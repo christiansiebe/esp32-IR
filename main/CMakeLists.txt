@@ -8,10 +8,8 @@ set(main_requires
     esp_wifi
     nvs_flash
     sml_transport
+    sml_parser
 )
-if(CONFIG_ESPNOW_ROLE_SENDER)
-    list(APPEND main_requires sml_parser)
-endif()
 
 idf_component_register(SRCS "main.c"
                     INCLUDE_DIRS "."
