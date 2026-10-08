@@ -54,7 +54,10 @@ jobs:
 
       - name: Build firmware
         shell: bash
-        run: idf.py -B "build/${{ matrix.role }}" build
+        run: |
+          source "${IDF_PATH:-/opt/esp/idf}/export.sh"
+          idf.py --version
+          idf.py -B "build/${{ matrix.role }}" build
 
       - name: Stage firmware artifact
         shell: bash
