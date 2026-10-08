@@ -31,7 +31,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /root/.cache/ccache
-          key: ${{ runner.os }}-idf-6.1-${{ matrix.role }}-${{ hashFiles('main/main.c', 'main/CMakeLists.txt', 'CMakeLists.txt', 'partitions.csv') }}
+          key: ${{ runner.os }}-idf-6.1-${{ matrix.role }}-${{ hashFiles('main/main.c', 'main/CMakeLists.txt', 'components/sml_parser/**', 'components/sml_transport/**', 'CMakeLists.txt', 'partitions.csv') }}
           restore-keys: |
             ${{ runner.os }}-idf-6.1-${{ matrix.role }}-
 
@@ -65,12 +65,12 @@ jobs:
           test -s "build/${{ matrix.role }}/esp32-IR.bin"
           mkdir -p "$RUNNER_TEMP/firmware"
           cp "build/${{ matrix.role }}/esp32-IR.bin" \
-            "$RUNNER_TEMP/firmware/${{ matrix.role }}.bin"
+            "$RUNNER_TEMP/firmware/${{ matrix.role }}-sml.bin"
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.role }}-firmware
-          path: ${{ runner.temp }}/firmware/${{ matrix.role }}.bin
+          name: ${{ matrix.role }}-sml-firmware
+          path: ${{ runner.temp }}/firmware/${{ matrix.role }}-sml.bin
           if-no-files-found: error
           retention-days: 14

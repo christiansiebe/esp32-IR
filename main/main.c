@@ -16,6 +16,10 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "sml_transport.h"
+#if CONFIG_ESPNOW_ROLE_SENDER
+#include "sml_adapter.h"
+#endif
 
 static const char *TAG = "espnow_meter";
 
@@ -26,17 +30,15 @@ static const char *TAG = "espnow_meter";
 #define UART_BUFFER_SIZE     8192
 #define UART_PACKET_BYTES    64
 #define UART_EVENT_QUEUE_LENGTH 32
-#define UART_TRANSPORT_QUEUE_LENGTH 128
+#define SML_TX_QUEUE_LENGTH 16
 #define METER_MAGIC          0x48425A31u
 #define METER_VERSION        1u
-#define RAW_PACKET_MAGIC     0x52415731u
-#define RAW_PACKET_VERSION   1u
-#define RAW_HISTORY_COUNT    128
-#define RAW_API_PAGE_SIZE    8
-#define SML_MAX_TELEGRAM_BYTES 2048
 #define SML_VALUE_HISTORY_COUNT 64
 #define SML_API_PAGE_SIZE    16
-#define SML_PARSER_QUEUE_LENGTH 32
+#define RSSI_HISTORY_COUNT   256
+#define RSSI_API_PAGE_SIZE   32
+#define SML_POWER_AVERAGE_WINDOW_US 900000000ULL
+#define SML_POWER_SAMPLE_COUNT 900
 #define ESPNOW_OTA_MAGIC     0x4F544131u
 #define ESPNOW_OTA_VERSION   1u
 #define ESPNOW_OTA_BEGIN     1u
@@ -52,33 +54,9 @@ static const char *TAG = "espnow_meter";
 #define WIFI_SSID_MAX_LEN      32
 #define WIFI_PASSWORD_MAX_LEN  64
 
-#define METER_HTML_HEADER "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"5\"><title>ESP32 IR Meter</title><style>body{font-family:Arial,sans-serif;margin:24px;background:#10151f;color:#e5edf7} .card{background:#182330;padding:20px;border-radius:12px;max-width:560px} .value{font-size:2rem;font-weight:700;color:#78d6ff} .small{font-size:0.8rem;color:#9fb4c8}.nav{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}.nav a,.action{display:inline-block;padding:10px 14px;border:0;border-radius:7px;background:#176b91;color:#fff;text-decoration:none;font:inherit;cursor:pointer}.nav a:hover,.action:hover{background:#2086b2}</style></head><body><div class=\"card\"><h1>ESP32 IR Meter</h1>"
+#define METER_HTML_HEADER "<!doctype html><html><head><meta charset=\"utf-8\"><title>ESP32 IR Meter</title><style>body{font-family:Arial,sans-serif;margin:24px;background:#10151f;color:#e5edf7} .card{background:#182330;padding:20px;border-radius:12px;max-width:100%} .value{font-size:2rem;font-weight:700;color:#78d6ff} .small{font-size:0.8rem;color:#9fb4c8}.nav{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}.nav a,.action{display:inline-block;padding:10px 14px;border:0;border-radius:7px;background:#176b91;color:#fff;text-decoration:none;font:inherit;cursor:pointer}.nav a:hover,.action:hover{background:#2086b2}</style></head><body><div class=\"card\"><h1>ESP32 IR Meter</h1>"
 
 #define METER_HTML_FOOTER "</div></body></html>"
-
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint8_t version;
-    uint32_t block_sequence;
-    uint64_t timestamp_us;
-    uint16_t raw_length;
-    uint16_t fragment_offset;
-    uint16_t fragment_length;
-} raw_packet_header_t;
-
-typedef struct {
-    uint32_t sequence;
-    uint64_t timestamp_us;
-    uint16_t length;
-    uint8_t data[UART_PACKET_BYTES];
-} raw_record_t;
-
-typedef struct {
-    uint32_t transport_sequence;
-    uint64_t timestamp_us;
-    uint16_t length;
-    uint8_t data[UART_PACKET_BYTES];
-} sml_parser_item_t;
 
 typedef struct {
     uint32_t sequence;
@@ -88,6 +66,17 @@ typedef struct {
     int8_t scaler;
     uint8_t unit;
 } sml_value_record_t;
+
+typedef struct {
+    uint64_t timestamp_us;
+    double watts;
+} sml_power_sample_t;
+
+typedef struct {
+    uint32_t sequence;
+    uint64_t timestamp_us;
+    int8_t rssi_dbm;
+} rssi_record_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -123,25 +112,21 @@ static bool g_wifi_connected;
 static esp_netif_t *g_ap_netif;
 static esp_netif_t *g_sta_netif;
 static uint8_t g_espnow_channel = ESPNOW_CHANNEL;
-static raw_record_t g_raw_history[RAW_HISTORY_COUNT];
-static size_t g_raw_history_count;
-static size_t g_raw_history_next;
-static uint32_t g_raw_latest_sequence;
-static portMUX_TYPE g_raw_history_lock = portMUX_INITIALIZER_UNLOCKED;
 #if CONFIG_ESPNOW_ROLE_SENDER
 typedef struct {
     uint64_t timestamp_us;
-    uint64_t delta_us;
-    uint16_t length;
-    uint8_t data[UART_PACKET_BYTES];
-} uart_raw_chunk_t;
+    bool crc_valid;
+    uint8_t value_count;
+    sml_transport_value_t values[SML_TRANSPORT_MAX_VALUES];
+} sml_tx_item_t;
 
 static SemaphoreHandle_t g_send_done;
 static esp_now_send_status_t g_last_send_status;
 static QueueHandle_t g_espnow_ota_rx_queue;
 static QueueHandle_t g_uart_event_queue;
-static QueueHandle_t g_uart_raw_queue;
+static QueueHandle_t g_sml_tx_queue;
 static uint64_t g_uart_rx_bytes;
+static uint32_t g_sml_tx_queue_drops;
 static uint32_t g_uart_fifo_overflows;
 static uint32_t g_uart_rx_buffer_full;
 static uint32_t g_uart_frame_errors;
@@ -151,7 +136,6 @@ static portMUX_TYPE g_uart_stats_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t g_espnow_ota_ack_queue;
 static SemaphoreHandle_t g_espnow_ota_mutex;
 static uint8_t g_espnow_ota_sender_mac[ESP_NOW_ETH_ALEN];
-static QueueHandle_t g_sml_parser_queue;
 static sml_value_record_t g_sml_value_history[SML_VALUE_HISTORY_COUNT];
 static size_t g_sml_value_history_count;
 static size_t g_sml_value_history_next;
@@ -159,8 +143,23 @@ static uint32_t g_sml_latest_value_sequence;
 static uint32_t g_sml_valid_telegrams;
 static uint32_t g_sml_invalid_crc_telegrams;
 static uint32_t g_sml_transport_gaps;
-static uint32_t g_sml_parser_queue_drops;
+static uint32_t g_sml_last_transport_sequence;
+static sml_value_record_t g_sml_latest_values[3];
+static bool g_sml_latest_value_valid[3];
+static sml_power_sample_t g_sml_power_samples[SML_POWER_SAMPLE_COUNT];
+static size_t g_sml_power_sample_count;
+static size_t g_sml_power_sample_next;
+static double g_sml_power_sample_sum_w;
+static uint64_t g_sml_last_power_sample_timestamp_us;
 static portMUX_TYPE g_sml_history_lock = portMUX_INITIALIZER_UNLOCKED;
+static rssi_record_t g_rssi_history[RSSI_HISTORY_COUNT];
+static size_t g_rssi_history_count;
+static size_t g_rssi_history_next;
+static uint32_t g_rssi_latest_sequence;
+static bool g_rssi_capture_active;
+static portMUX_TYPE g_rssi_history_lock = portMUX_INITIALIZER_UNLOCKED;
+static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
+                            const char *value, int8_t scaler, uint8_t unit);
 #endif
 
 static esp_err_t load_wifi_credentials(void)
@@ -570,30 +569,6 @@ static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_statu
 }
 #endif
 
-static void store_raw_record(const raw_packet_header_t *header,
-                            const uint8_t *raw_data,
-                            size_t raw_length)
-{
-    if (header->raw_length > UART_PACKET_BYTES || raw_length != header->raw_length) {
-        ESP_LOGW(TAG, "Raw block length invalid for history: %u",
-                 (unsigned int)header->raw_length);
-        return;
-    }
-
-    portENTER_CRITICAL(&g_raw_history_lock);
-    raw_record_t *record = &g_raw_history[g_raw_history_next];
-    record->sequence = header->block_sequence;
-    record->timestamp_us = header->timestamp_us;
-    record->length = (uint16_t)raw_length;
-    memcpy(record->data, raw_data, raw_length);
-    g_raw_history_next = (g_raw_history_next + 1) % RAW_HISTORY_COUNT;
-    if (g_raw_history_count < RAW_HISTORY_COUNT) {
-        ++g_raw_history_count;
-    }
-    g_raw_latest_sequence = header->block_sequence;
-    portEXIT_CRITICAL(&g_raw_history_lock);
-}
-
 static bool is_espnow_ota_packet(const uint8_t *data, int data_len)
 {
     if (data == NULL || data_len < (int)sizeof(espnow_ota_packet_t)) {
@@ -603,6 +578,32 @@ static bool is_espnow_ota_packet(const uint8_t *data, int data_len)
     memcpy(&packet, data, sizeof(packet));
     return packet.magic == ESPNOW_OTA_MAGIC && packet.version == ESPNOW_OTA_VERSION;
 }
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static void record_rssi_sample(int8_t rssi_dbm)
+{
+    portENTER_CRITICAL(&g_rssi_history_lock);
+    bool capture_active = g_rssi_capture_active;
+    portEXIT_CRITICAL(&g_rssi_history_lock);
+    if (!capture_active) {
+        return;
+    }
+
+    uint64_t timestamp_us = (uint64_t)esp_timer_get_time();
+    portENTER_CRITICAL(&g_rssi_history_lock);
+    if (g_rssi_capture_active) {
+        rssi_record_t *record = &g_rssi_history[g_rssi_history_next];
+        record->sequence = ++g_rssi_latest_sequence;
+        record->timestamp_us = timestamp_us;
+        record->rssi_dbm = rssi_dbm;
+        g_rssi_history_next = (g_rssi_history_next + 1) % RSSI_HISTORY_COUNT;
+        if (g_rssi_history_count < RSSI_HISTORY_COUNT) {
+            ++g_rssi_history_count;
+        }
+    }
+    portEXIT_CRITICAL(&g_rssi_history_lock);
+}
+#endif
 
 static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *data, int data_len)
 {
@@ -645,184 +646,77 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
     }
 #endif
 
-    if (data_len >= (int)sizeof(raw_packet_header_t)) {
-        raw_packet_header_t raw_header;
-        memcpy(&raw_header, data, sizeof(raw_header));
-        if (raw_header.magic == RAW_PACKET_MAGIC &&
-            raw_header.version == RAW_PACKET_VERSION) {
-            size_t fragment_payload_len = (size_t)data_len - sizeof(raw_header);
-            if (raw_header.raw_length <= UART_PACKET_BYTES &&
-                raw_header.fragment_offset == 0 &&
-                raw_header.fragment_length == raw_header.raw_length &&
-                fragment_payload_len == raw_header.fragment_length) {
-                store_raw_record(&raw_header, data + sizeof(raw_header), fragment_payload_len);
 #if !CONFIG_ESPNOW_ROLE_SENDER
-                sml_parser_item_t item = {
-                    .transport_sequence = raw_header.block_sequence,
-                    .timestamp_us = raw_header.timestamp_us,
-                    .length = raw_header.raw_length,
-                };
-                memcpy(item.data, data + sizeof(raw_header), fragment_payload_len);
-                if (g_sml_parser_queue == NULL ||
-                    xQueueSend(g_sml_parser_queue, &item, 0) != pdTRUE) {
-                    portENTER_CRITICAL(&g_sml_history_lock);
-                    ++g_sml_parser_queue_drops;
-                    portEXIT_CRITICAL(&g_sml_history_lock);
-                    ESP_LOGE(TAG, "SML parser queue full; raw record retained but not parsed");
-                }
-                memcpy(g_espnow_ota_sender_mac, info->src_addr, ESP_NOW_ETH_ALEN);
-#endif
-                return;
-            }
-
-            ESP_LOGW(TAG, "Dropped malformed or fragmented raw packet "
-                         "(block=%lu, offset=%u, fragment=%u, total=%u)",
-                     (unsigned long)raw_header.block_sequence,
-                     (unsigned int)raw_header.fragment_offset,
-                     (unsigned int)raw_header.fragment_length,
-                     (unsigned int)raw_header.raw_length);
-            return;
-        }
-    }
-    ESP_LOGW(TAG, "Dropped non-raw ESP-NOW packet from %02X:%02X:%02X:%02X:%02X:%02X (%d bytes)",
-             (unsigned int)info->src_addr[0], (unsigned int)info->src_addr[1],
-             (unsigned int)info->src_addr[2], (unsigned int)info->src_addr[3],
-             (unsigned int)info->src_addr[4], (unsigned int)info->src_addr[5],
-             data_len);
-}
-
-#if !CONFIG_ESPNOW_ROLE_SENDER
-typedef struct {
-    uint8_t type;
-    size_t value_length;
-    size_t item_count;
-    const uint8_t *value;
-    const uint8_t *children;
-    const uint8_t *next;
-} sml_tlv_node_t;
-
-static bool sml_read_tlv(const uint8_t *data, const uint8_t *end,
-                         unsigned int depth, sml_tlv_node_t *node)
-{
-    if (data >= end || depth > 16) {
-        return false;
+    if (data_len < (int)sizeof(sml_transport_header_t)) {
+        ESP_LOGW(TAG, "Dropped undersized SML transport packet (%d bytes)", data_len);
+        return;
     }
 
-    uint8_t first = *data++;
-    uint8_t type = first >> 4;
-    size_t encoded_length = first & 0x0f;
-    size_t header_length = 1;
-    if (encoded_length == 0x0f) {
-        encoded_length = 0;
-        uint8_t part;
-        do {
-            if (data >= end || encoded_length > SML_MAX_TELEGRAM_BYTES) {
-                return false;
-            }
-            part = *data++;
-            ++header_length;
-            encoded_length = (encoded_length << 7) | (part & 0x7f);
-        } while ((part & 0x80) != 0);
+    sml_transport_packet_t packet = {0};
+    memcpy(&packet.header, data, sizeof(packet.header));
+    size_t expected_length = sizeof(packet.header) +
+                             packet.header.value_count * sizeof(packet.values[0]);
+    if (packet.header.magic != SML_TRANSPORT_MAGIC ||
+        packet.header.version != SML_TRANSPORT_VERSION ||
+        packet.header.crc_valid > 1 ||
+        packet.header.value_count > SML_TRANSPORT_MAX_VALUES ||
+        (size_t)data_len != expected_length ||
+        (!packet.header.crc_valid && packet.header.value_count != 0)) {
+        ESP_LOGW(TAG, "Dropped malformed SML transport packet");
+        return;
     }
 
-    node->type = type;
-    node->value = data;
-    node->value_length = 0;
-    node->item_count = 0;
-    node->children = NULL;
-    node->next = data;
+    if (packet.header.sequence == 0) {
+        ESP_LOGW(TAG, "Dropped SML transport packet with sequence zero");
+        return;
+    }
+    if (info->rx_ctrl != NULL) {
+        record_rssi_sample(info->rx_ctrl->rssi);
+    }
+    if (g_sml_last_transport_sequence != 0 &&
+        packet.header.sequence != g_sml_last_transport_sequence + 1) {
+        portENTER_CRITICAL(&g_sml_history_lock);
+        ++g_sml_transport_gaps;
+        g_sml_power_sample_count = 0;
+        g_sml_power_sample_next = 0;
+        g_sml_power_sample_sum_w = 0.0;
+        g_sml_last_power_sample_timestamp_us = 0;
+        portEXIT_CRITICAL(&g_sml_history_lock);
+    }
+    g_sml_last_transport_sequence = packet.header.sequence;
+    memcpy(packet.values, data + sizeof(packet.header),
+           packet.header.value_count * sizeof(packet.values[0]));
 
-    if (type == 7) {
-        node->item_count = encoded_length;
-        node->children = data;
-        const uint8_t *cursor = data;
-        for (size_t i = 0; i < node->item_count; ++i) {
-            sml_tlv_node_t child;
-            if (!sml_read_tlv(cursor, end, depth + 1, &child) ||
-                child.next <= cursor) {
-                return false;
-            }
-            cursor = child.next;
-        }
-        node->next = cursor;
-        return true;
-    }
-
-    if (encoded_length < header_length ||
-        encoded_length - header_length > (size_t)(end - data)) {
-        return false;
-    }
-    node->value_length = encoded_length - header_length;
-    node->next = data + node->value_length;
-    return true;
-}
-
-static bool sml_list_child(const sml_tlv_node_t *list, size_t index,
-                           const uint8_t *end, sml_tlv_node_t *child)
-{
-    if (list->type != 7 || index >= list->item_count) {
-        return false;
-    }
-    const uint8_t *cursor = list->children;
-    for (size_t i = 0; i <= index; ++i) {
-        if (!sml_read_tlv(cursor, end, 0, child)) {
-            return false;
-        }
-        cursor = child->next;
-    }
-    return true;
-}
-
-static bool sml_node_unsigned(const sml_tlv_node_t *node, uint64_t *value)
-{
-    if (node->type != 6 || node->value_length == 0 || node->value_length > 8) {
-        return false;
-    }
-    uint64_t result = 0;
-    for (size_t i = 0; i < node->value_length; ++i) {
-        result = (result << 8) | node->value[i];
-    }
-    *value = result;
-    return true;
-}
-
-static bool sml_node_integer_text(const sml_tlv_node_t *node,
-                                  char *text, size_t text_size)
-{
-    if (node->value_length == 0 || node->value_length > 8 ||
-        (node->type != 5 && node->type != 6)) {
-        return false;
-    }
-
-    uint64_t value = 0;
-    for (size_t i = 0; i < node->value_length; ++i) {
-        value = (value << 8) | node->value[i];
-    }
-
-    int written;
-    if (node->type == 5 && (node->value[0] & 0x80) != 0) {
-        if (node->value_length < 8) {
-            value |= UINT64_MAX << (node->value_length * 8);
-        }
-        written = snprintf(text, text_size, "%lld", (long long)(int64_t)value);
+    portENTER_CRITICAL(&g_sml_history_lock);
+    if (packet.header.crc_valid) {
+        ++g_sml_valid_telegrams;
     } else {
-        written = snprintf(text, text_size, "%llu", (unsigned long long)value);
+        ++g_sml_invalid_crc_telegrams;
     }
-    return written > 0 && (size_t)written < text_size;
-}
+    portEXIT_CRITICAL(&g_sml_history_lock);
 
-static uint16_t sml_crc16(const uint8_t *data, size_t length)
-{
-    uint16_t crc = 0xffff;
-    for (size_t i = 0; i < length; ++i) {
-        crc ^= data[i];
-        for (unsigned int bit = 0; bit < 8; ++bit) {
-            crc = (crc & 1) != 0 ? (crc >> 1) ^ 0x8408 : crc >> 1;
+    if (packet.header.crc_valid) {
+        for (uint8_t i = 0; i < packet.header.value_count; ++i) {
+            char value_text[24];
+            int written = snprintf(value_text, sizeof(value_text), "%lld",
+                                   (long long)packet.values[i].value);
+            if (written < 0 || (size_t)written >= sizeof(value_text)) {
+                ESP_LOGE(TAG, "Could not format received SML value");
+                continue;
+            }
+            store_sml_value(packet.header.timestamp_us, packet.values[i].obis,
+                            value_text, packet.values[i].scaler,
+                            packet.values[i].unit);
         }
     }
-    return (uint16_t)~crc;
+    memcpy(g_espnow_ota_sender_mac, info->src_addr, ESP_NOW_ETH_ALEN);
+    return;
+#else
+    ESP_LOGW(TAG, "Dropped non-OTA ESP-NOW packet at sender");
+#endif
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
 static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
                             const char *value, int8_t scaler, uint8_t unit)
 {
@@ -835,6 +729,24 @@ static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
              obis[0], obis[1], obis[2], obis[3], obis[4], obis[5]);
     strlcpy(record.value, value, sizeof(record.value));
 
+    int latest_index = -1;
+    if (strcmp(record.obis, "1.0.1.8.0.255") == 0) {
+        latest_index = 0;
+    } else if (strcmp(record.obis, "1.0.2.8.0.255") == 0) {
+        latest_index = 1;
+    } else if (strcmp(record.obis, "1.0.16.7.0.255") == 0) {
+        latest_index = 2;
+    }
+    double watts = strtod(value, NULL);
+    if (latest_index == 2 && unit == 27) {
+        for (int exponent = 0; exponent < scaler; ++exponent) {
+            watts *= 10.0;
+        }
+        for (int exponent = 0; exponent > scaler; --exponent) {
+            watts /= 10.0;
+        }
+    }
+
     portENTER_CRITICAL(&g_sml_history_lock);
     record.sequence = ++g_sml_latest_value_sequence;
     g_sml_value_history[g_sml_value_history_next] = record;
@@ -843,6 +755,40 @@ static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
     if (g_sml_value_history_count < SML_VALUE_HISTORY_COUNT) {
         ++g_sml_value_history_count;
     }
+
+    if (latest_index >= 0) {
+        g_sml_latest_values[latest_index] = record;
+        g_sml_latest_value_valid[latest_index] = true;
+    }
+    if (latest_index == 2 && unit == 27 &&
+        timestamp_us > g_sml_last_power_sample_timestamp_us) {
+        while (g_sml_power_sample_count > 0) {
+            size_t oldest_index =
+                (g_sml_power_sample_next + SML_POWER_SAMPLE_COUNT -
+                 g_sml_power_sample_count) % SML_POWER_SAMPLE_COUNT;
+            if (timestamp_us - g_sml_power_samples[oldest_index].timestamp_us <=
+                SML_POWER_AVERAGE_WINDOW_US) {
+                break;
+            }
+            g_sml_power_sample_sum_w -=
+                g_sml_power_samples[oldest_index].watts;
+            --g_sml_power_sample_count;
+        }
+        if (g_sml_power_sample_count == SML_POWER_SAMPLE_COUNT) {
+            g_sml_power_sample_sum_w -=
+                g_sml_power_samples[g_sml_power_sample_next].watts;
+        } else {
+            ++g_sml_power_sample_count;
+        }
+        g_sml_power_samples[g_sml_power_sample_next] = (sml_power_sample_t) {
+            .timestamp_us = timestamp_us,
+            .watts = watts,
+        };
+        g_sml_power_sample_sum_w += watts;
+        g_sml_power_sample_next =
+            (g_sml_power_sample_next + 1) % SML_POWER_SAMPLE_COUNT;
+        g_sml_last_power_sample_timestamp_us = timestamp_us;
+    }
     portEXIT_CRITICAL(&g_sml_history_lock);
 
     ESP_LOGI(TAG, "SML value: OBIS=%s value=%s scaler=%d unit=%u",
@@ -850,289 +796,77 @@ static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
              (unsigned int)record.unit);
 }
 
-static size_t sml_parse_get_list_response(const uint8_t *end,
-                                         const sml_tlv_node_t *response,
-                                         uint64_t timestamp_us)
-{
-    sml_tlv_node_t values;
-    if (response->type != 7 ||
-        !sml_list_child(response, 4, end, &values) ||
-        values.type != 7) {
-        return 0;
-    }
-
-    size_t decoded = 0;
-    const uint8_t *cursor = values.children;
-    for (size_t i = 0; i < values.item_count; ++i) {
-        sml_tlv_node_t entry;
-        if (!sml_read_tlv(cursor, end, 0, &entry) || entry.type != 7) {
-            break;
-        }
-        cursor = entry.next;
-
-        sml_tlv_node_t obis_node;
-        sml_tlv_node_t unit_node;
-        sml_tlv_node_t scaler_node;
-        sml_tlv_node_t value_node;
-        uint64_t unit_value;
-        if (!sml_list_child(&entry, 0, end, &obis_node) ||
-            obis_node.type != 0 || obis_node.value_length != 6 ||
-            !sml_list_child(&entry, 3, end, &unit_node) ||
-            !sml_node_unsigned(&unit_node, &unit_value) || unit_value > UINT8_MAX ||
-            !sml_list_child(&entry, 4, end, &scaler_node) ||
-            scaler_node.type != 5 || scaler_node.value_length != 1 ||
-            !sml_list_child(&entry, 5, end, &value_node)) {
-            continue;
-        }
-
-        char value_text[24];
-        if (!sml_node_integer_text(&value_node, value_text, sizeof(value_text))) {
-            continue;
-        }
-        int8_t scaler = (int8_t)scaler_node.value[0];
-        store_sml_value(timestamp_us, obis_node.value, value_text,
-                        scaler, (uint8_t)unit_value);
-        ++decoded;
-    }
-    return decoded;
-}
-
-static size_t sml_parse_valid_telegram(const uint8_t *frame, size_t frame_length,
-                                       uint64_t timestamp_us)
-{
-    if (frame_length < 16 || frame[frame_length - 8] != 0x1b ||
-        frame[frame_length - 7] != 0x1b ||
-        frame[frame_length - 6] != 0x1b ||
-        frame[frame_length - 5] != 0x1b ||
-        frame[frame_length - 4] != 0x1a) {
-        return 0;
-    }
-
-    const uint8_t *content = frame + 8;
-    const uint8_t *content_end = frame + frame_length - 8;
-    size_t decoded = 0;
-    while (content < content_end) {
-        sml_tlv_node_t message;
-        if (!sml_read_tlv(content, content_end, 0, &message) ||
-            message.next <= content) {
-            ESP_LOGW(TAG, "CRC-valid SML telegram contains malformed TLV data");
-            break;
-        }
-        content = message.next;
-
-        sml_tlv_node_t body;
-        sml_tlv_node_t tag_node;
-        sml_tlv_node_t response;
-        uint64_t tag;
-        if (message.type != 7 ||
-            !sml_list_child(&message, 3, content_end, &body) ||
-            body.type != 7 ||
-            !sml_list_child(&body, 0, content_end, &tag_node) ||
-            !sml_node_unsigned(&tag_node, &tag) || tag != 0x0701 ||
-            !sml_list_child(&body, 1, content_end, &response)) {
-            continue;
-        }
-        decoded += sml_parse_get_list_response(content_end, &response,
-                                               timestamp_us);
-    }
-    return decoded;
-}
-
-static void sml_finish_frame(const uint8_t *frame, size_t frame_length,
-                             uint64_t timestamp_us)
-{
-    if (frame_length < 16) {
-        return;
-    }
-    uint16_t expected = (uint16_t)frame[frame_length - 2] |
-                        ((uint16_t)frame[frame_length - 1] << 8);
-    uint16_t actual = sml_crc16(frame, frame_length - 2);
-    if (expected != actual) {
-        portENTER_CRITICAL(&g_sml_history_lock);
-        ++g_sml_invalid_crc_telegrams;
-        portEXIT_CRITICAL(&g_sml_history_lock);
-        ESP_LOGW(TAG, "SML telegram CRC invalid: expected=%04X calculated=%04X",
-                 expected, actual);
-        return;
-    }
-
-    portENTER_CRITICAL(&g_sml_history_lock);
-    ++g_sml_valid_telegrams;
-    portEXIT_CRITICAL(&g_sml_history_lock);
-    size_t decoded = sml_parse_valid_telegram(frame, frame_length, timestamp_us);
-    ESP_LOGI(TAG, "SML telegram CRC valid; decoded numeric values=%u",
-             (unsigned int)decoded);
-}
-
-static void sml_parser_worker(void *arg)
-{
-    (void)arg;
-    static const uint8_t start_marker[8] = {
-        0x1b, 0x1b, 0x1b, 0x1b, 0x01, 0x01, 0x01, 0x01
-    };
-    static const uint8_t end_marker[5] = {
-        0x1b, 0x1b, 0x1b, 0x1b, 0x1a
-    };
-    uint8_t frame[SML_MAX_TELEGRAM_BYTES];
-    uint8_t start_window[8] = {0};
-    size_t frame_length = 0;
-    size_t start_window_length = 0;
-    uint8_t end_tail_remaining = 0;
-    bool in_frame = false;
-    uint32_t previous_transport_sequence = 0;
-    uint64_t frame_timestamp_us = 0;
-    uint64_t last_stats_us = (uint64_t)esp_timer_get_time();
-    sml_parser_item_t item;
-
-    while (1) {
-        if (xQueueReceive(g_sml_parser_queue, &item, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            if (previous_transport_sequence != 0 &&
-                item.transport_sequence != previous_transport_sequence + 1) {
-                in_frame = false;
-                frame_length = 0;
-                end_tail_remaining = 0;
-                start_window_length = 0;
-                portENTER_CRITICAL(&g_sml_history_lock);
-                ++g_sml_transport_gaps;
-                portEXIT_CRITICAL(&g_sml_history_lock);
-                ESP_LOGW(TAG, "Raw transport sequence gap; discarded partial SML frame");
-            }
-            previous_transport_sequence = item.transport_sequence;
-
-            for (size_t i = 0; i < item.length; ++i) {
-                uint8_t byte = item.data[i];
-                if (!in_frame) {
-                    if (start_window_length < sizeof(start_window)) {
-                        start_window[start_window_length++] = byte;
-                    } else {
-                        memmove(start_window, start_window + 1,
-                                sizeof(start_window) - 1);
-                        start_window[sizeof(start_window) - 1] = byte;
-                    }
-                    if (start_window_length == sizeof(start_window) &&
-                        memcmp(start_window, start_marker, sizeof(start_marker)) == 0) {
-                        memcpy(frame, start_marker, sizeof(start_marker));
-                        frame_length = sizeof(start_marker);
-                        frame_timestamp_us = item.timestamp_us;
-                        in_frame = true;
-                        end_tail_remaining = 0;
-                        start_window_length = 0;
-                    }
-                    continue;
-                }
-
-                if (frame_length >= sizeof(frame)) {
-                    ESP_LOGE(TAG, "SML telegram exceeds parser limit; waiting for next start");
-                    in_frame = false;
-                    frame_length = 0;
-                    end_tail_remaining = 0;
-                    start_window_length = 0;
-                    continue;
-                }
-                frame[frame_length++] = byte;
-                if (end_tail_remaining != 0) {
-                    --end_tail_remaining;
-                    if (end_tail_remaining == 0) {
-                        sml_finish_frame(frame, frame_length, frame_timestamp_us);
-                        in_frame = false;
-                        frame_length = 0;
-                    }
-                } else if (frame_length >= sizeof(end_marker) &&
-                           memcmp(frame + frame_length - sizeof(end_marker),
-                                  end_marker, sizeof(end_marker)) == 0) {
-                    end_tail_remaining = 3;
-                }
-            }
-        }
-
-        uint64_t now_us = (uint64_t)esp_timer_get_time();
-        if (now_us - last_stats_us >= 10000000ULL) {
-            uint32_t valid;
-            uint32_t invalid;
-            uint32_t gaps;
-            uint32_t queue_drops;
-            portENTER_CRITICAL(&g_sml_history_lock);
-            valid = g_sml_valid_telegrams;
-            invalid = g_sml_invalid_crc_telegrams;
-            gaps = g_sml_transport_gaps;
-            queue_drops = g_sml_parser_queue_drops;
-            portEXIT_CRITICAL(&g_sml_history_lock);
-            ESP_LOGI(TAG, "SML stats: crc_valid=%lu crc_invalid=%lu "
-                          "transport_gaps=%lu parser_queue_drops=%lu",
-                     (unsigned long)valid, (unsigned long)invalid,
-                     (unsigned long)gaps, (unsigned long)queue_drops);
-            last_stats_us = now_us;
-        }
-    }
-}
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
-static void log_raw_chunk(const uart_raw_chunk_t *chunk)
+void sml_adapter_telegram_callback(uint64_t timestamp_us, bool crc_valid,
+                                  const sml_transport_value_t *values,
+                                  uint8_t value_count)
 {
-    printf("%llu us | %llu us | %u | ",
-           (unsigned long long)chunk->timestamp_us,
-           (unsigned long long)chunk->delta_us,
-           (unsigned int)chunk->length);
-    for (size_t i = 0; i < chunk->length; ++i) {
-        printf("%s%02X", (i == 0) ? "" : " ",
-               (unsigned int)chunk->data[i]);
-    }
-    printf("\n");
-    fflush(stdout);
-}
-
-static void send_raw_chunk(uint32_t transport_sequence,
-                           const uart_raw_chunk_t *chunk)
-{
-    uint8_t packet[ESP_NOW_MAX_DATA_LEN];
-    const size_t fragment_capacity = sizeof(packet) - sizeof(raw_packet_header_t);
-    if (fragment_capacity == 0) {
-        ESP_LOGE(TAG, "ESP-NOW payload cannot contain raw packet header");
+    if (value_count > SML_TRANSPORT_MAX_VALUES ||
+        (value_count != 0 && values == NULL) || (!crc_valid && value_count != 0)) {
+        ESP_LOGE(TAG, "Parser produced an invalid SML telegram callback");
         return;
     }
 
-    size_t offset = 0;
-    do {
-        size_t fragment_length = chunk->length - offset;
-        if (fragment_length > fragment_capacity) {
-            fragment_length = fragment_capacity;
-        }
+    sml_tx_item_t item = {
+        .timestamp_us = timestamp_us,
+        .crc_valid = crc_valid,
+        .value_count = value_count,
+    };
+    if (value_count != 0) {
+        memcpy(item.values, values, value_count * sizeof(item.values[0]));
+    }
+    if (g_sml_tx_queue == NULL || xQueueSend(g_sml_tx_queue, &item, 0) != pdTRUE) {
+        portENTER_CRITICAL(&g_uart_stats_lock);
+        ++g_sml_tx_queue_drops;
+        portEXIT_CRITICAL(&g_uart_stats_lock);
+        ESP_LOGE(TAG, "SML transport queue full; validated telegram was not queued");
+    }
+}
 
-        raw_packet_header_t header = {
-            .magic = RAW_PACKET_MAGIC,
-            .version = RAW_PACKET_VERSION,
-            .block_sequence = transport_sequence,
-            .timestamp_us = chunk->timestamp_us,
-            .raw_length = chunk->length,
-            .fragment_offset = (uint16_t)offset,
-            .fragment_length = (uint16_t)fragment_length,
-        };
-        memcpy(packet, &header, sizeof(header));
-        memcpy(packet + sizeof(header), chunk->data + offset, fragment_length);
+static void send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
+{
+    sml_transport_packet_t packet = {
+        .header = {
+            .magic = SML_TRANSPORT_MAGIC,
+            .version = SML_TRANSPORT_VERSION,
+            .crc_valid = item->crc_valid ? 1 : 0,
+            .sequence = sequence,
+            .timestamp_us = item->timestamp_us,
+            .value_count = item->value_count,
+        },
+    };
+    if (item->value_count != 0) {
+        memcpy(packet.values, item->values,
+               item->value_count * sizeof(packet.values[0]));
+    }
 
-        esp_err_t err = esp_now_send(broadcast_mac, packet,
-                                     sizeof(header) + fragment_length);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "ESP-NOW raw chunk send failed: %s", esp_err_to_name(err));
-            return;
-        }
-        if (xSemaphoreTake(g_send_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
-            ESP_LOGE(TAG, "Timed out waiting for ESP-NOW raw fragment completion");
-            return;
-        }
-        if (g_last_send_status != ESP_NOW_SEND_SUCCESS) {
-            ESP_LOGE(TAG, "ESP-NOW did not deliver raw block fragment");
-            return;
-        }
-        offset += fragment_length;
-    } while (offset < chunk->length);
+    size_t packet_length = sizeof(packet.header) +
+                           item->value_count * sizeof(packet.values[0]);
+    esp_err_t err = esp_now_send(broadcast_mac, (const uint8_t *)&packet,
+                                 packet_length);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ESP-NOW SML telegram send failed: %s", esp_err_to_name(err));
+        return;
+    }
+    if (xSemaphoreTake(g_send_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Timed out waiting for ESP-NOW SML telegram completion");
+        return;
+    }
+    if (g_last_send_status != ESP_NOW_SEND_SUCCESS) {
+        ESP_LOGE(TAG, "ESP-NOW did not deliver SML telegram sequence %lu",
+                 (unsigned long)sequence);
+        return;
+    }
+    ESP_LOGD(TAG, "Sent SML telegram sequence=%lu crc_valid=%u values=%u",
+             (unsigned long)sequence, packet.header.crc_valid,
+             (unsigned int)packet.header.value_count);
 }
 
 static void uart_capture_worker(void *arg)
 {
     (void)arg;
-    uint64_t previous_timestamp_us = 0;
     uint8_t rx_buffer[UART_PACKET_BYTES];
 
     while (1) {
@@ -1142,22 +876,14 @@ static void uart_capture_worker(void *arg)
             continue;
         }
 
-        uart_raw_chunk_t chunk = {
-            .timestamp_us = (uint64_t)esp_timer_get_time(),
-            .length = (uint16_t)received,
-        };
-        chunk.delta_us = previous_timestamp_us == 0
-                             ? 0
-                             : chunk.timestamp_us - previous_timestamp_us;
-        previous_timestamp_us = chunk.timestamp_us;
-        memcpy(chunk.data, rx_buffer, (size_t)received);
+        uint64_t timestamp_us = (uint64_t)esp_timer_get_time();
 
         portENTER_CRITICAL(&g_uart_stats_lock);
         g_uart_rx_bytes += (uint64_t)received;
         portEXIT_CRITICAL(&g_uart_stats_lock);
 
-        if (xQueueSend(g_uart_raw_queue, &chunk, portMAX_DELAY) != pdTRUE) {
-            ESP_LOGE(TAG, "UART transport queue rejected received data");
+        for (int i = 0; i < received; ++i) {
+            (void)sml_adapter_feed_byte(rx_buffer[i], timestamp_us);
         }
     }
 }
@@ -1165,15 +891,14 @@ static void uart_capture_worker(void *arg)
 static void uart_transport_worker(void *arg)
 {
     (void)arg;
-    uint32_t transport_sequence = 0;
-    uart_raw_chunk_t chunk;
+    uint32_t sequence = 0;
+    sml_tx_item_t item;
 
     while (1) {
-        if (xQueueReceive(g_uart_raw_queue, &chunk, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(g_sml_tx_queue, &item, portMAX_DELAY) != pdTRUE) {
             continue;
         }
-        log_raw_chunk(&chunk);
-        send_raw_chunk(++transport_sequence, &chunk);
+        send_sml_telegram(++sequence, &item);
     }
 }
 
@@ -1222,6 +947,7 @@ static void uart_event_worker(void *arg)
             uint32_t rx_buffer_full;
             uint32_t frame_errors;
             uint32_t parity_errors;
+            uint32_t transport_queue_drops;
 
             portENTER_CRITICAL(&g_uart_stats_lock);
             rx_bytes = g_uart_rx_bytes;
@@ -1229,16 +955,19 @@ static void uart_event_worker(void *arg)
             rx_buffer_full = g_uart_rx_buffer_full;
             frame_errors = g_uart_frame_errors;
             parity_errors = g_uart_parity_errors;
+            transport_queue_drops = g_sml_tx_queue_drops;
             portEXIT_CRITICAL(&g_uart_stats_lock);
 
             ESP_LOGI(TAG,
                      "UART stats: rx_bytes=%llu fifo_overflows=%lu "
-                     "rx_buffer_full=%lu frame_errors=%lu parity_errors=%lu",
+                     "rx_buffer_full=%lu frame_errors=%lu parity_errors=%lu "
+                     "sml_transport_queue_drops=%lu",
                      (unsigned long long)rx_bytes,
                      (unsigned long)fifo_overflows,
                      (unsigned long)rx_buffer_full,
                      (unsigned long)frame_errors,
-                     (unsigned long)parity_errors);
+                     (unsigned long)parity_errors,
+                     (unsigned long)transport_queue_drops);
             next_stats_us = now_us + 10000000LL;
         }
     }
@@ -1247,48 +976,13 @@ static void uart_event_worker(void *arg)
 
 static esp_err_t root_handler(httpd_req_t *req)
 {
-    raw_record_t latest = {0};
-    bool valid;
-    portENTER_CRITICAL(&g_raw_history_lock);
-    valid = g_raw_history_count != 0;
-    if (valid) {
-        size_t latest_index = (g_raw_history_next + RAW_HISTORY_COUNT - 1) % RAW_HISTORY_COUNT;
-        latest = g_raw_history[latest_index];
-    }
-    portEXIT_CRITICAL(&g_raw_history_lock);
-
-    char raw_hex[UART_PACKET_BYTES * 3 + 1] = {0};
-    if (valid) {
-        size_t used = 0;
-        for (size_t i = 0; i < latest.length; ++i) {
-            int written = snprintf(raw_hex + used, sizeof(raw_hex) - used,
-                                   "%s%02X", (i == 0) ? "" : " ",
-                                   (unsigned int)latest.data[i]);
-            if (written < 0 || (size_t)written >= sizeof(raw_hex) - used) {
-                return ESP_FAIL;
-            }
-            used += (size_t)written;
-        }
-    }
-
-    char html[1536];
-    int len = snprintf(html, sizeof(html),
-                       "%s<p>Last UART block: %s</p>"
-                       "<p>Sequence: %lu</p><p>Timestamp: %llu us since sender boot</p>"
-                       "<p>Length: %u bytes</p><pre>%s</pre>"
-                       "<p>FRITZ!Box: %s</p>",
+    char html[768];
+    int len = snprintf(html, sizeof(html), "%s<p>FRITZ!Box: %s</p>",
                        METER_HTML_HEADER,
-                       valid ? "received" : "waiting",
-                       (unsigned long)(valid ? latest.sequence : 0),
-                       (unsigned long long)(valid ? latest.timestamp_us : 0),
-                       (unsigned int)(valid ? latest.length : 0),
-                       valid ? raw_hex : "",
                        g_wifi_connected ? "connected" : "not connected");
-
     if (len < 0 || (size_t)len >= sizeof(html)) {
         return ESP_FAIL;
     }
-
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     esp_err_t err = httpd_resp_send_chunk(req, html, len);
     if (err != ESP_OK) {
@@ -1297,35 +991,46 @@ static esp_err_t root_handler(httpd_req_t *req)
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
     static const char sml_page[] =
-        "<h2>Recognized SML values</h2><p id=\"home-sml-status\">Connecting…</p>"
-        "<pre id=\"home-sml-values\"></pre><script>"
-        "let smlCursor=0;const smlOut=document.getElementById('home-sml-values');"
-        "const smlStatus=document.getElementById('home-sml-status');"
-        "async function pollSml(){try{const r=await fetch('/api/sml?after='+smlCursor,"
-        "{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);"
-        "const d=await r.json();if(d.overflow)smlOut.textContent+="
-        "'[GAP: decoded-value history overflowed]\\n';"
-        "for(const v of d.values){smlCursor=v.sequence;const unit={14:'m3',16:'m3/h',"
-        "27:'W',30:'Wh',33:'A',35:'V'}[v.unit]||('unit-'+v.unit);"
-        "const label={'1.0.1.8.0.255':'Energy import (1-0:1.8.0)',"
-        "'1.0.2.8.0.255':'Energy export (1-0:2.8.0)',"
-        "'1.0.16.7.0.255':'Active power (1-0:16.7.0)'}[v.obis]||'SML value';"
-        "const integer=BigInt(v.value),negative=integer<0n;let digits="
-        "(negative?-integer:integer).toString(),scaled;"
-        "if(Math.abs(v.scaler)>12)scaled=v.value+' x10^'+v.scaler;else if(v.scaler>=0)"
-        "scaled=(negative?'-':'')+digits+'0'.repeat(v.scaler);else{const places=-v.scaler;"
-        "if(digits.length<=places)digits='0'.repeat(places+1-digits.length)+digits;"
-        "const point=digits.length-places;digits=digits.slice(0,point)+'.'+digits.slice(point);"
-        "digits=digits.replace(/0+$/,'').replace(/\\.$/,'');"
-        "scaled=(negative?'-':'')+digits;}"
-        "smlOut.textContent+=v.timestamp_us+' us | '+label+' | '+scaled+' '+unit+'\\n';}"
-        "if(smlOut.textContent.length>50000)smlOut.textContent="
-        "smlOut.textContent.slice(-40000);"
-        "smlStatus.textContent='CRC valid: '+d.crc_valid+' | CRC invalid: '+d.crc_invalid+"
-        "' | transport gaps: '+d.transport_gaps+' | parser queue drops: '+d.parser_queue_drops;"
-        "setTimeout(pollSml,d.values.length?0:250);}catch(e){"
-        "smlStatus.textContent='SML data unavailable: '+e;setTimeout(pollSml,1000);}}"
-        "pollSml();</script>";
+        "<style>.dashboard{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));"
+        "gap:12px;margin:20px 0}.meter{background:#182330;padding:18px;border-radius:10px}"
+        ".meter h2{font-size:1rem;margin:0 0 12px;color:#9fb4c8}.meter strong{font-size:1.7rem;"
+        "color:#78d6ff}.meter small{display:block;color:#9fb4c8;margin-top:8px}"
+        "#meter-status{color:#9fb4c8}</style><h1>Zählerübersicht</h1><div class=\"dashboard\">"
+        "<section class=\"meter\"><h2>Verbrauch gesamt</h2><strong id=\"meter-import\">—</strong>"
+        "<small>1-0:1.8.0 · kWh</small></section>"
+        "<section class=\"meter\"><h2>Einspeisung gesamt</h2><strong id=\"meter-export\">—</strong>"
+        "<small>1-0:2.8.0 · kWh</small></section>"
+        "<section class=\"meter\"><h2>Momentanleistung</h2><strong id=\"meter-power\">—</strong>"
+        "<small id=\"meter-direction\">1-0:16.7.0 · W</small></section>"
+        "<section class=\"meter\"><h2>Durchschnitt letzte 15 Minuten</h2>"
+        "<strong id=\"meter-average\">—</strong><small id=\"meter-average-direction\">W</small>"
+        "</section></div><p id=\"meter-status\">Warte auf CRC-gültige SML-Werte…</p>"
+        "<script>"
+        "const byId=id=>document.getElementById(id);"
+        "function scaled(v){return Number(v.value)*Math.pow(10,v.scaler);}"
+        "function fmt(value,digits=2){return value.toLocaleString('de-DE',{minimumFractionDigits:digits,"
+        "maximumFractionDigits:digits});}"
+        "function showEnergy(id,v){byId(id).textContent=v?fmt(scaled(v)/1000):'Warte…';}"
+        "async function updateMeter(){try{const r=await fetch('/api/dashboard',{cache:'no-store'});"
+        "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
+        "showEnergy('meter-import',d.import);showEnergy('meter-export',d.export);"
+        "if(d.power){const watts=scaled(d.power);byId('meter-power').textContent="
+        "(watts>0?'+':'')+fmt(watts,0)+' W';byId('meter-direction').textContent="
+        "(watts<0?'Einspeisung':'Verbrauch')+' · 1-0:16.7.0';}else{"
+        "byId('meter-power').textContent='Warte…';byId('meter-direction').textContent="
+        "'1-0:16.7.0 · W';}"
+        "if(d.average_power_w!==null&&d.average_samples){"
+        "byId('meter-average').textContent=fmt(Math.abs(d.average_power_w),0)+' W';"
+        "byId('meter-average-direction').textContent="
+        "(d.average_power_w<0?'Einspeisung':'Verbrauch')+' · '+"
+        "(d.average_duration_s>=899?'letzte 15 Minuten':"
+        "'seit Start, sammelt 15 Minuten');}"
+        "else{byId('meter-average').textContent='Sammle…';}"
+        "byId('meter-status').textContent='SML CRC gültig: '+d.crc_valid+"
+        "' · CRC fehlerhaft: '+d.crc_invalid+' · Transportlücken: '+d.transport_gaps+"
+        "' · Transportlücken: '+d.transport_gaps;"
+        "}catch(e){byId('meter-status').textContent='Verbindung zum Zähler fehlgeschlagen: '+e;}"
+        "setTimeout(updateMeter,1000);}updateMeter();</script>";
     err = httpd_resp_sendstr_chunk(req, sml_page);
     if (err != ESP_OK) {
         return err;
@@ -1333,7 +1038,7 @@ static esp_err_t root_handler(httpd_req_t *req)
 #endif
 
     static const char page_footer[] =
-        "<nav class=\"nav\"><a href=\"/log\">Live raw log</a>"
+        "<nav class=\"nav\"><a href=\"/log\">SML logger</a>"
         "<a href=\"/api\">JSON API</a><a href=\"/config\">Wi-Fi settings</a>"
         "<a href=\"/update\">Firmware update</a></nav>" METER_HTML_FOOTER;
     err = httpd_resp_sendstr_chunk(req, page_footer);
@@ -1345,40 +1050,9 @@ static esp_err_t root_handler(httpd_req_t *req)
 
 static esp_err_t json_handler(httpd_req_t *req)
 {
-    raw_record_t latest = {0};
-    bool valid;
-    portENTER_CRITICAL(&g_raw_history_lock);
-    valid = g_raw_history_count != 0;
-    if (valid) {
-        size_t latest_index = (g_raw_history_next + RAW_HISTORY_COUNT - 1) % RAW_HISTORY_COUNT;
-        latest = g_raw_history[latest_index];
-    }
-    portEXIT_CRITICAL(&g_raw_history_lock);
-
-    char raw_hex[UART_PACKET_BYTES * 3 + 1] = {0};
-    if (valid) {
-        size_t used = 0;
-        for (size_t i = 0; i < latest.length; ++i) {
-            int written = snprintf(raw_hex + used, sizeof(raw_hex) - used,
-                                   "%02X%s", (unsigned int)latest.data[i],
-                                   (i + 1 < latest.length) ? " " : "");
-            if (written < 0 || (size_t)written >= sizeof(raw_hex) - used) {
-                return ESP_FAIL;
-            }
-            used += (size_t)written;
-        }
-    }
-
-    char payload[512];
+    char payload[64];
     int len = snprintf(payload, sizeof(payload),
-                       "{\"raw_valid\":%s,\"block_sequence\":%lu,"
-                       "\"timestamp_us\":%llu,\"raw_length\":%u,\"raw_hex\":\"%s\","
-                       "\"fritzbox_connected\":%s}",
-                       valid ? "true" : "false",
-                       (unsigned long)(valid ? latest.sequence : 0),
-                       (unsigned long long)(valid ? latest.timestamp_us : 0),
-                       (unsigned int)(valid ? latest.length : 0),
-                       valid ? raw_hex : "",
+                       "{\"fritzbox_connected\":%s}",
                        g_wifi_connected ? "true" : "false");
     if (len < 0 || (size_t)len >= sizeof(payload)) {
         return ESP_FAIL;
@@ -1386,91 +1060,6 @@ static esp_err_t json_handler(httpd_req_t *req)
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, payload, len);
-}
-
-static esp_err_t log_api_handler(httpd_req_t *req)
-{
-    char query[64];
-    char after_text[16] = "0";
-    uint32_t after = 0;
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        if (httpd_query_key_value(query, "after", after_text, sizeof(after_text)) == ESP_OK) {
-            char *end = NULL;
-            unsigned long parsed = strtoul(after_text, &end, 10);
-            if (end == after_text || *end != '\0' || parsed > UINT32_MAX) {
-                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid after cursor");
-                return ESP_FAIL;
-            }
-            after = (uint32_t)parsed;
-        }
-    }
-
-    raw_record_t records[RAW_API_PAGE_SIZE];
-    size_t record_count = 0;
-    uint32_t oldest_sequence = 0;
-    uint32_t latest_sequence;
-    portENTER_CRITICAL(&g_raw_history_lock);
-    latest_sequence = g_raw_latest_sequence;
-    size_t oldest_index = (g_raw_history_next + RAW_HISTORY_COUNT - g_raw_history_count) %
-                          RAW_HISTORY_COUNT;
-    if (g_raw_history_count != 0) {
-        oldest_sequence = g_raw_history[oldest_index].sequence;
-    }
-    for (size_t i = 0; i < g_raw_history_count && record_count < RAW_API_PAGE_SIZE; ++i) {
-        size_t index = (oldest_index + i) % RAW_HISTORY_COUNT;
-        if ((int32_t)(g_raw_history[index].sequence - after) > 0) {
-            records[record_count++] = g_raw_history[index];
-        }
-    }
-    portEXIT_CRITICAL(&g_raw_history_lock);
-
-    char header[160];
-    bool overflow = oldest_sequence != 0 &&
-                    (int32_t)(oldest_sequence - after) > 1;
-    int header_len = snprintf(header, sizeof(header),
-                              "{\"oldest_sequence\":%lu,\"latest_sequence\":%lu,"
-                              "\"overflow\":%s,\"blocks\":[",
-                              (unsigned long)oldest_sequence,
-                              (unsigned long)latest_sequence,
-                              overflow ? "true" : "false");
-    if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
-        return ESP_FAIL;
-    }
-
-    httpd_resp_set_type(req, "application/json");
-    esp_err_t err = httpd_resp_send_chunk(req, header, header_len);
-    for (size_t i = 0; err == ESP_OK && i < record_count; ++i) {
-        char hex[UART_PACKET_BYTES * 3 + 1] = {0};
-        size_t used = 0;
-        for (size_t j = 0; j < records[i].length; ++j) {
-            int written = snprintf(hex + used, sizeof(hex) - used, "%s%02X",
-                                   j == 0 ? "" : " ",
-                                   (unsigned int)records[i].data[j]);
-            if (written < 0 || (size_t)written >= sizeof(hex) - used) {
-                return ESP_FAIL;
-            }
-            used += (size_t)written;
-        }
-        char item[384];
-        int item_len = snprintf(item, sizeof(item),
-                                "%s{\"sequence\":%lu,\"timestamp_us\":%llu,"
-                                "\"raw_length\":%u,\"raw_hex\":\"%s\"}",
-                                i == 0 ? "" : ",",
-                                (unsigned long)records[i].sequence,
-                                (unsigned long long)records[i].timestamp_us,
-                                (unsigned int)records[i].length, hex);
-        if (item_len < 0 || (size_t)item_len >= sizeof(item)) {
-            return ESP_FAIL;
-        }
-        err = httpd_resp_send_chunk(req, item, item_len);
-    }
-    if (err == ESP_OK) {
-        err = httpd_resp_send_chunk(req, "]}", 2);
-    }
-    if (err == ESP_OK) {
-        err = httpd_resp_send_chunk(req, NULL, 0);
-    }
-    return err;
 }
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -1497,13 +1086,11 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
     uint32_t valid_telegrams;
     uint32_t invalid_crc_telegrams;
     uint32_t transport_gaps;
-    uint32_t parser_queue_drops;
     portENTER_CRITICAL(&g_sml_history_lock);
     latest_sequence = g_sml_latest_value_sequence;
     valid_telegrams = g_sml_valid_telegrams;
     invalid_crc_telegrams = g_sml_invalid_crc_telegrams;
     transport_gaps = g_sml_transport_gaps;
-    parser_queue_drops = g_sml_parser_queue_drops;
     size_t oldest_index = (g_sml_value_history_next +
                            SML_VALUE_HISTORY_COUNT -
                            g_sml_value_history_count) % SML_VALUE_HISTORY_COUNT;
@@ -1528,14 +1115,13 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
                               "{\"oldest_sequence\":%lu,\"latest_sequence\":%lu,"
                               "\"overflow\":%s,\"crc_valid\":%lu,"
                               "\"crc_invalid\":%lu,\"transport_gaps\":%lu,"
-                              "\"parser_queue_drops\":%lu,\"values\":[",
+                              "\"values\":[",
                               (unsigned long)oldest_sequence,
                               (unsigned long)latest_sequence,
                               overflow ? "true" : "false",
                               (unsigned long)valid_telegrams,
                               (unsigned long)invalid_crc_telegrams,
-                              (unsigned long)transport_gaps,
-                              (unsigned long)parser_queue_drops);
+                              (unsigned long)transport_gaps);
     if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
         return ESP_FAIL;
     }
@@ -1567,28 +1153,211 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
     }
     return err;
 }
+
+static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
+{
+    sml_value_record_t latest[3];
+    bool valid[3];
+    uint32_t crc_valid;
+    uint32_t crc_invalid;
+    uint32_t transport_gaps;
+    double power_sum;
+    size_t power_count = 0;
+    uint64_t power_reference_us = 0;
+    uint64_t oldest_power_us = 0;
+
+    portENTER_CRITICAL(&g_sml_history_lock);
+    memcpy(latest, g_sml_latest_values, sizeof(latest));
+    memcpy(valid, g_sml_latest_value_valid, sizeof(valid));
+    crc_valid = g_sml_valid_telegrams;
+    crc_invalid = g_sml_invalid_crc_telegrams;
+    transport_gaps = g_sml_transport_gaps;
+
+    power_sum = g_sml_power_sample_sum_w;
+    power_count = g_sml_power_sample_count;
+    if (valid[2] && power_count > 0) {
+        power_reference_us = latest[2].timestamp_us;
+        size_t oldest_index =
+            (g_sml_power_sample_next + SML_POWER_SAMPLE_COUNT -
+             g_sml_power_sample_count) % SML_POWER_SAMPLE_COUNT;
+        oldest_power_us = g_sml_power_samples[oldest_index].timestamp_us;
+    }
+    portEXIT_CRITICAL(&g_sml_history_lock);
+
+    double average_power_w =
+        power_count != 0 ? power_sum / (double)power_count : 0.0;
+    uint64_t average_duration_s =
+        power_count != 0 ? (power_reference_us - oldest_power_us) / 1000000ULL : 0;
+    if (average_duration_s > 900) {
+        average_duration_s = 900;
+    }
+
+    char readings[3][128];
+    for (size_t i = 0; i < 3; ++i) {
+        if (valid[i]) {
+            int written = snprintf(readings[i], sizeof(readings[i]),
+                                   "{\"value\":\"%s\",\"scaler\":%d,\"unit\":%u}",
+                                   latest[i].value, (int)latest[i].scaler,
+                                   (unsigned int)latest[i].unit);
+            if (written < 0 || (size_t)written >= sizeof(readings[i])) {
+                return ESP_FAIL;
+            }
+        } else {
+            strlcpy(readings[i], "null", sizeof(readings[i]));
+        }
+    }
+
+    char payload[768];
+    char average_json[48] = "null";
+    if (power_count != 0) {
+        int average_len = snprintf(average_json, sizeof(average_json),
+                                   "%.2f", average_power_w);
+        if (average_len < 0 || (size_t)average_len >= sizeof(average_json)) {
+            return ESP_FAIL;
+        }
+    }
+    int len = snprintf(payload, sizeof(payload),
+                       "{\"import\":%s,\"export\":%s,\"power\":%s,"
+                       "\"average_power_w\":%s,\"average_samples\":%u,"
+                       "\"average_duration_s\":%llu,\"crc_valid\":%lu,"
+                       "\"crc_invalid\":%lu,\"transport_gaps\":%lu}",
+                       readings[0], readings[1], readings[2],
+                       average_json,
+                       (unsigned int)power_count,
+                       (unsigned long long)average_duration_s,
+                       (unsigned long)crc_valid,
+                       (unsigned long)crc_invalid,
+                       (unsigned long)transport_gaps);
+    if (len < 0 || (size_t)len >= sizeof(payload)) {
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, payload, len);
+}
+
+static esp_err_t rssi_api_handler(httpd_req_t *req)
+{
+    char query[96];
+    char capture_value[8];
+    uint32_t after = 0;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "capture", capture_value,
+                                  sizeof(capture_value)) == ESP_OK) {
+            if (strcmp(capture_value, "1") == 0) {
+                portENTER_CRITICAL(&g_rssi_history_lock);
+                g_rssi_history_count = 0;
+                g_rssi_history_next = 0;
+                g_rssi_latest_sequence = 0;
+                g_rssi_capture_active = true;
+                portEXIT_CRITICAL(&g_rssi_history_lock);
+            } else if (strcmp(capture_value, "0") == 0) {
+                portENTER_CRITICAL(&g_rssi_history_lock);
+                g_rssi_capture_active = false;
+                portEXIT_CRITICAL(&g_rssi_history_lock);
+            } else {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "capture must be 0 or 1");
+                return ESP_FAIL;
+            }
+        }
+        char after_value[16];
+        if (httpd_query_key_value(query, "after", after_value,
+                                  sizeof(after_value)) == ESP_OK) {
+            char *end = NULL;
+            unsigned long parsed = strtoul(after_value, &end, 10);
+            if (end == after_value || *end != '\0' || parsed > UINT32_MAX) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "Invalid RSSI sequence");
+                return ESP_FAIL;
+            }
+            after = (uint32_t)parsed;
+        }
+    }
+
+    rssi_record_t records[RSSI_API_PAGE_SIZE];
+    size_t record_count = 0;
+    uint32_t oldest_sequence = 0;
+    uint32_t latest_sequence;
+    bool capture_active;
+    portENTER_CRITICAL(&g_rssi_history_lock);
+    latest_sequence = g_rssi_latest_sequence;
+    capture_active = g_rssi_capture_active;
+    size_t oldest_index = (g_rssi_history_next + RSSI_HISTORY_COUNT -
+                           g_rssi_history_count) % RSSI_HISTORY_COUNT;
+    if (g_rssi_history_count != 0) {
+        oldest_sequence = g_rssi_history[oldest_index].sequence;
+    }
+    for (size_t i = 0; i < g_rssi_history_count; ++i) {
+        size_t index = (oldest_index + i) % RSSI_HISTORY_COUNT;
+        if ((int32_t)(g_rssi_history[index].sequence - after) > 0) {
+            records[record_count++] = g_rssi_history[index];
+            if (record_count == RSSI_API_PAGE_SIZE) {
+                break;
+            }
+        }
+    }
+    portEXIT_CRITICAL(&g_rssi_history_lock);
+
+    bool overflow = oldest_sequence != 0 &&
+                    (int32_t)(oldest_sequence - after) > 1;
+    char header[192];
+    int header_len = snprintf(header, sizeof(header),
+                              "{\"active\":%s,\"overflow\":%s,"
+                              "\"latest_sequence\":%lu,\"samples\":[",
+                              capture_active ? "true" : "false",
+                              overflow ? "true" : "false",
+                              (unsigned long)latest_sequence);
+    if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_send_chunk(req, header, header_len);
+    for (size_t i = 0; err == ESP_OK && i < record_count; ++i) {
+        char item[96];
+        int item_len = snprintf(item, sizeof(item),
+                                "%s{\"sequence\":%lu,\"timestamp_us\":%llu,"
+                                "\"rssi_dbm\":%d}",
+                                i == 0 ? "" : ",",
+                                (unsigned long)records[i].sequence,
+                                (unsigned long long)records[i].timestamp_us,
+                                (int)records[i].rssi_dbm);
+        if (item_len < 0 || (size_t)item_len >= sizeof(item)) {
+            return ESP_FAIL;
+        }
+        err = httpd_resp_send_chunk(req, item, item_len);
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, "]}", 2);
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);
+    }
+    return err;
+}
 #endif
 
 static esp_err_t log_page_handler(httpd_req_t *req)
 {
     static const char page[] =
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>UART and SML log</title>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>SML logger</title>"
         "<style>body{font-family:monospace;margin:20px;background:#10151f;color:#e5edf7}"
         "pre{white-space:pre-wrap;word-break:break-word}button,a{margin:4px;padding:8px 12px}"
-        "a{color:#78d6ff}</style></head><body><h1>UART raw and SML decoded log</h1>"
+        "a{color:#78d6ff}</style></head><body><h1>CRC-valid SML logger</h1>"
         "<button id=\"pause\" type=\"button\">Pause display</button>"
-        "<button id=\"download-raw\" type=\"button\">Download raw capture</button>"
         "<button id=\"download-sml\" type=\"button\">Download decoded values</button>"
-        "<h2>Raw UART bytes</h2><p id=\"raw-status\">Connecting…</p><pre id=\"raw-log\"></pre>"
+        "<button id=\"rssi-capture\" type=\"button\">Start RSSI capture</button>"
+        "<button id=\"download-rssi\" type=\"button\">Download RSSI capture</button>"
         "<h2>CRC-valid SML values</h2><p id=\"sml-status\">Waiting for valid telegrams…</p>"
-        "<pre id=\"sml-log\"></pre><script>"
-        "let rawCursor=0,smlCursor=0,paused=false,rawRendered=0,smlRendered=0;"
-        "let rawGap=false,smlGap=false;const rawCaptured=[],smlCaptured=[];"
-        "const rawOut=document.getElementById('raw-log'),smlOut=document.getElementById('sml-log');"
-        "const rawStatus=document.getElementById('raw-status'),smlStatus=document.getElementById('sml-status');"
-        "function render(){if(paused)return;for(;rawRendered<rawCaptured.length;rawRendered++){"
-        "const b=rawCaptured[rawRendered];rawOut.textContent+=b.timestamp_us+' us | seq '+b.sequence+' | '+"
-        "b.raw_length+' | '+b.raw_hex+'\\n';}for(;smlRendered<smlCaptured.length;smlRendered++){"
+        "<pre id=\"sml-log\"></pre><h2>On-demand reception-strength log</h2>"
+        "<p id=\"rssi-status\">Inactive; start capture to record signal strength.</p>"
+        "<pre id=\"rssi-log\"></pre><script>"
+        "let smlCursor=0,rssiCursor=0,paused=false,smlRendered=0,rssiRendered=0;"
+        "let smlGap=false,rssiActive=false;const smlCaptured=[],rssiCaptured=[];"
+        "const smlOut=document.getElementById('sml-log'),rssiOut=document.getElementById('rssi-log');"
+        "const smlStatus=document.getElementById('sml-status'),rssiStatus=document.getElementById('rssi-status');"
+        "function render(){if(paused)return;for(;smlRendered<smlCaptured.length;smlRendered++){"
         "const v=smlCaptured[smlRendered],unit={14:'m3',16:'m3/h',27:'W',30:'Wh',33:'A',35:'V'}[v.unit]"
         "||('unit-'+v.unit),label={'1.0.1.8.0.255':'Active energy import',"
         "'1.0.2.8.0.255':'Active energy export','1.0.16.7.0.255':'Active power'}[v.obis]"
@@ -1601,7 +1370,8 @@ static esp_err_t log_page_handler(httpd_req_t *req)
         "digits=digits.replace(/0+$/,'').replace(/\\.$/,'');scaled=(negative?'-':'')+digits;}"
         "smlOut.textContent+=v.timestamp_us+' us | '+label+' ('+v.obis+') | '+"
         "String(scaled)+' '+unit+' | raw '+v.value+' x10^'+v.scaler+'\\n';}"
-        "if(rawOut.textContent.length>200000)rawOut.textContent=rawOut.textContent.slice(-150000);"
+        "for(;rssiRendered<rssiCaptured.length;rssiRendered++){const x=rssiCaptured[rssiRendered];"
+        "rssiOut.textContent+=x.timestamp_us+' us | '+x.rssi_dbm+' dBm\\n';}"
         "if(smlOut.textContent.length>100000)smlOut.textContent=smlOut.textContent.slice(-75000);}"
         "document.getElementById('pause').onclick=()=>{paused=!paused;"
         "document.getElementById('pause').textContent=paused?'Resume display':'Pause display';render();};"
@@ -1611,26 +1381,38 @@ static esp_err_t log_page_handler(httpd_req_t *req)
         "a.download=name+'-'+new Date().toISOString().replace(/[:.]/g,'-')+'.jsonl';"
         "document.body.appendChild(a);a.click();a.remove();"
         "setTimeout(()=>URL.revokeObjectURL(url),1000);return true;}"
-        "document.getElementById('download-raw').onclick=()=>{if(!download(rawCaptured,'uart-raw'))"
-        "rawStatus.textContent='No raw data captured yet';};"
         "document.getElementById('download-sml').onclick=()=>{if(!download(smlCaptured,'sml-values'))"
         "smlStatus.textContent='No decoded SML values captured yet';};"
-        "async function pollRaw(){try{const r=await fetch('/api/log?after='+rawCursor,{cache:'no-store'});"
-        "if(!r.ok)throw new Error(r.status);const d=await r.json();if(d.overflow){rawGap=true;"
-        "rawOut.textContent+='[GAP: receiver raw history overflowed]\\n';}"
-        "for(const b of d.blocks){rawCaptured.push(b);rawCursor=b.sequence;}render();"
-        "rawStatus.textContent=(paused?'Display paused; capture continues':'Live')+'; cursor '+rawCursor+"
-        "(rawGap?' | GAP DETECTED':'');setTimeout(pollRaw,d.blocks.length?0:50);}"
-        "catch(e){rawStatus.textContent='Connection error: '+e;setTimeout(pollRaw,1000);}}"
+        "document.getElementById('download-rssi').onclick=()=>{if(!download(rssiCaptured,'rssi'))"
+        "rssiStatus.textContent='No RSSI samples captured yet';};"
         "async function pollSml(){try{const r=await fetch('/api/sml?after='+smlCursor,{cache:'no-store'});"
         "if(!r.ok)throw new Error(r.status);const d=await r.json();if(d.overflow){smlGap=true;"
         "smlOut.textContent+='[GAP: decoded-value history overflowed]\\n';}"
         "for(const v of d.values){smlCaptured.push(v);smlCursor=v.sequence;}render();"
         "smlStatus.textContent='CRC valid: '+d.crc_valid+' | CRC invalid: '+d.crc_invalid+"
-        "' | transport gaps: '+d.transport_gaps+' | parser queue drops: '+d.parser_queue_drops+"
+        "' | transport gaps: '+d.transport_gaps+"
         "(smlGap?' | VALUE GAP DETECTED':'');setTimeout(pollSml,d.values.length?0:250);}"
         "catch(e){smlStatus.textContent='Connection error: '+e;setTimeout(pollSml,1000);}}"
-        "pollRaw();pollSml();</script><p><a href=\"/\">Back</a></p></body></html>";
+        "async function pollRssi(){if(!rssiActive)return;try{const r=await fetch('/api/rssi?after='+rssiCursor,"
+        "{cache:'no-store'});if(!r.ok)throw new Error(r.status);const d=await r.json();"
+        "if(d.overflow)rssiOut.textContent+='[RSSI history overflow]\\n';"
+        "for(const x of d.samples){rssiCaptured.push(x);rssiCursor=x.sequence;}render();"
+        "rssiStatus.textContent='Recording signal strength; '+rssiCaptured.length+' samples';"
+        "setTimeout(pollRssi,1000);}catch(e){rssiStatus.textContent='RSSI capture error: '+e;"
+        "setTimeout(pollRssi,1000);}}"
+        "document.getElementById('rssi-capture').onclick=async()=>{const button="
+        "document.getElementById('rssi-capture');if(!rssiActive){rssiCaptured.length=0;"
+        "rssiCursor=0;rssiRendered=0;rssiOut.textContent='';try{const r=await fetch('/api/rssi?capture=1',"
+        "{cache:'no-store'});if(!r.ok)throw new Error(r.status);rssiActive=true;"
+        "button.textContent='Stop RSSI capture';rssiStatus.textContent='Waiting for received packets…';"
+        "pollRssi();}catch(e){rssiStatus.textContent='Could not start RSSI capture: '+e;}}"
+        "else{try{const r=await fetch('/api/rssi?capture=0&after='+rssiCursor,"
+        "{cache:'no-store'});if(!r.ok)throw new Error(r.status);const d=await r.json();"
+        "for(const x of d.samples){rssiCaptured.push(x);rssiCursor=x.sequence;}render();"
+        "rssiActive=false;"
+        "button.textContent='Start RSSI capture';rssiStatus.textContent='Capture stopped; '+"
+        "rssiCaptured.length+' samples recorded.';}catch(e){rssiStatus.textContent='Could not stop RSSI capture: '+e;}}};"
+        "pollSml();</script><p><a href=\"/\">Back</a></p></body></html>";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req, page);
 }
@@ -1641,8 +1423,9 @@ static esp_err_t ota_page_handler(httpd_req_t *req)
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Firmware update</title>"
         "<style>body{font-family:Arial;margin:24px;background:#10151f;color:#e5edf7}"
         "input,button{display:block;margin:12px 0;padding:8px}</style></head><body>"
-        "<h1>Local firmware update</h1><p>Select the matching role firmware. "
-        "For the sender, use sender.bin built with OTA partitions. Do not close this page during upload.</p>"
+        "<h1>Local firmware update</h1><p>Select the matching role firmware: "
+        "receiver-sml.bin for this device or sender-sml.bin for the sender. "
+        "Do not close this page during upload.</p>"
         "<label>Wi-Fi key (FRITZ!Box password when connected there; otherwise AP password)</label>"
         "<input id=\"key\" type=\"password\"><label>Target</label><select id=\"target\">"
         "<option value=\"/update\">Receiver (this device)</option>"
@@ -2078,16 +1861,21 @@ static void start_webserver(void)
         .method = HTTP_GET,
         .handler = json_handler,
     };
-    httpd_uri_t log_api = {
-        .uri = "/api/log",
-        .method = HTTP_GET,
-        .handler = log_api_handler,
-    };
 #if !CONFIG_ESPNOW_ROLE_SENDER
     httpd_uri_t sml_api = {
         .uri = "/api/sml",
         .method = HTTP_GET,
         .handler = sml_api_handler,
+    };
+    httpd_uri_t sml_dashboard_api = {
+        .uri = "/api/dashboard",
+        .method = HTTP_GET,
+        .handler = sml_dashboard_api_handler,
+    };
+    httpd_uri_t rssi_api = {
+        .uri = "/api/rssi",
+        .method = HTTP_GET,
+        .handler = rssi_api_handler,
     };
 #endif
     httpd_uri_t log_page = {
@@ -2125,9 +1913,10 @@ static void start_webserver(void)
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &data));
-    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_api));
 #if !CONFIG_ESPNOW_ROLE_SENDER
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sml_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sml_dashboard_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &rssi_api));
 #endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config_uri));
@@ -2159,12 +1948,12 @@ static void run_sender(void)
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, UART_PIN_NO_CHANGE, UART_RX_GPIO,
                                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
-    g_uart_raw_queue = xQueueCreate(UART_TRANSPORT_QUEUE_LENGTH,
-                                    sizeof(uart_raw_chunk_t));
-    if (g_uart_raw_queue == NULL) {
-        ESP_LOGE(TAG, "Could not create UART raw transport queue");
+    g_sml_tx_queue = xQueueCreate(SML_TX_QUEUE_LENGTH, sizeof(sml_tx_item_t));
+    if (g_sml_tx_queue == NULL) {
+        ESP_LOGE(TAG, "Could not create SML transport queue");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
+    sml_adapter_reset();
 
     g_send_done = xSemaphoreCreateBinary();
     if (g_send_done == NULL) {
@@ -2176,10 +1965,9 @@ static void run_sender(void)
     ESP_LOGI(TAG, "Sender ready: UART%d RX GPIO=%d at %d baud (8N1, no flow control); "
                   "ESP-NOW channel %u",
              UART_PORT_NUM, UART_RX_GPIO, UART_BAUD_RATE, g_espnow_channel);
-    ESP_LOGI(TAG, "UART RX ring buffer: %u bytes; transport queue: %u arbitrary read chunks",
-             (unsigned int)UART_BUFFER_SIZE,
-             (unsigned int)UART_TRANSPORT_QUEUE_LENGTH);
-    ESP_LOGI(TAG, "UART log columns: timestamp_us | read_delta_us | length | raw bytes");
+    ESP_LOGI(TAG, "UART RX ring buffer: %u bytes; SML transport queue: %u telegrams",
+             (unsigned int)UART_BUFFER_SIZE, (unsigned int)SML_TX_QUEUE_LENGTH);
+    ESP_LOGI(TAG, "Only CRC-checked SML values and telegram status are transmitted");
 
     BaseType_t task_result = xTaskCreate(uart_event_worker, "uart_events",
                                          4096, NULL, 6, NULL);
@@ -2187,10 +1975,10 @@ static void run_sender(void)
         ESP_LOGE(TAG, "Could not start UART event/statistics worker");
         ESP_ERROR_CHECK(ESP_FAIL);
     }
-    task_result = xTaskCreate(uart_transport_worker, "uart_transport",
+    task_result = xTaskCreate(uart_transport_worker, "sml_transport",
                               4096, NULL, 9, NULL);
     if (task_result != pdPASS) {
-        ESP_LOGE(TAG, "Could not start UART transport worker");
+        ESP_LOGE(TAG, "Could not start SML transport worker");
         ESP_ERROR_CHECK(ESP_FAIL);
     }
     task_result = xTaskCreate(uart_capture_worker, "uart_capture",
@@ -2223,18 +2011,6 @@ void app_main(void)
     if (g_espnow_ota_ack_queue == NULL || g_espnow_ota_mutex == NULL) {
         ESP_LOGE(TAG, "Could not create receiver OTA synchronization objects");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
-    }
-    g_sml_parser_queue = xQueueCreate(SML_PARSER_QUEUE_LENGTH,
-                                      sizeof(sml_parser_item_t));
-    if (g_sml_parser_queue == NULL) {
-        ESP_LOGE(TAG, "Could not create SML parser queue");
-        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
-    }
-    BaseType_t parser_task_result = xTaskCreate(sml_parser_worker, "sml_parser",
-                                                8192, NULL, 5, NULL);
-    if (parser_task_result != pdPASS) {
-        ESP_LOGE(TAG, "Could not start SML parser worker");
-        ESP_ERROR_CHECK(ESP_FAIL);
     }
 #endif
     ESP_ERROR_CHECK(esp_now_register_recv_cb(receive_callback));

@@ -3,9 +3,9 @@ choice ESPNOW_ROLE
     default ESPNOW_ROLE_RECEIVER
 
 config ESPNOW_ROLE_SENDER
-    bool "Sender (raw UART monitor and synthetic ESP-NOW test packets)"
+    bool "Sender (UART SML decoder and ESP-NOW value transport)"
 
 config ESPNOW_ROLE_RECEIVER
-    bool "Receiver (ESP-NOW meter packet validation and Wi-Fi web display)"
+    bool "Receiver (SML value transport and Wi-Fi dashboard)"
 
 endchoice
