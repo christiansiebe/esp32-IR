@@ -1,0 +1,11 @@
+choice ESPNOW_ROLE
+    prompt "ESP-NOW firmware role"
+    default ESPNOW_ROLE_RECEIVER
+
+config ESPNOW_ROLE_SENDER
+    bool "Sender (raw UART monitor and synthetic ESP-NOW test packets)"
+
+config ESPNOW_ROLE_RECEIVER
+    bool "Receiver (ESP-NOW meter packet validation and Wi-Fi web display)"
+
+endchoice

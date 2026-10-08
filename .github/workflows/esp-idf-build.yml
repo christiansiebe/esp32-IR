@@ -1,0 +1,73 @@
+name: ESP-IDF firmware
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.role }}
+    runs-on: ubuntu-24.04
+    container:
+      image: espressif/idf:v6.1
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [receiver, sender]
+    env:
+      IDF_CCACHE_ENABLE: "1"
+      CCACHE_DIR: /root/.cache/ccache
+      IDF_TARGET: esp32
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Cache compiler outputs
+        uses: actions/cache@v4
+        with:
+          path: /root/.cache/ccache
+          key: ${{ runner.os }}-idf-6.1-${{ matrix.role }}-${{ hashFiles('main/main.c', 'main/CMakeLists.txt', 'CMakeLists.txt', 'partitions.csv') }}
+          restore-keys: |
+            ${{ runner.os }}-idf-6.1-${{ matrix.role }}-
+
+      - name: Configure firmware role
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP"
+          role_upper="$(printf '%s' '${{ matrix.role }}' | tr '[:lower:]' '[:upper:]')"
+          cat > "$RUNNER_TEMP/sdkconfig.defaults" <<EOF
+          CONFIG_IDF_TARGET="esp32"
+          CONFIG_PARTITION_TABLE_CUSTOM=y
+          CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+          CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+          CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+          CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+          CONFIG_ESPNOW_ROLE_${role_upper}=y
+          EOF
+          echo "SDKCONFIG=$RUNNER_TEMP/sdkconfig-${{ matrix.role }}" >> "$GITHUB_ENV"
+          echo "SDKCONFIG_DEFAULTS=$RUNNER_TEMP/sdkconfig.defaults" >> "$GITHUB_ENV"
+
+      - name: Build firmware
+        shell: bash
+        run: idf.py -B "build/${{ matrix.role }}" build
+
+      - name: Stage firmware artifact
+        shell: bash
+        run: |
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          mkdir -p "$RUNNER_TEMP/firmware"
+          cp "build/${{ matrix.role }}/esp32-IR.bin" \
+            "$RUNNER_TEMP/firmware/${{ matrix.role }}.bin"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.role }}-firmware
+          path: ${{ runner.temp }}/firmware/${{ matrix.role }}.bin
+          if-no-files-found: error
+          retention-days: 14
