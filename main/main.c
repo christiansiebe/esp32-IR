@@ -1276,25 +1276,71 @@ static esp_err_t root_handler(httpd_req_t *req)
                        "%s<p>Last UART block: %s</p>"
                        "<p>Sequence: %lu</p><p>Timestamp: %llu us since sender boot</p>"
                        "<p>Length: %u bytes</p><pre>%s</pre>"
-                       "<p>FRITZ!Box: %s</p><nav class=\"nav\">"
-                       "<a href=\"/log\">Live raw log</a><a href=\"/api\">JSON API</a>"
-                       "<a href=\"/config\">Wi-Fi settings</a><a href=\"/update\">Firmware update</a>"
-                       "</nav>%s",
+                       "<p>FRITZ!Box: %s</p>",
                        METER_HTML_HEADER,
                        valid ? "received" : "waiting",
                        (unsigned long)(valid ? latest.sequence : 0),
                        (unsigned long long)(valid ? latest.timestamp_us : 0),
                        (unsigned int)(valid ? latest.length : 0),
                        valid ? raw_hex : "",
-                       g_wifi_connected ? "connected" : "not connected",
-                       METER_HTML_FOOTER);
+                       g_wifi_connected ? "connected" : "not connected");
 
     if (len < 0 || (size_t)len >= sizeof(html)) {
         return ESP_FAIL;
     }
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, html, len);
+    esp_err_t err = httpd_resp_send_chunk(req, html, len);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    static const char sml_page[] =
+        "<h2>Recognized SML values</h2><p id=\"home-sml-status\">Connecting…</p>"
+        "<pre id=\"home-sml-values\"></pre><script>"
+        "let smlCursor=0;const smlOut=document.getElementById('home-sml-values');"
+        "const smlStatus=document.getElementById('home-sml-status');"
+        "async function pollSml(){try{const r=await fetch('/api/sml?after='+smlCursor,"
+        "{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);"
+        "const d=await r.json();if(d.overflow)smlOut.textContent+="
+        "'[GAP: decoded-value history overflowed]\\n';"
+        "for(const v of d.values){smlCursor=v.sequence;const unit={14:'m3',16:'m3/h',"
+        "27:'W',30:'Wh',33:'A',35:'V'}[v.unit]||('unit-'+v.unit);"
+        "const label={'1.0.1.8.0.255':'Energy import (1-0:1.8.0)',"
+        "'1.0.2.8.0.255':'Energy export (1-0:2.8.0)',"
+        "'1.0.16.7.0.255':'Active power (1-0:16.7.0)'}[v.obis]||'SML value';"
+        "const integer=BigInt(v.value),negative=integer<0n;let digits="
+        "(negative?-integer:integer).toString(),scaled;"
+        "if(Math.abs(v.scaler)>12)scaled=v.value+' x10^'+v.scaler;else if(v.scaler>=0)"
+        "scaled=(negative?'-':'')+digits+'0'.repeat(v.scaler);else{const places=-v.scaler;"
+        "if(digits.length<=places)digits='0'.repeat(places+1-digits.length)+digits;"
+        "const point=digits.length-places;digits=digits.slice(0,point)+'.'+digits.slice(point);"
+        "digits=digits.replace(/0+$/,'').replace(/\\.$/,'');"
+        "scaled=(negative?'-':'')+digits;}"
+        "smlOut.textContent+=v.timestamp_us+' us | '+label+' | '+scaled+' '+unit+'\\n';}"
+        "if(smlOut.textContent.length>50000)smlOut.textContent="
+        "smlOut.textContent.slice(-40000);"
+        "smlStatus.textContent='CRC valid: '+d.crc_valid+' | CRC invalid: '+d.crc_invalid+"
+        "' | transport gaps: '+d.transport_gaps+' | parser queue drops: '+d.parser_queue_drops;"
+        "setTimeout(pollSml,d.values.length?0:250);}catch(e){"
+        "smlStatus.textContent='SML data unavailable: '+e;setTimeout(pollSml,1000);}}"
+        "pollSml();</script>";
+    err = httpd_resp_sendstr_chunk(req, sml_page);
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
+
+    static const char page_footer[] =
+        "<nav class=\"nav\"><a href=\"/log\">Live raw log</a>"
+        "<a href=\"/api\">JSON API</a><a href=\"/config\">Wi-Fi settings</a>"
+        "<a href=\"/update\">Firmware update</a></nav>" METER_HTML_FOOTER;
+    err = httpd_resp_sendstr_chunk(req, page_footer);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 static esp_err_t json_handler(httpd_req_t *req)
