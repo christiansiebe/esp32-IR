@@ -59,7 +59,7 @@ jobs:
           idf.py --version
           idf.py -B "build/${{ matrix.role }}" build
 
-       - name: Stage firmware and flash files
+     - name: Stage firmware and flash files
         shell: bash
         run: |
           set -euo pipefail
