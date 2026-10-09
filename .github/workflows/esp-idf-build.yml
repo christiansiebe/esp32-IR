@@ -59,18 +59,46 @@ jobs:
           idf.py --version
           idf.py -B "build/${{ matrix.role }}" build
 
-      - name: Stage firmware artifact
+       - name: Stage firmware and flash files
         shell: bash
         run: |
-          test -s "build/${{ matrix.role }}/esp32-IR.bin"
-          mkdir -p "$RUNNER_TEMP/firmware"
-          cp "build/${{ matrix.role }}/esp32-IR.bin" \
-            "$RUNNER_TEMP/firmware/${{ matrix.role }}-sml.bin"
+          set -euo pipefail
+          build_dir="build/${{ matrix.role }}"
+          out_dir="$RUNNER_TEMP/firmware"
+          mkdir -p "$out_dir"
+
+          test -s "$build_dir/esp32-IR.bin"
+          test -s "$build_dir/bootloader/bootloader.bin"
+          test -s "$build_dir/partition_table/partition-table.bin"
+          test -s "$build_dir/flasher_args.json"
+
+          cp "$build_dir/esp32-IR.bin" \
+            "$out_dir/${{ matrix.role }}-sml.bin"
+          cp "$build_dir/bootloader/bootloader.bin" \
+            "$out_dir/bootloader.bin"
+          cp "$build_dir/partition_table/partition-table.bin" \
+            "$out_dir/partition-table.bin"
+          cp "$build_dir/flasher_args.json" \
+            "$out_dir/flasher_args.json"
+          cp partitions.csv "$out_dir/partitions.csv"
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.role }}-sml-firmware
           path: ${{ runner.temp }}/firmware/${{ matrix.role }}-sml.bin
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload complete flash files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.role }}-sml-flash-files
+          path: |
+            ${{ runner.temp }}/firmware/bootloader.bin
+            ${{ runner.temp }}/firmware/partition-table.bin
+            ${{ runner.temp }}/firmware/flasher_args.json
+            ${{ runner.temp }}/firmware/partitions.csv
+            ${{ runner.temp }}/firmware/${{ matrix.role }}-sml.bin
           if-no-files-found: error
           retention-days: 14
