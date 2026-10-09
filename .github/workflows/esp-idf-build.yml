@@ -90,15 +90,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      
       - name: Upload complete flash files
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.role }}-sml-flash-files
-          path: |
-            ${{ runner.temp }}/firmware/bootloader.bin
-            ${{ runner.temp }}/firmware/partition-table.bin
-            ${{ runner.temp }}/firmware/flasher_args.json
-            ${{ runner.temp }}/firmware/partitions.csv
-            ${{ runner.temp }}/firmware/${{ matrix.role }}-sml.bin
+          path: ${{ runner.temp }}/firmware/
           if-no-files-found: error
           retention-days: 14
