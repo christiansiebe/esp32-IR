@@ -71,7 +71,9 @@ jobs:
           test -s "$build_dir/bootloader/bootloader.bin"
           test -s "$build_dir/partition_table/partition-table.bin"
           test -s "$build_dir/flasher_args.json"
-
+          test -s "$build_dir/ota_data_initial.bin"
+          cp "$build_dir/ota_data_initial.bin" "$out_dir/ota_data_initial.bin"
+          
           cp "$build_dir/esp32-IR.bin" \
             "$out_dir/${{ matrix.role }}-sml.bin"
           cp "$build_dir/bootloader/bootloader.bin" \
