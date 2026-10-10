@@ -789,6 +789,7 @@ static bool is_espnow_ota_packet(const uint8_t *data, int data_len)
     return packet.magic == ESPNOW_OTA_MAGIC && packet.version == ESPNOW_OTA_VERSION;
 }
 
+#if CONFIG_ESPNOW_ROLE_SENDER
 static bool is_diag_request(const uint8_t *data, int data_len)
 {
     if (data == NULL || data_len < (int)sizeof(espnow_diag_header_t)) {
@@ -801,6 +802,7 @@ static bool is_diag_request(const uint8_t *data, int data_len)
            header.type == ESPNOW_DIAG_TYPE_REQUEST;
 }
 
+#else
 static bool is_diag_response(const uint8_t *data, int data_len)
 {
     if (data == NULL || data_len < (int)sizeof(espnow_diag_header_t)) {
@@ -812,6 +814,7 @@ static bool is_diag_response(const uint8_t *data, int data_len)
            header.version == ESPNOW_DIAG_VERSION &&
            header.type == ESPNOW_DIAG_TYPE_RESPONSE;
 }
+#endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
 static void record_rssi_sample(int8_t rssi_dbm)
