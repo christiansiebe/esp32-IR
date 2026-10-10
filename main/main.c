@@ -1,21 +1,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <math.h>
 
 #include "driver/uart.h"
 #include "esp_err.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_now.h"
 #include "esp_ota_ops.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "power_history.h"
 #include "sml_transport.h"
 #if CONFIG_ESPNOW_ROLE_SENDER
 #include "sml_adapter.h"
@@ -35,10 +41,13 @@ static const char *TAG = "espnow_meter";
 #define METER_VERSION        1u
 #define SML_VALUE_HISTORY_COUNT 64
 #define SML_API_PAGE_SIZE    16
+#define SML_POWER_API_PAGE_SIZE 128
 #define RSSI_HISTORY_COUNT   256
 #define RSSI_API_PAGE_SIZE   32
 #define SML_POWER_AVERAGE_WINDOW_US 900000000ULL
 #define SML_POWER_SAMPLE_COUNT 900
+#define POWER_HISTORY_INTERVAL_SECONDS 60LL
+#define POWER_SAMPLE_STALE_US 30000000ULL
 #define ESPNOW_OTA_MAGIC     0x4F544131u
 #define ESPNOW_OTA_VERSION   1u
 #define ESPNOW_OTA_BEGIN     1u
@@ -48,6 +57,11 @@ static const char *TAG = "espnow_meter";
 #define ESPNOW_OTA_ACK       0x80u
 #define ESPNOW_OTA_CHUNK     220u
 #define ESPNOW_OTA_TIMEOUT_MS 3000
+#define ESPNOW_DIAG_MAGIC     0x44494147u
+#define ESPNOW_DIAG_VERSION   1u
+#define ESPNOW_DIAG_TELEMETRY 1u
+#define ESPNOW_DIAG_REBOOT    2u
+#define ESPNOW_DIAG_REBOOT_ACK 3u
 #define WIFI_CONFIG_NAMESPACE "metercfg"
 #define WIFI_SSID_KEY          "wifi_ssid"
 #define WIFI_PASSWORD_KEY      "wifi_pass"
@@ -101,6 +115,24 @@ typedef struct {
     espnow_ota_packet_t packet;
 } espnow_ota_ack_t;
 
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint8_t version;
+    uint8_t type;
+    uint16_t reserved;
+    uint32_t sequence;
+    uint32_t uptime_seconds;
+    uint32_t reset_reason;
+    uint32_t free_heap;
+    uint32_t minimum_free_heap;
+    uint64_t uart_rx_bytes;
+    uint32_t tx_queue_drops;
+    uint32_t uart_fifo_overflows;
+    uint32_t uart_rx_buffer_full;
+    uint32_t uart_frame_errors;
+    uint32_t uart_parity_errors;
+} espnow_diagnostic_packet_t;
+
 static const uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
@@ -109,6 +141,7 @@ static char g_wifi_ssid[WIFI_SSID_MAX_LEN + 1];
 static char g_wifi_password[WIFI_PASSWORD_MAX_LEN + 1];
 static bool g_wifi_configured;
 static bool g_wifi_connected;
+static bool g_sntp_started;
 static esp_netif_t *g_ap_netif;
 static esp_netif_t *g_sta_netif;
 static uint8_t g_espnow_channel = ESPNOW_CHANNEL;
@@ -120,7 +153,6 @@ typedef struct {
     sml_transport_value_t values[SML_TRANSPORT_MAX_VALUES];
 } sml_tx_item_t;
 
-static SemaphoreHandle_t g_send_done;
 static esp_now_send_status_t g_last_send_status;
 static QueueHandle_t g_espnow_ota_rx_queue;
 static QueueHandle_t g_uart_event_queue;
@@ -136,6 +168,12 @@ static portMUX_TYPE g_uart_stats_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t g_espnow_ota_ack_queue;
 static SemaphoreHandle_t g_espnow_ota_mutex;
 static uint8_t g_espnow_ota_sender_mac[ESP_NOW_ETH_ALEN];
+static espnow_diagnostic_packet_t g_sender_diagnostics;
+static int64_t g_sender_diagnostics_received_us;
+static uint32_t g_sender_reboot_ack_sequence;
+static uint32_t g_sender_reboot_requested_sequence;
+static bool g_sender_diagnostics_seen;
+static portMUX_TYPE g_sender_diagnostics_lock = portMUX_INITIALIZER_UNLOCKED;
 static sml_value_record_t g_sml_value_history[SML_VALUE_HISTORY_COUNT];
 static size_t g_sml_value_history_count;
 static size_t g_sml_value_history_next;
@@ -150,7 +188,15 @@ static sml_power_sample_t g_sml_power_samples[SML_POWER_SAMPLE_COUNT];
 static size_t g_sml_power_sample_count;
 static size_t g_sml_power_sample_next;
 static double g_sml_power_sample_sum_w;
-static uint64_t g_sml_last_power_sample_timestamp_us;
+static double g_sml_latest_power_w;
+static uint64_t g_sml_latest_power_received_us;
+static bool g_sml_latest_power_valid;
+static esp_timer_handle_t g_power_sample_timer;
+static int64_t g_power_bucket_start_utc;
+static int64_t g_power_bucket_first_sample_utc;
+static int64_t g_power_bucket_last_sample_utc;
+static double g_power_bucket_sum_w;
+static uint32_t g_power_bucket_sample_count;
 static portMUX_TYPE g_sml_history_lock = portMUX_INITIALIZER_UNLOCKED;
 static rssi_record_t g_rssi_history[RSSI_HISTORY_COUNT];
 static size_t g_rssi_history_count;
@@ -160,6 +206,18 @@ static bool g_rssi_capture_active;
 static portMUX_TYPE g_rssi_history_lock = portMUX_INITIALIZER_UNLOCKED;
 static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
                             const char *value, int8_t scaler, uint8_t unit);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static void power_sample_timer_callback(void *arg);
+#endif
+#endif
+
+static void diagnostic_receive_callback(const esp_now_recv_info_t *info,
+                                        const uint8_t *data, int data_len);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static esp_err_t sender_diagnostics_api_handler(httpd_req_t *req);
+static esp_err_t sender_reboot_handler(httpd_req_t *req);
+static esp_err_t diagnostics_page_handler(httpd_req_t *req);
+static esp_err_t power_samples_api_handler(httpd_req_t *req);
 #endif
 
 static esp_err_t load_wifi_credentials(void)
@@ -226,6 +284,17 @@ static void fill_station_config(wifi_config_t *config)
     strlcpy((char *)config->sta.password, g_wifi_password, sizeof(config->sta.password));
 }
 
+static void time_sync_notification(struct timeval *tv)
+{
+    (void)tv;
+    ESP_LOGI(TAG, "System clock synchronized; minute history enabled");
+}
+
+static bool system_time_is_valid(void)
+{
+    return time(NULL) >= 1704067200;
+}
+
 static void wifi_event_handler(void *arg,
                                esp_event_base_t event_base,
                                int32_t event_id,
@@ -250,6 +319,19 @@ static void wifi_event_handler(void *arg,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *event = event_data;
         ESP_LOGI(TAG, "FRITZ!Box network address: " IPSTR, IP2STR(&event->ip_info.ip));
+        if (!g_sntp_started) {
+            esp_sntp_config_t sntp_config =
+                ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+            sntp_config.wait_for_sync = false;
+            sntp_config.sync_cb = time_sync_notification;
+            esp_err_t err = esp_netif_sntp_init(&sntp_config);
+            if (err == ESP_OK) {
+                g_sntp_started = true;
+                ESP_LOGI(TAG, "SNTP time synchronization started");
+            } else {
+                ESP_LOGE(TAG, "Could not start SNTP: %s", esp_err_to_name(err));
+            }
+        }
     }
 }
 
@@ -563,9 +645,6 @@ static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_statu
         return;
     }
     g_last_send_status = status;
-    if (g_send_done != NULL) {
-        xSemaphoreGive(g_send_done);
-    }
 }
 #endif
 
@@ -680,7 +759,7 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         g_sml_power_sample_count = 0;
         g_sml_power_sample_next = 0;
         g_sml_power_sample_sum_w = 0.0;
-        g_sml_last_power_sample_timestamp_us = 0;
+        g_sml_latest_power_valid = false;
         portEXIT_CRITICAL(&g_sml_history_lock);
     }
     g_sml_last_transport_sequence = packet.header.sequence;
@@ -717,6 +796,93 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 }
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
+static void append_power_sample_locked(uint64_t timestamp_us, double watts)
+{
+    while (g_sml_power_sample_count > 0) {
+        size_t oldest_index =
+            (g_sml_power_sample_next + SML_POWER_SAMPLE_COUNT -
+             g_sml_power_sample_count) % SML_POWER_SAMPLE_COUNT;
+        if (timestamp_us - g_sml_power_samples[oldest_index].timestamp_us <=
+            SML_POWER_AVERAGE_WINDOW_US) {
+            break;
+        }
+        g_sml_power_sample_sum_w -= g_sml_power_samples[oldest_index].watts;
+        --g_sml_power_sample_count;
+    }
+    if (g_sml_power_sample_count == SML_POWER_SAMPLE_COUNT) {
+        g_sml_power_sample_sum_w -=
+            g_sml_power_samples[g_sml_power_sample_next].watts;
+    } else {
+        ++g_sml_power_sample_count;
+    }
+    g_sml_power_samples[g_sml_power_sample_next] = (sml_power_sample_t) {
+        .timestamp_us = timestamp_us,
+        .watts = watts,
+    };
+    g_sml_power_sample_sum_w += watts;
+    g_sml_power_sample_next =
+        (g_sml_power_sample_next + 1) % SML_POWER_SAMPLE_COUNT;
+}
+
+static void power_sample_timer_callback(void *arg)
+{
+    (void)arg;
+    const uint64_t now_us = (uint64_t)esp_timer_get_time();
+    const time_t wall_clock = time(NULL);
+    power_history_record_t completed_interval = {0};
+    bool enqueue_completed_interval = false;
+
+    portENTER_CRITICAL(&g_sml_history_lock);
+    if (g_sml_latest_power_valid &&
+        now_us - g_sml_latest_power_received_us <= POWER_SAMPLE_STALE_US) {
+        append_power_sample_locked(now_us, g_sml_latest_power_w);
+        if (wall_clock >= 1704067200) {
+            int64_t bucket_start = ((int64_t)wall_clock /
+                                    POWER_HISTORY_INTERVAL_SECONDS) *
+                                   POWER_HISTORY_INTERVAL_SECONDS;
+            if (g_power_bucket_start_utc != 0 &&
+                bucket_start > g_power_bucket_start_utc &&
+                g_power_bucket_sample_count != 0) {
+                double average_mw = 1000.0 * g_power_bucket_sum_w /
+                                    (double)g_power_bucket_sample_count;
+                if (average_mw > INT32_MAX) {
+                    average_mw = INT32_MAX;
+                } else if (average_mw < INT32_MIN) {
+                    average_mw = INT32_MIN;
+                }
+                completed_interval = (power_history_record_t) {
+                    .interval_start_utc = g_power_bucket_start_utc,
+                    .average_milliwatts = (int32_t)average_mw,
+                    .sample_count = g_power_bucket_sample_count,
+                };
+                enqueue_completed_interval = true;
+            }
+            if (g_power_bucket_start_utc == 0 ||
+                bucket_start > g_power_bucket_start_utc) {
+                g_power_bucket_start_utc = bucket_start;
+                g_power_bucket_first_sample_utc = 0;
+                g_power_bucket_last_sample_utc = 0;
+                g_power_bucket_sum_w = 0.0;
+                g_power_bucket_sample_count = 0;
+            }
+            if (bucket_start == g_power_bucket_start_utc &&
+                g_power_bucket_sample_count != UINT32_MAX) {
+                if (g_power_bucket_sample_count == 0) {
+                    g_power_bucket_first_sample_utc = (int64_t)wall_clock;
+                }
+                g_power_bucket_last_sample_utc = (int64_t)wall_clock;
+                g_power_bucket_sum_w += g_sml_latest_power_w;
+                ++g_power_bucket_sample_count;
+            }
+        }
+    }
+    portEXIT_CRITICAL(&g_sml_history_lock);
+
+    if (enqueue_completed_interval) {
+        (void)power_history_enqueue(&completed_interval);
+    }
+}
+
 static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
                             const char *value, int8_t scaler, uint8_t unit)
 {
@@ -760,34 +926,10 @@ static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
         g_sml_latest_values[latest_index] = record;
         g_sml_latest_value_valid[latest_index] = true;
     }
-    if (latest_index == 2 && unit == 27 &&
-        timestamp_us > g_sml_last_power_sample_timestamp_us) {
-        while (g_sml_power_sample_count > 0) {
-            size_t oldest_index =
-                (g_sml_power_sample_next + SML_POWER_SAMPLE_COUNT -
-                 g_sml_power_sample_count) % SML_POWER_SAMPLE_COUNT;
-            if (timestamp_us - g_sml_power_samples[oldest_index].timestamp_us <=
-                SML_POWER_AVERAGE_WINDOW_US) {
-                break;
-            }
-            g_sml_power_sample_sum_w -=
-                g_sml_power_samples[oldest_index].watts;
-            --g_sml_power_sample_count;
-        }
-        if (g_sml_power_sample_count == SML_POWER_SAMPLE_COUNT) {
-            g_sml_power_sample_sum_w -=
-                g_sml_power_samples[g_sml_power_sample_next].watts;
-        } else {
-            ++g_sml_power_sample_count;
-        }
-        g_sml_power_samples[g_sml_power_sample_next] = (sml_power_sample_t) {
-            .timestamp_us = timestamp_us,
-            .watts = watts,
-        };
-        g_sml_power_sample_sum_w += watts;
-        g_sml_power_sample_next =
-            (g_sml_power_sample_next + 1) % SML_POWER_SAMPLE_COUNT;
-        g_sml_last_power_sample_timestamp_us = timestamp_us;
+    if (latest_index == 2 && unit == 27 && isfinite(watts)) {
+        g_sml_latest_power_w = watts;
+        g_sml_latest_power_received_us = (uint64_t)esp_timer_get_time();
+        g_sml_latest_power_valid = true;
     }
     portEXIT_CRITICAL(&g_sml_history_lock);
 
@@ -850,15 +992,7 @@ static void send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
         ESP_LOGE(TAG, "ESP-NOW SML telegram send failed: %s", esp_err_to_name(err));
         return;
     }
-    if (xSemaphoreTake(g_send_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGE(TAG, "Timed out waiting for ESP-NOW SML telegram completion");
-        return;
-    }
-    if (g_last_send_status != ESP_NOW_SEND_SUCCESS) {
-        ESP_LOGE(TAG, "ESP-NOW did not deliver SML telegram sequence %lu",
-                 (unsigned long)sequence);
-        return;
-    }
+    g_last_send_status = ESP_NOW_SEND_SUCCESS;
     ESP_LOGD(TAG, "Sent SML telegram sequence=%lu crc_valid=%u values=%u",
              (unsigned long)sequence, packet.header.crc_valid,
              (unsigned int)packet.header.value_count);
@@ -995,7 +1129,9 @@ static esp_err_t root_handler(httpd_req_t *req)
         "gap:12px;margin:20px 0}.meter{background:#182330;padding:18px;border-radius:10px}"
         ".meter h2{font-size:1rem;margin:0 0 12px;color:#9fb4c8}.meter strong{font-size:1.7rem;"
         "color:#78d6ff}.meter small{display:block;color:#9fb4c8;margin-top:8px}"
-        "#meter-status{color:#9fb4c8}</style><h1>Zählerübersicht</h1><div class=\"dashboard\">"
+        "#meter-status,#history-status{color:#9fb4c8}.history{margin-top:24px}"
+        "#power-history{display:block;width:100%;height:260px;background:#121b27;border-radius:8px}"
+        "</style><h1>Zählerübersicht</h1><div class=\"dashboard\">"
         "<section class=\"meter\"><h2>Verbrauch gesamt</h2><strong id=\"meter-import\">—</strong>"
         "<small>1-0:1.8.0 · kWh</small></section>"
         "<section class=\"meter\"><h2>Einspeisung gesamt</h2><strong id=\"meter-export\">—</strong>"
@@ -1005,6 +1141,12 @@ static esp_err_t root_handler(httpd_req_t *req)
         "<section class=\"meter\"><h2>Durchschnitt letzte 15 Minuten</h2>"
         "<strong id=\"meter-average\">—</strong><small id=\"meter-average-direction\">W</small>"
         "</section></div><p id=\"meter-status\">Warte auf CRC-gültige SML-Werte…</p>"
+        "<section class=\"history\"><h2>Minutenmittelwerte · letzte 2 Stunden</h2>"
+        "<p>Verbrauch oberhalb, Einspeisung unterhalb der Nulllinie. "
+        "<a href=\"/api/power-history.csv\">Gesamten gespeicherten Verlauf als CSV herunterladen</a></p>"
+        "<canvas id=\"power-history\" aria-label=\"Diagramm der Minutenmittelwerte\"></canvas>"
+        "<p id=\"history-status\">Warte auf synchronisierte Netzwerkzeit und gespeicherte Minutenwerte…</p>"
+        "</section>"
         "<script>"
         "const byId=id=>document.getElementById(id);"
         "function scaled(v){return Number(v.value)*Math.pow(10,v.scaler);}"
@@ -1027,10 +1169,40 @@ static esp_err_t root_handler(httpd_req_t *req)
         "'seit Start, sammelt 15 Minuten');}"
         "else{byId('meter-average').textContent='Sammle…';}"
         "byId('meter-status').textContent='SML CRC gültig: '+d.crc_valid+"
-        "' · CRC fehlerhaft: '+d.crc_invalid+' · Transportlücken: '+d.transport_gaps+"
-        "' · Transportlücken: '+d.transport_gaps;"
+        "' · CRC fehlerhaft: '+d.crc_invalid+' · Transportlücken: '+d.transport_gaps;"
         "}catch(e){byId('meter-status').textContent='Verbindung zum Zähler fehlgeschlagen: '+e;}"
-        "setTimeout(updateMeter,1000);}updateMeter();</script>";
+        "setTimeout(updateMeter,1000);}updateMeter();"
+        "function drawHistory(rows){const canvas=byId('power-history'),rect=canvas.getBoundingClientRect();"
+        "if(!rect.width)return;const ratio=window.devicePixelRatio||1;"
+        "canvas.width=Math.floor(rect.width*ratio);canvas.height=Math.floor(260*ratio);"
+        "const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);const w=rect.width,h=260,"
+        "left=42,right=12,top=14,bottom=25,pw=w-left-right,ph=h-top-bottom,zero=top+ph/2;"
+        "ctx.clearRect(0,0,w,h);ctx.strokeStyle='#526174';ctx.lineWidth=1;"
+        "ctx.beginPath();ctx.moveTo(left,zero);ctx.lineTo(w-right,zero);ctx.stroke();"
+        "const max=Math.max(1,...rows.map(x=>Math.abs(x.average_milliwatts/1000)))*1.1,"
+        "now=Date.now(),start=now-7200000;"
+        "ctx.fillStyle='#9fb4c8';ctx.font='12px sans-serif';ctx.fillText('+'+max.toFixed(0)+' W',2,top+10);"
+        "ctx.fillText('0 W',2,zero+4);ctx.fillText('-'+max.toFixed(0)+' W',2,h-bottom);"
+        "ctx.fillText('-2 h',left,h-6);ctx.fillText('-1 h',left+pw/2-15,h-6);"
+        "ctx.fillText('jetzt',w-right-28,h-6);const barWidth=Math.max(2,pw/100*0.68);"
+        "for(const r of rows){const t=Number(r.timestamp);if(t<start||t>now)continue;"
+        "const value=r.watts,x=left+(t-start)/7200000*pw,"
+        "bar=value/max*(ph/2-5);ctx.fillStyle=value<0?'#63d79a':'#78d6ff';"
+        "ctx.fillRect(x,bar<0?zero:zero-bar,barWidth,Math.abs(bar));}"
+        "}"
+        "async function updateHistory(){try{const r=await fetch('/api/power-history?recent=128',"
+        "{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
+        "drawHistory(d.records);const latest=d.records.length?new Date("
+        "Number(d.records[d.records.length-1].timestamp)).toLocaleString('de-DE'):"
+        "'noch kein abgeschlossener Minutenwert';"
+        "byId('history-status').textContent=(d.clock_synced?'Netzwerkzeit synchronisiert':'Warte auf Netzwerkzeit')+"
+        "' · gespeicherte Minutenwerte: '+d.record_count+' / 30000 · letztes: '+latest+"
+        "' · aktuelle Messwerte im Intervall: '+d.current_sample_count+"
+        "' · Speicher: '+(d.storage_ready?'bereit':'nicht bereit')+"
+        "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
+        "}catch(e){byId('history-status').textContent='Verlauf nicht verfügbar: '+e;}"
+        "setTimeout(updateHistory,60000);}window.addEventListener('resize',()=>updateHistory());"
+        "updateHistory();</script>";
     err = httpd_resp_sendstr_chunk(req, sml_page);
     if (err != ESP_OK) {
         return err;
@@ -1039,6 +1211,7 @@ static esp_err_t root_handler(httpd_req_t *req)
 
     static const char page_footer[] =
         "<nav class=\"nav\"><a href=\"/log\">SML logger</a>"
+        "<a href=\"/diagnostics\">Sender diagnosis</a>"
         "<a href=\"/api\">JSON API</a><a href=\"/config\">Wi-Fi settings</a>"
         "<a href=\"/update\">Firmware update</a></nav>" METER_HTML_FOOTER;
     err = httpd_resp_sendstr_chunk(req, page_footer);
@@ -1234,6 +1407,231 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, payload, len);
+}
+
+static esp_err_t power_samples_api_handler(httpd_req_t *req)
+{
+    uint64_t after_timestamp_us = 0;
+    char query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char value[24];
+        if (httpd_query_key_value(query, "after_us", value, sizeof(value)) == ESP_OK) {
+            char *end = NULL;
+            unsigned long long parsed = strtoull(value, &end, 10);
+            if (end == value || *end != '\0') {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "Invalid power-sample cursor");
+                return ESP_FAIL;
+            }
+            after_timestamp_us = (uint64_t)parsed;
+        }
+    }
+
+    sml_power_sample_t records[SML_POWER_API_PAGE_SIZE];
+    size_t record_count = 0;
+    portENTER_CRITICAL(&g_sml_history_lock);
+    size_t oldest_index = (g_sml_power_sample_next + SML_POWER_SAMPLE_COUNT -
+                           g_sml_power_sample_count) % SML_POWER_SAMPLE_COUNT;
+    for (size_t i = 0; i < g_sml_power_sample_count; ++i) {
+        size_t index = (oldest_index + i) % SML_POWER_SAMPLE_COUNT;
+        if (g_sml_power_samples[index].timestamp_us > after_timestamp_us) {
+            records[record_count++] = g_sml_power_samples[index];
+            if (record_count == SML_POWER_API_PAGE_SIZE) {
+                break;
+            }
+        }
+    }
+    portEXIT_CRITICAL(&g_sml_history_lock);
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr_chunk(
+        req, "{\"resolution\":\"1s\",\"time_source\":\"monotonic_us\",\"records\":[");
+    for (size_t i = 0; err == ESP_OK && i < record_count; ++i) {
+        char item[96];
+        int item_len = snprintf(item, sizeof(item),
+                                "%s{\"timestamp_us\":%llu,\"watts\":%.3f}",
+                                i == 0 ? "" : ",",
+                                (unsigned long long)records[i].timestamp_us,
+                                records[i].watts);
+        if (item_len < 0 || (size_t)item_len >= sizeof(item)) {
+            return ESP_FAIL;
+        }
+        err = httpd_resp_send_chunk(req, item, item_len);
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, "]}", 2);
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);
+    }
+    return err;
+}
+
+static esp_err_t power_history_api_handler(httpd_req_t *req)
+{
+    uint32_t after_sequence = 0;
+    uint32_t recent_count = 0;
+    char query[96];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char value[16];
+        if (httpd_query_key_value(query, "after", value, sizeof(value)) == ESP_OK) {
+            char *end = NULL;
+            unsigned long parsed = strtoul(value, &end, 10);
+            if (end == value || *end != '\0' || parsed > UINT32_MAX) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "Invalid history cursor");
+                return ESP_FAIL;
+            }
+            after_sequence = (uint32_t)parsed;
+        }
+        if (httpd_query_key_value(query, "recent", value, sizeof(value)) == ESP_OK) {
+            char *end = NULL;
+            unsigned long parsed = strtoul(value, &end, 10);
+            if (end == value || *end != '\0' || parsed > POWER_HISTORY_CAPACITY) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "Invalid recent history count");
+                return ESP_FAIL;
+            }
+            recent_count = (uint32_t)parsed;
+        }
+    }
+
+    power_history_record_t records[POWER_HISTORY_PAGE_SIZE];
+    size_t record_count = 0;
+    power_history_status_t status;
+    bool overflow = false;
+    esp_err_t err = power_history_read(after_sequence, recent_count, records,
+                                       POWER_HISTORY_PAGE_SIZE, &record_count,
+                                       &status, &overflow);
+    if (err == ESP_ERR_INVALID_STATE) {
+        /* Verlaufs-Backend (SPIFFS/RAM) gerade nicht bereit, z. B. weil die
+         * SPIFFS-Partition nicht montiert werden kann. Das ist kein
+         * Serverfehler: wir liefern einen gueltigen, leeren Datensatz, damit
+         * die Dashboard-Seite weiterlaeuft und storage_ready=false anzeigt. */
+        record_count = 0;
+        status.ready = false;
+        ESP_LOGW(TAG, "Power history backend not ready; serving empty dataset");
+    } else if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Persistent power history is unavailable");
+        return err;
+    }
+    size_t current_sample_count;
+    portENTER_CRITICAL(&g_sml_history_lock);
+    current_sample_count = g_sml_power_sample_count;
+    portEXIT_CRITICAL(&g_sml_history_lock);
+
+    char header[320];
+    int header_len = snprintf(
+        header, sizeof(header),
+        "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
+        "\"oldest_sequence\":%lu,"
+        "\"latest_sequence\":%lu,\"record_count\":%lu,"
+        "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
+        "\"records\":[",
+        system_time_is_valid() ? "true" : "false",
+        status.ready ? "true" : "false",
+        (unsigned int)current_sample_count,
+        (unsigned long)status.oldest_sequence,
+        (unsigned long)status.latest_sequence,
+        (unsigned long)status.record_count,
+        (unsigned long)status.queue_drops,
+        (unsigned long)status.write_errors,
+        overflow ? "true" : "false");
+    if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    err = httpd_resp_send_chunk(req, header, header_len);
+    for (size_t i = 0; err == ESP_OK && i < record_count; ++i) {
+        char item[144];
+        int item_len = snprintf(
+            item, sizeof(item),
+            "%s{\"sequence\":%lu,\"timestamp\":%lld,"
+            "\"watts\":%.3f,\"average_milliwatts\":%ld,\"sample_count\":%lu}",
+            i == 0 ? "" : ",",
+            (unsigned long)records[i].sequence,
+            (long long)records[i].interval_start_utc * 1000LL,
+            (double)records[i].average_milliwatts / 1000.0,
+            (long)records[i].average_milliwatts,
+            (unsigned long)records[i].sample_count);
+        if (item_len < 0 || (size_t)item_len >= sizeof(item)) {
+            return ESP_FAIL;
+        }
+        err = httpd_resp_send_chunk(req, item, item_len);
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, "]}", 2);
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);
+    }
+    return err;
+}
+
+static esp_err_t power_history_csv_handler(httpd_req_t *req)
+{
+    power_history_record_t records[POWER_HISTORY_PAGE_SIZE];
+    size_t record_count = 0;
+    uint32_t after_sequence = 0;
+    power_history_status_t status;
+    bool overflow = false;
+    esp_err_t err = power_history_read(after_sequence, 0, records,
+                                       POWER_HISTORY_PAGE_SIZE, &record_count,
+                                       &status, &overflow);
+    if (err == ESP_ERR_INVALID_STATE) {
+        /* Wie im JSON-Handler: ein fehlendes Backend ist kein HTTP-500,
+         * sondern ein leerer CSV-Export. */
+        record_count = 0;
+        status.ready = false;
+        ESP_LOGW(TAG, "Power history backend not ready; serving empty CSV");
+    } else if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Persistent power history is unavailable");
+        return err;
+    }
+
+    httpd_resp_set_type(req, "text/csv; charset=utf-8");
+    httpd_resp_set_hdr(req, "Content-Disposition",
+                       "attachment; filename=\"power-history.csv\"");
+    err = httpd_resp_sendstr_chunk(
+        req, "sequence,interval_start_ms,average_w,sample_count\r\n");
+    while (err == ESP_OK && record_count != 0) {
+        for (size_t i = 0; err == ESP_OK && i < record_count; ++i) {
+            time_t interval_start =
+                (time_t)records[i].interval_start_utc;
+            struct tm interval_utc;
+            if (gmtime_r(&interval_start, &interval_utc) == NULL) {
+                return ESP_FAIL;
+            }
+            char interval_text[24];
+            if (strftime(interval_text, sizeof(interval_text),
+                         "%Y-%m-%dT%H:%M:%SZ", &interval_utc) == 0) {
+                return ESP_FAIL;
+            }
+            char row[128];
+            int row_len = snprintf(row, sizeof(row), "%lu,%s,%.3f,%lu\r\n",
+                                   (unsigned long)records[i].sequence,
+                                   interval_text,
+                                   (double)records[i].average_milliwatts / 1000.0,
+                                   (unsigned long)records[i].sample_count);
+            if (row_len < 0 || (size_t)row_len >= sizeof(row)) {
+                return ESP_FAIL;
+            }
+            err = httpd_resp_send_chunk(req, row, row_len);
+            after_sequence = records[i].sequence;
+        }
+        if (err == ESP_OK) {
+            err = power_history_read(after_sequence, 0, records,
+                                     POWER_HISTORY_PAGE_SIZE, &record_count,
+                                     &status, &overflow);
+        }
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);
+    }
+    return err;
 }
 
 static esp_err_t rssi_api_handler(httpd_req_t *req)
@@ -1844,7 +2242,8 @@ static void start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 24;
+    config.stack_size = 6144;
     config.lru_purge_enable = true;
 
     httpd_handle_t server = NULL;
@@ -1862,6 +2261,21 @@ static void start_webserver(void)
         .handler = json_handler,
     };
 #if !CONFIG_ESPNOW_ROLE_SENDER
+    httpd_uri_t sender_diagnostics_api = {
+        .uri = "/api/sender-diagnostics",
+        .method = HTTP_GET,
+        .handler = sender_diagnostics_api_handler,
+    };
+    httpd_uri_t sender_reboot = {
+        .uri = "/api/sender-reboot",
+        .method = HTTP_POST,
+        .handler = sender_reboot_handler,
+    };
+    httpd_uri_t diagnostics_page = {
+        .uri = "/diagnostics",
+        .method = HTTP_GET,
+        .handler = diagnostics_page_handler,
+    };
     httpd_uri_t sml_api = {
         .uri = "/api/sml",
         .method = HTTP_GET,
@@ -1871,6 +2285,21 @@ static void start_webserver(void)
         .uri = "/api/dashboard",
         .method = HTTP_GET,
         .handler = sml_dashboard_api_handler,
+    };
+    httpd_uri_t power_samples_api = {
+        .uri = "/api/power-samples",
+        .method = HTTP_GET,
+        .handler = power_samples_api_handler,
+    };
+    httpd_uri_t power_history_api = {
+        .uri = "/api/power-history",
+        .method = HTTP_GET,
+        .handler = power_history_api_handler,
+    };
+    httpd_uri_t power_history_csv = {
+        .uri = "/api/power-history.csv",
+        .method = HTTP_GET,
+        .handler = power_history_csv_handler,
     };
     httpd_uri_t rssi_api = {
         .uri = "/api/rssi",
@@ -1914,8 +2343,14 @@ static void start_webserver(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &data));
 #if !CONFIG_ESPNOW_ROLE_SENDER
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sender_diagnostics_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sender_reboot));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &diagnostics_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sml_api));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sml_dashboard_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_samples_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_history_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_history_csv));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &rssi_api));
 #endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
@@ -1955,11 +2390,9 @@ static void run_sender(void)
     }
     sml_adapter_reset();
 
-    g_send_done = xSemaphoreCreateBinary();
-    if (g_send_done == NULL) {
-        ESP_LOGE(TAG, "Could not create ESP-NOW send completion semaphore");
-        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
-    }
+    // Send-completion semaphore removed: the transport worker drains the
+    // SML queue at line rate (esp_now_send is non-blocking), which prevents
+    // the transport queue from filling up and dropping validated telegrams.
     ESP_ERROR_CHECK(esp_now_register_send_cb(send_callback));
 
     ESP_LOGI(TAG, "Sender ready: UART%d RX GPIO=%d at %d baud (8N1, no flow control); "
@@ -1990,6 +2423,215 @@ static void run_sender(void)
 }
 #endif
 
+#if CONFIG_ESPNOW_ROLE_SENDER
+static void sender_diagnostics_task(void *arg)
+{
+    (void)arg;
+    uint32_t sequence = 0;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+
+        espnow_diagnostic_packet_t packet = {
+            .magic = ESPNOW_DIAG_MAGIC,
+            .version = ESPNOW_DIAG_VERSION,
+            .type = ESPNOW_DIAG_TELEMETRY,
+            .sequence = ++sequence,
+            .uptime_seconds = (uint32_t)(esp_timer_get_time() / 1000000LL),
+            .reset_reason = (uint32_t)esp_reset_reason(),
+            .free_heap = (uint32_t)esp_get_free_heap_size(),
+            .minimum_free_heap = (uint32_t)esp_get_minimum_free_heap_size(),
+        };
+        portENTER_CRITICAL(&g_uart_stats_lock);
+        packet.uart_rx_bytes = g_uart_rx_bytes;
+        packet.tx_queue_drops = g_sml_tx_queue_drops;
+        packet.uart_fifo_overflows = g_uart_fifo_overflows;
+        packet.uart_rx_buffer_full = g_uart_rx_buffer_full;
+        packet.uart_frame_errors = g_uart_frame_errors;
+        packet.uart_parity_errors = g_uart_parity_errors;
+        portEXIT_CRITICAL(&g_uart_stats_lock);
+
+        esp_err_t err = esp_now_send(broadcast_mac, (const uint8_t *)&packet,
+                                     sizeof(packet));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Could not send sender diagnostics: %s",
+                     esp_err_to_name(err));
+        }
+    }
+}
+
+static void sender_reboot_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+}
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static esp_err_t sender_diagnostics_api_handler(httpd_req_t *req)
+{
+    espnow_diagnostic_packet_t packet;
+    int64_t received_us;
+    uint32_t reboot_ack_sequence;
+    uint32_t reboot_requested_sequence;
+    bool seen;
+    portENTER_CRITICAL(&g_sender_diagnostics_lock);
+    packet = g_sender_diagnostics;
+    received_us = g_sender_diagnostics_received_us;
+    reboot_ack_sequence = g_sender_reboot_ack_sequence;
+    reboot_requested_sequence = g_sender_reboot_requested_sequence;
+    seen = g_sender_diagnostics_seen;
+    portEXIT_CRITICAL(&g_sender_diagnostics_lock);
+
+    int64_t age_ms = seen ? (esp_timer_get_time() - received_us) / 1000 : -1;
+    char payload[512];
+    int len = snprintf(
+        payload, sizeof(payload),
+        "{\"seen\":%s,\"age_ms\":%lld,\"sequence\":%lu,"
+        "\"uptime_seconds\":%lu,\"reset_reason\":%lu,"
+        "\"free_heap\":%lu,\"minimum_free_heap\":%lu,"
+        "\"uart_rx_bytes\":%llu,\"tx_queue_drops\":%lu,"
+        "\"uart_fifo_overflows\":%lu,\"uart_rx_buffer_full\":%lu,"
+        "\"uart_frame_errors\":%lu,\"uart_parity_errors\":%lu,"
+        "\"reboot_ack_sequence\":%lu,\"reboot_acknowledged\":%s}",
+        seen ? "true" : "false", (long long)age_ms,
+        (unsigned long)packet.sequence,
+        (unsigned long)packet.uptime_seconds,
+        (unsigned long)packet.reset_reason,
+        (unsigned long)packet.free_heap,
+        (unsigned long)packet.minimum_free_heap,
+        (unsigned long long)packet.uart_rx_bytes,
+        (unsigned long)packet.tx_queue_drops,
+        (unsigned long)packet.uart_fifo_overflows,
+        (unsigned long)packet.uart_rx_buffer_full,
+        (unsigned long)packet.uart_frame_errors,
+        (unsigned long)packet.uart_parity_errors,
+        (unsigned long)reboot_ack_sequence,
+        reboot_requested_sequence != 0 &&
+                reboot_ack_sequence == reboot_requested_sequence
+            ? "true"
+            : "false");
+    if (len < 0 || (size_t)len >= sizeof(payload)) {
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, payload, len);
+}
+
+static esp_err_t sender_reboot_handler(httpd_req_t *req)
+{
+    espnow_diagnostic_packet_t request = {
+        .magic = ESPNOW_DIAG_MAGIC,
+        .version = ESPNOW_DIAG_VERSION,
+        .type = ESPNOW_DIAG_REBOOT,
+        .sequence = (uint32_t)esp_timer_get_time(),
+    };
+    if (request.sequence == 0) {
+        request.sequence = 1;
+    }
+    esp_err_t err = esp_now_send(broadcast_mac, (const uint8_t *)&request,
+                                 sizeof(request));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not send sender reboot request: %s",
+                 esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Could not send reboot request");
+        return err;
+    }
+    portENTER_CRITICAL(&g_sender_diagnostics_lock);
+    g_sender_reboot_requested_sequence = request.sequence;
+    portEXIT_CRITICAL(&g_sender_diagnostics_lock);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"sent\":true}");
+}
+
+static esp_err_t diagnostics_page_handler(httpd_req_t *req)
+{
+    static const char page[] =
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Sender diagnostics</title>"
+        "<style>body{font:16px Arial;margin:24px;background:#10151f;color:#e5edf7}"
+        "pre{padding:16px;background:#182330;white-space:pre-wrap}button,a{padding:10px;"
+        "margin-right:8px}</style></head><body><h1>Sender diagnosis</h1>"
+        "<p id=\"status\">Waiting for sender diagnostic packets…</p><pre id=\"data\"></pre>"
+        "<button id=\"reboot\" type=\"button\">Restart sender</button>"
+        "<a href=\"/\">Back to meter</a><script>"
+        "const status=document.getElementById('status'),output=document.getElementById('data');"
+        "async function refresh(){try{const r=await fetch('/api/sender-diagnostics',"
+        "{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
+        "status.textContent=d.reboot_acknowledged?'Sender acknowledged the restart; waiting for reboot':"
+        "(!d.seen?'No sender packet received yet':"
+        "(d.age_ms>30000?'STALE: last packet '+Math.round(d.age_ms/1000)+' s ago':"
+        "'Sender online · last packet '+Math.round(d.age_ms/1000)+' s ago'));"
+        "output.textContent=d.seen?JSON.stringify({uptime_seconds:d.uptime_seconds,"
+        "reset_reason:d.reset_reason,free_heap_bytes:d.free_heap,"
+        "minimum_free_heap_bytes:d.minimum_free_heap,uart_rx_bytes:d.uart_rx_bytes,"
+        "telemetry_queue_drops:d.tx_queue_drops,uart_fifo_overflows:d.uart_fifo_overflows,"
+        "uart_rx_buffer_full:d.uart_rx_buffer_full,uart_frame_errors:d.uart_frame_errors,"
+        "uart_parity_errors:d.uart_parity_errors,reboot_acknowledged:d.reboot_acknowledged,"
+        "reboot_ack_sequence:d.reboot_ack_sequence},null,2):'';"
+        "}catch(e){status.textContent='Diagnostics unavailable: '+e;}"
+        "setTimeout(refresh,3000);}document.getElementById('reboot').onclick=async()=>{"
+        "if(!confirm('Restart the sender now?'))return;status.textContent='Sending restart request…';"
+        "try{const r=await fetch('/api/sender-reboot',{method:'POST',cache:'no-store'});"
+        "if(!r.ok)throw new Error('HTTP '+r.status);status.textContent="
+        "'Request sent; waiting for acknowledgement and next boot…';setTimeout(refresh,1000);"
+        "}catch(e){status.textContent='Restart request failed: '+e;}};refresh();"
+        "</script></body></html>";
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_sendstr(req, page);
+}
+#endif
+
+static void diagnostic_receive_callback(const esp_now_recv_info_t *info,
+                                        const uint8_t *data, int data_len)
+{
+    if (info != NULL && data != NULL &&
+        data_len == (int)sizeof(espnow_diagnostic_packet_t)) {
+        espnow_diagnostic_packet_t packet;
+        memcpy(&packet, data, sizeof(packet));
+        if (packet.magic == ESPNOW_DIAG_MAGIC &&
+            packet.version == ESPNOW_DIAG_VERSION) {
+#if CONFIG_ESPNOW_ROLE_SENDER
+            if (packet.type == ESPNOW_DIAG_REBOOT) {
+                espnow_diagnostic_packet_t ack = {
+                    .magic = ESPNOW_DIAG_MAGIC,
+                    .version = ESPNOW_DIAG_VERSION,
+                    .type = ESPNOW_DIAG_REBOOT_ACK,
+                    .sequence = packet.sequence,
+                };
+                esp_err_t err = esp_now_send(broadcast_mac,
+                                             (const uint8_t *)&ack,
+                                             sizeof(ack));
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Could not acknowledge sender reboot: %s",
+                             esp_err_to_name(err));
+                }
+                BaseType_t result = xTaskCreate(sender_reboot_task,
+                                                "sender_reboot", 2048,
+                                                NULL, 5, NULL);
+                if (result != pdPASS) {
+                    ESP_LOGE(TAG, "Could not start requested sender reboot");
+                }
+            }
+#else
+            if (packet.type == ESPNOW_DIAG_TELEMETRY) {
+                portENTER_CRITICAL(&g_sender_diagnostics_lock);
+                g_sender_diagnostics = packet;
+                g_sender_diagnostics_received_us = esp_timer_get_time();
+                g_sender_diagnostics_seen = true;
+                portEXIT_CRITICAL(&g_sender_diagnostics_lock);
+            } else if (packet.type == ESPNOW_DIAG_REBOOT_ACK) {
+                portENTER_CRITICAL(&g_sender_diagnostics_lock);
+                g_sender_reboot_ack_sequence = packet.sequence;
+                portEXIT_CRITICAL(&g_sender_diagnostics_lock);
+            }
+#endif
+            return;
+        }
+    }
+    receive_callback(info, data, data_len);
+}
+
 void app_main(void)
 {
     initialize_wifi_and_espnow();
@@ -2005,6 +2647,12 @@ void app_main(void)
         ESP_LOGE(TAG, "Could not start sender OTA worker");
         ESP_ERROR_CHECK(ESP_FAIL);
     }
+    task_result = xTaskCreate(sender_diagnostics_task, "sender_diagnostics",
+                              3072, NULL, 3, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Could not start sender diagnostics task");
+        ESP_ERROR_CHECK(ESP_FAIL);
+    }
 #else
     g_espnow_ota_ack_queue = xQueueCreate(4, sizeof(espnow_ota_ack_t));
     g_espnow_ota_mutex = xSemaphoreCreateMutex();
@@ -2012,8 +2660,20 @@ void app_main(void)
         ESP_LOGE(TAG, "Could not create receiver OTA synchronization objects");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
+    esp_err_t history_err = power_history_init();
+    if (history_err != ESP_OK) {
+        ESP_LOGE(TAG, "Persistent minute history is disabled: %s",
+                 esp_err_to_name(history_err));
+    }
+    const esp_timer_create_args_t power_sample_timer_args = {
+        .callback = power_sample_timer_callback,
+        .name = "power_samples",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&power_sample_timer_args,
+                                     &g_power_sample_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(g_power_sample_timer, 1000000));
 #endif
-    ESP_ERROR_CHECK(esp_now_register_recv_cb(receive_callback));
+    ESP_ERROR_CHECK(esp_now_register_recv_cb(diagnostic_receive_callback));
 
     const esp_partition_t *running_partition = esp_ota_get_running_partition();
     if (running_partition == NULL) {
