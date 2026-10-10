@@ -90,39 +90,6 @@ static bool header_is_valid(const power_history_header_t *header)
            header->checksum == header_checksum(header);
 }
 
-static bool history_partition_is_erased(void)
-{
-    const esp_partition_t *partition =
-        esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
-                                 ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
-                                 POWER_HISTORY_PARTITION);
-    if (partition == NULL) {
-        ESP_LOGE(TAG, "SPIFFS partition '%s' was not found",
-                 POWER_HISTORY_PARTITION);
-        return false;
-    }
-
-    uint8_t buffer[256];
-    for (size_t offset = 0; offset < partition->size; offset += sizeof(buffer)) {
-        size_t chunk_size = partition->size - offset;
-        if (chunk_size > sizeof(buffer)) {
-            chunk_size = sizeof(buffer);
-        }
-        esp_err_t err = esp_partition_read(partition, offset, buffer, chunk_size);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Could not inspect SPIFFS partition: %s",
-                     esp_err_to_name(err));
-            return false;
-        }
-        for (size_t i = 0; i < chunk_size; ++i) {
-            if (buffer[i] != 0xFF) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
 static bool write_header_copy(uint8_t copy,
                               const power_history_header_t *header)
 {
@@ -245,34 +212,19 @@ esp_err_t power_history_init(void)
         .base_path = POWER_HISTORY_MOUNT_PATH,
         .partition_label = POWER_HISTORY_PARTITION,
         .max_files = 1,
-        .format_if_mount_failed = false,
+        /* Format automatically when the partition is blank or its SPIFFS image
+         * is unusable, so the persistent history works on first boot and after
+         * a fresh flash without any manual erase. The stored data is
+         * regenerable meter history, so a one-time reformat is acceptable. */
+        .format_if_mount_failed = true,
     };
     esp_err_t err = esp_vfs_spiffs_register(&config);
     bool storage_available = true;
     if (err != ESP_OK) {
-        if (!history_partition_is_erased()) {
-            ESP_LOGE(TAG, "Could not mount persistent SPIFFS partition: %s; "
-                          "continuing with RAM history, preserving existing partition contents",
-                     esp_err_to_name(err));
-            storage_available = false;
-        } else {
-            ESP_LOGW(TAG, "Formatting the blank SPIFFS partition for first use");
-            err = esp_spiffs_format(POWER_HISTORY_PARTITION);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Could not initialize blank SPIFFS partition: %s; "
-                              "continuing with RAM history",
-                         esp_err_to_name(err));
-                storage_available = false;
-            } else {
-                err = esp_vfs_spiffs_register(&config);
-                if (err != ESP_OK) {
-                    ESP_LOGE(TAG, "Could not mount newly formatted SPIFFS partition: %s; "
-                                  "continuing with RAM history",
-                             esp_err_to_name(err));
-                    storage_available = false;
-                }
-            }
-        }
+        ESP_LOGE(TAG, "Could not mount persistent SPIFFS partition: %s; "
+                      "continuing with RAM history",
+                 esp_err_to_name(err));
+        storage_available = false;
     }
 
     g_history_file = NULL;
