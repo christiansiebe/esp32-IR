@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,15 +8,18 @@
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_now.h"
 #include "esp_ota_ops.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "espnow_diag.h"
 #include "sml_transport.h"
 #if CONFIG_ESPNOW_ROLE_SENDER
 #include "sml_adapter.h"
@@ -48,6 +52,8 @@ static const char *TAG = "espnow_meter";
 #define ESPNOW_OTA_ACK       0x80u
 #define ESPNOW_OTA_CHUNK     220u
 #define ESPNOW_OTA_TIMEOUT_MS 3000
+#define ESPNOW_DIAG_TIMEOUT_MS 1500
+#define ESPNOW_DIAG_QUEUE_LENGTH 4
 #define WIFI_CONFIG_NAMESPACE "metercfg"
 #define WIFI_SSID_KEY          "wifi_ssid"
 #define WIFI_PASSWORD_KEY      "wifi_pass"
@@ -101,6 +107,14 @@ typedef struct {
     espnow_ota_packet_t packet;
 } espnow_ota_ack_t;
 
+typedef struct {
+    uint8_t source[ESP_NOW_ETH_ALEN];
+    uint32_t request_id;
+    uint16_t flags;
+    uint32_t page;
+    int8_t rssi;
+} espnow_diag_request_item_t;
+
 static const uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
@@ -132,6 +146,18 @@ static uint32_t g_uart_rx_buffer_full;
 static uint32_t g_uart_frame_errors;
 static uint32_t g_uart_parity_errors;
 static portMUX_TYPE g_uart_stats_lock = portMUX_INITIALIZER_UNLOCKED;
+static QueueHandle_t g_diag_request_queue;
+static SemaphoreHandle_t g_diag_send_done;
+static esp_now_send_status_t g_diag_send_status;
+static uint8_t g_diag_pending_mac[ESP_NOW_ETH_ALEN];
+static uint32_t g_sml_sent_ok;
+static uint32_t g_sml_send_fail;
+static uint32_t g_sml_last_sequence;
+static uint32_t g_diag_requests;
+static espnow_diag_event_t g_diag_events[ESPNOW_DIAG_EVENT_RING];
+static size_t g_diag_event_count;
+static size_t g_diag_event_next;
+static portMUX_TYPE g_diag_event_lock = portMUX_INITIALIZER_UNLOCKED;
 #else
 static QueueHandle_t g_espnow_ota_ack_queue;
 static SemaphoreHandle_t g_espnow_ota_mutex;
@@ -158,6 +184,10 @@ static size_t g_rssi_history_next;
 static uint32_t g_rssi_latest_sequence;
 static bool g_rssi_capture_active;
 static portMUX_TYPE g_rssi_history_lock = portMUX_INITIALIZER_UNLOCKED;
+static QueueHandle_t g_diag_response_queue;
+static uint8_t g_sender_mac[ESP_NOW_ETH_ALEN];
+static bool g_sender_mac_valid;
+static portMUX_TYPE g_sender_mac_lock = portMUX_INITIALIZER_UNLOCKED;
 static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
                             const char *value, int8_t scaler, uint8_t unit);
 #endif
@@ -553,18 +583,198 @@ static void espnow_ota_worker(void *arg)
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
+static void diag_log_event(uint8_t level, const char *format, ...)
+{
+    char text[ESPNOW_DIAG_EVENT_TEXT_LEN];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+
+    portENTER_CRITICAL(&g_diag_event_lock);
+    espnow_diag_event_t *event = &g_diag_events[g_diag_event_next];
+    event->timestamp_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    event->level = level;
+    memcpy(event->text, text, sizeof(event->text));
+    g_diag_event_next = (g_diag_event_next + 1) % ESPNOW_DIAG_EVENT_RING;
+    if (g_diag_event_count < ESPNOW_DIAG_EVENT_RING) {
+        ++g_diag_event_count;
+    }
+    portEXIT_CRITICAL(&g_diag_event_lock);
+}
+
+static void build_diag_counters_response(const espnow_diag_request_item_t *request,
+                                         uint8_t *frame, size_t *frame_len)
+{
+    espnow_diag_header_t *header = (espnow_diag_header_t *)frame;
+    espnow_diag_counters_t *counters =
+        (espnow_diag_counters_t *)(frame + sizeof(*header));
+
+    *header = (espnow_diag_header_t) {
+        .magic = ESPNOW_DIAG_MAGIC,
+        .version = ESPNOW_DIAG_VERSION,
+        .type = ESPNOW_DIAG_TYPE_RESPONSE,
+        .flags = ESPNOW_DIAG_SECTION_COUNTERS,
+        .request_id = request->request_id,
+        .page = 0,
+    };
+
+    uint64_t rx_bytes;
+    uint32_t fifo_overflows;
+    uint32_t rx_buffer_full;
+    uint32_t frame_errors;
+    uint32_t parity_errors;
+    uint32_t tx_queue_drops;
+    uint32_t sml_sent_ok;
+    uint32_t sml_send_fail;
+    uint32_t last_sequence;
+    uint32_t diag_requests;
+    portENTER_CRITICAL(&g_uart_stats_lock);
+    rx_bytes = g_uart_rx_bytes;
+    fifo_overflows = g_uart_fifo_overflows;
+    rx_buffer_full = g_uart_rx_buffer_full;
+    frame_errors = g_uart_frame_errors;
+    parity_errors = g_uart_parity_errors;
+    tx_queue_drops = g_sml_tx_queue_drops;
+    sml_sent_ok = g_sml_sent_ok;
+    sml_send_fail = g_sml_send_fail;
+    last_sequence = g_sml_last_sequence;
+    diag_requests = g_diag_requests;
+    portEXIT_CRITICAL(&g_uart_stats_lock);
+
+    *counters = (espnow_diag_counters_t) {
+        .uptime_ms = (uint64_t)(esp_timer_get_time() / 1000),
+        .uart_rx_bytes = rx_bytes,
+        .fifo_overflows = fifo_overflows,
+        .rx_buffer_full = rx_buffer_full,
+        .frame_errors = frame_errors,
+        .parity_errors = parity_errors,
+        .tx_queue_drops = tx_queue_drops,
+        .sml_sent_ok = sml_sent_ok,
+        .sml_send_fail = sml_send_fail,
+        .diag_requests = diag_requests,
+        .last_sequence = last_sequence,
+        .free_heap = (uint32_t)esp_get_free_heap_size(),
+        .last_send_status = (int8_t)g_last_send_status,
+        .last_request_rssi = request->rssi,
+        .channel = g_espnow_channel,
+        .reserved = 0,
+    };
+    *frame_len = sizeof(*header) + sizeof(*counters);
+}
+
+static void build_diag_events_response(const espnow_diag_request_item_t *request,
+                                       uint8_t *frame, size_t *frame_len)
+{
+    espnow_diag_events_response_t *response =
+        (espnow_diag_events_response_t *)frame;
+    response->header = (espnow_diag_header_t) {
+        .magic = ESPNOW_DIAG_MAGIC,
+        .version = ESPNOW_DIAG_VERSION,
+        .type = ESPNOW_DIAG_TYPE_RESPONSE,
+        .flags = ESPNOW_DIAG_SECTION_EVENTS,
+        .request_id = request->request_id,
+        .page = request->page,
+    };
+
+    espnow_diag_event_t snapshot[ESPNOW_DIAG_EVENT_RING];
+    size_t count = 0;
+    portENTER_CRITICAL(&g_diag_event_lock);
+    count = g_diag_event_count;
+    for (size_t i = 0; i < count; ++i) {
+        size_t index = (g_diag_event_next + ESPNOW_DIAG_EVENT_RING - count + i) %
+                       ESPNOW_DIAG_EVENT_RING;
+        snapshot[i] = g_diag_events[index];
+    }
+    portEXIT_CRITICAL(&g_diag_event_lock);
+
+    response->event_total = (uint8_t)count;
+    size_t offset = (size_t)request->page * ESPNOW_DIAG_EVENTS_PER_PACKET;
+    size_t emitted = 0;
+    while (emitted < ESPNOW_DIAG_EVENTS_PER_PACKET && offset + emitted < count) {
+        response->events[emitted] = snapshot[offset + emitted];
+        ++emitted;
+    }
+    response->event_count = (uint8_t)emitted;
+    if (offset + emitted < count) {
+        response->header.flags |= ESPNOW_DIAG_FLAG_MORE;
+    }
+    *frame_len = sizeof(response->header) + sizeof(response->event_total) +
+                 sizeof(response->event_count) +
+                 emitted * sizeof(espnow_diag_event_t);
+}
+
+static void espnow_diag_worker(void *arg)
+{
+    (void)arg;
+    espnow_diag_request_item_t request;
+
+    while (1) {
+        if (xQueueReceive(g_diag_request_queue, &request, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        uint8_t frame[ESP_NOW_MAX_DATA_LEN];
+        size_t frame_len = 0;
+        if (request.flags & ESPNOW_DIAG_SECTION_COUNTERS) {
+            build_diag_counters_response(&request, frame, &frame_len);
+        } else if (request.flags & ESPNOW_DIAG_SECTION_EVENTS) {
+            build_diag_events_response(&request, frame, &frame_len);
+        } else {
+            continue;
+        }
+
+        esp_err_t err = add_espnow_peer(request.source, WIFI_IF_STA);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Could not add diagnostic peer: %s", esp_err_to_name(err));
+            diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "diag peer add failed");
+            continue;
+        }
+
+        memcpy(g_diag_pending_mac, request.source, ESP_NOW_ETH_ALEN);
+        xSemaphoreTake(g_diag_send_done, 0);
+        err = esp_now_send(request.source, frame, frame_len);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Diagnostic response send failed: %s", esp_err_to_name(err));
+            diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "diag send err %s",
+                           esp_err_to_name(err));
+            continue;
+        }
+        if (xSemaphoreTake(g_diag_send_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            ESP_LOGW(TAG, "Timed out waiting for diagnostic send completion");
+            diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "diag send timeout");
+            continue;
+        }
+        if (g_diag_send_status != ESP_NOW_SEND_SUCCESS) {
+            ESP_LOGW(TAG, "Diagnostic response not confirmed by ESP-NOW callback");
+            diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "diag response not confirmed");
+        } else {
+            diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "diag response confirmed flags=0x%04x",
+                           request.flags);
+        }
+    }
+}
+
 static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_status_t status)
 {
     if (status != ESP_NOW_SEND_SUCCESS) {
-        ESP_LOGW(TAG, "ESP-NOW reports that the broadcast send failed");
+        ESP_LOGW(TAG, "ESP-NOW send callback reported a failure");
     }
-    if (tx_info == NULL || tx_info->des_addr == NULL ||
-        memcmp(tx_info->des_addr, broadcast_mac, ESP_NOW_ETH_ALEN) != 0) {
+    if (tx_info == NULL || tx_info->des_addr == NULL) {
         return;
     }
-    g_last_send_status = status;
-    if (g_send_done != NULL) {
-        xSemaphoreGive(g_send_done);
+    if (memcmp(tx_info->des_addr, broadcast_mac, ESP_NOW_ETH_ALEN) == 0) {
+        g_last_send_status = status;
+        if (g_send_done != NULL) {
+            xSemaphoreGive(g_send_done);
+        }
+        return;
+    }
+    if (memcmp(tx_info->des_addr, g_diag_pending_mac, ESP_NOW_ETH_ALEN) == 0) {
+        g_diag_send_status = status;
+        if (g_diag_send_done != NULL) {
+            xSemaphoreGive(g_diag_send_done);
+        }
     }
 }
 #endif
@@ -577,6 +787,30 @@ static bool is_espnow_ota_packet(const uint8_t *data, int data_len)
     espnow_ota_packet_t packet;
     memcpy(&packet, data, sizeof(packet));
     return packet.magic == ESPNOW_OTA_MAGIC && packet.version == ESPNOW_OTA_VERSION;
+}
+
+static bool is_diag_request(const uint8_t *data, int data_len)
+{
+    if (data == NULL || data_len < (int)sizeof(espnow_diag_header_t)) {
+        return false;
+    }
+    espnow_diag_header_t header;
+    memcpy(&header, data, sizeof(header));
+    return header.magic == ESPNOW_DIAG_MAGIC &&
+           header.version == ESPNOW_DIAG_VERSION &&
+           header.type == ESPNOW_DIAG_TYPE_REQUEST;
+}
+
+static bool is_diag_response(const uint8_t *data, int data_len)
+{
+    if (data == NULL || data_len < (int)sizeof(espnow_diag_header_t)) {
+        return false;
+    }
+    espnow_diag_header_t header;
+    memcpy(&header, data, sizeof(header));
+    return header.magic == ESPNOW_DIAG_MAGIC &&
+           header.version == ESPNOW_DIAG_VERSION &&
+           header.type == ESPNOW_DIAG_TYPE_RESPONSE;
 }
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -628,6 +862,28 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         }
         return;
     }
+    if (is_diag_request(data, data_len)) {
+        if (g_diag_request_queue == NULL || data_len > ESP_NOW_MAX_DATA_LEN) {
+            ESP_LOGE(TAG, "Sender diagnostic receiver is unavailable");
+            return;
+        }
+        espnow_diag_header_t diag_header;
+        memcpy(&diag_header, data, sizeof(diag_header));
+        espnow_diag_request_item_t request = {
+            .request_id = diag_header.request_id,
+            .flags = diag_header.flags,
+            .page = diag_header.page,
+            .rssi = (info->rx_ctrl != NULL) ? info->rx_ctrl->rssi : 0,
+        };
+        memcpy(request.source, info->src_addr, ESP_NOW_ETH_ALEN);
+        portENTER_CRITICAL(&g_uart_stats_lock);
+        ++g_diag_requests;
+        portEXIT_CRITICAL(&g_uart_stats_lock);
+        if (xQueueSend(g_diag_request_queue, &request, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "Sender diagnostic request queue full");
+        }
+        return;
+    }
 #else
     if (is_espnow_ota_packet(data, data_len)) {
         espnow_ota_packet_t packet;
@@ -640,6 +896,19 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             memcpy(ack.source, info->src_addr, ESP_NOW_ETH_ALEN);
             if (xQueueSend(g_espnow_ota_ack_queue, &ack, 0) != pdTRUE) {
                 ESP_LOGW(TAG, "Sender OTA acknowledgement queue full");
+            }
+        }
+        return;
+    }
+    if (is_diag_response(data, data_len)) {
+        if (g_diag_response_queue != NULL && data_len <= ESP_NOW_MAX_DATA_LEN) {
+            espnow_ota_rx_item_t item = {
+                .length = (uint16_t)data_len,
+            };
+            memcpy(item.source, info->src_addr, ESP_NOW_ETH_ALEN);
+            memcpy(item.data, data, (size_t)data_len);
+            if (xQueueSend(g_diag_response_queue, &item, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "Diagnostic response queue full");
             }
         }
         return;
@@ -665,6 +934,11 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         ESP_LOGW(TAG, "Dropped malformed SML transport packet");
         return;
     }
+
+    portENTER_CRITICAL(&g_sender_mac_lock);
+    memcpy(g_sender_mac, info->src_addr, ESP_NOW_ETH_ALEN);
+    g_sender_mac_valid = true;
+    portEXIT_CRITICAL(&g_sender_mac_lock);
 
     if (packet.header.sequence == 0) {
         ESP_LOGW(TAG, "Dropped SML transport packet with sequence zero");
@@ -822,6 +1096,7 @@ void sml_adapter_telegram_callback(uint64_t timestamp_us, bool crc_valid,
         ++g_sml_tx_queue_drops;
         portEXIT_CRITICAL(&g_uart_stats_lock);
         ESP_LOGE(TAG, "SML transport queue full; validated telegram was not queued");
+        diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "sml transport queue drop");
     }
 }
 
@@ -842,23 +1117,45 @@ static void send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
                item->value_count * sizeof(packet.values[0]));
     }
 
+    portENTER_CRITICAL(&g_uart_stats_lock);
+    g_sml_last_sequence = sequence;
+    portEXIT_CRITICAL(&g_uart_stats_lock);
+
     size_t packet_length = sizeof(packet.header) +
                            item->value_count * sizeof(packet.values[0]);
     esp_err_t err = esp_now_send(broadcast_mac, (const uint8_t *)&packet,
                                  packet_length);
     if (err != ESP_OK) {
+        portENTER_CRITICAL(&g_uart_stats_lock);
+        ++g_sml_send_fail;
+        portEXIT_CRITICAL(&g_uart_stats_lock);
         ESP_LOGE(TAG, "ESP-NOW SML telegram send failed: %s", esp_err_to_name(err));
+        diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "sml send err %s",
+                       esp_err_to_name(err));
         return;
     }
     if (xSemaphoreTake(g_send_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        portENTER_CRITICAL(&g_uart_stats_lock);
+        ++g_sml_send_fail;
+        portEXIT_CRITICAL(&g_uart_stats_lock);
         ESP_LOGE(TAG, "Timed out waiting for ESP-NOW SML telegram completion");
+        diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "sml send timeout seq=%lu",
+                       (unsigned long)sequence);
         return;
     }
     if (g_last_send_status != ESP_NOW_SEND_SUCCESS) {
+        portENTER_CRITICAL(&g_uart_stats_lock);
+        ++g_sml_send_fail;
+        portEXIT_CRITICAL(&g_uart_stats_lock);
         ESP_LOGE(TAG, "ESP-NOW did not deliver SML telegram sequence %lu",
                  (unsigned long)sequence);
+        diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "sml send unconfirmed seq=%lu",
+                       (unsigned long)sequence);
         return;
     }
+    portENTER_CRITICAL(&g_uart_stats_lock);
+    ++g_sml_sent_ok;
+    portEXIT_CRITICAL(&g_uart_stats_lock);
     ESP_LOGD(TAG, "Sent SML telegram sequence=%lu crc_valid=%u values=%u",
              (unsigned long)sequence, packet.header.crc_valid,
              (unsigned int)packet.header.value_count);
@@ -916,24 +1213,28 @@ static void uart_event_worker(void *arg)
                 ++g_uart_fifo_overflows;
                 portEXIT_CRITICAL(&g_uart_stats_lock);
                 ESP_LOGE(TAG, "UART hardware FIFO overflow detected");
+                diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "uart fifo overflow");
                 break;
             case UART_BUFFER_FULL:
                 portENTER_CRITICAL(&g_uart_stats_lock);
                 ++g_uart_rx_buffer_full;
                 portEXIT_CRITICAL(&g_uart_stats_lock);
                 ESP_LOGE(TAG, "UART RX ring buffer full detected");
+                diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "uart rx buffer full");
                 break;
             case UART_FRAME_ERR:
                 portENTER_CRITICAL(&g_uart_stats_lock);
                 ++g_uart_frame_errors;
                 portEXIT_CRITICAL(&g_uart_stats_lock);
                 ESP_LOGE(TAG, "UART frame error detected");
+                diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "uart frame error");
                 break;
             case UART_PARITY_ERR:
                 portENTER_CRITICAL(&g_uart_stats_lock);
                 ++g_uart_parity_errors;
                 portEXIT_CRITICAL(&g_uart_stats_lock);
                 ESP_LOGE(TAG, "UART parity error detected");
+                diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "uart parity error");
                 break;
             default:
                 break;
@@ -1040,6 +1341,7 @@ static esp_err_t root_handler(httpd_req_t *req)
     static const char page_footer[] =
         "<nav class=\"nav\"><a href=\"/log\">SML logger</a>"
         "<a href=\"/api\">JSON API</a><a href=\"/config\">Wi-Fi settings</a>"
+        "<a href=\"/diag\">Sender diagnostics</a>"
         "<a href=\"/update\">Firmware update</a></nav>" METER_HTML_FOOTER;
     err = httpd_resp_sendstr_chunk(req, page_footer);
     if (err != ESP_OK) {
@@ -1466,6 +1768,222 @@ static esp_err_t send_http_error_status(httpd_req_t *req,
 }
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
+static esp_err_t sender_diag_exchange(uint16_t flags, uint32_t page,
+                                      uint8_t *response, size_t *response_len)
+{
+    uint8_t sender_mac[ESP_NOW_ETH_ALEN];
+    portENTER_CRITICAL(&g_sender_mac_lock);
+    bool known = g_sender_mac_valid;
+    memcpy(sender_mac, g_sender_mac, ESP_NOW_ETH_ALEN);
+    portEXIT_CRITICAL(&g_sender_mac_lock);
+    if (!known) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = add_espnow_peer(sender_mac, WIFI_IF_AP);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint32_t request_id = (uint32_t)esp_random();
+    if (request_id == 0) {
+        request_id = 1;
+    }
+    espnow_diag_header_t request = {
+        .magic = ESPNOW_DIAG_MAGIC,
+        .version = ESPNOW_DIAG_VERSION,
+        .type = ESPNOW_DIAG_TYPE_REQUEST,
+        .flags = flags,
+        .request_id = request_id,
+        .page = page,
+    };
+
+    while (xQueueReceive(g_diag_response_queue, &(espnow_ota_rx_item_t){0}, 0) == pdTRUE) {
+    }
+
+    err = esp_now_send(sender_mac, (const uint8_t *)&request, sizeof(request));
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    int64_t deadline = esp_timer_get_time() + (int64_t)ESPNOW_DIAG_TIMEOUT_MS * 1000;
+    while (esp_timer_get_time() < deadline) {
+        int64_t remaining_us = deadline - esp_timer_get_time();
+        TickType_t wait_ticks = pdMS_TO_TICKS((remaining_us + 999) / 1000);
+        espnow_ota_rx_item_t item;
+        if (xQueueReceive(g_diag_response_queue, &item, wait_ticks) != pdTRUE) {
+            break;
+        }
+        if (item.length < sizeof(espnow_diag_header_t)) {
+            continue;
+        }
+        espnow_diag_header_t header;
+        memcpy(&header, item.data, sizeof(header));
+        if (header.request_id != request_id) {
+            continue;
+        }
+        memcpy(response, item.data, item.length);
+        *response_len = item.length;
+        return ESP_OK;
+    }
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t sender_diag_api_handler(httpd_req_t *req)
+{
+    char query[96];
+    char section_text[16] = "counters";
+    uint32_t page = 0;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "section", section_text, sizeof(section_text));
+        char page_text[16];
+        if (httpd_query_key_value(query, "page", page_text, sizeof(page_text)) == ESP_OK) {
+            char *end = NULL;
+            unsigned long parsed = strtoul(page_text, &end, 10);
+            if (end == page_text || *end != '\0' || parsed > 1000) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid page");
+                return ESP_FAIL;
+            }
+            page = (uint32_t)parsed;
+        }
+    }
+
+    uint16_t flags;
+    if (strcmp(section_text, "events") == 0) {
+        flags = ESPNOW_DIAG_SECTION_EVENTS;
+    } else if (strcmp(section_text, "counters") == 0) {
+        flags = ESPNOW_DIAG_SECTION_COUNTERS;
+    } else {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown diagnostic section");
+        return ESP_FAIL;
+    }
+
+    uint8_t response[ESP_NOW_MAX_DATA_LEN];
+    size_t response_len = 0;
+    esp_err_t err = sender_diag_exchange(flags, page, response, &response_len);
+    if (err == ESP_ERR_INVALID_STATE) {
+        send_http_error_status(req, "503 Service Unavailable",
+                               "No sender MAC known yet; waiting for SML telemetry");
+        return ESP_FAIL;
+    }
+    if (err != ESP_OK) {
+        send_http_error_status(req, "504 Gateway Timeout",
+                               "Sender did not answer the diagnostic request");
+        return ESP_FAIL;
+    }
+
+    espnow_diag_header_t header;
+    memcpy(&header, response, sizeof(header));
+
+    char payload[768];
+    int len;
+    if ((header.flags & ESPNOW_DIAG_SECTION_COUNTERS) &&
+        response_len >= sizeof(header) + sizeof(espnow_diag_counters_t)) {
+        espnow_diag_counters_t counters;
+        memcpy(&counters, response + sizeof(header), sizeof(counters));
+        len = snprintf(payload, sizeof(payload),
+                       "{\"section\":\"counters\",\"uptime_ms\":%llu,"
+                       "\"uart_rx_bytes\":%llu,\"fifo_overflows\":%lu,"
+                       "\"rx_buffer_full\":%lu,\"frame_errors\":%lu,"
+                       "\"parity_errors\":%lu,\"tx_queue_drops\":%lu,"
+                       "\"sml_sent_ok\":%lu,\"sml_send_fail\":%lu,"
+                       "\"diag_requests\":%lu,\"last_sequence\":%lu,"
+                       "\"free_heap\":%lu,\"last_send_status\":%d,"
+                       "\"last_request_rssi\":%d,\"channel\":%u}",
+                       (unsigned long long)counters.uptime_ms,
+                       (unsigned long long)counters.uart_rx_bytes,
+                       (unsigned long)counters.fifo_overflows,
+                       (unsigned long)counters.rx_buffer_full,
+                       (unsigned long)counters.frame_errors,
+                       (unsigned long)counters.parity_errors,
+                       (unsigned long)counters.tx_queue_drops,
+                       (unsigned long)counters.sml_sent_ok,
+                       (unsigned long)counters.sml_send_fail,
+                       (unsigned long)counters.diag_requests,
+                       (unsigned long)counters.last_sequence,
+                       (unsigned long)counters.free_heap,
+                       (int)counters.last_send_status,
+                       (int)counters.last_request_rssi,
+                       (unsigned int)counters.channel);
+    } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
+        size_t offset = sizeof(header) + 2;
+        uint8_t total = response[sizeof(header)];
+        uint8_t count = response[sizeof(header) + 1];
+        if (offset + (size_t)count * sizeof(espnow_diag_event_t) > response_len) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                "Malformed diagnostic events");
+            return ESP_FAIL;
+        }
+        len = snprintf(payload, sizeof(payload),
+                       "{\"section\":\"events\",\"page\":%lu,\"total\":%u,"
+                       "\"more\":%s,\"events\":[",
+                       (unsigned long)page, (unsigned int)total,
+                       (header.flags & ESPNOW_DIAG_FLAG_MORE) ? "true" : "false");
+        if (len < 0 || (size_t)len >= sizeof(payload)) {
+            return ESP_FAIL;
+        }
+        for (uint8_t i = 0; i < count; ++i) {
+            espnow_diag_event_t event;
+            memcpy(&event, response + offset + (size_t)i * sizeof(event), sizeof(event));
+            char text[ESPNOW_DIAG_EVENT_TEXT_LEN + 1];
+            memcpy(text, event.text, ESPNOW_DIAG_EVENT_TEXT_LEN);
+            text[ESPNOW_DIAG_EVENT_TEXT_LEN] = '\0';
+            int written = snprintf(payload + len, sizeof(payload) - len,
+                                   "%s{\"timestamp_ms\":%llu,\"level\":%u,\"text\":\"%s\"}",
+                                   i == 0 ? "" : ",",
+                                   (unsigned long long)event.timestamp_ms,
+                                   (unsigned int)event.level, text);
+            if (written < 0 || (size_t)(len + written) >= sizeof(payload)) {
+                return ESP_FAIL;
+            }
+            len += written;
+        }
+        int closing = snprintf(payload + len, sizeof(payload) - len, "]}");
+        if (closing < 0 || (size_t)(len + closing) >= sizeof(payload)) {
+            return ESP_FAIL;
+        }
+        len += closing;
+    } else {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Unexpected diagnostic response");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, payload, len);
+}
+
+static esp_err_t diag_page_handler(httpd_req_t *req)
+{
+    static const char page[] =
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Sender diagnostics</title>"
+        "<style>body{font-family:monospace;margin:20px;background:#10151f;color:#e5edf7}"
+        "pre{white-space:pre-wrap;word-break:break-word}button,a{margin:4px;padding:8px 12px}"
+        "a{color:#78d6ff}</style></head><body><h1>Sender diagnostics (on demand)</h1>"
+        "<button id=\"load\" type=\"button\">Request sender diagnostics</button>"
+        "<p id=\"status\">Idle; no diagnostic packets are sent during normal operation.</p>"
+        "<h2>Counters</h2><pre id=\"counters\"></pre>"
+        "<h2>Recent events</h2><pre id=\"events\"></pre><script>"
+        "const byId=id=>document.getElementById(id);"
+        "function fmt(o){return JSON.stringify(o,null,2);}"
+        "async function loadEvents(){let page=0,all=[];for(;;){"
+        "const r=await fetch('/api/sender-diag?section=events&page='+page,{cache:'no-store'});"
+        "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
+        "all=all.concat(d.events);if(!d.more)break;page++;if(page>64)break;}"
+        "byId('events').textContent=all.length?all.map(e=>new Date(e.timestamp_ms).toISOString()+' ['+e.level+'] '+e.text).join(String.fromCharCode(10)):'No events recorded.';}"
+        "async function load(){byId('status').textContent='Requesting...';"
+        "try{const r=await fetch('/api/sender-diag?section=counters',{cache:'no-store'});"
+        "if(!r.ok)throw new Error(await r.text());byId('counters').textContent=fmt(await r.json());"
+        "await loadEvents();byId('status').textContent='Diagnostics received.';}"
+        "catch(e){byId('status').textContent='Request failed: '+e;}}"
+        "byId('load').addEventListener('click',load);"
+        "</script><p><a href=\"/\">Back</a></p></body></html>";
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_sendstr(req, page);
+}
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
 static esp_err_t send_sender_ota_command(espnow_ota_packet_t *command,
                                          const uint8_t *payload,
                                          bool broadcast)
@@ -1844,7 +2362,7 @@ static void start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 16;
     config.lru_purge_enable = true;
 
     httpd_handle_t server = NULL;
@@ -1876,6 +2394,16 @@ static void start_webserver(void)
         .uri = "/api/rssi",
         .method = HTTP_GET,
         .handler = rssi_api_handler,
+    };
+    httpd_uri_t sender_diag_api = {
+        .uri = "/api/sender-diag",
+        .method = HTTP_GET,
+        .handler = sender_diag_api_handler,
+    };
+    httpd_uri_t diag_page = {
+        .uri = "/diag",
+        .method = HTTP_GET,
+        .handler = diag_page_handler,
     };
 #endif
     httpd_uri_t log_page = {
@@ -1917,6 +2445,8 @@ static void start_webserver(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sml_api));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sml_dashboard_api));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &rssi_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sender_diag_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &diag_page));
 #endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config_uri));
@@ -1962,6 +2492,14 @@ static void run_sender(void)
     }
     ESP_ERROR_CHECK(esp_now_register_send_cb(send_callback));
 
+    g_diag_request_queue = xQueueCreate(ESPNOW_DIAG_QUEUE_LENGTH,
+                                        sizeof(espnow_diag_request_item_t));
+    g_diag_send_done = xSemaphoreCreateBinary();
+    if (g_diag_request_queue == NULL || g_diag_send_done == NULL) {
+        ESP_LOGE(TAG, "Could not create sender diagnostic synchronization objects");
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+
     ESP_LOGI(TAG, "Sender ready: UART%d RX GPIO=%d at %d baud (8N1, no flow control); "
                   "ESP-NOW channel %u",
              UART_PORT_NUM, UART_RX_GPIO, UART_BAUD_RATE, g_espnow_channel);
@@ -1987,6 +2525,12 @@ static void run_sender(void)
         ESP_LOGE(TAG, "Could not start UART capture worker");
         ESP_ERROR_CHECK(ESP_FAIL);
     }
+    task_result = xTaskCreate(espnow_diag_worker, "espnow_diag",
+                              4096, NULL, 4, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Could not start sender diagnostic worker");
+        ESP_ERROR_CHECK(ESP_FAIL);
+    }
 }
 #endif
 
@@ -2010,6 +2554,12 @@ void app_main(void)
     g_espnow_ota_mutex = xSemaphoreCreateMutex();
     if (g_espnow_ota_ack_queue == NULL || g_espnow_ota_mutex == NULL) {
         ESP_LOGE(TAG, "Could not create receiver OTA synchronization objects");
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+    g_diag_response_queue = xQueueCreate(ESPNOW_DIAG_QUEUE_LENGTH,
+                                         sizeof(espnow_ota_rx_item_t));
+    if (g_diag_response_queue == NULL) {
+        ESP_LOGE(TAG, "Could not create receiver diagnostic response queue");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
 #endif
