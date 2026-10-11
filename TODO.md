@@ -14,21 +14,30 @@ Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungsh
       bisher wird nur die Richtung Empfaenger->Sender als `last_request_rssi` uebertragen.
 
 ### CI / Build
-- [ ] **`storage.bin` in das CI-Flash-Artefakt aufnehmen** (`.github/workflows/esp-idf-build.yml`).
-      Blockiert: Das Token der GitHub-App "Cline Cloud" hat keine `workflows`-Berechtigung
-      (Push/API liefern: `without 'workflows' permission` bzw. 403 `Resource not accessible by integration`).
-      Patch im Schritt "Stage firmware and flash files":
+- [x] **`storage.bin` in das CI-Flash-Artefakt aufnehmen** — erledigt (`71f5ea8`), CI-Staging
+      prueft und kopiert `storage.bin` jetzt; im Run `38141912733` verifiziert.
 
-      ```diff
-                 test -s "$build_dir/ota_data_initial.bin"
-      +          test -s "$build_dir/storage.bin"
-                 cp "$build_dir/ota_data_initial.bin" "$out_dir/ota_data_initial.bin"
-      +          cp "$build_dir/storage.bin" "$out_dir/storage.bin"
-      ```
+### Bedienung / Diagnose (neu)
+- [ ] **Reboot-Taste im Dashboard** (`POST /api/reboot`, Auth-Gate wie `/update`,
+      Antwort senden, dann `esp_restart()`). Nuetzlich fuer den Persistenz-Test
+      (Reboot ohne Stecker ziehen) und generell zum Neustart aus der Weboberflaeche.
+      Muss auf der AP-Seite auch ohne STA-Verbindung funktionieren.
+- [ ] **Debug-Konsole mit Eingabe** (seriell und/oder Web): Befehle senden und
+      Antworten sehen, z. B. `status`, `history status`, `nvs dump`, `reboot`,
+      `sntp resync`, `espnow diag`. Der Empfaenger hat `esp_console` noch nicht
+      verdrahtet; UART ist belegt (SML-Eingang) -> nur RX/TX-freie Kanaele nutzen
+      oder Web-Console ueber `/api/console`. Beruehrt keine geschuetzten Bereiche.
 
-      Bis dahin: Patch selbst anwenden, oder lokal `idf.py flash`
-      (`FLASH_IN_PROJECT` nimmt `storage.bin` automatisch mit).
-      Funktional unkritisch: `format_if_mount_failed = true` formatiert notfalls einmalig still.
+### Persistenz / Zeit
+- [ ] **Minutenwerte erst nach NTP-Sync** (`wall_clock >= 1704067200`): Vor der
+      Zeitsynchronisation werden zwar Samples gezaehlt, aber kein Minutenwert
+      abgeschlossen (`record_count = 0`). Kandidat: relative Boot-Zeitbasis mit
+      spaeterem Nachziehen der Zeitstempel. Beruehrt die `day=…`-UTC-Semantik ->
+      mit Nutzer abstimmen.
+- [ ] **`storage_ready` praezisieren**: `status->ready` ist auch im RAM-Fallback
+      `true` (nur bei fehlgeschlagenem Task-Start `false`). Verlaesslich ist bisher
+      nur die Boot-Log-Zeile `Persistent history ready: N of 30000`. Echten
+      SPIFFS-Status (Datei offen) melden, damit „bereit" nicht in die Irre fuehrt.
 
 ### Power-History-Dashboard (kosmetisch, optional)
 - [ ] `current_sample_count`-Label praezisieren (aktuell: 15-min-Ringpuffer, nicht Samples im aktuellen 60-s-Bucket).
