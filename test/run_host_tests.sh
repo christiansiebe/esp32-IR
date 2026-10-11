@@ -18,3 +18,12 @@ trap 'rm -rf "$out"' EXIT
     -lm -o "$out/test_power_history"
 
 "$out/test_power_history"
+
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/web_console.c" \
+    "$here/test_web_console.c" \
+    -o "$out/test_web_console"
+
+"$out/test_web_console"

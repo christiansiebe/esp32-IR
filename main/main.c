@@ -24,6 +24,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "power_history.h"
+#include "web_console.h"
 #include "espnow_diag.h"
 #include "sml_transport.h"
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -1557,6 +1558,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "<nav class=\"nav\"><a href=\"/log\">SML logger</a>"
         "<a href=\"/api\">JSON API</a><a href=\"/config\">Wi-Fi settings</a>"
         "<a href=\"/diag\">Sender diagnostics</a>"
+        "<a href=\"/console\">Debug console</a>"
         "<a href=\"/update\">Firmware update</a></nav>" METER_HTML_FOOTER;
     err = httpd_resp_sendstr_chunk(req, page_footer);
     if (err != ESP_OK) {
@@ -2431,6 +2433,217 @@ static esp_err_t send_http_error_status(httpd_req_t *req,
     return httpd_resp_sendstr(req, message);
 }
 
+/* --- Web debug console -----------------------------------------------------
+ * A browser alternative to the serial console. Commands are executed against
+ * the live device state; output is plain text. All handlers run in the HTTP
+ * server task, so they must stay short and non-blocking. */
+static void console_cmd_help(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    web_console_help(out, out_size);
+}
+
+static void console_cmd_status(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    int written = snprintf(
+        out, out_size,
+        "fritzbox: %s\n"
+        "esp-now channel: %u\n"
+        "sntp synced: %s\n"
+        "free heap: %u bytes\n",
+        g_wifi_connected ? "connected" : "not connected",
+        (unsigned int)g_espnow_channel,
+        system_time_is_valid() ? "yes" : "no",
+        (unsigned int)esp_get_free_heap_size());
+    if (written < 0 || (size_t)written >= out_size) {
+        snprintf(out, out_size, "status: output truncated\n");
+    }
+}
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static void console_cmd_history(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    power_history_status_t status;
+    power_history_get_status(&status);
+    int written = snprintf(
+        out, out_size,
+        "storage: %s\n"
+        "records: %u / %u\n"
+        "sequence: oldest %u, latest %u\n"
+        "write errors: %u, queue drops: %u\n",
+        status.ready ? "ready" : "unavailable",
+        (unsigned int)status.record_count, (unsigned int)POWER_HISTORY_CAPACITY,
+        (unsigned int)status.oldest_sequence,
+        (unsigned int)status.latest_sequence,
+        (unsigned int)status.write_errors,
+        (unsigned int)status.queue_drops);
+    if (written < 0 || (size_t)written >= out_size) {
+        snprintf(out, out_size, "history: output truncated\n");
+    }
+}
+#endif /* !CONFIG_ESPNOW_ROLE_SENDER */
+
+static void console_cmd_time(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    time_t now = time(NULL);
+    struct tm utc;
+    if (gmtime_r(&now, &utc) == NULL) {
+        snprintf(out, out_size, "clock: unreadable\n");
+        return;
+    }
+    char text[24];
+    if (strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+        snprintf(out, out_size, "clock: %s\n", text);
+        return;
+    }
+    snprintf(out, out_size, "clock: %ld (valid=%s)\n", (long)now,
+             system_time_is_valid() ? "yes" : "no");
+}
+
+static void console_cmd_wifi(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    int written = snprintf(out, out_size,
+                           "configured ssid: %s\n"
+                           "fritzbox: %s\n"
+                           "esp-now channel: %u\n",
+                           g_wifi_configured ? g_wifi_ssid : "(none)",
+                           g_wifi_connected ? "connected" : "not connected",
+                           (unsigned int)g_espnow_channel);
+    if (written < 0 || (size_t)written >= out_size) {
+        snprintf(out, out_size, "wifi: output truncated\n");
+    }
+}
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static void console_cmd_power(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    double watts = 0.0;
+    size_t samples = 0;
+    portENTER_CRITICAL(&g_sml_history_lock);
+    if (g_sml_latest_power_valid) {
+        watts = g_sml_latest_power_w;
+    }
+    samples = g_sml_power_sample_count;
+    portEXIT_CRITICAL(&g_sml_history_lock);
+    int written = snprintf(out, out_size,
+                           "latest power: %.1f W\n"
+                           "samples in ring: %u\n",
+                           watts, (unsigned int)samples);
+    if (written < 0 || (size_t)written >= out_size) {
+        snprintf(out, out_size, "power: output truncated\n");
+    }
+}
+#endif /* !CONFIG_ESPNOW_ROLE_SENDER */
+
+static void console_cmd_reboot(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    snprintf(out, out_size,
+             "rebooting in 500 ms - reload the page in a few seconds\n");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+}
+
+static void web_console_register_commands(void)
+{
+    web_console_register("help", "list available commands", console_cmd_help);
+    web_console_register("status", "wifi, channel, clock and heap",
+                         console_cmd_status);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    web_console_register("history", "persistent power-history counters",
+                         console_cmd_history);
+#endif
+    web_console_register("time", "current UTC clock and sync state",
+                         console_cmd_time);
+    web_console_register("wifi", "configured SSID and link state",
+                         console_cmd_wifi);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    web_console_register("power", "latest power and ring sample count",
+                         console_cmd_power);
+#endif
+    web_console_register("reboot", "restart the device", console_cmd_reboot);
+}
+
+static esp_err_t console_api_handler(httpd_req_t *req)
+{
+    if (!ota_key_is_valid(req)) {
+        return send_http_error_status(req, "401 Unauthorized",
+                                      "X-OTA-Key missing or wrong");
+    }
+    char line[192];
+    size_t total = 0;
+    int timeouts = 0;
+    while (total < sizeof(line) - 1) {
+        int received = httpd_req_recv(req, line + total,
+                                      sizeof(line) - 1 - total);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            /* Allow a couple of socket timeouts, then stop; a bare continue
+             * would spin forever if the client stalls. */
+            if (++timeouts > 3) {
+                break;
+            }
+            continue;
+        }
+        timeouts = 0;
+        if (received <= 0) {
+            break;
+        }
+        total += (size_t)received;
+    }
+    line[total] = '\0';
+
+    char result[768];
+    web_console_run(line, result, sizeof(result));
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_sendstr(req, result);
+}
+
+static esp_err_t console_page_handler(httpd_req_t *req)
+{
+    static const char page[] =
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>ESP32 IR debug console</title>"
+        "<style>body{font-family:monospace;margin:20px;background:#10151f;color:#e5edf7}"
+        "input,button{font:inherit;padding:8px;margin:4px 0}"
+        "input{width:70%;background:#182330;color:#e5edf7;border:1px solid #2c3e50;border-radius:6px}"
+        "button{background:#176b91;color:#fff;border:0;border-radius:6px;cursor:pointer}"
+        "button:hover{background:#2086b2}pre{white-space:pre-wrap;word-break:break-word}"
+        "a{color:#78d6ff}</style></head><body>"
+        "<h1>Debug console</h1>"
+        "<p>Same information as the serial console. Enter the Wi-Fi key once "
+        "(stored for this tab) and send commands such as <b>status</b>, "
+        "<b>history</b>, <b>time</b>, <b>wifi</b>, <b>power</b>, <b>reboot</b>, "
+        "<b>help</b>.</p>"
+        "<input id=\"key\" type=\"password\" placeholder=\"Wi-Fi / OTA key\">"
+        "<br><input id=\"cmd\" placeholder=\"command\" autocomplete=\"off\">"
+        "<button id=\"send\" type=\"button\">Send</button>"
+        "<button id=\"clear\" type=\"button\">Clear</button>"
+        "<pre id=\"out\"></pre><script>"
+        "const out=document.getElementById('out'),cmd=document.getElementById('cmd'),"
+        "key=document.getElementById('key');"
+        "try{key.value=sessionStorage.getItem('consoleKey')||'';}catch(e){}"
+        "function append(text){out.textContent+=text;out.scrollTop=out.scrollHeight;}"
+        "async function send(){const line=cmd.value;if(!line.trim())return;"
+        "try{sessionStorage.setItem('consoleKey',key.value);}catch(e){}"
+        "append('> '+line+'\\n');cmd.value='';"
+        "try{const r=await fetch('/api/console',{method:'POST',"
+        "headers:{'X-OTA-Key':key.value},body:line});const t=await r.text();"
+        "append((r.ok?'':('['+r.status+'] '))+t);"
+        "if(!t.endsWith('\\n'))append('\\n');}catch(e){append('request failed: '+e+'\\n');}}"
+        "document.getElementById('send').onclick=send;"
+        "document.getElementById('clear').onclick=()=>{out.textContent='';};"
+        "cmd.addEventListener('keydown',e=>{if(e.key==='Enter')send();});"
+        "cmd.focus();</script></body></html>";
+
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_sendstr(req, page);
+}
+
 #if !CONFIG_ESPNOW_ROLE_SENDER
 static esp_err_t sender_diag_exchange(uint16_t flags, uint32_t page,
                                       uint8_t *response, size_t *response_len)
@@ -3121,6 +3334,16 @@ static void start_webserver(void)
         .method = HTTP_POST,
         .handler = save_wifi_handler,
     };
+    httpd_uri_t console_page = {
+        .uri = "/console",
+        .method = HTTP_GET,
+        .handler = console_page_handler,
+    };
+    httpd_uri_t console_api = {
+        .uri = "/api/console",
+        .method = HTTP_POST,
+        .handler = console_api_handler,
+    };
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &data));
@@ -3137,6 +3360,9 @@ static void start_webserver(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &save));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &console_page));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &console_api));
+    web_console_register_commands();
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update));
 #if !CONFIG_ESPNOW_ROLE_SENDER

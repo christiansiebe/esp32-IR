@@ -13,7 +13,7 @@ set(main_requires
     sml_parser
 )
 
-idf_component_register(SRCS "main.c" "power_history.c"
+idf_component_register(SRCS "main.c" "power_history.c" "web_console.c"
                     INCLUDE_DIRS "."
                     REQUIRES ${main_requires})
 
