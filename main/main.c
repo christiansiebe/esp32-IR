@@ -1431,11 +1431,14 @@ static esp_err_t root_handler(httpd_req_t *req)
         "</section>"
         "<script>"
         "const byId=id=>document.getElementById(id);"
+        "let historyTimer=null;"
+        "async function fetchT(url,ms){const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);"
+        "try{return await fetch(url,{cache:'no-store',signal:c.signal});}finally{clearTimeout(t);}}"
         "function scaled(v){return Number(v.value)*Math.pow(10,v.scaler);}"
         "function fmt(value,digits=2){return value.toLocaleString('de-DE',{minimumFractionDigits:digits,"
         "maximumFractionDigits:digits});}"
         "function showEnergy(id,v){byId(id).textContent=v?fmt(scaled(v)/1000):'Warte…';}"
-        "async function updateMeter(){try{const r=await fetch('/api/dashboard',{cache:'no-store'});"
+        "async function updateMeter(){try{const r=await fetchT('/api/dashboard',4000);"
         "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
         "showEnergy('meter-import',d.import);showEnergy('meter-export',d.export);"
         "if(d.power){const watts=scaled(d.power);byId('meter-power').textContent="
@@ -1486,12 +1489,12 @@ static esp_err_t root_handler(httpd_req_t *req)
         "bar=value/max*(ph/2-5);ctx.fillStyle=value<0?'#63d79a':'#78d6ff';"
         "ctx.fillRect(x,bar<0?zero:zero-bar,barWidth,Math.abs(bar));}"
         "}"
-        "async function updateHistory(){try{const hours=historyHours();"
+        "async function updateHistory(){clearTimeout(historyTimer);try{const hours=historyHours();"
         "byId('history-range-label').textContent=historyLabel();"
         "let url='/api/power-history?recent=128';"
         "if(hours>2)url='/api/power-history?hours='+hours+'&points=240';"
-        "const r=await fetch(url,"
-        "{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
+        "const r=await fetchT(url,15000);"
+        "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
         "drawHistory(d.records,hours);const latest=d.records.length?new Date("
         "Number(d.records[d.records.length-1].timestamp)).toLocaleString('de-DE'):"
         "'noch kein abgeschlossener Minutenwert';"
@@ -1503,8 +1506,8 @@ static esp_err_t root_handler(httpd_req_t *req)
         "' · Speicher: '+(d.storage_ready?'bereit':'nicht bereit')+"
         "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
         "}catch(e){byId('history-status').textContent='Verlauf nicht verfügbar: '+e;}"
-        "setTimeout(updateHistory,60000);}byId('history-range').addEventListener('change',()=>updateHistory());"
-        "window.addEventListener('resize',()=>updateHistory());"
+        "historyTimer=setTimeout(updateHistory,60000);}byId('history-range').addEventListener('change',()=>updateHistory());"
+        "window.addEventListener('resize',()=>{clearTimeout(historyTimer);historyTimer=setTimeout(updateHistory,400);});"
         "updateHistory();</script>";
     err = httpd_resp_sendstr_chunk(req, sml_page);
     if (err != ESP_OK) {
@@ -1843,7 +1846,16 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         }
     }
 
-    power_history_record_t records[POWER_HISTORY_PAGE_SIZE];
+    /* Heap, not stack: a full history page (128 * sizeof(record)) would use
+     * most of the HTTP task stack. The CSV handler below does the same. */
+    power_history_record_t *records = heap_caps_calloc(POWER_HISTORY_PAGE_SIZE,
+                                                       sizeof(*records),
+                                                       MALLOC_CAP_DEFAULT);
+    if (records == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Out of memory for history page");
+        return ESP_FAIL;
+    }
     size_t record_count = 0;
     power_history_status_t status;
     bool overflow = false;
@@ -1859,6 +1871,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         status.ready = false;
         ESP_LOGW(TAG, "Power history backend not ready; serving empty dataset");
     } else if (err != ESP_OK) {
+        free(records);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "Persistent power history is unavailable");
         return err;
@@ -1886,6 +1899,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
             free(sum_w);
             free(count);
             free(bucket_start_ms);
+            free(records);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                                 "Out of memory for history aggregation");
             return ESP_FAIL;
@@ -1921,6 +1935,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
             free(sum_w);
             free(count);
             free(bucket_start_ms);
+            free(records);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                                 "History aggregation failed");
             return ESP_FAIL;
@@ -1948,6 +1963,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 free(sum_w);
                 free(count);
                 free(bucket_start_ms);
+                free(records);
                 return ESP_FAIL;
             }
             err = httpd_resp_send_chunk(req, item, item_len);
@@ -1956,6 +1972,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         free(sum_w);
         free(count);
         free(bucket_start_ms);
+        free(records);
         if (err == ESP_OK) {
             err = httpd_resp_send_chunk(req, "]}", 2);
         }
@@ -1987,6 +2004,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         (unsigned long)status.write_errors,
         overflow ? "true" : "false");
     if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
+        free(records);
         return ESP_FAIL;
     }
 
@@ -2005,6 +2023,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
             (long)records[i].average_milliwatts,
             (unsigned long)records[i].sample_count);
         if (item_len < 0 || (size_t)item_len >= sizeof(item)) {
+            free(records);
             return ESP_FAIL;
         }
         err = httpd_resp_send_chunk(req, item, item_len);
@@ -2015,12 +2034,21 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     if (err == ESP_OK) {
         err = httpd_resp_send_chunk(req, NULL, 0);
     }
+    free(records);
     return err;
 }
 
 static esp_err_t power_history_csv_handler(httpd_req_t *req)
 {
-    power_history_record_t records[POWER_HISTORY_PAGE_SIZE];
+    /* Heap, not stack: see the JSON handler above. */
+    power_history_record_t *records = heap_caps_calloc(POWER_HISTORY_PAGE_SIZE,
+                                                       sizeof(*records),
+                                                       MALLOC_CAP_DEFAULT);
+    if (records == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Out of memory for history page");
+        return ESP_FAIL;
+    }
     size_t record_count = 0;
     uint32_t after_sequence = 0;
     power_history_status_t status;
@@ -2035,6 +2063,7 @@ static esp_err_t power_history_csv_handler(httpd_req_t *req)
         status.ready = false;
         ESP_LOGW(TAG, "Power history backend not ready; serving empty CSV");
     } else if (err != ESP_OK) {
+        free(records);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "Persistent power history is unavailable");
         return err;
@@ -2051,11 +2080,13 @@ static esp_err_t power_history_csv_handler(httpd_req_t *req)
                 (time_t)records[i].interval_start_utc;
             struct tm interval_utc;
             if (gmtime_r(&interval_start, &interval_utc) == NULL) {
+                free(records);
                 return ESP_FAIL;
             }
             char interval_text[24];
             if (strftime(interval_text, sizeof(interval_text),
                          "%Y-%m-%dT%H:%M:%SZ", &interval_utc) == 0) {
+                free(records);
                 return ESP_FAIL;
             }
             char row[128];
@@ -2065,6 +2096,7 @@ static esp_err_t power_history_csv_handler(httpd_req_t *req)
                                    (double)records[i].average_milliwatts / 1000.0,
                                    (unsigned long)records[i].sample_count);
             if (row_len < 0 || (size_t)row_len >= sizeof(row)) {
+                free(records);
                 return ESP_FAIL;
             }
             err = httpd_resp_send_chunk(req, row, row_len);
@@ -2079,6 +2111,7 @@ static esp_err_t power_history_csv_handler(httpd_req_t *req)
     if (err == ESP_OK) {
         err = httpd_resp_send_chunk(req, NULL, 0);
     }
+    free(records);
     return err;
 }
 
@@ -2907,7 +2940,10 @@ static void start_webserver(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.max_uri_handlers = 24;
-    config.stack_size = 6144;
+    /* Handlers that keep a full history page (128 records) on their stack run
+     * on this task; keep headroom so a large page cannot overflow it and abort
+     * the whole HTTP server. */
+    config.stack_size = 8192;
     config.lru_purge_enable = true;
 
     httpd_handle_t server = NULL;

@@ -418,8 +418,24 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
     uint32_t oldest_slot =
         (g_history_header.next_slot + POWER_HISTORY_CAPACITY -
          g_history_header.record_count) % POWER_HISTORY_CAPACITY;
-    for (uint32_t i = 0; i < g_history_header.record_count; ++i) {
-        uint32_t slot = (oldest_slot + i) % POWER_HISTORY_CAPACITY;
+    /* Skip straight to the first record newer than after_sequence instead of
+     * re-reading the whole ring (one fseek+fread per record) from the oldest
+     * slot. Without this a large log made every history request block the HTTP
+     * task for seconds. */
+    uint32_t skip = 0;
+    if (oldest_sequence != 0) {
+        int64_t wanted = (int64_t)after_sequence + 1 - (int64_t)oldest_sequence;
+        if (wanted > 0) {
+            skip = (uint32_t)wanted;
+        }
+    }
+    if (skip >= g_history_header.record_count) {
+        xSemaphoreGive(g_history_mutex);
+        return ESP_OK;
+    }
+    uint32_t first_slot = (oldest_slot + skip) % POWER_HISTORY_CAPACITY;
+    for (uint32_t i = 0; i < g_history_header.record_count - skip; ++i) {
+        uint32_t slot = (first_slot + i) % POWER_HISTORY_CAPACITY;
         long offset = (long)(2u * sizeof(power_history_header_t) +
                              slot * sizeof(power_history_record_t));
         power_history_record_t record;
