@@ -1,0 +1,9 @@
+# Run the CPU at 80 MHz instead of the IDF default of 160 MHz.
+#
+# The device is network-bound and the SML UART runs at only 9600 baud, so the
+# extra CPU clock buys almost nothing while roughly doubling dynamic current.
+# A fixed 80 MHz is chosen over dynamic frequency scaling (CONFIG_PM_ENABLE):
+# the Wi-Fi driver holds an APB_MAX lock for as long as the AP/STA interfaces
+# are up, so DFS would settle at 80 MHz anyway, and on the ESP32 DFS must be
+# disabled for reliable ESP-NOW (connectionless) timing.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
