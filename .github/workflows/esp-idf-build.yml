@@ -68,7 +68,6 @@ jobs:
           CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
           CONFIG_ESPNOW_ROLE_${role_upper}=y
           EOF
-          echo "SDKCONFIG=$RUNNER_TEMP/sdkconfig-${{ matrix.role }}" >> "$GITHUB_ENV"
           echo "SDKCONFIG_DEFAULTS=sdkconfig.defaults;$RUNNER_TEMP/sdkconfig.defaults" >> "$GITHUB_ENV"
 
       - name: Build firmware
@@ -82,9 +81,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! grep -q '^CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80$' "$SDKCONFIG"; then
+          conf="sdkconfig"
+          if ! grep -q '^CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80$' "$conf"; then
             echo "Expected CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80 but got:"
-            grep 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ' "$SDKCONFIG" || echo "(not set)"
+            grep 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ' "$conf" || echo "(not set)"
             exit 1
           fi
           echo "CPU default frequency is 80 MHz"
