@@ -10,6 +10,7 @@
 #include <stdio.h>
 
 #include "sml.h"
+#include "sml_adapter.h"
 
 static int g_checks;
 static int g_failures;
@@ -50,6 +51,17 @@ static void feed(const unsigned char *bytes, size_t len)
  * public header). Driving it directly makes the nodes[] depth guard
  * deterministic instead of depending on a crafted byte stream. */
 void smlNewList(unsigned char size);
+
+/* sml_adapter.cpp normally depends on the transport header; for the host test
+ * we only need the "awaiting telegram" predicate, so stub the callback it
+ * declares. */
+extern "C" void sml_adapter_telegram_callback(uint64_t, bool,
+                                              const sml_transport_value_t *,
+                                              uint8_t)
+{
+}
+
+bool sml_adapter_awaiting_telegram(void);
 
 int main(void)
 {
@@ -102,19 +114,20 @@ int main(void)
     }
     CHECK(1, "random byte stream did not crash");
 
-    /* The gap diagnosis relies on smlCurrentState(): SML_START means "waiting
-     * for a telegram", anything else means a gap would be mid-telegram. */
+    /* The gap diagnosis relies on sml_adapter_awaiting_telegram(): only
+     * SML_START and SML_FINAL are "between telegrams". A gap anywhere else
+     * would mean bytes were lost inside a telegram. */
     smlReset();
-    CHECK(smlCurrentState() == SML_START,
-          "parser is idle (SML_START) right after reset");
+    CHECK(sml_adapter_awaiting_telegram(),
+          "idle parser (SML_START) counts as between telegrams");
     feed_start();
     static const unsigned char partial[] = {0x77, 0x07, 0x01};
     feed(partial, sizeof(partial));
-    CHECK(smlCurrentState() != SML_START,
-          "parser is mid-telegram after a partial telegram");
+    CHECK(!sml_adapter_awaiting_telegram(),
+          "parser in the middle of a telegram is not 'awaiting'");
     smlReset();
-    CHECK(smlCurrentState() == SML_START,
-          "parser returns to SML_START after a reset");
+    CHECK(sml_adapter_awaiting_telegram(),
+          "parser is between telegrams again after a reset");
 
     printf("sml parser robustness: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

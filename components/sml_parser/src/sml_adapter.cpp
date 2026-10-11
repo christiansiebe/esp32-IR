@@ -47,7 +47,11 @@ static void remember_value(const unsigned char *obis, sml_units_t unit,
 
 extern "C" bool sml_adapter_awaiting_telegram(void)
 {
-    return smlCurrentState() == SML_START;
+    /* SML_START = waiting for the next telegram, SML_FINAL = the previous
+     * telegram was delivered and the callback fired. Both are between
+     * telegrams, so a byte gap there is normal idle time, not data loss. */
+    sml_states_t state = smlCurrentState();
+    return state == SML_START || state == SML_FINAL;
 }
 
 extern "C" sml_adapter_result_t sml_adapter_feed_byte(uint8_t byte,

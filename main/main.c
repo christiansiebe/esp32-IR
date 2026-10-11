@@ -1597,6 +1597,10 @@ static void uart_capture_worker(void *arg)
                 if (mid_telegram) {
                     diag_log_event(ESPNOW_DIAG_LEVEL_WARN,
                                    "rx gap %lums mid-telegram", (unsigned long)gap_ms);
+                } else {
+                    diag_log_event(ESPNOW_DIAG_LEVEL_INFO,
+                                   "rx gap %lums between telegrams",
+                                   (unsigned long)gap_ms);
                 }
             }
         }

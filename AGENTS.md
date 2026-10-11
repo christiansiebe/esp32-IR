@@ -62,7 +62,8 @@ Two firmware roles are built from one source tree.
 - The read head (IR diode UART) delivers bytes in bursts; silent gaps between
   telegrams are normal. `uart_capture_worker` measures the gap between byte
   bursts (threshold `UART_GAP_THRESHOLD_MS`, 50 ms) and classifies each gap with
-  `smlCurrentState()`: `SML_START` = waiting for a telegram (fine),
+  `sml_adapter_awaiting_telegram()`: `SML_START` (waiting for a telegram) or
+  `SML_FINAL` (previous telegram just delivered) = between telegrams (fine),
   anything else = a gap inside a telegram (bytes lost, the parser will fail its
   checksum). Counters: `gap_count`/`gap_quiet`/`gap_mid`/`last_gap_ms`/
   `max_gap_ms`, plus `last_rx_ago_ms`. A total silence longer than

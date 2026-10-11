@@ -48,7 +48,10 @@ python3 "$here/check_dashboard_js.py"
 cxx="${CXX:-g++}"
 "$cxx" -std=c++17 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -I"$repo/components/sml_parser/src" \
+    -I"$repo/components/sml_parser/include" \
+    -I"$repo/components/sml_transport/include" \
     "$repo/components/sml_parser/src/sml.cpp" \
+    "$repo/components/sml_parser/src/sml_adapter.cpp" \
     "$here/test_sml_parser.cpp" \
     -o "$out/test_sml_parser"
 
