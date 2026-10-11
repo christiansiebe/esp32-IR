@@ -40,4 +40,15 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
 esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_seconds,
                                   double *sum_w, uint32_t *count, int64_t *bucket_start_ms,
                                   size_t bucket_count, power_history_status_t *status);
+
+/* Reine, hardwareunabhaengige Aggregations-Helfer (ohne NVS/SPIFFS/FreeRTOS),
+ * damit dieselbe Logik auf dem Host getestet werden kann. */
+void power_history_aggregate_init(int64_t window_start_utc, int64_t bucket_seconds,
+                                  double *sum_w, uint32_t *count,
+                                  int64_t *bucket_start_ms, size_t bucket_count);
+esp_err_t power_history_aggregate_core(int64_t window_start_utc,
+                                       int64_t bucket_seconds,
+                                       const power_history_record_t *records,
+                                       size_t record_count, double *sum_w,
+                                       uint32_t *count, size_t bucket_count);
 void power_history_get_status(power_history_status_t *status);

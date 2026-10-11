@@ -463,6 +463,46 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
     return ESP_OK;
 }
 
+void power_history_aggregate_init(int64_t window_start_utc, int64_t bucket_seconds,
+                                  double *sum_w, uint32_t *count,
+                                  int64_t *bucket_start_ms, size_t bucket_count)
+{
+    for (size_t i = 0; i < bucket_count; ++i) {
+        sum_w[i] = 0.0;
+        count[i] = 0;
+        bucket_start_ms[i] = window_start_utc * 1000LL +
+                             (int64_t)i * bucket_seconds * 1000LL;
+    }
+}
+
+esp_err_t power_history_aggregate_core(int64_t window_start_utc,
+                                       int64_t bucket_seconds,
+                                       const power_history_record_t *records,
+                                       size_t record_count, double *sum_w,
+                                       uint32_t *count, size_t bucket_count)
+{
+    if (sum_w == NULL || count == NULL || bucket_count == 0 ||
+        bucket_seconds <= 0 || (record_count != 0 && records == NULL)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0; i < record_count; ++i) {
+        if (!record_is_valid(&records[i])) {
+            continue;
+        }
+        int64_t ts = records[i].interval_start_utc;
+        if (ts < window_start_utc) {
+            continue;
+        }
+        int64_t idx = (ts - window_start_utc) / bucket_seconds;
+        if (idx < 0 || idx >= (int64_t)bucket_count) {
+            continue;
+        }
+        sum_w[idx] += (double)records[i].average_milliwatts / 1000.0;
+        ++count[idx];
+    }
+    return ESP_OK;
+}
+
 esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_seconds,
                                   double *sum_w, uint32_t *count, int64_t *bucket_start_ms,
                                   size_t bucket_count, power_history_status_t *status)
@@ -471,12 +511,8 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
         bucket_count == 0 || bucket_seconds <= 0 || status == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    for (size_t i = 0; i < bucket_count; ++i) {
-        sum_w[i] = 0.0;
-        count[i] = 0;
-        bucket_start_ms[i] = window_start_utc * 1000LL +
-                             (int64_t)i * bucket_seconds * 1000LL;
-    }
+    power_history_aggregate_init(window_start_utc, bucket_seconds, sum_w, count,
+                                 bucket_start_ms, bucket_count);
     power_history_get_status(status);
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
@@ -494,54 +530,45 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
     }
 
     if (g_history_file == NULL) {
-        for (size_t i = 0; i < g_history_ram_count; ++i) {
-            const power_history_record_t *record = &g_history_ram_records[i];
-            if (!record_is_valid(record)) {
-                continue;
-            }
-            int64_t ts = record->interval_start_utc;
-            if (ts < window_start_utc) {
-                continue;
-            }
-            int64_t idx = (ts - window_start_utc) / bucket_seconds;
-            if (idx < 0 || idx >= (int64_t)bucket_count) {
-                continue;
-            }
-            sum_w[idx] += (double)record->average_milliwatts / 1000.0;
-            ++count[idx];
-        }
+        esp_err_t core_err = power_history_aggregate_core(
+            window_start_utc, bucket_seconds, g_history_ram_records,
+            g_history_ram_count, sum_w, count, bucket_count);
         xSemaphoreGive(g_history_mutex);
-        return ESP_OK;
+        return core_err;
     }
 
     uint32_t oldest_slot =
         (g_history_header.next_slot + POWER_HISTORY_CAPACITY -
          g_history_header.record_count) % POWER_HISTORY_CAPACITY;
-    for (uint32_t i = 0; i < g_history_header.record_count; ++i) {
-        uint32_t slot = (oldest_slot + i) % POWER_HISTORY_CAPACITY;
+    /* Walk the ring once but read in blocks: a large log made the per-record
+     * fseek+fread dominate (tens of thousands of syscalls) and blocked the HTTP
+     * task. A small block buffer keeps RAM flat and stays correct across the
+     * ring wrap. */
+    power_history_record_t block[64];
+    uint32_t remaining = g_history_header.record_count;
+    uint32_t index = 0;
+    while (remaining != 0) {
+        uint32_t slot = (oldest_slot + index) % POWER_HISTORY_CAPACITY;
+        uint32_t chunk = remaining < 64 ? remaining : 64;
+        if (slot + chunk > POWER_HISTORY_CAPACITY) {
+            chunk = POWER_HISTORY_CAPACITY - slot;
+        }
         long offset = (long)(2u * sizeof(power_history_header_t) +
                              slot * sizeof(power_history_record_t));
-        power_history_record_t record;
         if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
-            fread(&record, sizeof(record), 1, g_history_file) != 1) {
+            fread(block, sizeof(block[0]), chunk, g_history_file) != chunk) {
             xSemaphoreGive(g_history_mutex);
-            ESP_LOGE(TAG, "Could not read persistent history record at slot %lu",
+            ESP_LOGE(TAG, "Could not read persistent history records at slot %lu",
                      (unsigned long)slot);
             return ESP_FAIL;
         }
-        if (!record_is_valid(&record)) {
-            continue;
+        if (power_history_aggregate_core(window_start_utc, bucket_seconds, block,
+                                         chunk, sum_w, count, bucket_count) != ESP_OK) {
+            xSemaphoreGive(g_history_mutex);
+            return ESP_FAIL;
         }
-        int64_t ts = record.interval_start_utc;
-        if (ts < window_start_utc) {
-            continue;
-        }
-        int64_t idx = (ts - window_start_utc) / bucket_seconds;
-        if (idx < 0 || idx >= (int64_t)bucket_count) {
-            continue;
-        }
-        sum_w[idx] += (double)record.average_milliwatts / 1000.0;
-        ++count[idx];
+        remaining -= chunk;
+        index += chunk;
     }
     xSemaphoreGive(g_history_mutex);
     return ESP_OK;

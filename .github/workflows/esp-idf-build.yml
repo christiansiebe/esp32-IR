@@ -9,6 +9,17 @@ permissions:
   contents: read
 
 jobs:
+  host-tests:
+    name: Host tests (aggregation)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Run aggregation / data-gap / day-boundary tests
+        shell: bash
+        run: ./test/run_host_tests.sh
+
   build:
     name: Build ${{ matrix.role }}
     runs-on: ubuntu-24.04

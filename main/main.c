@@ -1426,6 +1426,14 @@ static esp_err_t root_handler(httpd_req_t *req)
         "<input type=\"range\" id=\"history-range\" min=\"0\" max=\"6\" step=\"1\" value=\"0\" "
         "style=\"vertical-align:middle\"> <strong id=\"history-range-label\">2 Stunden</strong> "
         "<span id=\"history-resolution\"></span></p>"
+        "<p><label for=\"history-day\">Tag (UTC): </label>"
+        "<input type=\"date\" id=\"history-day\"> "
+        "<button type=\"button\" id=\"history-day-load\">Tagesverlauf</button> "
+        "<button type=\"button\" id=\"history-day-prev\">◀</button> "
+        "<button type=\"button\" id=\"history-day-next\">▶</button> "
+        "<button type=\"button\" id=\"history-day-compare\">Vortag vergleichen</button> "
+        "<button type=\"button\" id=\"history-day-live\">Live</button>"
+        " <span id=\"history-day-info\"></span></p>"
         "<canvas id=\"power-history\" aria-label=\"Diagramm der Minutenmittelwerte\"></canvas>"
         "<p id=\"history-status\">Warte auf synchronisierte Netzwerkzeit und gespeicherte Minutenwerte…</p>"
         "</section>"
@@ -1463,51 +1471,81 @@ static esp_err_t root_handler(httpd_req_t *req)
         "if(i<0||i>=RANGE_STEPS.length)i=0;return RANGE_STEPS[i];}"
         "function historyLabel(){let i=parseInt(byId('history-range').value)||0;"
         "if(i<0||i>=RANGE_STEPS.length)i=0;return RANGE_LABELS[i];}"
-        "function historyWindowMs(){return historyHours()*3600000;}"
+        "let historyView='live';let historyCompare=null;"
+        "function dayISO(d){return d.toISOString().slice(0,10);}"
+        "function rowValue(r){return Number(r.watts!==undefined?r.watts:r.average_milliwatts/1000);}"
+        "function niceMax(v){if(!(v>0))return 1;const p=Math.pow(10,Math.floor(Math.log10(v)));const n=v/p;"
+        "return (n<=1?1:n<=2?2:n<=5?5:10)*p;}"
+        "function setLive(on){historyView=on?'live':'day';}"
         "function fmtTick(t,hours){const d=new Date(t);"
         "if(hours<24)return d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});"
         "return d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})+' '+"
         "d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});}"
-        "function drawHistory(rows,hours){const canvas=byId('power-history'),rect=canvas.getBoundingClientRect();"
+        "function drawHistory(rows,hours,windowStart,compare){const canvas=byId('power-history'),rect=canvas.getBoundingClientRect();"
         "if(!rect.width)return;const ratio=window.devicePixelRatio||1;"
         "canvas.width=Math.floor(rect.width*ratio);canvas.height=Math.floor(260*ratio);"
         "const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);const w=rect.width,h=260,"
         "left=42,right=12,top=14,bottom=38,pw=w-left-right,ph=h-top-bottom,zero=top+ph/2;"
         "ctx.clearRect(0,0,w,h);ctx.strokeStyle='#526174';ctx.lineWidth=1;"
         "ctx.beginPath();ctx.moveTo(left,zero);ctx.lineTo(w-right,zero);ctx.stroke();"
-        "const max=Math.max(1,...rows.map(x=>Math.abs(Number(x.watts!==undefined?x.watts:x.average_milliwatts/1000))))*1.1,"
-        "now=Date.now(),span=hours*3600000,start=now-span;"
+        "const span=hours*3600000,start=(windowStart===undefined||windowStart===null)?Date.now()-span:Number(windowStart);"
+        "const end=start+span;"
+        "let peak=1;for(const r of rows){peak=Math.max(peak,Math.abs(rowValue(r)));}"
+        "if(compare)for(const r of compare){peak=Math.max(peak,Math.abs(rowValue(r)));}"
+        "const max=niceMax(peak*1.1);"
         "ctx.fillStyle='#9fb4c8';ctx.font='12px sans-serif';ctx.fillText('+'+max.toFixed(0)+' W',2,top+10);"
         "ctx.fillText('0 W',2,zero+4);ctx.fillText('-'+max.toFixed(0)+' W',2,h-bottom);"
-        "ctx.fillText(fmtTick(start,hours),left,h-20);ctx.fillText(fmtTick(start+span/2,hours),left+pw/2-30,h-20);"
-        "ctx.fillText('jetzt',w-right-28,h-20);"
-        "ctx.fillText(new Date(start).toLocaleString('de-DE'),left,h-6);"
+        "for(let k=0;k<=4;k++){const t=start+span*k/4,xx=left+pw*k/4;"
+        "ctx.strokeStyle='rgba(82,97,116,0.35)';ctx.beginPath();ctx.moveTo(xx,top);ctx.lineTo(xx,top+ph);ctx.stroke();"
+        "ctx.fillStyle='#9fb4c8';ctx.fillText(fmtTick(t,hours),Math.min(xx,w-right-34),h-20);}"
         "const barWidth=Math.max(2,pw/240*0.68);"
-        "for(const r of rows){const t=Number(r.timestamp);if(t<start||t>now)continue;"
-        "const value=Number(r.watts!==undefined?r.watts:r.average_milliwatts/1000),"
-        "x=left+(t-start)/span*pw,"
-        "bar=value/max*(ph/2-5);ctx.fillStyle=value<0?'#63d79a':'#78d6ff';"
-        "ctx.fillRect(x,bar<0?zero:zero-bar,barWidth,Math.abs(bar));}"
+        "function plot(data,color){if(!data)return;ctx.fillStyle=color;"
+        "for(const r of data){const t=Number(r.timestamp);if(t<start||t>end)continue;"
+        "const value=rowValue(r),x=left+(t-start)/span*pw,bar=value/max*(ph/2-5);"
+        "ctx.fillRect(x,bar<0?zero:zero-bar,barWidth,Math.abs(bar));}}"
+        "if(compare)plot(compare,'#e2b53e');plot(rows,compare?'rgba(120,214,255,0.55)':'#78d6ff');"
         "}"
-        "async function updateHistory(){clearTimeout(historyTimer);try{const hours=historyHours();"
+        "async function updateHistory(){clearTimeout(historyTimer);try{const live=(historyView==='live');"
+        "const hours=live?historyHours():24;"
         "byId('history-range-label').textContent=historyLabel();"
-        "let url='/api/power-history?recent=128';"
-        "if(hours>2)url='/api/power-history?hours='+hours+'&points=240';"
+        "let url,windowStart=null;"
+        "if(live){url='/api/power-history?recent=128';if(hours>2)url='/api/power-history?hours='+hours+'&points=240';}"
+        "else{const day=byId('history-day').value||dayISO(new Date());"
+        "url='/api/power-history?day='+day+'&points=96';windowStart=Date.parse(day+'T00:00:00Z');}"
         "const r=await fetchT(url,15000);"
         "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
-        "drawHistory(d.records,hours);const latest=d.records.length?new Date("
-        "Number(d.records[d.records.length-1].timestamp)).toLocaleString('de-DE'):"
+        "let compare=null,compareDay=null;"
+        "if(!live&&historyCompare){try{const cr=await fetchT('/api/power-history?day='+historyCompare+'&points=96',15000);"
+        "if(cr.ok){compare=(await cr.json()).records;compareDay=historyCompare;}}catch(e){}}"
+        "drawHistory(d.records,hours,windowStart,compare);"
+        "const total=rows=>rows.reduce((s,x)=>s+rowValue(x),0);"
+        "const info=(d.records.length?('Σ '+fmt(total(d.records),0)+' W·h')+(d.records.length?(' · '+d.records.length+' Punkte'):''):'keine Werte');"
+        "byId('history-day-info').textContent=live?'':('· '+(compareDay?('Vergleich '+compareDay+' (gelb) · '):'')+info);"
+        "const latest=d.records.length?new Date(Number(d.records[d.records.length-1].timestamp)).toLocaleString('de-DE'):"
         "'noch kein abgeschlossener Minutenwert';"
-        "byId('history-title').textContent=d.aggregated?('Mittelwerte · letzte '+hours+' Stunden'):('Minutenmittelwerte · letzte 2 Stunden');"
-        "byId('history-resolution').textContent=d.aggregated&&d.bucket_seconds?(' (1 Balken = '+Math.round(Number(d.bucket_seconds)/60)+' Min)'):'';"
+        "byId('history-title').textContent=live?(d.aggregated?('Mittelwerte · letzte '+hours+' Stunden'):'Minutenmittelwerte · letzte 2 Stunden'):('Tagesverlauf (UTC) · 15-Minuten-Mittel');"
+        "byId('history-resolution').textContent=(live&&d.aggregated&&d.bucket_seconds)?(' (1 Balken = '+Math.round(Number(d.bucket_seconds)/60)+' Min)'):(live?'':(' (1 Balken = 15 Min)'));"
         "byId('history-status').textContent=(d.clock_synced?'Netzwerkzeit synchronisiert':'Warte auf Netzwerkzeit')+"
         "' · gespeicherte Minutenwerte: '+d.record_count+' / 30000 · letztes: '+latest+"
         "' · aktuelle Messwerte im Intervall: '+d.current_sample_count+"
         "' · Speicher: '+(d.storage_ready?'bereit':'nicht bereit')+"
         "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
         "}catch(e){byId('history-status').textContent='Verlauf nicht verfügbar: '+e;}"
-        "historyTimer=setTimeout(updateHistory,60000);}byId('history-range').addEventListener('change',()=>updateHistory());"
+        "historyTimer=setTimeout(updateHistory,60000);}"
+        "function redraw(){clearTimeout(historyTimer);updateHistory();}"
+        "byId('history-range').addEventListener('change',()=>{setLive(true);byId('history-day-info').textContent='';redraw();});"
+        "byId('history-day-load').addEventListener('click',()=>{setLive(false);historyCompare=null;redraw();});"
+        "byId('history-day-prev').addEventListener('click',()=>{shiftDay(-1);});"
+        "byId('history-day-next').addEventListener('click',()=>{shiftDay(1);});"
+        "byId('history-day-compare').addEventListener('click',()=>{toggleCompare();});"
+        "byId('history-day-live').addEventListener('click',()=>{setLive(true);historyCompare=null;byId('history-day-info').textContent='';redraw();});"
+        "byId('history-day').addEventListener('change',()=>{setLive(false);historyCompare=null;redraw();});"
+        "function shiftDay(delta){const base=byId('history-day').value?Date.parse(byId('history-day').value+'T00:00:00Z'):Date.now();"
+        "const next=new Date(base+delta*86400000);byId('history-day').value=dayISO(next);setLive(false);historyCompare=null;redraw();}"
+        "function toggleCompare(){if(historyCompare){historyCompare=null;}else{const base=byId('history-day').value?Date.parse(byId('history-day').value+'T00:00:00Z'):Date.now();"
+        "historyCompare=dayISO(new Date(base-86400000));}redraw();}"
         "window.addEventListener('resize',()=>{clearTimeout(historyTimer);historyTimer=setTimeout(updateHistory,400);});"
+        "byId('history-day').value=dayISO(new Date());"
         "updateHistory();</script>";
     err = httpd_resp_sendstr_chunk(req, sml_page);
     if (err != ESP_OK) {
@@ -1779,9 +1817,40 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     uint32_t recent_count = 0;
     double hours_requested = 0.0;
     uint32_t points_requested = 0;
+    int64_t day_start_utc = 0;
+    int64_t day_seconds = 0;
     char query[96];
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
         char value[16];
+        char day_value[24];
+        if (httpd_query_key_value(query, "day", day_value, sizeof(day_value)) == ESP_OK) {
+            /* Calendar day given as YYYY-MM-DD in UTC (timezone-neutral, matches
+             * the UTC timestamps the history records carry). */
+            int year = 0, month = 0, day = 0;
+            char tail = '\0';
+            if (sscanf(day_value, "%4d-%2d-%2d%c", &year, &month, &day, &tail) != 3 ||
+                month < 1 || month > 12 || day < 1 || day > 31) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "Invalid day (expected YYYY-MM-DD)");
+                return ESP_FAIL;
+            }
+            struct tm day_tm;
+            memset(&day_tm, 0, sizeof(day_tm));
+            day_tm.tm_year = year - 1900;
+            day_tm.tm_mon = month - 1;
+            day_tm.tm_mday = day;
+            time_t day_epoch = timegm(&day_tm);
+            struct tm round_trip;
+            if (day_epoch < 0 || gmtime_r(&day_epoch, &round_trip) == NULL ||
+                round_trip.tm_year != day_tm.tm_year ||
+                round_trip.tm_mon != day_tm.tm_mon ||
+                round_trip.tm_mday != day_tm.tm_mday) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid day");
+                return ESP_FAIL;
+            }
+            day_start_utc = (int64_t)day_epoch;
+            day_seconds = 86400;
+        }
         if (httpd_query_key_value(query, "after", value, sizeof(value)) == ESP_OK) {
             char *end = NULL;
             unsigned long parsed = strtoul(value, &end, 10);
@@ -1825,26 +1894,43 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
             points_requested = (uint32_t)parsed;
         }
     }
-    if ((hours_requested > 0.0) != (points_requested != 0)) {
+    if (day_seconds != 0 && hours_requested > 0.0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "day and hours are mutually exclusive");
+        return ESP_FAIL;
+    }
+    if (day_seconds == 0 && (hours_requested > 0.0) != (points_requested != 0)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                             "hours and points must be combined");
         return ESP_FAIL;
+    }
+    if (day_seconds != 0 && points_requested == 0) {
+        /* One calendar day at 15 minute resolution unless the caller asks for
+         * a different point count. */
+        points_requested = 96;
     }
 
     /* Aggregationsmodus: Fenster in Buckets einteilen, damit auch 20 Tage als
      * kompakte Antwort (<= 240 Punkte) uebertragen werden koennen. */
     int64_t window_start_utc = 0;
+    int64_t window_seconds = 0;
     int64_t bucket_seconds = 0;
-    if (hours_requested > 0.0) {
+    if (day_seconds != 0) {
+        window_start_utc = day_start_utc;
+        window_seconds = day_seconds;
+    } else if (hours_requested > 0.0) {
         time_t now_s;
         time(&now_s);
-        int64_t window_seconds = (int64_t)(hours_requested * 3600.0);
+        window_seconds = (int64_t)(hours_requested * 3600.0);
         window_start_utc = (int64_t)now_s - window_seconds;
+    }
+    if (window_seconds > 0 && points_requested > 0) {
         bucket_seconds = window_seconds / (int64_t)points_requested;
         if (bucket_seconds < 60) {
             bucket_seconds = 60;
         }
     }
+    double window_hours_out = (double)window_seconds / 3600.0;
 
     /* Heap, not stack: a full history page (128 * sizeof(record)) would use
      * most of the HTTP task stack. The CSV handler below does the same. */
@@ -1880,7 +1966,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     portENTER_CRITICAL(&g_sml_history_lock);
     current_sample_count_agg = g_sml_power_sample_count;
     portEXIT_CRITICAL(&g_sml_history_lock);
-    if (hours_requested > 0.0 && status.ready) {
+    if (window_seconds > 0 && status.ready) {
         /* Aggregationsmodus: Single-Pass-Aggregation im Backend. Die Bucket-
          * Puffer liegen auf dem Heap (nicht auf dem nur 6 kB großen HTTP-Task-
          * Stack) und werden in einem Durchgang gefüllt (kein O(n^2)-Paging). */
@@ -1917,7 +2003,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 "\"latest_sequence\":%lu,\"record_count\":%lu,"
                 "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
                 "\"aggregated\":true,\"window_hours\":%.2f,\"bucket_seconds\":%lld,"
-                "\"records\":[",
+                "\"day_start_utc\":%lld,\"records\":[",
                 system_time_is_valid() ? "true" : "false",
                 status.ready ? "true" : "false",
                 (unsigned int)current_sample_count_agg,
@@ -1927,8 +2013,9 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 (unsigned long)status.queue_drops,
                 (unsigned long)status.write_errors,
                 overflow ? "true" : "false",
-                hours_requested,
-                (long long)bucket_seconds);
+                window_hours_out,
+                (long long)bucket_seconds,
+                (long long)window_start_utc);
         }
         if (agg_err != ESP_OK ||
             agg_header_len < 0 || (size_t)agg_header_len >= sizeof(agg_header)) {
