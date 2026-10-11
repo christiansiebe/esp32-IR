@@ -1419,9 +1419,19 @@ static esp_err_t root_handler(httpd_req_t *req)
         "<section class=\"meter\"><h2>Durchschnitt letzte 15 Minuten</h2>"
         "<strong id=\"meter-average\">—</strong><small id=\"meter-average-direction\">W</small>"
         "</section></div><p id=\"meter-status\">Warte auf CRC-gültige SML-Werte…</p>"
-        "<section class=\"history\"><h2>Minutenmittelwerte · letzte 2 Stunden</h2>"
+        "<section class=\"history\"><h2 id=\"history-title\">Minutenmittelwerte · letzte 2 Stunden</h2>"
         "<p>Verbrauch oberhalb, Einspeisung unterhalb der Nulllinie. "
         "<a href=\"/api/power-history.csv\">Gesamten gespeicherten Verlauf als CSV herunterladen</a></p>"
+        "<p><label for=\"history-range\">Zeitraum: </label>"
+        "<select id=\"history-range\">"
+        "<option value=\"2\" selected>2 Stunden</option>"
+        "<option value=\"6\">6 Stunden</option>"
+        "<option value=\"12\">12 Stunden</option>"
+        "<option value=\"24\">24 Stunden</option>"
+        "<option value=\"72\">3 Tage</option>"
+        "<option value=\"168\">7 Tage</option>"
+        "<option value=\"480\">Max (ca. 20 Tage)</option>"
+        "</select> <span id=\"history-resolution\"></span></p>"
         "<canvas id=\"power-history\" aria-label=\"Diagramm der Minutenmittelwerte\"></canvas>"
         "<p id=\"history-status\">Warte auf synchronisierte Netzwerkzeit und gespeicherte Minutenwerte…</p>"
         "</section>"
@@ -1450,36 +1460,50 @@ static esp_err_t root_handler(httpd_req_t *req)
         "' · CRC fehlerhaft: '+d.crc_invalid+' · Transportlücken: '+d.transport_gaps;"
         "}catch(e){byId('meter-status').textContent='Verbindung zum Zähler fehlgeschlagen: '+e;}"
         "setTimeout(updateMeter,1000);}updateMeter();"
-        "function drawHistory(rows){const canvas=byId('power-history'),rect=canvas.getBoundingClientRect();"
+        "function historyWindowMs(){const v=parseFloat(byId('history-range').value)||2;return v*3600000;}"
+        "function fmtTick(t,hours){const d=new Date(t);"
+        "if(hours<24)return d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});"
+        "return d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})+' '+"
+        "d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});}"
+        "function drawHistory(rows,hours){const canvas=byId('power-history'),rect=canvas.getBoundingClientRect();"
         "if(!rect.width)return;const ratio=window.devicePixelRatio||1;"
         "canvas.width=Math.floor(rect.width*ratio);canvas.height=Math.floor(260*ratio);"
         "const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);const w=rect.width,h=260,"
-        "left=42,right=12,top=14,bottom=25,pw=w-left-right,ph=h-top-bottom,zero=top+ph/2;"
+        "left=42,right=12,top=14,bottom=38,pw=w-left-right,ph=h-top-bottom,zero=top+ph/2;"
         "ctx.clearRect(0,0,w,h);ctx.strokeStyle='#526174';ctx.lineWidth=1;"
         "ctx.beginPath();ctx.moveTo(left,zero);ctx.lineTo(w-right,zero);ctx.stroke();"
-        "const max=Math.max(1,...rows.map(x=>Math.abs(x.average_milliwatts/1000)))*1.1,"
-        "now=Date.now(),start=now-7200000;"
+        "const max=Math.max(1,...rows.map(x=>Math.abs(Number(x.watts!==undefined?x.watts:x.average_milliwatts/1000))))*1.1,"
+        "now=Date.now(),span=hours*3600000,start=now-span;"
         "ctx.fillStyle='#9fb4c8';ctx.font='12px sans-serif';ctx.fillText('+'+max.toFixed(0)+' W',2,top+10);"
         "ctx.fillText('0 W',2,zero+4);ctx.fillText('-'+max.toFixed(0)+' W',2,h-bottom);"
-        "ctx.fillText('-2 h',left,h-6);ctx.fillText('-1 h',left+pw/2-15,h-6);"
-        "ctx.fillText('jetzt',w-right-28,h-6);const barWidth=Math.max(2,pw/100*0.68);"
+        "ctx.fillText(fmtTick(start,hours),left,h-20);ctx.fillText(fmtTick(start+span/2,hours),left+pw/2-30,h-20);"
+        "ctx.fillText('jetzt',w-right-28,h-20);"
+        "ctx.fillText(new Date(start).toLocaleString('de-DE'),left,h-6);"
+        "const barWidth=Math.max(2,pw/240*0.68);"
         "for(const r of rows){const t=Number(r.timestamp);if(t<start||t>now)continue;"
-        "const value=r.watts,x=left+(t-start)/7200000*pw,"
+        "const value=Number(r.watts!==undefined?r.watts:r.average_milliwatts/1000),"
+        "x=left+(t-start)/span*pw,"
         "bar=value/max*(ph/2-5);ctx.fillStyle=value<0?'#63d79a':'#78d6ff';"
         "ctx.fillRect(x,bar<0?zero:zero-bar,barWidth,Math.abs(bar));}"
         "}"
-        "async function updateHistory(){try{const r=await fetch('/api/power-history?recent=128',"
+        "async function updateHistory(){try{const hours=parseFloat(byId('history-range').value)||2;"
+        "let url='/api/power-history?recent=128';"
+        "if(hours>2)url='/api/power-history?hours='+hours+'&points=240';"
+        "const r=await fetch(url,"
         "{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
-        "drawHistory(d.records);const latest=d.records.length?new Date("
+        "drawHistory(d.records,hours);const latest=d.records.length?new Date("
         "Number(d.records[d.records.length-1].timestamp)).toLocaleString('de-DE'):"
         "'noch kein abgeschlossener Minutenwert';"
+        "byId('history-title').textContent=d.aggregated?('Mittelwerte · letzte '+hours+' Stunden'):('Minutenmittelwerte · letzte 2 Stunden');"
+        "byId('history-resolution').textContent=d.aggregated&&d.bucket_seconds?(' (1 Balken = '+Math.round(Number(d.bucket_seconds)/60)+' Min)'):'';"
         "byId('history-status').textContent=(d.clock_synced?'Netzwerkzeit synchronisiert':'Warte auf Netzwerkzeit')+"
         "' · gespeicherte Minutenwerte: '+d.record_count+' / 30000 · letztes: '+latest+"
         "' · aktuelle Messwerte im Intervall: '+d.current_sample_count+"
         "' · Speicher: '+(d.storage_ready?'bereit':'nicht bereit')+"
         "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
         "}catch(e){byId('history-status').textContent='Verlauf nicht verfügbar: '+e;}"
-        "setTimeout(updateHistory,60000);}window.addEventListener('resize',()=>updateHistory());"
+        "setTimeout(updateHistory,60000);}byId('history-range').addEventListener('change',()=>updateHistory());"
+        "window.addEventListener('resize',()=>updateHistory());"
         "updateHistory();</script>";
     err = httpd_resp_sendstr_chunk(req, sml_page);
     if (err != ESP_OK) {
@@ -1749,6 +1773,8 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
 {
     uint32_t after_sequence = 0;
     uint32_t recent_count = 0;
+    double hours_requested = 0.0;
+    uint32_t points_requested = 0;
     char query[96];
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
         char value[16];
@@ -1772,6 +1798,48 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
             }
             recent_count = (uint32_t)parsed;
         }
+        char hvalue[24];
+        if (httpd_query_key_value(query, "hours", hvalue, sizeof(hvalue)) == ESP_OK) {
+            char *end = NULL;
+            double parsed = strtod(hvalue, &end);
+            if (end == hvalue || *end != '\0' || !(parsed >= 0.25) ||
+                !(parsed <= 480.0)) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "Invalid history window hours (0.25..480)");
+                return ESP_FAIL;
+            }
+            hours_requested = parsed;
+        }
+        if (httpd_query_key_value(query, "points", value, sizeof(value)) == ESP_OK) {
+            char *end = NULL;
+            unsigned long parsed = strtoul(value, &end, 10);
+            if (end == value || *end != '\0' || parsed == 0 || parsed > 240) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "Invalid history point count (1..240)");
+                return ESP_FAIL;
+            }
+            points_requested = (uint32_t)parsed;
+        }
+    }
+    if ((hours_requested > 0.0) != (points_requested != 0)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "hours and points must be combined");
+        return ESP_FAIL;
+    }
+
+    /* Aggregationsmodus: Fenster in Buckets einteilen, damit auch 20 Tage als
+     * kompakte Antwort (<= 240 Punkte) uebertragen werden koennen. */
+    int64_t window_start_utc = 0;
+    int64_t bucket_seconds = 0;
+    if (hours_requested > 0.0) {
+        time_t now_s;
+        time(&now_s);
+        int64_t window_seconds = (int64_t)(hours_requested * 3600.0);
+        window_start_utc = (int64_t)now_s - window_seconds;
+        bucket_seconds = window_seconds / (int64_t)points_requested;
+        if (bucket_seconds < 60) {
+            bucket_seconds = 60;
+        }
     }
 
     power_history_record_t records[POWER_HISTORY_PAGE_SIZE];
@@ -1792,6 +1860,107 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     } else if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "Persistent power history is unavailable");
+        return err;
+    }
+    size_t current_sample_count_agg;
+    portENTER_CRITICAL(&g_sml_history_lock);
+    current_sample_count_agg = g_sml_power_sample_count;
+    portEXIT_CRITICAL(&g_sml_history_lock);
+    if (hours_requested > 0.0 && status.ready) {
+        /* Aggregationsmodus: Single-Pass-Aggregation im Backend. Die Bucket-
+         * Puffer liegen auf dem Heap (nicht auf dem nur 6 kB großen HTTP-Task-
+         * Stack) und werden in einem Durchgang gefüllt (kein O(n^2)-Paging). */
+        uint32_t point_count = points_requested;
+        if (point_count == 0 || point_count > 240) {
+            point_count = 240;
+        }
+        double *sum_w = heap_caps_calloc(1, point_count * sizeof(double),
+                                         MALLOC_CAP_DEFAULT);
+        uint32_t *count = heap_caps_calloc(1, point_count * sizeof(uint32_t),
+                                           MALLOC_CAP_DEFAULT);
+        int64_t *bucket_start_ms = heap_caps_calloc(1,
+                                                    point_count * sizeof(int64_t),
+                                                    MALLOC_CAP_DEFAULT);
+        if (sum_w == NULL || count == NULL || bucket_start_ms == NULL) {
+            free(sum_w);
+            free(count);
+            free(bucket_start_ms);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                "Out of memory for history aggregation");
+            return ESP_FAIL;
+        }
+        esp_err_t agg_err = power_history_aggregate(window_start_utc, bucket_seconds,
+                                                    sum_w, count, bucket_start_ms,
+                                                    point_count, &status);
+        char agg_header[384];
+        int agg_header_len = -1;
+        if (agg_err == ESP_OK) {
+            agg_header_len = snprintf(
+                agg_header, sizeof(agg_header),
+                "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
+                "\"oldest_sequence\":%lu,"
+                "\"latest_sequence\":%lu,\"record_count\":%lu,"
+                "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
+                "\"aggregated\":true,\"window_hours\":%.2f,\"bucket_seconds\":%lld,"
+                "\"records\":[",
+                system_time_is_valid() ? "true" : "false",
+                status.ready ? "true" : "false",
+                (unsigned int)current_sample_count_agg,
+                (unsigned long)status.oldest_sequence,
+                (unsigned long)status.latest_sequence,
+                (unsigned long)status.record_count,
+                (unsigned long)status.queue_drops,
+                (unsigned long)status.write_errors,
+                overflow ? "true" : "false",
+                hours_requested,
+                (long long)bucket_seconds);
+        }
+        if (agg_err != ESP_OK ||
+            agg_header_len < 0 || (size_t)agg_header_len >= sizeof(agg_header)) {
+            free(sum_w);
+            free(count);
+            free(bucket_start_ms);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                "History aggregation failed");
+            return ESP_FAIL;
+        }
+        httpd_resp_set_type(req, "application/json");
+        err = httpd_resp_send_chunk(req, agg_header, agg_header_len);
+        uint32_t emitted = 0;
+        for (uint32_t i = 0; err == ESP_OK && i < point_count; ++i) {
+            if (count[i] == 0) {
+                continue;
+            }
+            double avg_w = sum_w[i] / (double)count[i];
+            char item[144];
+            int item_len = snprintf(
+                item, sizeof(item),
+                "%s{\"sequence\":%lu,\"timestamp\":%lld,"
+                "\"watts\":%.3f,\"average_milliwatts\":%ld,\"sample_count\":%lu}",
+                emitted == 0 ? "" : ",",
+                (unsigned long)(i + 1),
+                (long long)bucket_start_ms[i],
+                avg_w,
+                (long)(avg_w * 1000.0),
+                (unsigned long)count[i]);
+            if (item_len < 0 || (size_t)item_len >= sizeof(item)) {
+                free(sum_w);
+                free(count);
+                free(bucket_start_ms);
+                return ESP_FAIL;
+            }
+            err = httpd_resp_send_chunk(req, item, item_len);
+            ++emitted;
+        }
+        free(sum_w);
+        free(count);
+        free(bucket_start_ms);
+        if (err == ESP_OK) {
+            err = httpd_resp_send_chunk(req, "]}", 2);
+        }
+        if (err == ESP_OK) {
+            err = httpd_resp_send_chunk(req, NULL, 0);
+        }
         return err;
     }
     size_t current_sample_count;

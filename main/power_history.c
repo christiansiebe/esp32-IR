@@ -446,3 +446,88 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
     xSemaphoreGive(g_history_mutex);
     return ESP_OK;
 }
+
+esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_seconds,
+                                  double *sum_w, uint32_t *count, int64_t *bucket_start_ms,
+                                  size_t bucket_count, power_history_status_t *status)
+{
+    if (sum_w == NULL || count == NULL || bucket_start_ms == NULL ||
+        bucket_count == 0 || bucket_seconds <= 0 || status == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0; i < bucket_count; ++i) {
+        sum_w[i] = 0.0;
+        count[i] = 0;
+        bucket_start_ms[i] = window_start_utc * 1000LL +
+                             (int64_t)i * bucket_seconds * 1000LL;
+    }
+    power_history_get_status(status);
+    if (!status->ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(g_history_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    status->record_count = g_history_header.record_count;
+    status->latest_sequence = g_history_header.next_sequence - 1u;
+    status->oldest_sequence = status->record_count == 0 ? 0 :
+                              g_history_header.next_sequence - status->record_count;
+    if (status->oldest_sequence == 0 && status->record_count != 0) {
+        status->oldest_sequence = 1;
+    }
+
+    if (g_history_file == NULL) {
+        for (size_t i = 0; i < g_history_ram_count; ++i) {
+            const power_history_record_t *record = &g_history_ram_records[i];
+            if (!record_is_valid(record)) {
+                continue;
+            }
+            int64_t ts = record->interval_start_utc;
+            if (ts < window_start_utc) {
+                continue;
+            }
+            int64_t idx = (ts - window_start_utc) / bucket_seconds;
+            if (idx < 0 || idx >= (int64_t)bucket_count) {
+                continue;
+            }
+            sum_w[idx] += (double)record->average_milliwatts / 1000.0;
+            ++count[idx];
+        }
+        xSemaphoreGive(g_history_mutex);
+        return ESP_OK;
+    }
+
+    uint32_t oldest_slot =
+        (g_history_header.next_slot + POWER_HISTORY_CAPACITY -
+         g_history_header.record_count) % POWER_HISTORY_CAPACITY;
+    for (uint32_t i = 0; i < g_history_header.record_count; ++i) {
+        uint32_t slot = (oldest_slot + i) % POWER_HISTORY_CAPACITY;
+        long offset = (long)(2u * sizeof(power_history_header_t) +
+                             slot * sizeof(power_history_record_t));
+        power_history_record_t record;
+        if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
+            fread(&record, sizeof(record), 1, g_history_file) != 1) {
+            xSemaphoreGive(g_history_mutex);
+            ESP_LOGE(TAG, "Could not read persistent history record at slot %lu",
+                     (unsigned long)slot);
+            return ESP_FAIL;
+        }
+        if (!record_is_valid(&record)) {
+            continue;
+        }
+        int64_t ts = record.interval_start_utc;
+        if (ts < window_start_utc) {
+            continue;
+        }
+        int64_t idx = (ts - window_start_utc) / bucket_seconds;
+        if (idx < 0 || idx >= (int64_t)bucket_count) {
+            continue;
+        }
+        sum_w[idx] += (double)record.average_milliwatts / 1000.0;
+        ++count[idx];
+    }
+    xSemaphoreGive(g_history_mutex);
+    return ESP_OK;
+}
+

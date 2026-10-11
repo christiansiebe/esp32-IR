@@ -34,4 +34,10 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
                              power_history_record_t *records, size_t capacity,
                              size_t *record_count, power_history_status_t *status,
                              bool *overflow);
+/* Single-Pass-Aggregation: iteriert alle gespeicherten Saetze genau einmal und
+ * mittelt sie in feste Zeit-Buckets. Vermeidet O(n^2)-Paging bei vollem
+ * Speicher (30000 Saetze). count != 0 markiert belegte Buckets. */
+esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_seconds,
+                                  double *sum_w, uint32_t *count, int64_t *bucket_start_ms,
+                                  size_t bucket_count, power_history_status_t *status);
 void power_history_get_status(power_history_status_t *status);
