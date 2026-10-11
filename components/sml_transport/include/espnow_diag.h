@@ -23,6 +23,7 @@
 /* Requested/returned sections (request flags and response flags). */
 #define ESPNOW_DIAG_SECTION_COUNTERS 0x0001u
 #define ESPNOW_DIAG_SECTION_EVENTS   0x0002u
+#define ESPNOW_DIAG_SECTION_CRASH    0x0004u
 
 /* Response flag: at least one more event page follows for this request. */
 #define ESPNOW_DIAG_FLAG_MORE 0x8000u

@@ -25,6 +25,7 @@
 #include "nvs_flash.h"
 #include "power_history.h"
 #include "web_console.h"
+#include "crash_journal.h"
 #include "espnow_diag.h"
 #include "sml_transport.h"
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -136,6 +137,17 @@ static bool g_sntp_started;
 static esp_netif_t *g_ap_netif;
 static esp_netif_t *g_sta_netif;
 static uint8_t g_espnow_channel = ESPNOW_CHANNEL;
+/* Wire layout for the crash-journal diagnostic section. Kept here (next to the
+ * journal it mirrors) and outside the role guards so the receiver can decode it
+ * too. */
+typedef struct __attribute__((packed)) {
+    espnow_diag_header_t header;
+    int32_t current_reset_reason;
+    crash_journal_t journal;
+} espnow_diag_crash_response_t;
+_Static_assert(sizeof(espnow_diag_crash_response_t) <= ESP_NOW_MAX_DATA_LEN,
+               "crash diagnostic response must fit one ESP-NOW payload");
+
 #if CONFIG_ESPNOW_ROLE_SENDER
 typedef struct {
     uint64_t timestamp_us;
@@ -168,6 +180,10 @@ static espnow_diag_event_t g_diag_events[ESPNOW_DIAG_EVENT_RING];
 static size_t g_diag_event_count;
 static size_t g_diag_event_next;
 static portMUX_TYPE g_diag_event_lock = portMUX_INITIALIZER_UNLOCKED;
+/* Persistent crash journal (NVS), see crash_journal.c. */
+static crash_journal_t g_crash_journal;
+static SemaphoreHandle_t g_crash_journal_mutex;
+static int32_t g_current_reset_reason = 0;
 #else
 static QueueHandle_t g_espnow_ota_ack_queue;
 static SemaphoreHandle_t g_espnow_ota_mutex;
@@ -629,6 +645,8 @@ static void espnow_ota_worker(void *arg)
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
+static void crash_journal_persist(bool force);
+
 static void diag_log_event(uint8_t level, const char *format, ...)
 {
     char text[ESPNOW_DIAG_EVENT_TEXT_LEN];
@@ -647,6 +665,186 @@ static void diag_log_event(uint8_t level, const char *format, ...)
         ++g_diag_event_count;
     }
     portEXIT_CRITICAL(&g_diag_event_lock);
+
+    /* ERROR events are the interesting ones around a fault, so they always
+     * refresh the persistent journal; INFO/WARN are rate limited. */
+    crash_journal_persist(level == ESPNOW_DIAG_LEVEL_ERROR);
+}
+
+/* Copy the live counters and event tail into *journal (checksum finalized).
+ * Pure with respect to the journal; callers serialize access themselves. */
+static void crash_journal_capture(crash_journal_t *journal)
+{
+    uint64_t rx_bytes;
+    uint32_t fifo_overflows;
+    uint32_t rx_buffer_full;
+    uint32_t frame_errors;
+    uint32_t parity_errors;
+    uint32_t tx_queue_drops;
+    uint32_t sml_sent_ok;
+    uint32_t sml_send_fail;
+    uint32_t last_sequence;
+    uint32_t diag_requests;
+
+    portENTER_CRITICAL(&g_uart_stats_lock);
+    rx_bytes = g_uart_rx_bytes;
+    fifo_overflows = g_uart_fifo_overflows;
+    rx_buffer_full = g_uart_rx_buffer_full;
+    frame_errors = g_uart_frame_errors;
+    parity_errors = g_uart_parity_errors;
+    tx_queue_drops = g_sml_tx_queue_drops;
+    sml_sent_ok = g_sml_sent_ok;
+    sml_send_fail = g_sml_send_fail;
+    last_sequence = g_sml_last_sequence;
+    diag_requests = g_diag_requests;
+    portEXIT_CRITICAL(&g_uart_stats_lock);
+
+    espnow_diag_event_t snapshot[ESPNOW_DIAG_EVENT_RING];
+    size_t count = 0;
+    portENTER_CRITICAL(&g_diag_event_lock);
+    count = g_diag_event_count;
+    for (size_t i = 0; i < count; ++i) {
+        size_t index = (g_diag_event_next + ESPNOW_DIAG_EVENT_RING - count + i) %
+                       ESPNOW_DIAG_EVENT_RING;
+        snapshot[i] = g_diag_events[index];
+    }
+    portEXIT_CRITICAL(&g_diag_event_lock);
+
+    crash_journal_event_t events[CRASH_JOURNAL_EVENT_COUNT];
+    size_t start = (count > CRASH_JOURNAL_EVENT_COUNT)
+                       ? count - CRASH_JOURNAL_EVENT_COUNT
+                       : 0;
+    for (size_t i = start; i < count; ++i) {
+        events[i - start] = (crash_journal_event_t) {
+            .timestamp_ms = snapshot[i].timestamp_ms,
+            .level = snapshot[i].level,
+        };
+        memcpy(events[i - start].text, snapshot[i].text,
+               sizeof(events[i - start].text));
+    }
+
+    journal->session_uptime_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    journal->free_heap = (uint32_t)esp_get_free_heap_size();
+    journal->uart_rx_bytes = (uint32_t)rx_bytes;
+    journal->fifo_overflows = fifo_overflows;
+    journal->rx_buffer_full = rx_buffer_full;
+    journal->frame_errors = frame_errors;
+    journal->parity_errors = parity_errors;
+    journal->tx_queue_drops = tx_queue_drops;
+    journal->sml_sent_ok = sml_sent_ok;
+    journal->sml_send_fail = sml_send_fail;
+    journal->diag_requests = diag_requests;
+    journal->last_sequence = last_sequence;
+    journal->clean_shutdown = 0;
+    crash_journal_set_events(journal, events, count - start);
+}
+
+/* Refresh the stored journal from the live counters. NVS has limited write
+ * endurance and the UART error events can be frequent, so writes are rate
+ * limited unless `force` is set (used for ERROR events). */
+#define CRASH_JOURNAL_PERSIST_MIN_INTERVAL_MS 30000
+
+static int64_t g_crash_journal_last_persist_us;
+
+static void crash_journal_persist(bool force)
+{
+    if (g_crash_journal_mutex == NULL) {
+        return;
+    }
+    int64_t now = esp_timer_get_time();
+    if (!force &&
+        now - g_crash_journal_last_persist_us <
+            (int64_t)CRASH_JOURNAL_PERSIST_MIN_INTERVAL_MS * 1000) {
+        return;
+    }
+    if (xSemaphoreTake(g_crash_journal_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return;
+    }
+    crash_journal_capture(&g_crash_journal);
+    g_crash_journal_last_persist_us = now;
+    esp_err_t err = crash_journal_save(&g_crash_journal);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not persist crash journal: %s", esp_err_to_name(err));
+    }
+    xSemaphoreGive(g_crash_journal_mutex);
+}
+
+/* Persist a clean shutdown so the next boot can tell a clean restart from a
+ * crash. Registered with esp_register_shutdown_handler(). */
+static void crash_journal_shutdown_handler(void)
+{
+    if (g_crash_journal_mutex == NULL) {
+        return;
+    }
+    if (xSemaphoreTake(g_crash_journal_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return;
+    }
+    crash_journal_capture(&g_crash_journal);
+    g_crash_journal.clean_shutdown = 1;
+    /* clean_shutdown was changed after capture finalized the checksum. */
+    crash_journal_finalize(&g_crash_journal);
+    (void)crash_journal_save(&g_crash_journal);
+    xSemaphoreGive(g_crash_journal_mutex);
+}
+
+/* Load the previous session's journal, report the reset reason, then start a
+ * fresh record for this session. */
+static void crash_journal_init(void)
+{
+    g_crash_journal_mutex = xSemaphoreCreateMutex();
+    if (g_crash_journal_mutex == NULL) {
+        ESP_LOGW(TAG, "Crash journal disabled: no mutex");
+        return;
+    }
+
+    g_current_reset_reason = (int32_t)esp_reset_reason();
+    ESP_LOGI(TAG, "Reset reason: %s (%d)",
+             crash_journal_reset_reason_name((int)g_current_reset_reason),
+             (int)g_current_reset_reason);
+
+    crash_journal_t previous = {0};
+    bool found = false;
+    if (crash_journal_load(&previous, &found) == ESP_OK && found) {
+        if (previous.clean_shutdown) {
+            ESP_LOGI(TAG, "Previous session (boot %lu) ended cleanly after %llu ms",
+                     (unsigned long)previous.boot_count,
+                     (unsigned long long)previous.session_uptime_ms);
+        } else {
+            ESP_LOGW(TAG,
+                     "Previous session (boot %lu) did NOT end cleanly: reason=%s "
+                     "uptime=%llu ms free_heap=%lu sml_ok=%lu sml_fail=%lu "
+                     "uart_rx=%lu fifo=%lu rx_full=%lu frame_err=%lu parity_err=%lu "
+                     "queue_drops=%lu",
+                     (unsigned long)previous.boot_count,
+                     crash_journal_reset_reason_name((int)previous.reset_reason),
+                     (unsigned long long)previous.session_uptime_ms,
+                     (unsigned long)previous.free_heap,
+                     (unsigned long)previous.sml_sent_ok,
+                     (unsigned long)previous.sml_send_fail,
+                     (unsigned long)previous.uart_rx_bytes,
+                     (unsigned long)previous.fifo_overflows,
+                     (unsigned long)previous.rx_buffer_full,
+                     (unsigned long)previous.frame_errors,
+                     (unsigned long)previous.parity_errors,
+                     (unsigned long)previous.tx_queue_drops);
+            for (uint8_t i = 0; i < previous.event_count; ++i) {
+                ESP_LOGW(TAG, "  last event %u: [%u] %s", (unsigned)i,
+                         (unsigned)previous.events[i].level,
+                         previous.events[i].text);
+            }
+        }
+    } else {
+        ESP_LOGI(TAG, "No crash journal stored yet");
+    }
+
+    crash_journal_make_fresh(&g_crash_journal, previous.boot_count + 1,
+                             g_current_reset_reason);
+    esp_err_t err = crash_journal_save(&g_crash_journal);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not store the initial crash journal: %s",
+                 esp_err_to_name(err));
+    }
+    ESP_ERROR_CHECK(esp_register_shutdown_handler(crash_journal_shutdown_handler));
 }
 
 static void build_diag_counters_response(const espnow_diag_request_item_t *request,
@@ -750,6 +948,34 @@ static void build_diag_events_response(const espnow_diag_request_item_t *request
                  emitted * sizeof(espnow_diag_event_t);
 }
 
+static void build_diag_crash_response(const espnow_diag_request_item_t *request,
+                                      uint8_t *frame, size_t *frame_len)
+{
+    espnow_diag_crash_response_t *response =
+        (espnow_diag_crash_response_t *)frame;
+    response->header = (espnow_diag_header_t) {
+        .magic = ESPNOW_DIAG_MAGIC,
+        .version = ESPNOW_DIAG_VERSION,
+        .type = ESPNOW_DIAG_TYPE_RESPONSE,
+        .flags = ESPNOW_DIAG_SECTION_CRASH,
+        .request_id = request->request_id,
+        .page = 0,
+    };
+    if (g_crash_journal_mutex != NULL &&
+        xSemaphoreTake(g_crash_journal_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        /* Report the live state, not the (rate-limited) persisted copy, so the
+         * receiver sees the current counters even if nothing was flushed yet. */
+        crash_journal_t live = g_crash_journal;
+        crash_journal_capture(&live);
+        response->journal = live;
+        xSemaphoreGive(g_crash_journal_mutex);
+    } else {
+        memset(&response->journal, 0, sizeof(response->journal));
+    }
+    response->current_reset_reason = g_current_reset_reason;
+    *frame_len = sizeof(*response);
+}
+
 static void espnow_diag_worker(void *arg)
 {
     (void)arg;
@@ -766,6 +992,8 @@ static void espnow_diag_worker(void *arg)
             build_diag_counters_response(&request, frame, &frame_len);
         } else if (request.flags & ESPNOW_DIAG_SECTION_EVENTS) {
             build_diag_events_response(&request, frame, &frame_len);
+        } else if (request.flags & ESPNOW_DIAG_SECTION_CRASH) {
+            build_diag_crash_response(&request, frame, &frame_len);
         } else {
             continue;
         }
@@ -2778,6 +3006,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
         flags = ESPNOW_DIAG_SECTION_EVENTS;
     } else if (strcmp(section_text, "counters") == 0) {
         flags = ESPNOW_DIAG_SECTION_COUNTERS;
+    } else if (strcmp(section_text, "crash") == 0) {
+        flags = ESPNOW_DIAG_SECTION_CRASH;
     } else {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown diagnostic section");
         return ESP_FAIL;
@@ -2800,7 +3030,9 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
     espnow_diag_header_t header;
     memcpy(&header, response, sizeof(header));
 
-    char payload[768];
+    /* Large enough for the counters/events JSON and the full crash report
+     * (counters + up to CRASH_JOURNAL_EVENT_COUNT events). */
+    char payload[1280];
     int len;
     if ((header.flags & ESPNOW_DIAG_SECTION_COUNTERS) &&
         response_len >= sizeof(header) + sizeof(espnow_diag_counters_t)) {
@@ -2868,9 +3100,68 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
             return ESP_FAIL;
         }
         len += closing;
+    } else if ((header.flags & ESPNOW_DIAG_SECTION_CRASH) &&
+               response_len >= sizeof(espnow_diag_crash_response_t)) {
+        espnow_diag_crash_response_t crash;
+        memcpy(&crash, response, sizeof(crash));
+        const crash_journal_t *j = &crash.journal;
+        char events_json[512];
+        int events_len = 0;
+        for (uint8_t i = 0; i < j->event_count && i < CRASH_JOURNAL_EVENT_COUNT; ++i) {
+            char text[CRASH_JOURNAL_EVENT_TEXT_LEN + 1];
+            memcpy(text, j->events[i].text, CRASH_JOURNAL_EVENT_TEXT_LEN);
+            text[CRASH_JOURNAL_EVENT_TEXT_LEN] = '\0';
+            int written = snprintf(events_json + events_len,
+                                   sizeof(events_json) - (size_t)events_len,
+                                   "%s{\"timestamp_ms\":%llu,\"level\":%u,\"text\":\"%s\"}",
+                                   i == 0 ? "" : ",",
+                                   (unsigned long long)j->events[i].timestamp_ms,
+                                   (unsigned int)j->events[i].level, text);
+            if (written < 0 ||
+                (size_t)(events_len + written) >= sizeof(events_json)) {
+                events_len = 0;
+                break;
+            }
+            events_len += written;
+        }
+        len = snprintf(payload, sizeof(payload),
+                       "{\"section\":\"crash\",\"valid\":%s,\"boot_count\":%lu,"
+                       "\"reset_reason\":%d,\"reset_reason_name\":\"%s\","
+                       "\"current_reset_reason\":%d,\"current_reset_reason_name\":\"%s\","
+                       "\"clean_shutdown\":%s,\"session_uptime_ms\":%llu,"
+                       "\"free_heap\":%lu,\"uart_rx_bytes\":%lu,\"fifo_overflows\":%lu,"
+                       "\"rx_buffer_full\":%lu,\"frame_errors\":%lu,\"parity_errors\":%lu,"
+                       "\"tx_queue_drops\":%lu,\"sml_sent_ok\":%lu,\"sml_send_fail\":%lu,"
+                       "\"diag_requests\":%lu,\"last_sequence\":%lu,\"events\":[%s]}",
+                       crash_journal_is_valid(j) ? "true" : "false",
+                       (unsigned long)j->boot_count,
+                       (int)j->reset_reason,
+                       crash_journal_reset_reason_name((int)j->reset_reason),
+                       (int)crash.current_reset_reason,
+                       crash_journal_reset_reason_name((int)crash.current_reset_reason),
+                       j->clean_shutdown ? "true" : "false",
+                       (unsigned long long)j->session_uptime_ms,
+                       (unsigned long)j->free_heap,
+                       (unsigned long)j->uart_rx_bytes,
+                       (unsigned long)j->fifo_overflows,
+                       (unsigned long)j->rx_buffer_full,
+                       (unsigned long)j->frame_errors,
+                       (unsigned long)j->parity_errors,
+                       (unsigned long)j->tx_queue_drops,
+                       (unsigned long)j->sml_sent_ok,
+                       (unsigned long)j->sml_send_fail,
+                       (unsigned long)j->diag_requests,
+                       (unsigned long)j->last_sequence,
+                       events_len != 0 ? events_json : "");
     } else {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "Unexpected diagnostic response");
+        return ESP_FAIL;
+    }
+
+    if (len < 0 || (size_t)len >= sizeof(payload)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Diagnostic response too large");
         return ESP_FAIL;
     }
 
@@ -2888,9 +3179,24 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "<button id=\"load\" type=\"button\">Request sender diagnostics</button>"
         "<p id=\"status\">Idle; no diagnostic packets are sent during normal operation.</p>"
         "<h2>Counters</h2><pre id=\"counters\"></pre>"
+        "<h2>Last crash / previous session</h2><pre id=\"crash\"></pre>"
         "<h2>Recent events</h2><pre id=\"events\"></pre><script>"
         "const byId=id=>document.getElementById(id);"
         "function fmt(o){return JSON.stringify(o,null,2);}"
+        "async function loadCrash(){"
+        "const r=await fetch('/api/sender-diag?section=crash',{cache:'no-store'});"
+        "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
+        "const ev=(d.events||[]).map(e=>'    '+new Date(e.timestamp_ms).toISOString()+' ['+e.level+'] '+e.text).join(String.fromCharCode(10));"
+        "let head='Previous session: '+(d.clean_shutdown?'ended cleanly':'DID NOT END CLEANLY')"
+        "+String.fromCharCode(10)+'  reset reason: '+d.reset_reason_name+' ('+d.reset_reason+')'"
+        "+String.fromCharCode(10)+'  uptime: '+(d.session_uptime_ms/1000).toFixed(1)+' s'"
+        "+String.fromCharCode(10)+'  boot count: '+d.boot_count"
+        "+String.fromCharCode(10)+'  free heap: '+d.free_heap+' bytes'"
+        "+String.fromCharCode(10)+'  sml ok/fail: '+d.sml_sent_ok+'/'+d.sml_send_fail"
+        "+String.fromCharCode(10)+'  uart rx: '+d.uart_rx_bytes+'  fifo: '+d.fifo_overflows+'  frame err: '+d.frame_errors+'  parity err: '+d.parity_errors"
+        "+String.fromCharCode(10)+'  queue drops: '+d.tx_queue_drops"
+        "+String.fromCharCode(10)+'This boot started with: '+d.current_reset_reason_name+' ('+d.current_reset_reason+')  <- why the previous session ended';"
+        "byId('crash').textContent=head+(ev?String.fromCharCode(10)+'  last events:'+String.fromCharCode(10)+ev:'');}"
         "async function loadEvents(){let page=0,all=[];for(;;){"
         "const r=await fetch('/api/sender-diag?section=events&page='+page,{cache:'no-store'});"
         "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
@@ -2899,7 +3205,7 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "async function load(){byId('status').textContent='Requesting...';"
         "try{const r=await fetch('/api/sender-diag?section=counters',{cache:'no-store'});"
         "if(!r.ok)throw new Error(await r.text());byId('counters').textContent=fmt(await r.json());"
-        "await loadEvents();byId('status').textContent='Diagnostics received.';}"
+        "await loadCrash();await loadEvents();byId('status').textContent='Diagnostics received.';}"
         "catch(e){byId('status').textContent='Request failed: '+e;}}"
         "byId('load').addEventListener('click',load);"
         "</script><p><a href=\"/\">Back</a></p></body></html>";
@@ -3422,6 +3728,10 @@ static void start_webserver(void)
 #if CONFIG_ESPNOW_ROLE_SENDER
 static void run_sender(void)
 {
+    /* Load the previous session's journal and report the reset reason first, so
+     * a crash is explained as early as possible in the boot log. */
+    crash_journal_init();
+
     const uart_config_t uart_config = {
         .baud_rate = UART_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,

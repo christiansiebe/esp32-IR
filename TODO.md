@@ -87,3 +87,19 @@ Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungsh
   fiel und der Verlauf auf 0 zurueckging. Fix: gueltiger Fresh-Header + In-Place-Reparatur
   bei ungueltigen Kopien. **Hardware-verifiziert**: nach Reboot sofort 10 Minutenwerte
   wieder vorhanden, `storage_ready: true`, 0 Schreibfehler.
+- **Absturzdiagnose + persistentes Crash-Journal (Sender)**: Der Sender hat kein Netz, das
+  On-Demand-Diagnose-Ringpuffer lag nur im RAM und war nach einem Absturz weg. Neu:
+  - `main/crash_journal.{h,c}` (reine, hosttestbare Logik) + `main/crash_journal_store.c`
+    (NVS-Bindung). Ein kleines, per CRC32 gesichertes Abbild (Zaehler + Schwanz des
+    Event-Rings) ueberlebt den Reset.
+  - Beim Boot wird der Reset-Grund geloggt und die vorige Session bewertet
+    (`clean_shutdown`), inklusive der letzten Events. Ein Shutdown-Handler markiert
+    saubere Reboots, damit Abstuerze erkennbar sind.
+  - Neuer Diagnose-Abschnitt `crash` (Request/Response), Empfaenger liefert JSON und
+    zeigt ihn auf `/diag` an. Antwort passt in ein ESP-NOW-Paket (243 Byte, Static-Assert).
+  - Schreibdrosselung (30 s) gegen NVS-Verschleiss, ERROR-Events schreiben sofort.
+  - **Parser-Haerten**: Off-by-one in `smlNewList` (`nodes[10]`), das bei tiefer
+    Listenverschachtelung ein Element ueber das Array schrieb; dazu gepruefte
+    OBIS-Varianten (`smlOBISCheck`, `smlOBISByUnitChecked`). Host-Test
+    `test/test_sml_parser.cpp` laeuft unter AddressSanitizer und reproduziert den
+    urspruenglichen Ueberlauf nachweislich (rot ohne Fix, gruen mit Fix).

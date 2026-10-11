@@ -39,4 +39,20 @@ Two firmware roles are built from one source tree.
   `test/test_ws_client.py`, `test/check_dashboard_js.py`.
 - `test/check_dashboard_js.py` extracts the dashboard JS embedded in a C string
   in `main/main.c` and checks syntax and a runtime smoke test with Node
-  (Node is a test-time dependency only).
+  (Node is a test-time dependency only). It also syntax-checks the diagnostics
+  page JS from `diag_page_handler` in `main.c`.
+- `test/test_sml_parser.cpp` exercises the vendored SML parser under
+  AddressSanitizer/UBSan (depth guard in `smlNewList`, OBIS bounds on empty and
+  truncated lists, fuzzed byte streams). It is built and run by
+  `run_host_tests.sh`, so a parser buffer overrun fails CI.
+
+## Crash diagnostics (sender)
+- The sender persists a small, CRC32-checksummed crash journal in NVS
+  (`crash_journal.c` + `crash_journal_store.c`): counters plus the tail of the
+  diagnostic event ring. On boot `crash_journal_init()` logs the reset reason
+  and whether the previous session ended cleanly (shutdown handler marks clean
+  reboots). The receiver reads it via the `crash` diagnostic section
+  (`/api/sender-diag?section=crash`, shown on `/diag`).
+- Writes are rate limited (30 s) to protect NVS endurance; ERROR events write
+  immediately. The wire response is a single ESP-NOW payload (243 bytes,
+  guarded by a `_Static_assert` in `main.c`).

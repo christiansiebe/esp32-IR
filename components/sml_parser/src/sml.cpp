@@ -101,7 +101,9 @@ void reduceList()
 void smlNewList(unsigned char size)
 {
   reduceList();
-  if (currentLevel < MAX_TREE_SIZE)
+  /* Keep the write inside nodes[]: currentLevel must never reach
+   * MAX_TREE_SIZE (index would be out of bounds on a deeply nested list). */
+  if (currentLevel < MAX_TREE_SIZE - 1)
     currentLevel++;
   nodes[currentLevel] = size;
   SML_TREELOG(currentLevel, "LISTSTART on level %i with %i nodes\n",
@@ -311,6 +313,12 @@ sml_states_t smlState(unsigned char &currentByte)
 
 bool smlOBISCheck(const unsigned char *obis)
 {
+  /* A list holds at least the two header bytes plus the 6 OBIS bytes; guard
+   * against a truncated list so a malformed telegram cannot read past the
+   * buffer. */
+  if (listPos < 8) {
+    return false;
+  }
   return (memcmp(obis, &listBuffer[2], 6) == 0);
 }
 
@@ -359,26 +367,47 @@ bool smlOBISByUnitChecked(long long int &val, signed char &scaler,
   while (i < listPos) {
     pos++;
     size = (int)listBuffer[i++];
+    if (i >= listPos) {
+      /* truncated list: header says more data than was captured */
+      return false;
+    }
     type = (sml_states_t)listBuffer[i++];
     if (type == SML_LISTSTART && size > 0) {
       // skip a list inside an obis list
       skip = size;
       while (skip > 0) {
+        if (i + 1 >= listPos) {
+          return false;
+        }
         size = (int)listBuffer[i++];
         type = (sml_states_t)listBuffer[i++];
+        if (i + size > listPos) {
+          return false;
+        }
         i += size;
         skip--;
       }
       size = 0;
     }
-    if (pos == 4 && listBuffer[i] != unit) {
-      /* return unknown (-1) if unit does not match */
-      return false;
+    if (pos == 4) {
+      if (i >= listPos) {
+        return false;
+      }
+      if (listBuffer[i] != unit) {
+        /* return unknown (-1) if unit does not match */
+        return false;
+      }
     }
     if (pos == 5) {
+      if (i >= listPos) {
+        return false;
+      }
       scaler = listBuffer[i];
     }
     if (pos == 6) {
+      if (i + size > listPos) {
+        return false;
+      }
       y = size;
       // initialize 64bit signed integer based on MSB from received value
       val =

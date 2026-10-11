@@ -123,6 +123,17 @@ def extract_script(source: str) -> str:
     return match.group(1)
 
 
+def extract_diag_script(source: str) -> str:
+    start = source.index("static esp_err_t diag_page_handler")
+    marker = "</script><p><a href=\\\"/\\\">Back</a></p></body></html>\";"
+    end = source.index(marker, start) + len(marker)
+    page = c_string_contents(source[start:end])
+    match = re.search(r"<script>(.*)</script>", page, re.S)
+    if not match:
+        raise SystemExit("no <script> block found in the diagnostics page")
+    return match.group(1)
+
+
 def main() -> int:
     node = shutil.which("node")
     if node is None:
@@ -130,13 +141,25 @@ def main() -> int:
         return 0
 
     with open(MAIN_C, encoding="utf-8") as handle:
-        script = extract_script(handle.read())
+        source = handle.read()
+    script = extract_script(source)
+    diag_script = extract_diag_script(source)
 
     workdir = tempfile.mkdtemp()
     try:
         script_path = os.path.join(workdir, "dash.js")
         with open(script_path, "w", encoding="utf-8") as handle:
             handle.write(script)
+
+        diag_path = os.path.join(workdir, "diag.js")
+        with open(diag_path, "w", encoding="utf-8") as handle:
+            handle.write(diag_script)
+        diag_check = subprocess.run([node, "--check", diag_path],
+                                    capture_output=True, text=True)
+        if diag_check.returncode != 0:
+            print("diagnostics page JS syntax error:")
+            print(diag_check.stderr)
+            return 1
 
         check = subprocess.run([node, "--check", script_path],
                                capture_output=True, text=True)
@@ -163,6 +186,7 @@ def main() -> int:
         shutil.rmtree(workdir, ignore_errors=True)
 
     print("dashboard JS syntax ok (%d bytes)" % len(script))
+    print("diagnostics page JS syntax ok (%d bytes)" % len(diag_script))
     return 0
 
 
