@@ -45,6 +45,11 @@ static void remember_value(const unsigned char *obis, sml_units_t unit,
     pending_timestamp_us = timestamp_us;
 }
 
+extern "C" bool sml_adapter_awaiting_telegram(void)
+{
+    return smlCurrentState() == SML_START;
+}
+
 extern "C" sml_adapter_result_t sml_adapter_feed_byte(uint8_t byte,
                                                         uint64_t timestamp_us)
 {

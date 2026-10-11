@@ -1581,7 +1581,7 @@ static void uart_capture_worker(void *arg)
             uint64_t gap_us = now_us - g_uart_last_byte_us;
             if (gap_us >= UART_GAP_THRESHOLD_MS * 1000ULL) {
                 uint32_t gap_ms = (uint32_t)(gap_us / 1000ULL);
-                bool mid_telegram = smlCurrentState() != SML_START;
+                bool mid_telegram = !sml_adapter_awaiting_telegram();
                 portENTER_CRITICAL(&g_uart_stats_lock);
                 ++g_uart_gap_count;
                 if (mid_telegram) {
