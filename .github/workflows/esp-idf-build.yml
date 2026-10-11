@@ -78,6 +78,17 @@ jobs:
           idf.py --version
           idf.py -B "build/${{ matrix.role }}" build
 
+      - name: Verify 80 MHz CPU clock is in effect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q '^CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80$' "$SDKCONFIG"; then
+            echo "Expected CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80 but got:"
+            grep 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ' "$SDKCONFIG" || echo "(not set)"
+            exit 1
+          fi
+          echo "CPU default frequency is 80 MHz"
+
       - name: Stage firmware and flash files
         shell: bash
         run: |
