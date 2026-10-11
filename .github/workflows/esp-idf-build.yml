@@ -72,7 +72,9 @@ jobs:
           test -s "$build_dir/partition_table/partition-table.bin"
           test -s "$build_dir/flasher_args.json"
           test -s "$build_dir/ota_data_initial.bin"
+          test -s "$build_dir/storage.bin"
           cp "$build_dir/ota_data_initial.bin" "$out_dir/ota_data_initial.bin"
+          cp "$build_dir/storage.bin" "$out_dir/storage.bin"
           
           cp "$build_dir/esp32-IR.bin" \
             "$out_dir/${{ matrix.role }}-sml.bin"
