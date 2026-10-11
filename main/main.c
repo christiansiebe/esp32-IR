@@ -645,7 +645,7 @@ static void espnow_ota_worker(void *arg)
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
-static void crash_journal_persist(bool force);
+static void crash_journal_persist(uint8_t level);
 
 static void diag_log_event(uint8_t level, const char *format, ...)
 {
@@ -666,9 +666,9 @@ static void diag_log_event(uint8_t level, const char *format, ...)
     }
     portEXIT_CRITICAL(&g_diag_event_lock);
 
-    /* ERROR events are the interesting ones around a fault, so they always
-     * refresh the persistent journal; INFO/WARN are rate limited. */
-    crash_journal_persist(level == ESPNOW_DIAG_LEVEL_ERROR);
+    /* ERROR events refresh the journal quickly, INFO/WARN slowly, so a crash
+     * keeps a recent picture without exhausting the NVS flash. */
+    crash_journal_persist(level);
 }
 
 /* Copy the live counters and event tail into *journal (checksum finalized).
@@ -740,21 +740,25 @@ static void crash_journal_capture(crash_journal_t *journal)
 }
 
 /* Refresh the stored journal from the live counters. NVS has limited write
- * endurance and the UART error events can be frequent, so writes are rate
- * limited unless `force` is set (used for ERROR events). */
-#define CRASH_JOURNAL_PERSIST_MIN_INTERVAL_MS 30000
+ * endurance and the UART error events can be frequent, so writes are always
+ * rate limited: ERROR events use a short interval to keep the journal close to
+ * a fault, INFO/WARN use a long interval. */
+#define CRASH_JOURNAL_ERROR_INTERVAL_MS 5000
+#define CRASH_JOURNAL_SLOW_INTERVAL_MS  60000
 
 static int64_t g_crash_journal_last_persist_us;
 
-static void crash_journal_persist(bool force)
+static void crash_journal_persist(uint8_t level)
 {
     if (g_crash_journal_mutex == NULL) {
         return;
     }
     int64_t now = esp_timer_get_time();
-    if (!force &&
-        now - g_crash_journal_last_persist_us <
-            (int64_t)CRASH_JOURNAL_PERSIST_MIN_INTERVAL_MS * 1000) {
+    int64_t interval_us =
+        (level == ESPNOW_DIAG_LEVEL_ERROR)
+            ? (int64_t)CRASH_JOURNAL_ERROR_INTERVAL_MS * 1000
+            : (int64_t)CRASH_JOURNAL_SLOW_INTERVAL_MS * 1000;
+    if (now - g_crash_journal_last_persist_us < interval_us) {
         return;
     }
     if (xSemaphoreTake(g_crash_journal_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
@@ -1610,6 +1614,9 @@ static void uart_event_worker(void *arg)
                      (unsigned long)parity_errors,
                      (unsigned long)transport_queue_drops);
             next_stats_us = now_us + 10000000LL;
+            /* Periodic heartbeat refresh so the persisted counters stay close
+             * to reality even when no diagnostic event fires (60 s interval). */
+            crash_journal_persist(ESPNOW_DIAG_LEVEL_WARN);
         }
     }
 }

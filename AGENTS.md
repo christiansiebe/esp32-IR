@@ -53,6 +53,21 @@ Two firmware roles are built from one source tree.
   and whether the previous session ended cleanly (shutdown handler marks clean
   reboots). The receiver reads it via the `crash` diagnostic section
   (`/api/sender-diag?section=crash`, shown on `/diag`).
-- Writes are rate limited (30 s) to protect NVS endurance; ERROR events write
-  immediately. The wire response is a single ESP-NOW payload (243 bytes,
-  guarded by a `_Static_assert` in `main.c`).
+- Writes are rate limited to protect NVS endurance: ERROR events at most every
+  5 s, INFO/WARN at most every 60 s, plus a 60 s heartbeat in the UART stats
+  task. The wire response is a single ESP-NOW payload (243 bytes, guarded by a
+  `_Static_assert` in `main.c`).
+
+## Watchdog (reviewed, not enabled)
+- No `esp_task_wdt_*` usage anywhere; the task watchdog (TWDT) and interrupt
+  watchdog are left at the IDF defaults (enabled, panic on timeout). So a hang
+  in a watched task already reboots the device and shows up as
+  `task-watchdog`/`interrupt-watchdog` in the crash journal.
+- The sender's workers all block on a queue/semaphore/UART read with a finite
+  timeout and have no busy loop, so they should not trip the TWDT. `app_main`
+  returns after `run_sender()`, and the IDF main task is subscribed to the TWDT
+  by default; it does not idle-panic here (default `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1`).
+- Consideration for a future change: enabling `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0`
+  would catch a fully starved CPU0, but on the ESP32 the Arduino-ESP32 core
+  disables the idle-task checks specifically to avoid false resets, and the
+  project has no hardware-in-the-loop test to validate it. Left off deliberately.

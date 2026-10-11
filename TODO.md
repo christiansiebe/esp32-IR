@@ -97,7 +97,8 @@ Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungsh
     saubere Reboots, damit Abstuerze erkennbar sind.
   - Neuer Diagnose-Abschnitt `crash` (Request/Response), Empfaenger liefert JSON und
     zeigt ihn auf `/diag` an. Antwort passt in ein ESP-NOW-Paket (243 Byte, Static-Assert).
-  - Schreibdrosselung (30 s) gegen NVS-Verschleiss, ERROR-Events schreiben sofort.
+  - Gestufte Schreibdrosselung gegen NVS-Verschleiss (ERROR 5 s, INFO/WARN 60 s)
+    plus 60-s-Heartbeat, damit die Zaehler auch ohne Event aktuell bleiben.
   - **Parser-Haerten**: Off-by-one in `smlNewList` (`nodes[10]`), das bei tiefer
     Listenverschachtelung ein Element ueber das Array schrieb; dazu gepruefte
     OBIS-Varianten (`smlOBISCheck`, `smlOBISByUnitChecked`). Host-Test
