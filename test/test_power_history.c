@@ -254,6 +254,31 @@ static void test_dst_neutral_utc_days(void)
     CHECK((day * 1000) / 900000 == 96, "a UTC day has 96 fifteen-minute buckets");
 }
 
+/* 9) Regression: a freshly created header must be valid, and an all-zero
+ *    header must be invalid. The latter guards the reboot-data-loss bug where
+ *    the empty-file branch wrote magic=0, so the next boot saw two invalid
+ *    copies and silently fell back to RAM (history reset to 0 every reboot). */
+static void test_fresh_header_validity(void)
+{
+    printf("test_fresh_header_validity\n");
+    power_history_header_t header;
+    power_history_make_fresh_header(&header);
+    CHECK(power_history_header_is_valid(&header), "fresh header is valid");
+    CHECK(header.magic != 0, "fresh header carries a magic");
+    CHECK(header.version == 2, "fresh header carries the current version");
+
+    power_history_header_t zeroed;
+    memset(&zeroed, 0, sizeof(zeroed));
+    CHECK(!power_history_header_is_valid(&zeroed),
+          "all-zero header (old bug output) is rejected");
+
+    power_history_header_t wrong_version = header;
+    wrong_version.version = 99;
+    wrong_version.checksum = 0; /* checksum no longer matches either */
+    CHECK(!power_history_header_is_valid(&wrong_version),
+          "header with foreign version is rejected");
+}
+
 int main(void)
 {
     test_15min_average_basic();
@@ -264,6 +289,7 @@ int main(void)
     test_full_day_96_buckets();
     test_leap_day_boundary();
     test_dst_neutral_utc_days();
+    test_fresh_header_validity();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

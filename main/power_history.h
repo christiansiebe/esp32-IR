@@ -28,6 +28,23 @@ typedef struct {
     uint32_t write_errors;
 } power_history_status_t;
 
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    uint32_t generation;
+    uint32_t next_sequence;
+    uint32_t record_count;
+    uint32_t next_slot;
+    uint32_t checksum;
+} power_history_header_t;
+
+/* Fill a header with the values a freshly created history file must carry.
+ * Exposed (with the validator) so the boot-time header invariants can be
+ * covered by host tests without touching SPIFFS. */
+void power_history_make_fresh_header(power_history_header_t *header);
+bool power_history_header_is_valid(const power_history_header_t *header);
+
 esp_err_t power_history_init(void);
 bool power_history_enqueue(const power_history_record_t *record);
 esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,

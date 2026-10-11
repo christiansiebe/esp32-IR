@@ -23,17 +23,6 @@
 #define POWER_HISTORY_BATCH_RECORDS 5u
 #define POWER_HISTORY_BATCH_TIMEOUT_MS 60000u
 
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t reserved;
-    uint32_t generation;
-    uint32_t next_sequence;
-    uint32_t record_count;
-    uint32_t next_slot;
-    uint32_t checksum;
-} power_history_header_t;
-
 static const char *TAG = "power_history";
 static FILE *g_history_file;
 static power_history_header_t g_history_header;
@@ -88,6 +77,21 @@ static bool header_is_valid(const power_history_header_t *header)
            header->record_count <= POWER_HISTORY_CAPACITY &&
            header->next_slot < POWER_HISTORY_CAPACITY &&
            header->checksum == header_checksum(header);
+}
+
+void power_history_make_fresh_header(power_history_header_t *header)
+{
+    memset(header, 0, sizeof(*header));
+    header->magic = POWER_HISTORY_MAGIC;
+    header->version = POWER_HISTORY_VERSION;
+    header->generation = 1;
+    header->next_sequence = 1;
+    header->checksum = header_checksum(header);
+}
+
+bool power_history_header_is_valid(const power_history_header_t *header)
+{
+    return header_is_valid(header);
 }
 
 static bool write_header_copy(uint8_t copy,
@@ -239,15 +243,13 @@ esp_err_t power_history_init(void)
         }
     }
     if (g_history_file == NULL) {
-        memset(&g_history_header, 0, sizeof(g_history_header));
-        g_history_header.magic = POWER_HISTORY_MAGIC;
-        g_history_header.version = POWER_HISTORY_VERSION;
-        g_history_header.generation = 1;
-        g_history_header.next_sequence = 1;
-        g_history_header.checksum = header_checksum(&g_history_header);
+        power_history_make_fresh_header(&g_history_header);
         g_active_header_copy = 1;
     } else if (fseek(g_history_file, 0, SEEK_END) != 0 || ftell(g_history_file) == 0) {
-        memset(&g_history_header, 0, sizeof(g_history_header));
+        /* Empty file: write the fresh header into both copies. A previous bug
+         * stored an all-zero (invalid) header here, so the next boot saw two
+         * invalid copies and silently fell back to RAM, dropping every reboot. */
+        power_history_make_fresh_header(&g_history_header);
         power_history_header_t previous = g_history_header;
         previous.generation = 0;
         previous.checksum = header_checksum(&previous);
@@ -256,12 +258,7 @@ esp_err_t power_history_init(void)
             ESP_LOGE(TAG, "Could not initialize persistent history metadata; continuing with RAM history");
             fclose(g_history_file);
             g_history_file = NULL;
-            memset(&g_history_header, 0, sizeof(g_history_header));
-            g_history_header.magic = POWER_HISTORY_MAGIC;
-            g_history_header.version = POWER_HISTORY_VERSION;
-            g_history_header.generation = 1;
-            g_history_header.next_sequence = 1;
-            g_history_header.checksum = header_checksum(&g_history_header);
+            power_history_make_fresh_header(&g_history_header);
             g_active_header_copy = 1;
         } else {
             g_active_header_copy = 1;
@@ -276,15 +273,21 @@ esp_err_t power_history_init(void)
             }
         }
         if (!valid[0] && !valid[1]) {
-            ESP_LOGE(TAG, "Persistent history metadata is corrupt; using RAM history and preserving partition");
-            fclose(g_history_file);
-            g_history_file = NULL;
-            memset(&g_history_header, 0, sizeof(g_history_header));
-            g_history_header.magic = POWER_HISTORY_MAGIC;
-            g_history_header.version = POWER_HISTORY_VERSION;
-            g_history_header.generation = 1;
-            g_history_header.next_sequence = 1;
-            g_history_header.checksum = header_checksum(&g_history_header);
+            /* Recover in place: create a fresh header instead of dropping to the
+             * RAM-only fallback. The records may be gone, but history persists
+             * across the next reboot again (and a diagnostic log explains why). */
+            ESP_LOGW(TAG, "Persistent history metadata was invalid; reinitializing header");
+            power_history_make_fresh_header(&g_history_header);
+            power_history_header_t previous = g_history_header;
+            previous.generation = 0;
+            previous.checksum = header_checksum(&previous);
+            if (!write_header_copy(0, &previous) ||
+                !write_header_copy(1, &g_history_header)) {
+                ESP_LOGE(TAG, "Could not write recovered history metadata; using RAM history");
+                fclose(g_history_file);
+                g_history_file = NULL;
+                power_history_make_fresh_header(&g_history_header);
+            }
             g_active_header_copy = 1;
         } else if (valid[0] && valid[1]) {
             g_active_header_copy =
