@@ -31,3 +31,4 @@ trap 'rm -rf "$out"' EXIT
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"
+python3 "$here/check_dashboard_js.py"

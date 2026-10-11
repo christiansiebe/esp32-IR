@@ -61,6 +61,10 @@ Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungsh
       mitschreibt (dann ist der Import nur noch fuer die Alt-Daten noetig).
 
 ### Power-History-Dashboard (kosmetisch, optional)
+- [x] **Balken-Wert per Hover/Tap einblenden**: Tooltip auf dem Canvas zeigt Wert + Zeitpunkt;
+      Maus (`mousemove`) und Touch (`touchstart`/`touchmove`) unterstuetzt, funktioniert also
+      auch am Touch-Display. Basis-Chart liegt in einem Offscreen-Canvas, beim Hervorheben
+      wird nur geblittet + der Balken betont. JS-Syntax- und Laufzeit-Check in CI.
 - [ ] `current_sample_count`-Label praezisieren (aktuell: 15-min-Ringpuffer, nicht Samples im aktuellen 60-s-Bucket).
 - [ ] `resize`-Handler startet zusaetzliche 60-s-Schleifen (`updateHistory`) -> Mehrfach-Timer vermeiden.
 

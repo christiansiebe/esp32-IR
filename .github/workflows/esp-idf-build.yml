@@ -26,6 +26,7 @@ jobs:
           python3 test/test_ha_stats.py
           python3 test/test_ws_min.py
           python3 test/test_ws_client.py
+          python3 test/check_dashboard_js.py
 
   build:
     name: Build ${{ matrix.role }}
