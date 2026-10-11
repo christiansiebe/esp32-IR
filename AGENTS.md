@@ -65,9 +65,12 @@ Two firmware roles are built from one source tree.
   `sml_adapter_awaiting_telegram()`: `SML_START` (waiting for a telegram) or
   `SML_FINAL` (previous telegram just delivered) = between telegrams (fine),
   anything else = a gap inside a telegram (bytes lost, the parser will fail its
-  checksum). Counters: `gap_count`/`gap_quiet`/`gap_mid`/`last_gap_ms`/
-  `max_gap_ms`, plus `last_rx_ago_ms`. A total silence longer than
-  `UART_SILENCE_ALERT_MS` (30 s) logs a one-shot ERROR event.
+  checksum). Counters: `gap_count`/`gap_quiet`/`gap_mid`/`gap_loss`/
+  `last_gap_ms`/`max_gap_ms`, plus `last_rx_ago_ms`. A mid-telegram gap is not
+  proof of loss by itself: only a following failed checksum increments
+  `gap_loss` (the meter may pause inside a split telegram and still pass).
+  A total silence longer than `UART_SILENCE_ALERT_MS` (30 s) logs a one-shot
+  ERROR event.
 - These are exposed in the counters diagnostic section and rendered with a
   plain-language verdict on `/diag`.
 

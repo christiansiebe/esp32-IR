@@ -191,6 +191,8 @@ static uint32_t g_uart_gap_quiet;
 static uint32_t g_uart_gap_mid;
 static uint32_t g_uart_gap_last_ms;
 static uint32_t g_uart_gap_max_ms;
+static uint32_t g_uart_gap_loss;
+static bool g_uart_gap_mid_pending;
 static uint64_t g_uart_last_byte_us;
 static bool g_uart_silence_reported;
 static espnow_diag_event_t g_diag_events[ESPNOW_DIAG_EVENT_RING];
@@ -899,6 +901,7 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     uint32_t gap_mid;
     uint32_t gap_last_ms;
     uint32_t gap_max_ms;
+    uint32_t gap_loss;
     uint64_t last_byte_us;
     portENTER_CRITICAL(&g_uart_stats_lock);
     rx_bytes = g_uart_rx_bytes;
@@ -916,6 +919,7 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     gap_mid = g_uart_gap_mid;
     gap_last_ms = g_uart_gap_last_ms;
     gap_max_ms = g_uart_gap_max_ms;
+    gap_loss = g_uart_gap_loss;
     last_byte_us = g_uart_last_byte_us;
     portEXIT_CRITICAL(&g_uart_stats_lock);
 
@@ -946,6 +950,7 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .last_gap_ms = gap_last_ms,
         .max_gap_ms = gap_max_ms,
         .last_rx_ago_ms = last_rx_ago_ms,
+        .gap_loss = gap_loss,
     };
     *frame_len = sizeof(*header) + sizeof(*counters);
 }
@@ -1466,6 +1471,21 @@ void sml_adapter_telegram_callback(uint64_t timestamp_us, bool crc_valid,
         return;
     }
 
+    /* Resolve a pending mid-telegram gap: only a failed checksum proves that
+     * the gap actually cost bytes. A passing checksum means the gap was just
+     * the meter pausing between fragments of a split telegram. */
+    bool gap_pending;
+    portENTER_CRITICAL(&g_uart_stats_lock);
+    gap_pending = g_uart_gap_mid_pending;
+    g_uart_gap_mid_pending = false;
+    if (gap_pending && !crc_valid) {
+        ++g_uart_gap_loss;
+    }
+    portEXIT_CRITICAL(&g_uart_stats_lock);
+    if (gap_pending && !crc_valid) {
+        diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "gap cost bytes (crc failed)");
+    }
+
     sml_tx_item_t item = {
         .timestamp_us = timestamp_us,
         .crc_valid = crc_valid,
@@ -1586,6 +1606,7 @@ static void uart_capture_worker(void *arg)
                 ++g_uart_gap_count;
                 if (mid_telegram) {
                     ++g_uart_gap_mid;
+                    g_uart_gap_mid_pending = true;
                 } else {
                     ++g_uart_gap_quiet;
                 }
@@ -1594,14 +1615,11 @@ static void uart_capture_worker(void *arg)
                     g_uart_gap_max_ms = gap_ms;
                 }
                 portEXIT_CRITICAL(&g_uart_stats_lock);
-                if (mid_telegram) {
-                    diag_log_event(ESPNOW_DIAG_LEVEL_WARN,
-                                   "rx gap %lums mid-telegram", (unsigned long)gap_ms);
-                } else {
-                    diag_log_event(ESPNOW_DIAG_LEVEL_INFO,
-                                   "rx gap %lums between telegrams",
-                                   (unsigned long)gap_ms);
-                }
+                /* Logged at INFO: a mid-telegram gap is not proven data loss
+                 * until the telegram fails its checksum (see the callback). */
+                diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "rx gap %lums %s",
+                               (unsigned long)gap_ms,
+                               mid_telegram ? "mid-telegram" : "between telegrams");
             }
         }
         portENTER_CRITICAL(&g_uart_stats_lock);
@@ -3143,7 +3161,7 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"last_request_rssi\":%d,\"channel\":%u,"
                        "\"gap_count\":%lu,\"gap_quiet\":%lu,\"gap_mid\":%lu,"
                        "\"last_gap_ms\":%lu,\"max_gap_ms\":%lu,"
-                       "\"last_rx_ago_ms\":%lu}",
+                       "\"last_rx_ago_ms\":%lu,\"gap_loss\":%lu}",
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
                        (unsigned long)counters.fifo_overflows,
@@ -3164,7 +3182,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.gap_mid,
                        (unsigned long)counters.last_gap_ms,
                        (unsigned long)counters.max_gap_ms,
-                       (unsigned long)counters.last_rx_ago_ms);
+                       (unsigned long)counters.last_rx_ago_ms,
+                       (unsigned long)counters.gap_loss);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -3287,14 +3306,14 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "const byId=id=>document.getElementById(id);"
         "function fmt(o){return JSON.stringify(o,null,2);}"
         "function fmtCounters(d){const nl=String.fromCharCode(10);"
-        "const verdict=d.gap_mid===0"
-        "+'No gaps inside a telegram: the receive pauses are normal silent periods between telegrams.'"
-        "+': '+d.gap_mid+' gaps happened INSIDE a telegram (data lost); the parser will fail its checksum.';"
+        "const verdict=d.gap_loss===0"
+        "+'No gap has cost a telegram yet (every received telegram passed its checksum), so the pauses are normal idle time between or inside telegrams.'"
+        "+': '+d.gap_loss+' gap(s) actually cost bytes - the telegram failed its checksum and was dropped.';"
         "return 'uptime: '+(d.uptime_ms/1000).toFixed(1)+' s  channel: '+d.channel+nl"
         "+'uart rx bytes: '+d.uart_rx_bytes+'  last byte '+d.last_rx_ago_ms+' ms ago'+nl"
         "+'frame err: '+d.frame_errors+'  parity err: '+d.parity_errors+'  fifo: '+d.fifo_overflows+'  rx buf full: '+d.rx_buffer_full+nl"
         "+'sml ok/fail: '+d.sml_sent_ok+'/'+d.sml_send_fail+'  queue drops: '+d.tx_queue_drops+'  last seq: '+d.last_sequence+nl"
-        "+'gaps >= 50 ms: '+d.gap_count+'  (between telegrams: '+d.gap_quiet+', inside a telegram: '+d.gap_mid+')'+nl"
+        "+'gaps >= 50 ms: '+d.gap_count+'  (between telegrams: '+d.gap_quiet+', mid-telegram: '+d.gap_mid+', cost a telegram: '+d.gap_loss+')'+nl"
         "+'last gap: '+d.last_gap_ms+' ms  longest gap: '+d.max_gap_ms+' ms'+nl"
         "+'free heap: '+d.free_heap+' bytes  last send: '+d.last_send_status+'  request rssi: '+d.last_request_rssi+nl"
         "+'VERDICT: '+verdict;}"
