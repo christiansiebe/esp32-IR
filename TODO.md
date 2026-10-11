@@ -40,26 +40,25 @@ Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungsh
       SPIFFS-Status (Datei offen) melden, damit „bereit" nicht in die Irre fuehrt.
 
 ### MQTT / Home Assistant (geplant)
-- [ ] **MQTT-Client im Empfaenger** (ESP-IDF `mqtt`/esp-mqtt). Broker/Port/Benutzer/Passwort
-      + Topic-Prefix in NVS (bestehendes `metercfg`-Namespace erweitern). LWT-Topic fuer
-      online/offline, Publish von:
+- [x] **Speicherdaten nach HA bringen** (ohne MQTT): `tools/ha_import.py` zieht die
+      Rohdaten ueber `/api/power-history?after=<seq>`, aggregiert stuendlich
+      (`tools/ha_stats.py`) und importiert sie per HA-WebSocket-Befehl
+      `recorder/import_statistics` mit echten UTC-Zeitstempeln. Version-aware
+      (`mean_type`/`unit_class` ab HA 2025.10). Stdlib-only WebSocket-Client
+      (`tools/ws_min.py`). Tests: 28 + 16 + 7 Checks, keine Mocks.
+- [ ] **MQTT-Client im Empfaenger** (esp-mqtt; in IDF v6.1 als Komponente
+      `espressif/mqtt` nachzuziehen). Broker/Port/User/Passwort + Topic-Prefix in
+      NVS. LWT fuer online/offline, Publish von:
       - Live-Leistung: `<prefix>/power` (W)
       - Abgeschlossener Minutenwert: `<prefix>/history` als JSON
         `{"t":<utc>,"w":<avg>,"n":<count>}`
       - Verfuegbarkeit: `<prefix>/status` (online/offline via LWT)
       Nur Empfaenger (hat STA/Netz); ESP-NOW, OTA und Rollen bleiben unberuehrt.
-- [ ] **Home-Assistant-Discovery** (`homeassistant/sensor/.../config`), damit die Entitaeten
-      automatisch erscheinen: `device_class: power`, `state_class: measurement`, Unit W,
-      plus Energie-Zaehler (kWh) fuer das Energie-Dashboard.
-- [ ] **Speicherdaten nach HA bringen**: HAs Recorder fuellt per MQTT **nicht** rueckwirkend
-      auf. Optionen (mit Nutzer waehlen):
-      - **Replay**: beim Connect die gespeicherten Minutenwerte einmalig publizieren
-        (begrenzte Burst-Anzahl), plus Web-Konsolen-Befehl `mqtt replay N`.
-      - **Langzeit-Statistik-Import** in HA aus dem Replay (`recorder.import_statistics`
-        bzw. Statistik-Import) — exakte API vor Umsetzung verifizieren.
-      - **REST-Sensor** in HA, der `/api/power-history?day=...` (CSV/JSON) zieht und
-        rueckwirkend eintraegt.
-- [ ] **Web-Konsolen-Befehle**: `mqtt status`, `mqtt reconnect`, `mqtt replay N`.
+- [ ] **Home-Assistant-Discovery** (`homeassistant/sensor/.../config`), damit die
+      Entitaeten automatisch erscheinen: `device_class: power`,
+      `state_class: measurement`, Unit W, plus Energie-Zaehler (kWh).
+- [ ] Optional: Live-MQTT-Push der Minutenwerte, damit HA ab sofort selbst
+      mitschreibt (dann ist der Import nur noch fuer die Alt-Daten noetig).
 
 ### Power-History-Dashboard (kosmetisch, optional)
 - [ ] `current_sample_count`-Label praezisieren (aktuell: 15-min-Ringpuffer, nicht Samples im aktuellen 60-s-Bucket).

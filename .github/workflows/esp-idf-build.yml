@@ -20,6 +20,13 @@ jobs:
         shell: bash
         run: ./test/run_host_tests.sh
 
+      - name: Run Home Assistant import helper tests
+        shell: bash
+        run: |
+          python3 test/test_ha_stats.py
+          python3 test/test_ws_min.py
+          python3 test/test_ws_client.py
+
   build:
     name: Build ${{ matrix.role }}
     runs-on: ubuntu-24.04

@@ -27,3 +27,7 @@ trap 'rm -rf "$out"' EXIT
     -o "$out/test_web_console"
 
 "$out/test_web_console"
+
+python3 "$here/test_ha_stats.py"
+python3 "$here/test_ws_min.py"
+python3 "$here/test_ws_client.py"
