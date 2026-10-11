@@ -112,6 +112,10 @@ sml_states_t smlState(unsigned char &byte);
 /*! Reset parser state after a transport discontinuity. */
 void smlReset(void);
 
+/*! Current parser state. SML_START means "waiting for the next telegram", so a
+ * byte gap in any other state is a gap in the middle of a telegram. */
+sml_states_t smlCurrentState(void);
+
 /* ! Return whether the 6-character OBIS identifier (binary encoded) matches to
  * the last received message.
  * If it does, use one of the specific functions to retrieve the value.

@@ -63,6 +63,13 @@ typedef struct __attribute__((packed)) {
     int8_t last_request_rssi;
     uint8_t channel;
     uint8_t reserved;
+    /* Transport-gap diagnosis (see the sender's uart_capture_worker). */
+    uint32_t gap_count;
+    uint32_t gap_quiet;         /* gap while waiting for a telegram */
+    uint32_t gap_mid;           /* gap inside a telegram */
+    uint32_t last_gap_ms;       /* length of the most recent gap */
+    uint32_t max_gap_ms;        /* longest gap in this session */
+    uint32_t last_rx_ago_ms;    /* time since the last received byte */
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {

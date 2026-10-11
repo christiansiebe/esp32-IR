@@ -69,6 +69,11 @@ void smlReset(void)
   listPos = 0;
 }
 
+sml_states_t smlCurrentState(void)
+{
+  return currentState;
+}
+
 void crc16(unsigned char &byte)
 {
 #ifdef ARDUINO

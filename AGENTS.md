@@ -58,6 +58,18 @@ Two firmware roles are built from one source tree.
   task. The wire response is a single ESP-NOW payload (243 bytes, guarded by a
   `_Static_assert` in `main.c`).
 
+## UART receive-gap diagnosis (sender)
+- The read head (IR diode UART) delivers bytes in bursts; silent gaps between
+  telegrams are normal. `uart_capture_worker` measures the gap between byte
+  bursts (threshold `UART_GAP_THRESHOLD_MS`, 50 ms) and classifies each gap with
+  `smlCurrentState()`: `SML_START` = waiting for a telegram (fine),
+  anything else = a gap inside a telegram (bytes lost, the parser will fail its
+  checksum). Counters: `gap_count`/`gap_quiet`/`gap_mid`/`last_gap_ms`/
+  `max_gap_ms`, plus `last_rx_ago_ms`. A total silence longer than
+  `UART_SILENCE_ALERT_MS` (30 s) logs a one-shot ERROR event.
+- These are exposed in the counters diagnostic section and rendered with a
+  plain-language verdict on `/diag`.
+
 ## Watchdog (reviewed, not enabled)
 - No `esp_task_wdt_*` usage anywhere; the task watchdog (TWDT) and interrupt
   watchdog are left at the IDF defaults (enabled, panic on timeout). So a hang

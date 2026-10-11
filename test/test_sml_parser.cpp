@@ -102,6 +102,20 @@ int main(void)
     }
     CHECK(1, "random byte stream did not crash");
 
+    /* The gap diagnosis relies on smlCurrentState(): SML_START means "waiting
+     * for a telegram", anything else means a gap would be mid-telegram. */
+    smlReset();
+    CHECK(smlCurrentState() == SML_START,
+          "parser is idle (SML_START) right after reset");
+    feed_start();
+    static const unsigned char partial[] = {0x77, 0x07, 0x01};
+    feed(partial, sizeof(partial));
+    CHECK(smlCurrentState() != SML_START,
+          "parser is mid-telegram after a partial telegram");
+    smlReset();
+    CHECK(smlCurrentState() == SML_START,
+          "parser returns to SML_START after a reset");
+
     printf("sml parser robustness: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
