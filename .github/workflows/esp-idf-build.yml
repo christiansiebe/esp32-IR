@@ -102,9 +102,7 @@ jobs:
           test -s "$build_dir/partition_table/partition-table.bin"
           test -s "$build_dir/flasher_args.json"
           test -s "$build_dir/ota_data_initial.bin"
-          test -s "$build_dir/storage.bin"
           cp "$build_dir/ota_data_initial.bin" "$out_dir/ota_data_initial.bin"
-          cp "$build_dir/storage.bin" "$out_dir/storage.bin"
           
           cp "$build_dir/esp32-IR.bin" \
             "$out_dir/${{ matrix.role }}-sml.bin"
@@ -115,6 +113,25 @@ jobs:
           cp "$build_dir/flasher_args.json" \
             "$out_dir/flasher_args.json"
           cp partitions.csv "$out_dir/partitions.csv"
+
+          # The aggregate bundle must never write the SPIFFS "storage"
+          # partition: flashing a blank storage.bin wipes the persisted
+          # minute history. Strip the storage entry so flashing this bundle
+          # keeps the data; OTA updates never touch it either.
+          python3 - "$out_dir/flasher_args.json" <<'PYEOF'
+          import json, sys
+          path = sys.argv[1]
+          with open(path) as fh:
+              args = json.load(fh)
+          for off in [k for k, v in list(args.get("flash_files", {}).items())
+                      if str(v).endswith("storage.bin")]:
+              del args["flash_files"][off]
+          args.get("flash_settings", {}).pop("storage", None)
+          args.pop("storage", None)
+          with open(path, "w") as fh:
+              json.dump(args, fh, indent=4)
+          print("flasher_args.json: storage entry stripped (SPIFFS preserved).")
+          PYEOF
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
