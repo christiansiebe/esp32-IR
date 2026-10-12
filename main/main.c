@@ -205,6 +205,15 @@ static bool g_uart_gap_mid_pending;
 static uint32_t g_uart_parser_resyncs;
 static uint64_t g_uart_last_byte_us;
 static uint64_t g_uart_last_telegram_us;
+/* Wall clock learned from the receiver (the only NTP-synced side). Events are
+ * stamped with esp_timer uptime plus this offset, so the sender stays
+ * self-sufficient between calibrations. */
+static portMUX_TYPE g_time_sync_lock = portMUX_INITIALIZER_UNLOCKED;
+static int64_t g_utc_offset_us;
+static bool g_utc_valid;
+static uint32_t g_time_sync_count;
+static uint8_t g_receiver_mac[ESP_NOW_ETH_ALEN];
+static bool g_receiver_mac_valid;
 static bool g_uart_silence_reported;
 static espnow_diag_event_t g_diag_events[ESPNOW_DIAG_EVENT_RING];
 static size_t g_diag_event_count;
@@ -676,6 +685,23 @@ static void espnow_ota_worker(void *arg)
 
 #if CONFIG_ESPNOW_ROLE_SENDER
 static void crash_journal_persist(uint8_t level);
+static void time_sync_worker(void *arg);
+
+/* Current wall-clock time as Unix ms. Before the first calibration the sender
+ * has no clock, so the uptime is reported (as before). After calibration the
+ * events carry real time until the offset drifts. */
+static uint64_t event_wall_ms(void)
+{
+    uint64_t uptime_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    portENTER_CRITICAL(&g_time_sync_lock);
+    bool valid = g_utc_valid;
+    int64_t offset_us = g_utc_offset_us;
+    portEXIT_CRITICAL(&g_time_sync_lock);
+    if (!valid) {
+        return uptime_ms;
+    }
+    return (uint64_t)((int64_t)uptime_ms + offset_us / 1000);
+}
 
 static void diag_log_event(uint8_t level, const char *format, ...)
 {
@@ -687,7 +713,7 @@ static void diag_log_event(uint8_t level, const char *format, ...)
 
     portENTER_CRITICAL(&g_diag_event_lock);
     espnow_diag_event_t *event = &g_diag_events[g_diag_event_next];
-    event->timestamp_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    event->timestamp_ms = event_wall_ms();
     event->level = level;
     memcpy(event->text, text, sizeof(event->text));
     g_diag_event_next = (g_diag_event_next + 1) % ESPNOW_DIAG_EVENT_RING;
@@ -936,6 +962,11 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     last_byte_us = g_uart_last_byte_us;
     portEXIT_CRITICAL(&g_uart_stats_lock);
 
+    uint32_t time_syncs;
+    portENTER_CRITICAL(&g_time_sync_lock);
+    time_syncs = g_time_sync_count;
+    portEXIT_CRITICAL(&g_time_sync_lock);
+
     uint64_t now_us = (uint64_t)esp_timer_get_time();
     uint32_t last_rx_ago_ms =
         last_byte_us != 0 ? (uint32_t)((now_us - last_byte_us) / 1000ULL) : 0;
@@ -965,6 +996,7 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .last_rx_ago_ms = last_rx_ago_ms,
         .gap_loss = gap_loss,
         .parser_resyncs = parser_resyncs,
+        .time_syncs = time_syncs,
     };
     *frame_len = sizeof(*header) + sizeof(*counters);
 }
@@ -1113,6 +1145,72 @@ static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_statu
         }
     }
 }
+
+/* Ask the receiver for its wall clock: once on boot, then hourly. The receiver
+ * is the only side with an NTP-synced clock, so the sender cannot do this
+ * itself. Between calibrations the sender keeps its own esp_timer offset. */
+#define TIME_SYNC_INTERVAL_US (60LL * 60LL * 1000000LL)
+
+static void time_sync_worker(void *arg)
+{
+    (void)arg;
+    while (1) {
+        uint8_t receiver_mac[ESP_NOW_ETH_ALEN];
+        portENTER_CRITICAL(&g_time_sync_lock);
+        bool known = g_receiver_mac_valid;
+        memcpy(receiver_mac, g_receiver_mac, ESP_NOW_ETH_ALEN);
+        portEXIT_CRITICAL(&g_time_sync_lock);
+
+        if (!known) {
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            continue;
+        }
+
+        if (add_espnow_peer(receiver_mac, WIFI_IF_STA) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+
+        espnow_diag_time_sync_t request = {
+            .header = {
+                .magic = ESPNOW_DIAG_MAGIC,
+                .version = ESPNOW_DIAG_VERSION,
+                .type = ESPNOW_DIAG_TYPE_REQUEST,
+                .flags = ESPNOW_DIAG_SECTION_TIME_SYNC,
+                .request_id = (uint32_t)esp_random(),
+                .page = 0,
+            },
+            .uptime_ms = (uint64_t)(esp_timer_get_time() / 1000),
+        };
+        if (request.header.request_id == 0) {
+            request.header.request_id = 1;
+        }
+
+        portENTER_CRITICAL(&g_time_sync_lock);
+        g_utc_valid = false; /* response must arrive before the next send */
+        portEXIT_CRITICAL(&g_time_sync_lock);
+
+        if (esp_now_send(receiver_mac, (const uint8_t *)&request,
+                         sizeof(request)) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+
+        /* The receiver answers in receive_callback(); the interval is shortened
+         * if no valid answer arrived (not synced yet, or packet lost). */
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        portENTER_CRITICAL(&g_time_sync_lock);
+        bool valid = g_utc_valid;
+        portEXIT_CRITICAL(&g_time_sync_lock);
+        if (!valid) {
+            /* Receiver has no NTP fix yet (or the packet was lost); retry soon
+             * but not so often that it becomes chatter. */
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            continue;
+        }
+        vTaskDelay(pdMS_TO_TICKS((TickType_t)(TIME_SYNC_INTERVAL_US / 1000)));
+    }
+}
 #endif
 
 static bool is_espnow_ota_packet(const uint8_t *data, int data_len)
@@ -1125,7 +1223,6 @@ static bool is_espnow_ota_packet(const uint8_t *data, int data_len)
     return packet.magic == ESPNOW_OTA_MAGIC && packet.version == ESPNOW_OTA_VERSION;
 }
 
-#if CONFIG_ESPNOW_ROLE_SENDER
 static bool is_diag_request(const uint8_t *data, int data_len)
 {
     if (data == NULL || data_len < (int)sizeof(espnow_diag_header_t)) {
@@ -1138,7 +1235,6 @@ static bool is_diag_request(const uint8_t *data, int data_len)
            header.type == ESPNOW_DIAG_TYPE_REQUEST;
 }
 
-#else
 static bool is_diag_response(const uint8_t *data, int data_len)
 {
     if (data == NULL || data_len < (int)sizeof(espnow_diag_header_t)) {
@@ -1150,7 +1246,6 @@ static bool is_diag_response(const uint8_t *data, int data_len)
            header.version == ESPNOW_DIAG_VERSION &&
            header.type == ESPNOW_DIAG_TYPE_RESPONSE;
 }
-#endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
 static void record_rssi_sample(int8_t rssi_dbm)
@@ -1223,6 +1318,30 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         }
         return;
     }
+    if (is_diag_response(data, data_len)) {
+        /* The only response the sender expects is the time sync. Learn the
+         * receiver MAC here as well, so a later sync can be addressed directly
+         * even if the SML broadcast sender address differs. */
+        portENTER_CRITICAL(&g_time_sync_lock);
+        memcpy(g_receiver_mac, info->src_addr, ESP_NOW_ETH_ALEN);
+        g_receiver_mac_valid = true;
+        portEXIT_CRITICAL(&g_time_sync_lock);
+
+        if (data_len >= (int)sizeof(espnow_diag_time_sync_t)) {
+            espnow_diag_time_sync_t response;
+            memcpy(&response, data, sizeof(response));
+            if ((response.header.flags & ESPNOW_DIAG_SECTION_TIME_SYNC) &&
+                response.valid && response.utc_seconds > 0) {
+                int64_t uptime_us = (int64_t)response.uptime_ms * 1000;
+                portENTER_CRITICAL(&g_time_sync_lock);
+                g_utc_offset_us = response.utc_seconds * 1000000 - uptime_us;
+                g_utc_valid = true;
+                ++g_time_sync_count;
+                portEXIT_CRITICAL(&g_time_sync_lock);
+            }
+        }
+        return;
+    }
 #else
     if (is_espnow_ota_packet(data, data_len)) {
         espnow_ota_packet_t packet;
@@ -1248,6 +1367,32 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             memcpy(item.data, data, (size_t)data_len);
             if (xQueueSend(g_diag_response_queue, &item, 0) != pdTRUE) {
                 ESP_LOGW(TAG, "Diagnostic response queue full");
+            }
+        }
+        return;
+    }
+    if (is_diag_request(data, data_len) && data_len >= (int)sizeof(espnow_diag_time_sync_t)) {
+        /* The sender asks for the wall clock. Only the receiver has an
+         * NTP-synced clock, so answer with the current UTC seconds. */
+        espnow_diag_time_sync_t request;
+        memcpy(&request, data, sizeof(request));
+        if (request.header.flags & ESPNOW_DIAG_SECTION_TIME_SYNC) {
+            espnow_diag_time_sync_t response = {
+                .header = {
+                    .magic = ESPNOW_DIAG_MAGIC,
+                    .version = ESPNOW_DIAG_VERSION,
+                    .type = ESPNOW_DIAG_TYPE_RESPONSE,
+                    .flags = ESPNOW_DIAG_SECTION_TIME_SYNC,
+                    .request_id = request.header.request_id,
+                    .page = 0,
+                },
+                .uptime_ms = request.uptime_ms,
+                .utc_seconds = (int64_t)time(NULL),
+                .valid = system_time_is_valid() ? 1 : 0,
+            };
+            if (add_espnow_peer(info->src_addr, WIFI_IF_AP) == ESP_OK) {
+                (void)esp_now_send(info->src_addr, (const uint8_t *)&response,
+                                   sizeof(response));
             }
         }
         return;
@@ -3206,7 +3351,7 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"gap_count\":%lu,\"gap_quiet\":%lu,\"gap_mid\":%lu,"
                        "\"last_gap_ms\":%lu,\"max_gap_ms\":%lu,"
                        "\"last_rx_ago_ms\":%lu,\"gap_loss\":%lu,"
-                       "\"parser_resyncs\":%lu}",
+                       "\"parser_resyncs\":%lu,\"time_syncs\":%lu}",
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
                        (unsigned long)counters.fifo_overflows,
@@ -3229,7 +3374,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.max_gap_ms,
                        (unsigned long)counters.last_rx_ago_ms,
                        (unsigned long)counters.gap_loss,
-                       (unsigned long)counters.parser_resyncs);
+                       (unsigned long)counters.parser_resyncs,
+                       (unsigned long)counters.time_syncs);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -3353,9 +3499,12 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "const byId=id=>document.getElementById(id);"
         "function fmt(o){return JSON.stringify(o,null,2);}"
         "let capturedUptimeMs=null;let capturedAt=0;"
-        "function relBase(ms,base){return 'T-'+Math.round((base-ms)/1000)+'s';}"
-        "function rel(ms){if(capturedUptimeMs===null)return new Date(ms).toISOString();"
-        "return relBase(ms,capturedUptimeMs);}"
+        "function fmtTs(ms,base){"
+        "if(ms>1e12)return new Date(ms).toISOString();"
+        "if(base===null||base===undefined)return 'uptime '+ms+'ms';"
+        "return 'T-'+Math.round((base-ms)/1000)+'s';}"
+        "function rel(ms){return fmtTs(ms,capturedUptimeMs);}"
+        "function relBase(ms,base){return fmtTs(ms,base);}"
         "function fmtCounters(d){const nl=String.fromCharCode(10);"
         "capturedUptimeMs=d.uptime_ms;capturedAt=Date.now();"
         "const verdict=(d.gap_loss===0&&d.parser_resyncs===0)"
@@ -3369,7 +3518,7 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "+'frame err: '+d.frame_errors+'  parity err: '+d.parity_errors+'  fifo: '+d.fifo_overflows+'  rx buf full: '+d.rx_buffer_full+nl"
         "+'sml ok/fail: '+d.sml_sent_ok+'/'+d.sml_send_fail+'  queue drops: '+d.tx_queue_drops+'  last seq: '+d.last_sequence+nl"
         "+'gaps >= 50 ms: '+d.gap_count+'  (between telegrams: '+d.gap_quiet+', mid-telegram: '+d.gap_mid+', cost a telegram: '+d.gap_loss+')'+nl"
-        "+'parser resyncs: '+d.parser_resyncs+nl"
+        "+'parser resyncs: '+d.parser_resyncs+'  clock calibrations: '+d.time_syncs+nl"
         "+'last gap: '+d.last_gap_ms+' ms  longest gap: '+d.max_gap_ms+' ms'+nl"
         "+'free heap: '+d.free_heap+' bytes  last send: '+d.last_send_status+'  request rssi: '+d.last_request_rssi+nl"
         "+'VERDICT: '+verdict;}"
@@ -3994,6 +4143,12 @@ static void run_sender(void)
                               4096, NULL, 4, NULL);
     if (task_result != pdPASS) {
         ESP_LOGE(TAG, "Could not start sender diagnostic worker");
+        ESP_ERROR_CHECK(ESP_FAIL);
+    }
+    task_result = xTaskCreate(time_sync_worker, "time_sync",
+                              3072, NULL, 3, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Could not start sender time-sync worker");
         ESP_ERROR_CHECK(ESP_FAIL);
     }
 }

@@ -24,6 +24,10 @@
 #define ESPNOW_DIAG_SECTION_COUNTERS 0x0001u
 #define ESPNOW_DIAG_SECTION_EVENTS   0x0002u
 #define ESPNOW_DIAG_SECTION_CRASH    0x0004u
+/* The sender asks the receiver for the wall clock (the receiver is the only
+ * side with an NTP-synced clock). The request carries the sender's uptime; the
+ * response carries the receiver's UTC seconds. */
+#define ESPNOW_DIAG_SECTION_TIME_SYNC 0x0008u
 
 /* Response flag: at least one more event page follows for this request. */
 #define ESPNOW_DIAG_FLAG_MORE 0x8000u
@@ -72,6 +76,7 @@ typedef struct __attribute__((packed)) {
     uint32_t last_rx_ago_ms;    /* time since the last received byte */
     uint32_t gap_loss;          /* mid-telegram gaps that failed the checksum */
     uint32_t parser_resyncs;    /* parser resets after a truncated telegram */
+    uint32_t time_syncs;        /* successful wall-clock calibrations */
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {
@@ -86,3 +91,13 @@ typedef struct __attribute__((packed)) {
     uint8_t event_count;
     espnow_diag_event_t events[ESPNOW_DIAG_EVENTS_PER_PACKET];
 } espnow_diag_events_response_t;
+
+/* Time-sync exchange. The sender sends its uptime; the receiver answers with
+ * its NTP-synced UTC seconds. The sender keeps offset = utc - uptime/1e6 and
+ * stamps events with real time until the next calibration. */
+typedef struct __attribute__((packed)) {
+    espnow_diag_header_t header;
+    uint64_t uptime_ms;         /* request: sender uptime at send */
+    int64_t utc_seconds;        /* response: receiver UTC (0 = not synced) */
+    uint8_t valid;              /* response: 1 when utc_seconds is trustworthy */
+} espnow_diag_time_sync_t;
