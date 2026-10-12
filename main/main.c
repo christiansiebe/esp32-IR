@@ -212,6 +212,7 @@ static portMUX_TYPE g_time_sync_lock = portMUX_INITIALIZER_UNLOCKED;
 static int64_t g_utc_offset_us;
 static bool g_utc_valid;
 static uint32_t g_time_sync_count;
+static uint32_t g_time_request_count;
 static uint8_t g_receiver_mac[ESP_NOW_ETH_ALEN];
 static bool g_receiver_mac_valid;
 static bool g_uart_silence_reported;
@@ -963,8 +964,10 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     portEXIT_CRITICAL(&g_uart_stats_lock);
 
     uint32_t time_syncs;
+    uint32_t time_requests;
     portENTER_CRITICAL(&g_time_sync_lock);
     time_syncs = g_time_sync_count;
+    time_requests = g_time_request_count;
     portEXIT_CRITICAL(&g_time_sync_lock);
 
     uint64_t now_us = (uint64_t)esp_timer_get_time();
@@ -997,6 +1000,7 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .gap_loss = gap_loss,
         .parser_resyncs = parser_resyncs,
         .time_syncs = time_syncs,
+        .time_requests = time_requests,
     };
     *frame_len = sizeof(*header) + sizeof(*counters);
 }
@@ -1192,9 +1196,15 @@ static void time_sync_worker(void *arg)
 
         if (esp_now_send(destination, (const uint8_t *)&request,
                          sizeof(request)) != ESP_OK) {
+            ESP_LOGW(TAG, "Time-sync request send failed");
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
+        portENTER_CRITICAL(&g_time_sync_lock);
+        ++g_time_request_count;
+        portEXIT_CRITICAL(&g_time_sync_lock);
+        ESP_LOGI(TAG, "Asked receiver for wall clock (%s)",
+                 known ? "unicast" : "broadcast");
 
         /* The receiver answers in receive_callback(); the interval is shortened
          * if no valid answer arrived (not synced yet, or packet lost). */
@@ -1310,6 +1320,12 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             .rssi = (info->rx_ctrl != NULL) ? info->rx_ctrl->rssi : 0,
         };
         memcpy(request.source, info->src_addr, ESP_NOW_ETH_ALEN);
+        /* The receiver polling diagnostics is an early source of its MAC, so a
+         * later time-sync request can go unicast right away. */
+        portENTER_CRITICAL(&g_time_sync_lock);
+        memcpy(g_receiver_mac, info->src_addr, ESP_NOW_ETH_ALEN);
+        g_receiver_mac_valid = true;
+        portEXIT_CRITICAL(&g_time_sync_lock);
         portENTER_CRITICAL(&g_uart_stats_lock);
         ++g_diag_requests;
         portEXIT_CRITICAL(&g_uart_stats_lock);
@@ -1393,6 +1409,9 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             if (add_espnow_peer(info->src_addr, WIFI_IF_AP) == ESP_OK) {
                 (void)esp_now_send(info->src_addr, (const uint8_t *)&response,
                                    sizeof(response));
+                ESP_LOGI(TAG, "Answered sender time sync (%s, utc=%lld)",
+                         response.valid ? "synced" : "no NTP fix yet",
+                         (long long)response.utc_seconds);
             }
         }
         return;
@@ -3351,7 +3370,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"gap_count\":%lu,\"gap_quiet\":%lu,\"gap_mid\":%lu,"
                        "\"last_gap_ms\":%lu,\"max_gap_ms\":%lu,"
                        "\"last_rx_ago_ms\":%lu,\"gap_loss\":%lu,"
-                       "\"parser_resyncs\":%lu,\"time_syncs\":%lu}",
+                       "\"parser_resyncs\":%lu,\"time_syncs\":%lu,"
+                       "\"time_requests\":%lu}",
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
                        (unsigned long)counters.fifo_overflows,
@@ -3375,7 +3395,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.last_rx_ago_ms,
                        (unsigned long)counters.gap_loss,
                        (unsigned long)counters.parser_resyncs,
-                       (unsigned long)counters.time_syncs);
+                       (unsigned long)counters.time_syncs,
+                       (unsigned long)counters.time_requests);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -3508,17 +3529,17 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "function fmtCounters(d){const nl=String.fromCharCode(10);"
         "capturedUptimeMs=d.uptime_ms;capturedAt=Date.now();"
         "const verdict=(d.gap_loss===0&&d.parser_resyncs===0)"
-        "+'No gap has cost a telegram and the parser never had to resync: the pauses are normal idle time between or inside telegrams.'"
-        "+': '+(d.gap_loss?d.gap_loss+' gap(s) cost bytes (checksum failed); ':'')"
+        "? 'No gap has cost a telegram and the parser never had to resync: the pauses are normal idle time between or inside telegrams.'"
+        ": ((d.gap_loss?d.gap_loss+' gap(s) cost bytes (checksum failed); ':'')"
         "+(d.parser_resyncs?d.parser_resyncs+' parser resync(s) after a truncated telegram; ':'')"
-        "+'the read head is losing the byte stream sometimes.';"
+        "+'the read head is losing the byte stream sometimes.');"
         "return 'captured: '+new Date(capturedAt).toLocaleTimeString()+'  (T+'+(d.uptime_ms/1000).toFixed(1)+' s after sender boot)'+nl"
         "+'uptime: '+(d.uptime_ms/1000).toFixed(1)+' s  channel: '+d.channel+nl"
         "+'uart rx bytes: '+d.uart_rx_bytes+'  last byte '+d.last_rx_ago_ms+' ms ago'+nl"
         "+'frame err: '+d.frame_errors+'  parity err: '+d.parity_errors+'  fifo: '+d.fifo_overflows+'  rx buf full: '+d.rx_buffer_full+nl"
         "+'sml ok/fail: '+d.sml_sent_ok+'/'+d.sml_send_fail+'  queue drops: '+d.tx_queue_drops+'  last seq: '+d.last_sequence+nl"
         "+'gaps >= 50 ms: '+d.gap_count+'  (between telegrams: '+d.gap_quiet+', mid-telegram: '+d.gap_mid+', cost a telegram: '+d.gap_loss+')'+nl"
-        "+'parser resyncs: '+d.parser_resyncs+'  clock calibrations: '+d.time_syncs+nl"
+        "+'parser resyncs: '+d.parser_resyncs+'  clock calibrations: '+d.time_syncs+' (requests sent: '+d.time_requests+')'+nl"
         "+'last gap: '+d.last_gap_ms+' ms  longest gap: '+d.max_gap_ms+' ms'+nl"
         "+'free heap: '+d.free_heap+' bytes  last send: '+d.last_send_status+'  request rssi: '+d.last_request_rssi+nl"
         "+'VERDICT: '+verdict;}"

@@ -77,6 +77,7 @@ typedef struct __attribute__((packed)) {
     uint32_t gap_loss;          /* mid-telegram gaps that failed the checksum */
     uint32_t parser_resyncs;    /* parser resets after a truncated telegram */
     uint32_t time_syncs;        /* successful wall-clock calibrations */
+    uint32_t time_requests;     /* wall-clock requests sent to the receiver */
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {
