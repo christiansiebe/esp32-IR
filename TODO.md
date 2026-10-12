@@ -140,6 +140,33 @@ Ziel: Der **Sender** soll ebenfalls die persistente Minutenhistorie bekommen und
 - Akzeptanz: Sender legt die Minutenhistorie im Flash ab und stellt sie nach Reboot wieder her
   (`record_count > 0`, kein RAM-Fallback) — identisch zum Empfänger.
 
+### Synchronisation: Empfänger holt fehlende Sender-Daten (Backfill)
+Ziel: Der Empfänger soll Minutenwerte, die er **nicht** mitbekommen hat (Funklücke,
+Sender/Receiver-Neustart, OTA), **nachträglich vom Sender** holen — der Sender hat sie
+in seiner eigenen SPIFFS-Historie (siehe oben).
+
+- [ ] Neuen Diagnose-Abschnitt `history` im vorhandenen ESP-NOW-Diag-Protokoll ergänzen:
+      Request = `after_sequence`/`from_utc` + `count`; Response = eine Seite Records + `more`.
+      Platz: ESP-NOW-Payload 250 B, `power_history_record_t` = 28 B → ca. 8 Records/Paket.
+- [ ] Pagination mit `more`-Flag und fester Seitengröße (z. B. 6–8 Records), analog zum
+      OTA-Chunking (BEGIN/DATA/END) — inklusive ACK/Retry, ESP-NOW ist unzuverlässig.
+- [ ] Empfänger merkt sich seinen letzten Stand (Sequenz/Zeitstempel) und fordert gezielt
+      „alles danach“ an. **Merge/Dedupe nach Zeitstempel**; Live-Daten des Empfängers
+      bleiben erhalten, der Sender füllt nur Lücken.
+- [ ] Voraussetzung Zeit: Der Sender kann nur mit Wall-Clock korrekt stempeln → der
+      ESP-NOW-Wall-Clock-Sync (`a8a3e23`) muss vor dem Aufzeichnen gelaufen sein; sonst
+      `bucket_start==0` sauber behandeln (Uptime-Fallback).
+- [ ] Rate/Dauer: 30000 × 28 B ≈ 840 KB → über ESP-NOW (~1–10 KB/s) **Stunden**.
+      Daher nur **inkrementell** (nur die Lücke) und gedrosselt; große Nachladungen
+      lieber in Häppchen (z. B. max. N Seiten pro Zyklus).
+- [ ] Auslöser: automatisch nach Boot/Reconnect **und** manuell per Button/Endpoint
+      (z. B. `POST /api/history-pull`) mit Statusanzeige („x/y Records übernommen“).
+- [ ] Host-Test für Merge/Dedupe; CI baut beide Rollen.
+
+**Offene Designfrage:** Quelle der Wahrheit, wenn beide gleichzeitig aufzeichnen — der
+Sender liest den Zähler direkt, der Empfänger sieht nur die Funkkopie. Vorschlag:
+**Sender = Quelle**, Empfänger merged nur die Lücken (kein Überschreiben eigener Werte).
+
 ## Partitionstabelle (geändert, `c3d3420`) — Flash-Reihenfolge & Auswirkungen
 Ziel: zwei echte OTA-Slots à 1,5 MB; `storage` bleibt an exakt derselben Adresse, damit
 die SPIFFS-Minutenhistorie einen COM-Re-Flash überlebt.
