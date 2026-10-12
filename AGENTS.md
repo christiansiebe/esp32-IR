@@ -92,9 +92,13 @@ receiver's `time(NULL)` seconds and a validity flag (`system_time_is_valid`).
 The sender stores `offset = utc - uptime` and stamps `diag_log_event` with real
 time (`event_wall_ms`), falling back to uptime until the first sync. Between
 calibrations the sender counts on its own crystal (10-50 ppm, so under ~0.2 s
-per hour). The receiver MAC is learned from the time-sync response. The
+per hour). The receiver MAC is learned from the time-sync response and from
+incoming diagnostic requests; until it is known the request is broadcast. The
 `/diag` dashboard shows absolute ISO time once stamps look like real dates
-(> 1e12), otherwise relative `T-xx s` or raw uptime.
+(> 1e12), otherwise relative `T-xx s` or raw uptime, and lists `time_syncs`
+(successful calibrations) next to `time_requests` (requests sent). If
+`time_requests` grows but `time_syncs` stays 0, the receiver has no NTP fix
+(check `clock_synced` on the receiver) or still runs old firmware.
 
 ## Watchdog (reviewed, not enabled)
 - No `esp_task_wdt_*` usage anywhere; the task watchdog (TWDT) and interrupt
