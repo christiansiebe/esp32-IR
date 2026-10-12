@@ -107,6 +107,30 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       (In `mqtt_*` angelegt, aber nicht integriert.)
 - [ ] Optional: konfigurierbares Reboot-Intervall (nächtlich), Deckelung wie AMS.
 
+### SPIFFS-Historie auch im Sender (gleiche Speicherung wie Empfänger)
+Ziel: Der **Sender** soll ebenfalls die persistente Minutenhistorie bekommen und die Daten
+**genau wie der Empfänger** ablegen (gleiches `power_history`-Format, gleiche Datei).
+- Ausgangslage: `power_history_init()`, `g_power_sample_timer` und der History-Worker laufen
+  nur im Empfänger-Zweig (`app_main`, `#else`-Block zu `CONFIG_ESPNOW_ROLE_SENDER`,
+  `main.c` um 4206–4216). Der Sender sendet nur per ESP-NOW, führt **keine** lokale Historie.
+- Partition ist bereits vorhanden: `partitions.csv` ist für **beide** Rollen identisch,
+  `storage` = `data/spiffs`, `0x320000`/`0xE0000` liegt auch im Sender-Image. Also **keine**
+  Repartitionierung nötig — dieselbe Datei `/powerlog/quarters.bin`, dieselben Offsets.
+- Zu tun:
+  - [ ] `power_history_init()` + Sample-Timer + Worker aus dem Empfänger-`#else` herauslösen,
+        sodass **beide** Rollen sie starten (Sender: keine Web-API/Aggregation nötig, nur
+        Aufzeichnung + Persistenz).
+  - [ ] Gleiches On-Disk-Format/Datei wie Empfänger (nichts am Layout ändern, siehe
+        Non-negotiable „Historie nie verlieren"), Migration/Versionen (`4af921a`) gelten mit.
+  - [ ] Sender-Zeitbasis: ohne Empfänger gibt es keine Wall-Clock (Uptime-Fallback) → Sender-
+        Historie muss `bucket_start==0` sauber behandeln (hängt an „letzte Zeit persistieren").
+  - [ ] Flash-Regel bleibt: `storage` bei **keinem** Bundle schreiben/erassen; nach jedem
+        Flash `record_count > 0` prüfen (auch beim Sender).
+  - [ ] Host-Test + CI: beide Rollen bauen; Persistenz-Test
+        (`test/test_reboot_persistence.c`) gilt analog für den Sender.
+- Akzeptanz: Sender legt die Minutenhistorie im Flash ab und stellt sie nach Reboot wieder her
+  (`record_count > 0`, kein RAM-Fallback) — identisch zum Empfänger.
+
 ## Partitionstabelle (geändert, `c3d3420`) — Flash-Reihenfolge & Auswirkungen
 Ziel: zwei echte OTA-Slots à 1,5 MB; `storage` bleibt an exakt derselben Adresse, damit
 die SPIFFS-Minutenhistorie einen COM-Re-Flash überlebt.
