@@ -76,6 +76,11 @@ Two firmware roles are built from one source tree.
   AddressSanitizer/UBSan (depth guard in `smlNewList`, OBIS bounds on empty and
   truncated lists, fuzzed byte streams). It is built and run by
   `run_host_tests.sh`, so a parser buffer overrun fails CI.
+- `test/stability/run_stability.sh` (also run by `run_host_tests.sh`) builds the
+  power-history logic under AddressSanitizer/UBSan and drives it with ten
+  fault-injection tests (bit flips, random garbage, version/boundary matrix,
+  corrupt-record mixes, argument guards). It must never crash or accept an
+  inconsistent record.
 
 ## Crash diagnostics (sender)
 - The sender persists a small, CRC32-checksummed crash journal in NVS

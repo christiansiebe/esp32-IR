@@ -56,3 +56,8 @@ cxx="${CXX:-g++}"
     -o "$out/test_sml_parser"
 
 ASAN_OPTIONS=detect_leaks=1 "$out/test_sml_parser"
+
+# Stability / fault-injection harness for the power-history logic (ASan+UBSan):
+# corrupted, truncated, adversarial and boundary inputs must never crash or be
+# accepted as consistent records.
+"$here/stability/run_stability.sh"
