@@ -48,6 +48,15 @@ Two firmware roles are built from one source tree.
   `Firmware/Receiver` bundle strip the `storage.bin` entry from
   `flasher_args.json`, so a bundle/com flash keeps the history. OTA and app-only
   flashes were already safe. Do not re-add the storage entry.
+- The ring buffer holds `POWER_HISTORY_CAPACITY` (29000) minute records; when it
+  is full it overwrites the oldest slot (`next_slot = (next_slot + 1) %
+  CAPACITY`). The value is bounded by the SPIFFS partition, not chosen freely:
+  the on-disk file is `2 * header + CAPACITY * sizeof(record) = 56 + CAPACITY*28`
+  bytes and SPIFFS keeps free blocks for wear-levelling GC. 30000 records
+  (840056 B) did **not** fit in the 896 KiB `storage` partition, so the buffer
+  could never wrap and every write past ~29600 records failed with
+  `SPIFFS_ERR_FULL` (recurring dashboard write errors). Before changing the
+  capacity, re-check it with `components/spiffs/spiffsgen.py`.
 - Record format is versioned (`POWER_HISTORY_VERSION`, currently 2). A version
   bump does not drop the stored history: `power_history_migrate_record()` upgrades
   older records in place, kept versions are `[POWER_HISTORY_OLDEST_SUPPORTED_VERSION,

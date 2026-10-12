@@ -47,7 +47,7 @@ Erst danach ist der Push-Blocker in der TODO.md abzuhaken.
 ## ⚠️ Verbindliche Regel: SPIFFS-Historie darf nie verloren gehen
 
 - Partition `storage`: **Offset 0x320000, Größe 0xE0000 (917504 B)**, Datei
-  `/powerlog/quarters.bin`, bis 30000 Minutenwerte.
+  `/powerlog/quarters.bin`, bis 29000 Minutenwerte (~20 Tage; die 896-KiB-Partition fasst keine 30000).
 - Offset/Größe **niemals** ändern oder verschieben.
 - Flash-Bundles/`flasher_args.json` dürfen `storage` **nicht** schreiben
   (umgesetzt: `e944e04`/`aac6ee0`).
@@ -59,7 +59,7 @@ Erst danach ist der Push-Blocker in der TODO.md abzuhaken.
 Symptom: Nach Reboot startet `record_count` bei 0 statt beim gespeicherten Wert
 (ggf. RAM-Fallback trotz vorhandener Datei). Nächste Schritte:
 
-1. Boot-Logzeile `Persistent history ready: N of 30000` gegen `record_count` in
+1. Boot-Logzeile `Persistent history ready: N of 29000` gegen `record_count` in
    `/api/power-history` abgleichen.
 2. Header-Handling prüfen (Fix `1612975`: Fresh-Header + In-Place-Reparatur) — gültiger
    Bestand darf nicht als „leer" gelten.

@@ -342,6 +342,28 @@ Zu tun:
 - [ ] Verifizieren: Live → Button klicken → gestrichelte/gelbe Vergleichskurve +
       Info „Vergleich &lt;Datum&gt; (gelb)“ sichtbar.
 
+### 🐛 Behoben: wiederkehrende „Schreibfehler" (Ringpuffer größer als die Partition)
+`POWER_HISTORY_CAPACITY` war **30000** (→ Datei 56 + 30000·28 = 840 056 B ≈ 820 KiB).
+Die `storage`-SPIFFS-Partition ist aber nur 896 KiB groß und SPIFFS lässt für die
+Garbage Collection Reserve: auf dem Host mit `spiffsgen.py` (ESP-IDF v6.1) nachgerechnet
+passen nur **≈ 29 600** Datensätze hinein. Der Ringpuffer konnte seine Wrap-Grenze daher
+**nie** erreichen: ab ~29 600 Datensätzen (≈ **20,6 Tage Dauerbetrieb**) lief jeder
+Minuten-Schreibvorgang auf `SPIFFS_ERR_FULL`, die Datei wuchs nicht weiter und das
+Dashboard zeigte jede Minute „Schreibfehler: N". Ein Ringpuffer muss beim Vollstand
+überschreiben — das war durch die zu große Kapazität unmöglich.
+- [x] `POWER_HISTORY_CAPACITY` auf **29000** gesenkt (~20,1 Tage, 4 reservierte Blöcke).
+      Überschreib-Logik (`next_slot = (next_slot+1) % CAPACITY`) war korrekt und ist jetzt
+      erstmals erreichbar.
+- [x] Dashboard nutzt `d.capacity` statt der fest verdrahteten „/ 30000" (beide
+      JSON-Header liefern `"capacity"`).
+- [x] Host-Suite grün (`./test/run_host_tests.sh`, inkl. 61 Stability-Checks); kein Test
+      hing an 30000.
+- Hinweis am Gerät: Nach dem Update zeigt das Dashboard erst bei `record_count` nahe der
+      neuen Grenze wieder Schreiben. Einmal `POST /api/reboot` (oder Stecker) und danach
+      „Schreibfehler" beobachten.
+
+
+
 ## Erledigt (in dieser Session)
 - On-Demand-Senderdiagnose ueber ESP-NOW (unicast, Request/Response, echte Sendebestaetigung via Callback).
 - Persistente Leistungshistorie (SPIFFS/RAM-Fallback, SNTP, 1-s-Sampling, 60-s-Buckets, `/api/power-*`).

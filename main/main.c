@@ -2173,7 +2173,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "byId('history-title').textContent=live?(d.aggregated?('Mittelwerte · letzte '+hours+' Stunden'):'Minutenmittelwerte · letzte 2 Stunden'):('Tagesverlauf (UTC) · 15-Minuten-Mittel');"
         "byId('history-resolution').textContent=(live&&d.aggregated&&d.bucket_seconds)?(' (1 Balken = '+Math.round(Number(d.bucket_seconds)/60)+' Min)'):(live?'':(' (1 Balken = 15 Min)'));"
         "byId('history-status').textContent=(d.clock_synced?'Netzwerkzeit synchronisiert':'Warte auf Netzwerkzeit')+"
-        "' · gespeicherte Minutenwerte: '+d.record_count+' / 30000 · letztes: '+latest+"
+        "' · gespeicherte Minutenwerte: '+d.record_count+' / '+d.capacity+' · letztes: '+latest+"
         "' · aktuelle Messwerte im Intervall: '+d.current_sample_count+"
         "' · Speicher: '+(d.storage_ready?'bereit':'nicht bereit')+"
         "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
@@ -2659,7 +2659,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 "\"latest_sequence\":%lu,\"record_count\":%lu,"
                 "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
                 "\"aggregated\":true,\"window_hours\":%.2f,\"bucket_seconds\":%lld,"
-                "\"day_start_utc\":%lld,\"records\":[",
+                "\"day_start_utc\":%lld,\"capacity\":%u,\"records\":[",
                 system_time_is_valid() ? "true" : "false",
                 status.ready ? "true" : "false",
                 (unsigned int)current_sample_count_agg,
@@ -2671,7 +2671,8 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 overflow ? "true" : "false",
                 window_hours_out,
                 (long long)bucket_seconds,
-                (long long)window_start_utc);
+                (long long)window_start_utc,
+                (unsigned int)POWER_HISTORY_CAPACITY);
         }
         if (agg_err != ESP_OK ||
             agg_header_len < 0 || (size_t)agg_header_len >= sizeof(agg_header)) {
@@ -2736,7 +2737,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         "\"oldest_sequence\":%lu,"
         "\"latest_sequence\":%lu,\"record_count\":%lu,"
         "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
-        "\"records\":[",
+        "\"capacity\":%u,\"records\":[",
         system_time_is_valid() ? "true" : "false",
         status.ready ? "true" : "false",
         (unsigned int)current_sample_count,
@@ -2745,7 +2746,8 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         (unsigned long)status.record_count,
         (unsigned long)status.queue_drops,
         (unsigned long)status.write_errors,
-        overflow ? "true" : "false");
+        overflow ? "true" : "false",
+        (unsigned int)POWER_HISTORY_CAPACITY);
     if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
         free(records);
         return ESP_FAIL;

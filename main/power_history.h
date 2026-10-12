@@ -6,7 +6,15 @@
 
 #include "esp_err.h"
 
-#define POWER_HISTORY_CAPACITY 30000u
+/* How many minute records the ring buffer holds. This is bounded by what
+ * actually fits in the SPIFFS "storage" partition, not by a round number: the
+ * on-disk file is 2 headers + CAPACITY * sizeof(record) bytes, and SPIFFS must
+ * still keep free blocks for wear-levelling garbage collection. 30000 records
+ * (840 kB) did not fit, so once the log filled up every write failed with
+ * SPIFFS_ERR_FULL and the dashboard showed recurring write errors. 29000
+ * (~20 days) leaves comfortable headroom. If this grows, re-check it against
+ * the partition size with components/spiffs/spiffsgen.py. */
+#define POWER_HISTORY_CAPACITY 29000u
 #define POWER_HISTORY_PAGE_SIZE 128u
 
 /* SPIFFS mount point and history file. Overridable so the reboot-persistence
