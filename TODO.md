@@ -27,6 +27,13 @@ Symptom: Nach einem Reboot wird die persistierte Minutenhistorie nicht (oder nic
 vollständig) geladen — `record_count` startet bei 0 statt beim gespeicherten Wert
 (ggf. RAM-Fallback trotz vorhandener `/powerlog/quarters.bin`).
 
+**Stand:** Der bekannte Auslöser (`1612975`, ungültiger Fresh-Header `magic=0`) ist
+behoben und war laut `d620ea0` hardware-verifiziert. Der Speicherpfad war host-seitig
+bisher **ungedeckt** (der Shim rief `power_history_init()` nie auf). Neu: Host-Test
+`test/test_reboot_persistence.c` fährt den echten Init→Schreiben→Reboot-Zyklus (per
+`fork()`) und belegt `record_count` wird wiederhergestellt — rot mit dem alten Bug,
+grün mit dem Fix.
+
 Zu prüfen / zu tun:
 - [ ] Beim Boot verifizieren, dass `power_history` die SPIFFS-Datei öffnet und den
       Header liest (nicht in den RAM-Fallback fällt). Logzeile `Persistent history

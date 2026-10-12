@@ -38,6 +38,21 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_crash_journal"
 
+# Reboot-persistence: drives the real init/write/status cycle against a scratch
+# file and simulates a reboot with a fresh process. The mount point and history
+# file are redirected into the temp build dir (no /powerlog on the host).
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_reboot_persistence.c" \
+    -lm -o "$out/test_reboot_persistence"
+
+"$out/test_reboot_persistence"
+
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"

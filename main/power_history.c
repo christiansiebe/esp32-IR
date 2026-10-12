@@ -14,11 +14,11 @@
 #include "freertos/task.h"
 
 #define POWER_HISTORY_MAGIC 0x50484C31u
-#define POWER_HISTORY_MOUNT_PATH "/powerlog"
 /* Format versions live in power_history.h so the host tests and the migration
- * helper agree on them. The header version is the current record version. */
+ * helper agree on them. The header version is the current record version.
+ * POWER_HISTORY_MOUNT_PATH/POWER_HISTORY_FILE also come from the header (they
+ * are overridable there for the reboot-persistence host test). */
 #define POWER_HISTORY_VERSION_MAX POWER_HISTORY_VERSION
-#define POWER_HISTORY_FILE POWER_HISTORY_MOUNT_PATH "/quarters.bin"
 #define POWER_HISTORY_PARTITION "storage"
 #define POWER_HISTORY_QUEUE_LENGTH 16u
 #define POWER_HISTORY_TASK_STACK 4096u

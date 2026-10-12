@@ -9,6 +9,16 @@
 #define POWER_HISTORY_CAPACITY 30000u
 #define POWER_HISTORY_PAGE_SIZE 128u
 
+/* SPIFFS mount point and history file. Overridable so the reboot-persistence
+ * host test can point the store at a scratch directory instead of the
+ * device-only /powerlog mount. */
+#ifndef POWER_HISTORY_MOUNT_PATH
+#define POWER_HISTORY_MOUNT_PATH "/powerlog"
+#endif
+#ifndef POWER_HISTORY_FILE
+#define POWER_HISTORY_FILE POWER_HISTORY_MOUNT_PATH "/quarters.bin"
+#endif
+
 /* On-disk record/header format version. v1 stored the slot generation in
  * `reserved`; v2 leaves `reserved` at 0. Bumping the version must not drop the
  * stored history: power_history_migrate_record() upgrades older records in
