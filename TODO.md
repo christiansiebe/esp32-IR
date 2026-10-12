@@ -118,8 +118,10 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       Minutenwerten ableiten, platzsparend + schnellere Langzeitgrafik.
 - [ ] **Letzte bekannte Zeit persistieren** (`lastMeterReadTime`): nach Reboot ohne SNTP ist
       `bucket_start==0` → keine Aufzeichnung; letzte UTC im Header/NVS ablegen.
-- [ ] **MQTT-Availability (LWT)** + Service-Events (Reboot-Grund) — ergänzt Crash-Journal.
-      (In `mqtt_*` angelegt, aber nicht integriert.)
+- [x] **MQTT-Availability (LWT)**: `main/mqtt_bridge.c` setzt ein LWT auf
+      `<prefix>/status` (retained, offline) und veroeffentlicht beim Connect `online`;
+      der Discovery-Hub verweist per `availability_topic` darauf.
+- [ ] **MQTT-Service-Events (Reboot-Grund)** — ergänzt Crash-Journal (noch offen).
 - [ ] Optional: konfigurierbares Reboot-Intervall (nächtlich), Deckelung wie AMS.
 
 ### SPIFFS-Historie auch im Sender (gleiche Speicherung wie Empfänger)
@@ -300,19 +302,29 @@ läuft 2026-11-11 ab). `origin`-URL trägt den Write-Token, `git push` funktioni
       `recorder/import_statistics` mit echten UTC-Zeitstempeln. Version-aware
       (`mean_type`/`unit_class` ab HA 2025.10). Stdlib-only WebSocket-Client
       (`tools/ws_min.py`). Tests: 28 + 16 + 7 Checks, keine Mocks.
-- [ ] **MQTT-Client im Empfaenger** (esp-mqtt; in IDF v6.1 als Komponente
-      `espressif/mqtt` nachzuziehen). Broker/Port/User/Passwort + Topic-Prefix in
-      NVS. LWT fuer online/offline, Publish von:
-      - Live-Leistung: `<prefix>/power` (W)
+- [x] **MQTT-Client im Empfaenger** (esp-mqtt; in IDF v6.1 managed Component
+      `espressif/mqtt` + `espressif/cjson`, deklariert in `main/idf_component.yml`).
+      Umgesetzt in `main/mqtt_bridge.{c,h}` (nur Empfaenger, per `#if`-Rolle):
+      Broker-URI/User/Passwort/Topic-Prefix aus NVS (Namespace `mqttcfg`); ohne URI
+      bleibt MQTT aus. Start bei `IP_EVENT_STA_GOT_IP`. Publish:
+      - Live-Leistung: `<prefix>/power` (retained, JSON `{"power":<W>,"unit":27}`)
       - Abgeschlossener Minutenwert: `<prefix>/history` als JSON
         `{"t":<utc>,"w":<avg>,"n":<count>}`
-      - Verfuegbarkeit: `<prefix>/status` (online/offline via LWT)
-      Nur Empfaenger (hat STA/Netz); ESP-NOW, OTA und Rollen bleiben unberuehrt.
-- [ ] **Home-Assistant-Discovery** (`homeassistant/sensor/.../config`), damit die
-      Entitaeten automatisch erscheinen: `device_class: power`,
-      `state_class: measurement`, Unit W, plus Energie-Zaehler (kWh).
+      - Verfuegbarkeit: `<prefix>/status` (online/offline via LWT, retained)
+      - Discovery-Hub: `<prefix>/state` (retained)
+      Web-Konsole: Befehl `mqtt`. **CI gruen** (Run 38319709982, Receiver+Sender+Host).
+      Grammatik/Format der Topics kommt aus `main/mqtt_topics.c` (host-getestet).
+- [x] **Home-Assistant-Discovery** (`homeassistant/sensor/.../config`): als
+      `mqtt_discovery_topic`/`mqtt_discovery_payload` in `mqtt_topics.c` implementiert
+      und beim Connect retained veroeffentlicht; aktuell eine Entitaet „Leistung"
+      (`device_class: power`, `state_class: measurement`, Unit W, mit Availability).
+      **Offen:** weitere Entitaeten (Import/Export in kWh → `state_class: total_increasing`).
 - [ ] Optional: Live-MQTT-Push der Minutenwerte, damit HA ab sofort selbst
       mitschreibt (dann ist der Import nur noch fuer die Alt-Daten noetig).
+- **⚠️ Am Geraet noch zu verifizieren:** Broker in NVS setzen, dann `mqtt` in der
+      Konsole pruefen und in HA sehen, ob die Entitaet auftaucht (LWT online/offline
+      durch Broker-Neustart testen). Broker/Port/User/Pass sind Werte, die der
+      Nutzer setzt (nicht im Code).
 
 ### Power-History-Dashboard (kosmetisch, optional)
 - [x] **Balken-Wert per Hover/Tap einblenden**: Tooltip auf dem Canvas zeigt Wert + Zeitpunkt;
@@ -423,6 +435,14 @@ offen (s. u.) — **vor** dem Kopieren fremden Codes entscheiden.
 
 
 ## Erledigt (in dieser Session)
+- **SML-Golden-Fixture + CRC-Hinweis** (`3427bd2`): echtes eHZ-Telegramm als Fixture,
+  Golden-Decode-Test (8 Checks, ASan+UBSan), Standard-CRC/Kermit-Caveat dokumentiert.
+- **MQTT-Topic-/Discovery-Builder** (`ee8ea13`): `main/mqtt_topics.{c,h}`, host-getestet
+  (30 Checks) — reine Logik, Vorbild SMLReader-Topic-Schema.
+- **esp-mqtt-Bridge im Empfänger** (`b76c7d7` + Fix `c5bf82c`): `main/mqtt_bridge.{c,h}`,
+  managed Components `espressif/mqtt`+`espressif/cjson`, Live-Leistung/Minutenwert/LWT/
+  HA-Discovery, Console-Befehl `mqtt`. **CI grün** (Run 38319709982).
+- **Externe SML-Projekte gesichtet** (Recherche/Übernahmen, s. o.).
 - **Tagesgrenzen im Chart exakt um 0:00 UTC** (`e7e7cb7`): `drawHistory()` zeichnet bei
   `hours >= 24` gestrichelte Linien auf jedes echte UTC-Mitternacht
   (`Math.ceil(start/86400000)*86400000`) statt auf beliebige Rasterpositionen; der
