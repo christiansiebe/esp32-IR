@@ -290,6 +290,31 @@ alles lokal.
 - [ ] `current_sample_count`-Label praezisieren (aktuell: 15-min-Ringpuffer, nicht Samples im aktuellen 60-s-Bucket).
 - [ ] `resize`-Handler startet zusaetzliche 60-s-Schleifen (`updateHistory`) -> Mehrfach-Timer vermeiden.
 
+### 🐛 Bug: Button „Vortag vergleichen“ tut in der Live-Ansicht nichts
+Betrifft die **Empfänger-Weboberfläche** (Dashboard, `root_handler`/`sml_page` in
+`main/main.c`). Der Sender hat keinen Webserver.
+
+Symptom: Der Button `history-day-compare` („Vortag vergleichen“, `toggleCompare()`)
+reagiert nicht, wenn die Grafik im **Live-Modus** steht (Default).
+
+Ursache: `toggleCompare()` setzt nur `historyCompare`, wechselt aber **nicht** aus der
+Live-Ansicht. In `updateHistory()` wird der Vergleich nur geladen, wenn `!live`:
+```js
+const live=(historyView==='live');
+...
+if(!live&&historyCompare){ /* Vortag laden */ }
+```
+Im Live-Modus bleibt der Button daher wirkungslos; zusätzlich wird die Info-Zeile
+gerade im Live-Modus geleert (`live?'':...`), sodass auch kein Hinweis erscheint.
+
+Zu tun:
+- [ ] **Fix**: in `toggleCompare()` vor `redraw()` in die Tagesansicht wechseln
+      (z. B. `setLive(false);`), dann wird der Vortag (gelb) über den Tagesverlauf gelegt.
+- [ ] Optional: beim Wechsel in die Live-Ansicht `historyCompare` zurücksetzen
+      (der Slider-Handler `history-range` tut das derzeit nicht).
+- [ ] Verifizieren: Live → Button klicken → gestrichelte/gelbe Vergleichskurve +
+      Info „Vergleich &lt;Datum&gt; (gelb)“ sichtbar.
+
 ## Erledigt (in dieser Session)
 - On-Demand-Senderdiagnose ueber ESP-NOW (unicast, Request/Response, echte Sendebestaetigung via Callback).
 - Persistente Leistungshistorie (SPIFFS/RAM-Fallback, SNTP, 1-s-Sampling, 60-s-Buckets, `/api/power-*`).
