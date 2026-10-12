@@ -4,6 +4,24 @@ Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungsh
 
 ## Offen
 
+## Übergabe (unfertig, NICHT gepusht)
+
+Lokaler Stand: `/workspace/esp32-IR`, Branch `cline/power-history-diag`, **6 lokale Commits** voraus
+gegenüber `origin` (Push scheiterte an ungültigem `GITHUB_TOKEN`, 401):
+
+    aac6ee0 AGENTS.md: flash bundles never write storage
+    e944e04 Never flash the storage partition from a bundle (preserve SPIFFS history)
+    f528156 gitignore: per-role sdkconfig.*
+    c3d3420 Remove factory slot, give both OTA slots 1.5 MB
+    f736672 build.sh: sudo-docker fallback
+    6a52fe6 Add tools/build.sh (containerised build)
+
+**To do in der naechsten (frischen) Session:**
+1. Token pruefen: `curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/christiansiebe/esp32-IR` (erwartet 200).
+2. `cd /workspace/esp32-IR && git push origin cline/power-history-diag`.
+3. CI-Ergebnis pruefen; Bundle-Flash am Geraet -> Verlauf muss erhalten bleiben.
+Backup des Stands: `/workspace/esp32-IR-backup-*.bundle` (`git bundle verify`).
+
 ### Sender-Diagnose (On-Demand über ESP-NOW)
 - [ ] **Event-Zeitstempel als Uptime darstellen** statt als 1970-Datum.
       Grund: Der Sender hat keine Netzwerkzeit (SNTP laeuft nur im Empfaenger);
