@@ -165,6 +165,23 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(espnow_diag_crash_response_t) <= ESP_NOW_MAX_DATA_LEN,
                "crash diagnostic response must fit one ESP-NOW payload");
 
+/* Minute-history sampling state. Used by BOTH roles: the receiver records the
+ * telemetry it receives, the sender records the values it decodes from UART. */
+static sml_power_sample_t g_sml_power_samples[SML_POWER_SAMPLE_COUNT];
+static size_t g_sml_power_sample_count;
+static size_t g_sml_power_sample_next;
+static double g_sml_power_sample_sum_w;
+static double g_sml_latest_power_w;
+static uint64_t g_sml_latest_power_received_us;
+static bool g_sml_latest_power_valid;
+static esp_timer_handle_t g_power_sample_timer;
+static int64_t g_power_bucket_start_utc;
+static int64_t g_power_bucket_first_sample_utc;
+static int64_t g_power_bucket_last_sample_utc;
+static double g_power_bucket_sum_w;
+static uint32_t g_power_bucket_sample_count;
+static portMUX_TYPE g_sml_history_lock = portMUX_INITIALIZER_UNLOCKED;
+
 #if CONFIG_ESPNOW_ROLE_SENDER
 typedef struct {
     uint64_t timestamp_us;
@@ -239,20 +256,6 @@ static uint32_t g_sml_transport_gaps;
 static uint32_t g_sml_last_transport_sequence;
 static sml_value_record_t g_sml_latest_values[3];
 static bool g_sml_latest_value_valid[3];
-static sml_power_sample_t g_sml_power_samples[SML_POWER_SAMPLE_COUNT];
-static size_t g_sml_power_sample_count;
-static size_t g_sml_power_sample_next;
-static double g_sml_power_sample_sum_w;
-static double g_sml_latest_power_w;
-static uint64_t g_sml_latest_power_received_us;
-static bool g_sml_latest_power_valid;
-static esp_timer_handle_t g_power_sample_timer;
-static int64_t g_power_bucket_start_utc;
-static int64_t g_power_bucket_first_sample_utc;
-static int64_t g_power_bucket_last_sample_utc;
-static double g_power_bucket_sum_w;
-static uint32_t g_power_bucket_sample_count;
-static portMUX_TYPE g_sml_history_lock = portMUX_INITIALIZER_UNLOCKED;
 static rssi_record_t g_rssi_history[RSSI_HISTORY_COUNT];
 static size_t g_rssi_history_count;
 static size_t g_rssi_history_next;
@@ -265,7 +268,6 @@ static bool g_sender_mac_valid;
 static portMUX_TYPE g_sender_mac_lock = portMUX_INITIALIZER_UNLOCKED;
 static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
                             const char *value, int8_t scaler, uint8_t unit);
-static void power_sample_timer_callback(void *arg);
 static esp_err_t power_samples_api_handler(httpd_req_t *req);
 static esp_err_t power_history_api_handler(httpd_req_t *req);
 static esp_err_t power_history_csv_handler(httpd_req_t *req);
@@ -1494,7 +1496,19 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 #endif
 }
 
-#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Wall-clock seconds for the minute history. The receiver gets real time from
+ * SNTP; the sender has no RTC and uses the ESP-NOW wall-clock calibration, so
+ * it falls back to uptime - the bucket guard below then stores nothing until
+ * the clock is valid. */
+static int64_t current_utc_seconds(void)
+{
+#if CONFIG_ESPNOW_ROLE_SENDER
+    return (int64_t)(event_wall_ms() / 1000);
+#else
+    return (int64_t)time(NULL);
+#endif
+}
+
 static void append_power_sample_locked(uint64_t timestamp_us, double watts)
 {
     while (g_sml_power_sample_count > 0) {
@@ -1527,7 +1541,7 @@ static void power_sample_timer_callback(void *arg)
 {
     (void)arg;
     const uint64_t now_us = (uint64_t)esp_timer_get_time();
-    const time_t wall_clock = time(NULL);
+    const int64_t wall_clock = current_utc_seconds();
     power_history_record_t completed_interval = {0};
     bool enqueue_completed_interval = false;
 
@@ -1582,6 +1596,7 @@ static void power_sample_timer_callback(void *arg)
     }
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
 static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
                             const char *value, int8_t scaler, uint8_t unit)
 {
@@ -1640,6 +1655,37 @@ static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
+/* Feed the sender's own minute history from the values it decodes off UART.
+ * Mirrors the receiver's store_sml_value(): only CRC-valid telegrams reach
+ * this point, and only the active-power OBIS (1.0.16.7.0, unit W) is used. */
+static void record_sender_power(const sml_transport_value_t *values,
+                                uint8_t value_count)
+{
+    static const uint8_t obis_active_power[6] = {0x01, 0x00, 0x10, 0x07, 0x00, 0xff};
+    for (uint8_t i = 0; i < value_count; ++i) {
+        if (memcmp(values[i].obis, obis_active_power, 6) != 0 ||
+            values[i].unit != 27) {
+            continue;
+        }
+        double watts = (double)values[i].value;
+        for (int exponent = 0; exponent < values[i].scaler; ++exponent) {
+            watts *= 10.0;
+        }
+        for (int exponent = 0; exponent > values[i].scaler; --exponent) {
+            watts /= 10.0;
+        }
+        if (!isfinite(watts)) {
+            return;
+        }
+        portENTER_CRITICAL(&g_sml_history_lock);
+        g_sml_latest_power_w = watts;
+        g_sml_latest_power_received_us = (uint64_t)esp_timer_get_time();
+        g_sml_latest_power_valid = true;
+        portEXIT_CRITICAL(&g_sml_history_lock);
+        return;
+    }
+}
+
 void sml_adapter_telegram_callback(uint64_t timestamp_us, bool crc_valid,
                                   const sml_transport_value_t *values,
                                   uint8_t value_count)
@@ -1664,6 +1710,10 @@ void sml_adapter_telegram_callback(uint64_t timestamp_us, bool crc_valid,
     portEXIT_CRITICAL(&g_uart_stats_lock);
     if (gap_pending && !crc_valid) {
         diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "gap cost bytes (crc failed)");
+    }
+
+    if (crc_valid && value_count != 0) {
+        record_sender_power(values, value_count);
     }
 
     sml_tx_item_t item = {
@@ -4211,6 +4261,9 @@ void app_main(void)
         ESP_LOGE(TAG, "Could not create receiver diagnostic response queue");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
+#endif
+    /* Persistent minute history runs on BOTH roles: the receiver records the
+     * telemetry it receives, the sender records the values it decodes. */
     esp_err_t history_err = power_history_init();
     if (history_err != ESP_OK) {
         ESP_LOGE(TAG, "Persistent minute history is disabled: %s",
@@ -4223,7 +4276,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_create(&power_sample_timer_args,
                                      &g_power_sample_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(g_power_sample_timer, 1000000));
-#endif
+
     ESP_ERROR_CHECK(esp_now_register_recv_cb(receive_callback));
 
 #if CONFIG_ESPNOW_ROLE_SENDER
