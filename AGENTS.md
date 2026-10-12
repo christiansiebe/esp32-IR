@@ -158,3 +158,25 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   would catch a fully starved CPU0, but on the ESP32 the Arduino-ESP32 core
   disables the idle-task checks specifically to avoid false resets, and the
   project has no hardware-in-the-loop test to validate it. Left off deliberately.
+
+## Persistence runs on BOTH roles
+- `power_history_init()`, the 1 s `g_power_sample_timer` and the history worker
+  are started in `app_main` *outside* the `CONFIG_ESPNOW_ROLE_SENDER` branches,
+  so sender and receiver both keep a local SPIFFS minute history. Feed points
+  differ: the receiver records received telegrams, the sender records what it
+  decodes off UART (`record_sender_power`). Do not move that init into a role
+  branch without keeping the other role covered.
+- This is why managed components are declared globally in `main/idf_component.yml`
+  (mqtt + cjson): the component manager resolves them for both roles, but
+  `mqtt_bridge.c` is only compiled for the receiver and `tx_batch.c` only for
+  the sender (`main/CMakeLists.txt`).
+
+## Managed components (IDF v6)
+- ESP-IDF v6 moved ESP-MQTT and cJSON out of the core. They come from the ESP
+  Component Registry (`espressif/mqtt`, `espressif/cjson`) via
+  `main/idf_component.yml`; their component names in the build are
+  `espressif__mqtt` / `espressif__cjson`, and the manifest makes them a
+  dependency of `main` automatically - naming them in `REQUIRES` is not needed.
+- The IDF build compiles with `-Werror`: unused vars and `-Wformat-truncation`
+  (e.g. a `snprintf` whose buffer is smaller than the topic could be) fail CI.
+  Size buffers for the full topic length.
