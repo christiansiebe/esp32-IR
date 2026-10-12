@@ -23,6 +23,9 @@ set(main_srcs "main.c" "power_history.c" "web_console.c"
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
     list(APPEND main_srcs "mqtt_bridge.c")
 endif()
+if(CONFIG_ESPNOW_ROLE_SENDER)
+    list(APPEND main_srcs "tx_batch.c")
+endif()
 
 idf_component_register(SRCS ${main_srcs}
                     INCLUDE_DIRS "."

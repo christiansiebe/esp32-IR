@@ -127,26 +127,45 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
 ### SPIFFS-Historie auch im Sender (gleiche Speicherung wie Empfänger)
 Ziel: Der **Sender** soll ebenfalls die persistente Minutenhistorie bekommen und die Daten
 **genau wie der Empfänger** ablegen (gleiches `power_history`-Format, gleiche Datei).
-- Ausgangslage: `power_history_init()`, `g_power_sample_timer` und der History-Worker laufen
-  nur im Empfänger-Zweig (`app_main`, `#else`-Block zu `CONFIG_ESPNOW_ROLE_SENDER`,
-  `main.c` um 4206–4216). Der Sender sendet nur per ESP-NOW, führt **keine** lokale Historie.
-- Partition ist bereits vorhanden: `partitions.csv` ist für **beide** Rollen identisch,
-  `storage` = `data/spiffs`, `0x320000`/`0xE0000` liegt auch im Sender-Image. Also **keine**
-  Repartitionierung nötig — dieselbe Datei `/powerlog/quarters.bin`, dieselben Offsets.
-- Zu tun:
-  - [ ] `power_history_init()` + Sample-Timer + Worker aus dem Empfänger-`#else` herauslösen,
-        sodass **beide** Rollen sie starten (Sender: keine Web-API/Aggregation nötig, nur
-        Aufzeichnung + Persistenz).
-  - [ ] Gleiches On-Disk-Format/Datei wie Empfänger (nichts am Layout ändern, siehe
-        Non-negotiable „Historie nie verlieren"), Migration/Versionen (`4af921a`) gelten mit.
-  - [ ] Sender-Zeitbasis: ohne Empfänger gibt es keine Wall-Clock (Uptime-Fallback) → Sender-
-        Historie muss `bucket_start==0` sauber behandeln (hängt an „letzte Zeit persistieren").
-  - [ ] Flash-Regel bleibt: `storage` bei **keinem** Bundle schreiben/erassen; nach jedem
-        Flash `record_count > 0` prüfen (auch beim Sender).
-  - [ ] Host-Test + CI: beide Rollen bauen; Persistenz-Test
-        (`test/test_reboot_persistence.c`) gilt analog für den Sender.
+- Ausgangslage (Stand 2026-10-12 geprüft): Die lokale Sender-Historie läuft **bereits** —
+  `power_history_init()`, `g_power_sample_timer` und der History-Worker stehen in `app_main`
+  **außerhalb** der Rollen-`#if` (gemeinsamer Pfad) und der Sender speist sie über
+  `record_sender_power()` aus den UART-Werten. Partition `storage` (`0x320000`/`0xE0000`)
+  ist in `partitions.csv` für beide Rollen identisch → keine Repartitionierung.
+- Zu tun / offen:
+  - [x] Aufzeichnung + Persistenz im Sender aktiv (gemeinsamer Init-Pfad).
+  - [ ] **Verifikation am Gerät:** `record_count > 0` beim Sender nach Flash (kein RAM-Fallback).
+  - [ ] **Sender-Zeitbasis:** ohne Empfänger keine Wall-Clock → `bucket_start==0` sauber
+        behandeln (hängt an „letzte Zeit persistieren", s. o.); Wall-Clock-Sync (`a8a3e23`)
+        muss vor dem Stempeln gelaufen sein.
+  - [ ] Host-Test + CI: Persistenz-Test (`test/test_reboot_persistence.c`) auch für den Sender.
 - Akzeptanz: Sender legt die Minutenhistorie im Flash ab und stellt sie nach Reboot wieder her
   (`record_count > 0`, kein RAM-Fallback) — identisch zum Empfänger.
+
+### Sender: gepufferte ESP-NOW-Übertragung im 5-s-Zyklus
+Ziel: Der Sender sammelt seine aus der UART dekodierten Werte **lokal** und schickt sie
+**gebündelt** (statt ein Paket pro Telegramm). Statt dauerhaft zu funken, arbeitet er in
+einem Zyklus: sammeln → ~5 s → Pakete senden → (Radio nutzbar/ruhen).
+- [x] Puffer-Modul `main/tx_batch.{c,h}`: `sml_tx_item_t` + Ringpuffer
+      (`sml_tx_batch_push/take/count/dropped`), host-getestet
+      (`test/test_tx_batch.c`, im Runner). Verdrängt bei Voll das **älteste** Element
+      (monoton wachsende Sequenz bleibt erhalten, kein Sprung an der Spitze).
+- [x] Sequenz-/Kantenlogik für den Abgleich: `main/tx_batch.c`
+      (`sml_tx_batch_mark_sent`, `sml_tx_batch_missing`) — reine Funktionen, host-getestet.
+- [ ] Sendeschleife in `uart_transport_worker` umbauen: Puffer füllen, alle
+      `SML_TX_CYCLE_MS` (5000) eine Sendephase; in der Phase bis zu `SML_TX_BURST`
+      Pakete abarbeiten (Semaphore je Paket, aber Gesamtbudget), danach Zyklus neu.
+      Telegramm-Werte kommen weiterhin aus `sml_adapter_telegram_callback()`.
+- [ ] Optionale Funkruhe zwischen Zyklen (Light-Sleep) nur wenn verifiziert, dass
+      ESP-NOW-Empfang/ACK und die 5-s-Kadenz darunter nicht leiden — **nicht** mit
+      `CONFIG_PM_ENABLE` (DFS ist für ESP-NOW abgeschaltet, s. `sdkconfig.defaults`).
+- [ ] Zähler/Diagnose: `batch_pending`, `batch_dropped`, `bursts`, `last_cycle_ms` im
+      ESP-NOW-Diag-`counters`-Struct ergänzen (Sender → Empfänger-Diagnoseseite).
+- [ ] Host-Test für den Zyklus (virtuelle Zeit): Bündelung, Verdrängung, kein Verlust
+      an der Spitze, Sendephase sendet genau `min(pending, burst)`.
+- Akzeptanz: Der Sender funkt zwischen den Zyklen nicht mehr pro Telegramm einzeln,
+  verliert dabei keine Minutenwerte (Puffer groß genug für einen Zyklus) und beide
+  Rollen bauen in CI.
 
 ### Synchronisation: Empfänger holt fehlende Sender-Daten (Backfill)
 Ziel: Der Empfänger soll Minutenwerte, die er **nicht** mitbekommen hat (Funklücke,

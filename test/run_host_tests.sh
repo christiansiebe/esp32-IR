@@ -77,6 +77,17 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_mqtt_topics"
 
+# Sender-side batching ring + backfill arithmetic (no radio): batching,
+# oldest-eviction and the gap count the receiver reconciles against.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" -I"$repo/components/sml_transport/include" \
+    "$repo/main/tx_batch.c" \
+    "$here/test_tx_batch.c" \
+    -o "$out/test_tx_batch"
+
+"$out/test_tx_batch"
+
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"

@@ -34,6 +34,7 @@
 #include "sml_transport.h"
 #if CONFIG_ESPNOW_ROLE_SENDER
 #include "sml_adapter.h"
+#include "tx_batch.h"
 #endif
 
 static const char *TAG = "espnow_meter";
@@ -186,12 +187,7 @@ static uint32_t g_power_bucket_sample_count;
 static portMUX_TYPE g_sml_history_lock = portMUX_INITIALIZER_UNLOCKED;
 
 #if CONFIG_ESPNOW_ROLE_SENDER
-typedef struct {
-    uint64_t timestamp_us;
-    bool crc_valid;
-    uint8_t value_count;
-    sml_transport_value_t values[SML_TRANSPORT_MAX_VALUES];
-} sml_tx_item_t;
+/* sml_tx_item_t lives in tx_batch.h so the batching ring is host-testable. */
 
 static SemaphoreHandle_t g_send_done;
 static esp_now_send_status_t g_last_send_status;
