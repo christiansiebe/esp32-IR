@@ -108,8 +108,10 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       `test/test_boot_policy.c` (10 Checks, rot/grün verifiziert), im Runner aktiv.
       **⚠️ Hardware-Verifikation offen:** der echte OTA→bestätigt / OTA→Rollback-Pfad ist
       am Gerät zu prüfen (host-seitig nur die Entscheidungslogik abgedeckt).
-- [ ] **SML-Golden-Fixtures**: `test/fixtures/sml/*.bin` mit echten Zähler-Telegrammen +
-      Decode-Golden-Test (bester Regressionsschutz gegen Parser-Bugs).
+- [x] **SML-Golden-Fixtures**: `test/fixtures/sml/ehz_bin.upstream.h` (echtes EMH-eHZ-
+      Telegramm, 319 B, aus dem öffentlichen libsml-testing-Korpus) + Decode-Golden-Test
+      `test/test_sml_parser_golden.cpp` (8 Checks; 1-0:1.8.0/1.8.1 Wh, 1-0:15.7.0 W exakt;
+      gekipptes Byte → `SML_CHECKSUM_ERROR`). Im Host-Runner aktiv, ASan+UBSan.
 - [ ] **AP abschalten, wenn STA verbunden** (größter einzelner Spareffekt): Empfänger fährt
       dauerhaft `WIFI_MODE_APSTA` (`main.c`); nach `GOT_IP` auf `WIFI_MODE_STA` wechseln.
 - [ ] **Tages-/Monats-Summen im Flash** (`hImport[24]`/`dImport[31]` wie AMS): aus
@@ -402,11 +404,13 @@ offen (s. u.) — **vor** dem Kopieren fremden Codes entscheiden.
       Telemetrie gilt wegen `crc_valid=false` als ungültig — gegen bestehendes
       Produktionsverhalten (Adapter/Transport) absichern. Telegramm-Referenz/Inspiration:
       `olliiiver/sml_parser`-Tests, `volkszaehler/libsml`-Frames (nur Konzept).
-- [ ] **MQTT-Topic-Schema + HA-Discovery (mittel):** Vorbild `mruettgers/SMLReader`
+- [x] **MQTT-Topic-Schema + HA-Discovery-Logik (mittel):** Vorbild `mruettgers/SMLReader`
       (GPL-3.0, nur Konzept): pro OBIS-Code ein eigenes Topic statt Sammel-JSON,
-      z. B. `<prefix>/sensor/<n>/obis/1-0:16.7.0/255/value`. Deckt den MQTT/HA-Block
-      unten ab; zuerst als **reine, host-testbare Topic-/Discovery-Builder-Logik**
-      (wie `boot_policy.c`) bauen, dann an esp-mqtt hängen.
+      z. B. `<prefix>/sensor/<n>/obis/1-0:16.7.0*255/value`. **Fertig als reine,
+      host-testbare Builder**: `main/mqtt_topics.{c,h}` (`mqtt_topics_build`,
+      `mqtt_topic_obis`, `mqtt_discovery_topic`, `mqtt_discovery_payload`), Test
+      `test/test_mqtt_topics.c` (30 Checks, im Runner aktiv). Noch **nicht** an
+      esp-mqtt angeschlossen (nächster Block).
 - [ ] **MQTT over TLS (kompliziert, optional):** Vorbild `lrswss/esp32-sml-multi-reader`
       (Apache-2.0): esp-mqtt mit TLS + optionaler Auth. Nur wenn der Broker
       abgesichert angebunden werden soll.

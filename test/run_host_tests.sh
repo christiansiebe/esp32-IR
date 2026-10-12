@@ -66,6 +66,17 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_boot_policy"
 
+# Pure MQTT topic / Home Assistant discovery builders (no esp-mqtt): the string
+# layout is what breaks silently, so it is host-tested like boot_policy.c.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/mqtt_topics.c" \
+    "$here/test_mqtt_topics.c" \
+    -o "$out/test_mqtt_topics"
+
+"$out/test_mqtt_topics"
+
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"
