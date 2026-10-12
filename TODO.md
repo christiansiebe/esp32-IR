@@ -4,10 +4,10 @@ Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungsh
 
 ## Offen
 
-## Übergabe (unfertig, NICHT gepusht)
+## Übergabe
 
-Lokaler Stand: `/workspace/esp32-IR`, Branch `cline/power-history-diag`, **6 lokale Commits** voraus
-gegenüber `origin` (Push scheiterte an ungültigem `GITHUB_TOKEN`, 401):
+Lokaler Stand: `/workspace/esp32-IR`, Branch `cline/power-history-diag`, **7 lokale Commits**
+inzwischen nach `origin/cline/power-history-diag` gepusht (`cdc7cd3..569a11c`):
 
     aac6ee0 AGENTS.md: flash bundles never write storage
     e944e04 Never flash the storage partition from a bundle (preserve SPIFFS history)
@@ -15,11 +15,20 @@ gegenüber `origin` (Push scheiterte an ungültigem `GITHUB_TOKEN`, 401):
     c3d3420 Remove factory slot, give both OTA slots 1.5 MB
     f736672 build.sh: sudo-docker fallback
     6a52fe6 Add tools/build.sh (containerised build)
+    569a11c TODO.md: add handoff note for the unpushed partition-layout work
 
-**To do in der naechsten (frischen) Session:**
-1. Token pruefen: `curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/christiansiebe/esp32-IR` (erwartet 200).
-2. `cd /workspace/esp32-IR && git push origin cline/power-history-diag`.
-3. CI-Ergebnis pruefen; Bundle-Flash am Geraet -> Verlauf muss erhalten bleiben.
+**Push + CI:**
+- `GITHUB_TOKEN` liefert weiterhin **401** (Secret nicht refresht); der Push lief über das
+  funktionierende `GITHUB_WRITE_TOKEN` (fine-grained PAT, Schreibrechte auf
+  `christiansiebe/esp32-IR`).
+- CI für `569a11c`: push-Lauf `38263508190` und pull_request-Lauf `38263514672`,
+  beide **success**.
+
+**To do (naechste Session / am Geraet):**
+1. Bundle-Flash am Geraet -> Verlauf (SPIFFS-Historie) muss erhalten bleiben
+   (der Flash-Bundle schreibt die Storage-Partition bewusst nicht, siehe `e944e04`/`aac6ee0`).
+2. Falls `GITHUB_TOKEN` in einer neuen Session erneut 401 gibt: fine-grained Token
+   (`github_pat_…`) direkt als `GITHUB_TOKEN` hinterlegen.
 Backup des Stands: `/workspace/esp32-IR-backup-*.bundle` (`git bundle verify`).
 
 ### Sender-Diagnose (On-Demand über ESP-NOW)
