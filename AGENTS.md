@@ -81,6 +81,21 @@ Two firmware roles are built from one source tree.
 - These are exposed in the counters diagnostic section and rendered with a
   plain-language verdict on `/diag`.
 
+## Sender wall clock (time sync over ESP-NOW)
+
+Only the receiver has an NTP-synced clock (`esp_netif_sntp`, started on
+`IP_EVENT_STA_GOT_IP`); the sender has no network and only `esp_timer` uptime.
+The sender therefore asks the receiver for the time (section flag
+`ESPNOW_DIAG_SECTION_TIME_SYNC`, `espnow_diag_time_sync_t`) once on boot and
+then hourly. The request carries the sender uptime; the response carries the
+receiver's `time(NULL)` seconds and a validity flag (`system_time_is_valid`).
+The sender stores `offset = utc - uptime` and stamps `diag_log_event` with real
+time (`event_wall_ms`), falling back to uptime until the first sync. Between
+calibrations the sender counts on its own crystal (10-50 ppm, so under ~0.2 s
+per hour). The receiver MAC is learned from the time-sync response. The
+`/diag` dashboard shows absolute ISO time once stamps look like real dates
+(> 1e12), otherwise relative `T-xx s` or raw uptime.
+
 ## Watchdog (reviewed, not enabled)
 - No `esp_task_wdt_*` usage anywhere; the task watchdog (TWDT) and interrupt
   watchdog are left at the IDF defaults (enabled, panic on timeout). So a hang
