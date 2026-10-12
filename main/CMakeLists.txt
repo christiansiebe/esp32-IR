@@ -13,10 +13,18 @@ set(main_requires
     sml_parser
 )
 
-idf_component_register(SRCS "main.c" "power_history.c" "web_console.c"
-                            "boot_policy.c" "boot_confirm.c"
-                            "crash_journal.c" "crash_journal_store.c"
-                            "mqtt_topics.c"
+# ESP-IDF v6: ESP-MQTT and cJSON are managed components. They are declared in
+# idf_component.yml and become dependencies of "main" automatically, so they do
+# not need to be named in REQUIRES (see the IDF v6 migration guide for cJSON).
+set(main_srcs "main.c" "power_history.c" "web_console.c"
+              "boot_policy.c" "boot_confirm.c"
+              "crash_journal.c" "crash_journal_store.c"
+              "mqtt_topics.c")
+if(CONFIG_ESPNOW_ROLE_RECEIVER)
+    list(APPEND main_srcs "mqtt_bridge.c")
+endif()
+
+idf_component_register(SRCS ${main_srcs}
                     INCLUDE_DIRS "."
                     REQUIRES ${main_requires})
 

@@ -26,6 +26,9 @@
 #include "boot_confirm.h"
 #include "power_history.h"
 #include "web_console.h"
+#if !CONFIG_ESPNOW_ROLE_SENDER
+#include "mqtt_bridge.h"
+#endif
 #include "crash_journal.h"
 #include "espnow_diag.h"
 #include "sml_transport.h"
@@ -385,6 +388,9 @@ static void wifi_event_handler(void *arg,
                 ESP_LOGE(TAG, "Could not start SNTP: %s", esp_err_to_name(err));
             }
         }
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        mqtt_bridge_start();
+#endif
     }
 }
 
@@ -1544,10 +1550,14 @@ static void power_sample_timer_callback(void *arg)
     const int64_t wall_clock = current_utc_seconds();
     power_history_record_t completed_interval = {0};
     bool enqueue_completed_interval = false;
+    double live_watts = 0.0;
+    bool have_live_power = false;
 
     portENTER_CRITICAL(&g_sml_history_lock);
     if (g_sml_latest_power_valid &&
         now_us - g_sml_latest_power_received_us <= POWER_SAMPLE_STALE_US) {
+        live_watts = g_sml_latest_power_w;
+        have_live_power = true;
         append_power_sample_locked(now_us, g_sml_latest_power_w);
         if (wall_clock >= 1704067200) {
             int64_t bucket_start = ((int64_t)wall_clock /
@@ -1594,6 +1604,14 @@ static void power_sample_timer_callback(void *arg)
     if (enqueue_completed_interval) {
         (void)power_history_enqueue(&completed_interval);
     }
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    if (have_live_power) {
+        mqtt_bridge_publish_power(live_watts);
+    }
+    if (enqueue_completed_interval) {
+        mqtt_bridge_publish_history(&completed_interval);
+    }
+#endif
 }
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -3198,6 +3216,14 @@ static void console_cmd_power(const char *args, char *out, size_t out_size)
 }
 #endif /* !CONFIG_ESPNOW_ROLE_SENDER */
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static void console_cmd_mqtt(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    mqtt_bridge_status(out, out_size);
+}
+#endif
+
 static void console_cmd_reboot(const char *args, char *out, size_t out_size)
 {
     (void)args;
@@ -3223,6 +3249,8 @@ static void web_console_register_commands(void)
 #if !CONFIG_ESPNOW_ROLE_SENDER
     web_console_register("power", "latest power and ring sample count",
                          console_cmd_power);
+    web_console_register("mqtt", "MQTT bridge state",
+                         console_cmd_mqtt);
 #endif
     web_console_register("reboot", "restart the device", console_cmd_reboot);
 }
