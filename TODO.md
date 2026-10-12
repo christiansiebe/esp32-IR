@@ -68,34 +68,43 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
 
 ## Übergabe
 
-Lokaler Stand: `/workspace/esp32-IR`, Branch `cline/power-history-diag`, **7 lokale Commits**
-inzwischen nach `origin/cline/power-history-diag` gepusht (`cdc7cd3..569a11c`):
+Stand `/workspace/esp32-IR`, Branch `cline/power-history-diag`, **4 lokale Commits vor `origin`**
+(**nicht gepusht**). Arbeitsbaum sauber. Backup: `/workspace/esp32-IR-backup-20261012.bundle`.
 
-    aac6ee0 AGENTS.md: flash bundles never write storage
-    e944e04 Never flash the storage partition from a bundle (preserve SPIFFS history)
-    f528156 gitignore: per-role sdkconfig.*
-    c3d3420 Remove factory slot, give both OTA slots 1.5 MB
-    f736672 build.sh: sudo-docker fallback
-    6a52fe6 Add tools/build.sh (containerised build)
-    569a11c TODO.md: add handoff note for the unpushed partition-layout work
+    aae37ec TODO: record push blocker, recovered AMS work and comparison follow-ups
+    4af921a power_history: migrate old record formats instead of dropping them
+    72004b7 docs: mark persistence migration done, note record-format versioning
+    8764f22 tests: add power-history stability/fault-injection harness (ASan/UBSan)
 
-**Push + CI:**
-- Historie: `GITHUB_TOKEN` lieferte **401**; der frühere Push lief über das funktionierende
-  `GITHUB_WRITE_TOKEN` (fine-grained PAT, Schreibrechte auf `christiansiebe/esp32-IR`).
-- Aktueller Stand: `GITHUB_TOKEN` (erneuert) ist ein **GitHub-App-Token** (`ghu_…`) mit
-  **Nur-Lesezugriff** -> Push/Branch-Anlage scheitern mit
-  `403 Resource not accessible by integration`. `.git/config` wurde von einem eingebetteten
-  Token bereinigt und nutzt jetzt einen Credential-Helper aus `$GITHUB_TOKEN`.
-- CI für `569a11c`: push-Lauf `38263508190` und pull_request-Lauf `38263514672`,
-  beide **success**.
+**Push-Status (blockiert):** `GITHUB_TOKEN` -> HTTP 200, aber **nur Lesen** (GitHub-App-Token
+`ghu_…`; Branch/Commit/Push scheitern mit `403 Resource not accessible by integration`).
+`GITHUB_WRITE_TOKEN` -> **401 (ungültig)**. Früherer erfolgreicher Push lief über einen
+fine-grained PAT.
 
-**To do (naechste Session / am Geraet):**
-1. Bundle-Flash am Geraet -> Verlauf (SPIFFS-Historie) muss erhalten bleiben
-   (der Flash-Bundle schreibt die Storage-Partition bewusst nicht, siehe `e944e04`/`aac6ee0`).
-2. **Schreibfähigen Token hinterlegen:** fine-grained PAT (`github_pat_…`) mit
-   *Contents: Read and write* als `GITHUB_WRITE_TOKEN` in OpenHands, sonst kein Push.
-3. Bergungs-Branch `recovered/ams-features-salvage` pushen (sobald Token schreibt).
-Backup des Stands: `/workspace/esp32-IR-backup-*.bundle` (`git bundle verify`).
+**1. Schritt in der neuen Session — Token + Push:**
+```
+# erwartet 200
+curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://api.github.com/repos/christiansiebe/esp32-IR
+# Schreibtest (Branch anlegen + löschen); 403 = kein Schreibrecht
+curl -s -X POST -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://api.github.com/repos/christiansiebe/esp32-IR/git/refs \
+  -d "{\"ref\":\"refs/heads/probe-\$\$\",\"sha\":\"<main-sha>\"}"
+cd /workspace/esp32-IR && git push origin cline/power-history-diag
+```
+Wenn der Push erneut 403/401 gibt: **schreibfähigen fine-grained PAT (`github_pat_…`,
+*Contents: Read and write*) als `GITHUB_WRITE_TOKEN` hinterlegen** und mit diesem pushen
+(`git remote set-url origin https://x-access-token:$GITHUB_WRITE_TOKEN@github.com/christiansiebe/esp32-IR.git`).
+Danach: Bergungs-Branch `recovered/ams-features-salvage` pushen und CI-Ergebnis prüfen.
+
+**2. Am Gerät:** Bundle flashen -> SPIFFS-Verlauf muss erhalten bleiben (Flash-Bundle schreibt
+die `storage`-Partition bewusst nicht, siehe `e944e04`/`aac6ee0`).
+
+**Tests (lokal, vor Push):** `./test/run_host_tests.sh` — alles grün, inkl. Stabilitäts-Harness
+(`test/stability/`, 10 Fehlerinjektions-Tests, ASan+UBSan, 61 Checks, 0 Failures).
+
+**Als Nächstes ohne Push möglich:** Web-Konsole (`main/web_console.c`) um `nvs dump`,
+`sntp resync`, `espnow diag` erweitern (host-testbar, siehe Debug-Konsole unten).
 
 ### Sender-Diagnose (On-Demand über ESP-NOW)
 - [ ] **Event-Zeitstempel als Uptime darstellen** statt als 1970-Datum.
