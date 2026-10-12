@@ -16,10 +16,18 @@ clean="${2:-}"
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 role_upper="$(printf '%s' "$role" | tr '[:lower:]' '[:upper:]')"
 
+# Locate a working docker command (the socket is often root-only).
+docker_cmd="docker"
 if ! docker info >/dev/null 2>&1; then
-    echo "Docker daemon is not running. Start it (e.g. 'sudo dockerd &') first." >&2
-    exit 1
+    if command -v sudo >/dev/null 2>&1 && sudo docker info >/dev/null 2>&1; then
+        docker_cmd="sudo docker"
+    else
+        echo "Docker daemon is not reachable. Start it (e.g. 'sudo dockerd &') first." >&2
+        exit 1
+    fi
 fi
+# shellcheck disable=SC2086
+$docker_cmd version --format '{{.Server.Version}}' >/dev/null
 
 # Per-role generated defaults, merged with the repo's sdkconfig.defaults.
 gen="$(mktemp)"
@@ -36,7 +44,8 @@ EOF
 [[ "$clean" == "--clean" ]] && rm -rf "$repo/build/$role" "$repo/sdkconfig.$role"
 
 mkdir -p "$repo/.ccache"
-docker run --rm \
+# shellcheck disable=SC2086
+$docker_cmd run --rm \
     -v "$repo":/project \
     -v "$repo/.ccache":/root/.cache/ccache \
     -v "$gen":/tmp/extra.defaults:ro \
