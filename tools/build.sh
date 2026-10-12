@@ -41,21 +41,35 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPNOW_ROLE_${role_upper}=y
 EOF
 
-[[ "$clean" == "--clean" ]] && rm -rf "$repo/build/$role" "$repo/sdkconfig.$role"
+# Wipe inside the container: it runs as root, so this works even though build/
+# may be owned by root from a previous containerised build.
+if [[ "$clean" == "--clean" ]]; then
+    # shellcheck disable=SC2086
+    $docker_cmd run --rm -v "$repo":/project -w /project espressif/idf:v6.1 \
+        rm -rf "build/$role" "sdkconfig.$role"
+fi
 
 mkdir -p "$repo/.ccache"
+# -DSDKCONFIG (a CMake cache variable) is required: an exported SDKCONFIG env
+# var is ignored by the idf.py CLI, so both roles would otherwise share the
+# project ./sdkconfig and the second build would silently use the wrong role.
 # shellcheck disable=SC2086
 $docker_cmd run --rm \
     -v "$repo":/project \
     -v "$repo/.ccache":/root/.cache/ccache \
     -v "$gen":/tmp/extra.defaults:ro \
     -e IDF_CCACHE_ENABLE=1 -e CCACHE_DIR=/root/.cache/ccache \
-    -e SDKCONFIG="/project/sdkconfig.$role" \
     -e SDKCONFIG_DEFAULTS="sdkconfig.defaults;/tmp/extra.defaults" \
     -e IDF_TARGET=esp32 \
     -w /project \
     espressif/idf:v6.1 \
-    idf.py -B "build/$role" build
+    idf.py -B "build/$role" -DSDKCONFIG="/project/sdkconfig.$role" build
+
+# Guard against a silent role mix-up.
+if ! grep -q "CONFIG_ESPNOW_ROLE_${role_upper}=y" "$repo/sdkconfig.$role"; then
+    echo "ERROR: sdkconfig.$role does not select the $role role" >&2
+    exit 1
+fi
 
 echo "--- artifact ---"
 ls -l "$repo/build/$role/esp32-IR.bin"

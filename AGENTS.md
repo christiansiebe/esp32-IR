@@ -10,7 +10,10 @@ Two firmware roles are built from one source tree.
   dashboard (AP `ESP32-IR-Meter` + optional STA to the FRITZ!Box).
 - Role selection is a Kconfig `choice` in `main/Kconfig.projbuild`
   (`CONFIG_ESPNOW_ROLE_SENDER` / `_RECEIVER`).
-- **Non-negotiable / must-not-break**: ESP-NOW, OTA, partition layout, roles.
+- **Non-negotiable / must-not-break**: ESP-NOW, OTA, roles.
+- **Partition layout**: the `factory` slot was removed to give both OTA slots
+  more room (see `partitions.csv` and "Flash layout" below). Keep `storage` at
+  its current offset/size so existing SPIFFS history survives a re-flash.
 
 ## Build and configuration
 - No committed `sdkconfig` (git-ignored). Configuration comes from
@@ -22,6 +25,25 @@ Two firmware roles are built from one source tree.
   `idf.py build` invoked as a CLI ignores an exported `SDKCONFIG`; the effective
   config is written to the project `sdkconfig` file. Assert against that file.
 - Build image: `espressif/idf:v6.1`, target `esp32`, flash 4 MB.
+- Local builds: `tools/build.sh receiver|sender [--clean]` wraps the IDF
+  container (host only needs Docker; works with `docker` or `sudo docker`).
+
+## Flash layout (4 MB)
+| Partition | Offset | Size |
+|-----------|--------|------|
+| nvs       | 0x9000 | 0x6000 |
+| otadata   | 0xf000 | 0x2000 |
+| phy_init  | 0x11000 | 0x1000 |
+| ota_0     | 0x20000 | 0x180000 (1.5 MB) |
+| ota_1     | 0x1a0000 | 0x180000 (1.5 MB) |
+| storage (SPIFFS) | 0x320000 | 0xE0000 (896 KB) |
+
+- There is **no `factory` slot**: the app is flashed to `ota_0` (COM) and updated
+  OTA between `ota_0`/`ota_1`. The two 1.5 MB slots replace the old 1 MB
+  factory+2×1 MB OTA layout, giving each image +512 KB headroom.
+- `storage` deliberately keeps its old offset **and** size, so upgrading from
+  the factory layout preserves the SPIFFS minute history (data is only lost if
+  `storage.bin` is flashed or the partition offset/size changes).
 
 ## CPU clock / power
 - CPU runs at a fixed 80 MHz (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y` in
