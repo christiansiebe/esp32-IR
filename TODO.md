@@ -2,38 +2,52 @@
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
 
-## ⚠️ Verbindliche Regel: SPIFFS-Historie muss erhalten bleiben
-
-Die persistente Leistungshistorie liegt in der SPIFFS-Partition `storage`
-(Offset **`0x320000`**, Größe **`0xE0000`** = 917504 B, Datei `/powerlog/quarters.bin`,
-bis zu 30000 Minutenwerte).
-
-**Diese Daten dürfen NIE verloren gehen.** Konkret einzuhalten:
-
-- **`storage`-Offset und -Größe niemals ändern** und niemals verschieben — sonst ist
-  der bestehende Verlauf nach einem Flash weg.
-- **Flash-Bundles/`flasher_args.json` dürfen die `storage`-Partition nicht schreiben.**
-  (bereits umgesetzt: `e944e04`/`aac6ee0`; Bundle enthält keinen `storage`-Eintrag und
-  keine `storage.bin`.) Vor jeder Bundle-Änderung erneut prüfen.
-- **Kein `erase-flash` / kein Full-Chip-Erase** beim Deployment — nur
-  bootloader + partition-table + app schreiben, `storage` bleibt unberührt.
-- Bei jeder Partitions-/OTA-/Build-/Flash-Änderung prüfen: **bleibt `storage` an exakt
-  derselben Adresse?** Wenn nein, Änderung verwerfen oder Verlust ausdrücklich absprechen.
-- Nach jedem Deployment am Gerät verifizieren: **Verlauf noch vorhanden**
-  (`record_count` > 0, nicht RAM-Fallback) — Akzeptanzkriterium, kein „nice to have".
-
 ## Offen
 
+### ⚠️ Verbindliche Regel: SPIFFS-Historie muss erhalten bleiben (nicht verhandelbar)
+Die persistente Leistungshistorie liegt in der SPIFFS-Partition `storage`
+(Offset **0x320000**, Größe **0xE0000** = 917504 B, Datei `/powerlog/quarters.bin`,
+bis zu 30000 Minutenwerte).
+
+**Diese Daten dürfen NIE verloren gehen.** Konkret:
+- `storage`-Offset und -Größe niemals ändern und niemals verschieben — sonst ist der
+  bestehende Verlauf nach dem nächsten Flash weg. (Genau deshalb blieb `storage` bei
+  der OTA-Neuaufteilung in `c3d3420` auf 0x320000/0xE0000.)
+- Flash-Bundles/`flasher_args.json` dürfen die `storage`-Partition **nicht** schreiben
+  (bereits umgesetzt: `e944e04`/`aac6ee0`; bei jeder Bundle-Änderung erneut prüfen).
+- Kein `erase-flash`/Full-Chip-Erase beim Deployment — nur bootloader + partition-table
+  + App schreiben; `storage` bleibt unberührt.
+- Bei jeder Partitions-/OTA-/Build-/Flash-Änderung prüfen: bleibt `storage` an exakt
+  derselben Adresse? Wenn nein: Änderung verwerfen oder Verlust ausdrücklich absprechen.
+- Nach jedem Deployment am Gerät verifizieren: Verlauf vorhanden (`record_count > 0`,
+  kein RAM-Fallback) — **Akzeptanzkriterium**, kein „nice to have".
+
+### 🐛 Bug: `record_count` nach dem Boot nicht wiederhergestellt
+Symptom: Nach einem Reboot wird die persistierte Minutenhistorie nicht (oder nicht
+vollständig) geladen — `record_count` startet bei 0 statt beim gespeicherten Wert
+(ggf. RAM-Fallback trotz vorhandener `/powerlog/quarters.bin`).
+
+Zu prüfen / zu tun:
+- [ ] Beim Boot verifizieren, dass `power_history` die SPIFFS-Datei öffnet und den
+      Header liest (nicht in den RAM-Fallback fällt). Logzeile `Persistent history
+      ready: N of 30000` gegen `record_count` in `/api/power-history` abgleichen.
+- [ ] Header-Handling prüfen: Nach dem Fix `1612975` (gültiger Fresh-Header + In-Place-
+      Reparatur) darf ein gültiger Bestand **nicht** als „leer" gewertet werden.
+- [ ] Migration prüfen (`4af921a`): Alte `format_version` darf die Datensätze nicht
+      mehr verwerfen — nach dem Boot müssen migrierte Datensätze `record_count > 0` ergeben.
+- [ ] Akzeptanzkriterium (Pflicht): nach Reboot sofort `record_count > 0`, kein RAM-Fallback,
+      0 Schreibfehler. Am Gerät verifizieren.
+
 ### Push / Zugang (blockiert)
-- [ ] **Fine-grained PAT (`github_pat_…`) als `GITHUB_WRITE_TOKEN` hinterlegen.**
-      Aktueller Stand: `GITHUB_TOKEN` ist in dieser Umgebung ein **GitHub-App-Token**
-      (`ghu_…`, kurzlebig) mit reinem **Lesezugriff**. Schreibversuche (Branch/Commit/Push)
-      scheitern mit `403 Resource not accessible by integration`. Der frühere erfolgreiche
-      Push lief über einen **PAT**. Benötigt: fine-grained Token mit *Contents: Read and write*
-      (+ *Workflows: Read and write* bei Workflow-Änderungen) auf `christiansiebe/esp32-IR`,
-      als Secret `GITHUB_WRITE_TOKEN` in OpenHands.
-      → Solange offen: **kein Push möglich**, alle neuen Commits bleiben nur lokal.
-- [ ] Nach Token-Erneuerung: Bergungs-Branch `recovered/ams-features-salvage` pushen.
+- [ ] **Gültigen fine-grained PAT (`github_pat_…`) als `GITHUB_WRITE_TOKEN` hinterlegen.**
+      Geprüfter Stand in dieser Session: `GITHUB_TOKEN` = GitHub-App-Token (`ghu_…`), read-only
+      (`git push` -> `403 Permission to christiansiebe/esp32-IR.git denied`, auch auf bestehenden
+      Branch). `GITHUB_WRITE_TOKEN` = 93 Zeichen, Prefix `githu…` -> **`401 Bad credentials`**
+      (ungültig/abgelaufen), für API *und* Git. Ein Schreibzugang fehlt damit komplett.
+      Benötigt: fine-grained Token mit *Contents: Read and write* (+ *Workflows: Read and write*
+      bei Workflow-Änderungen) auf `christiansiebe/esp32-IR`.
+      → Solange offen: alle neuen Commits bleiben nur lokal.
+- [ ] Bergungs-Branch `recovered/ams-features-salvage` (lokal, Commit `d10ea8c`) pushen.
 
 ### Geborgene Arbeit (AMS-Features, aus verlorenem `/tmp/work` gerettet)
 Kontext: In einer früheren Session lag die Arbeit in **`/tmp/work/`** (nicht `/workspace`).
@@ -86,100 +100,81 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       (In `mqtt_*` angelegt, aber nicht integriert.)
 - [ ] Optional: konfigurierbares Reboot-Intervall (nächtlich), Deckelung wie AMS.
 
-## Partitionstabelle (geändert, Commit `c3d3420`)
+## Partitionstabelle (geändert, `c3d3420`) — Flash-Reihenfolge & Auswirkungen
+Ziel: zwei echte OTA-Slots à 1,5 MB; `storage` bleibt an exakt derselben Adresse, damit
+die SPIFFS-Minutenhistorie einen COM-Re-Flash überlebt.
 
-Ziel: zwei echte OTA-Slots à 1,5 MB (für OTA-Updates ohne Kabel), **storage bleibt
-an exakt derselben Adresse**, damit die SPIFFS-Minutenhistorie einen COM-Re-Flash
-überlebt.
-
-**Vorher:**
+Vorher:
 ```
-nvs      data nvs     0x9000   0x6000
-otadata  data ota     0xf000   0x2000
-phy_init data phy     0x11000  0x1000
 factory  app  factory 0x20000  0x100000
 ota_0    app  ota_0   0x120000 0x100000
 ota_1    app  ota_1   0x220000 0x100000
 storage  data spiffs  0x320000 0xE0000
 ```
-
-**Nachher:**
+Nachher:
 ```
-nvs      data nvs     0x9000   0x6000
-otadata  data ota     0xf000   0x2000
-phy_init data phy     0x11000  0x1000
 ota_0    app  ota_0   0x20000  0x180000
 ota_1    app  ota_1   0x1a0000 0x180000
 storage  data spiffs  0x320000 0xE0000
 ```
-
 Konkret geändert:
-- **`factory`-App-Slot entfernt** (lag bei `0x20000`/`1 MB`).
-- **`ota_0` vergrößert und verschoben:** `0x120000`/`0x100000` -> **`0x20000`/`0x180000`**
-  (übernimmt den bisherigen Factory-Platz).
-- **`ota_1` vergrößert und verschoben:** `0x220000`/`0x100000` -> **`0x1a0000`/`0x180000`**.
-- **`storage` unverändert:** Offset `0x320000`, Größe `0xE0000` (= 917504 B) -> Historie bleibt.
-  **Nicht verhandelbar** — siehe Regel oben („SPIFFS-Historie muss erhalten bleiben").
-- `nvs`, `otadata`, `phy_init` unverändert.
+- `factory`-App-Slot **entfernt** (war 0x20000/1 MB).
+- `ota_0`: 0x120000/0x100000 → **0x20000/0x180000**.
+- `ota_1`: 0x220000/0x100000 → **0x1a0000/0x180000**.
+- `storage` **unverändert** (0x320000/0xE0000) → Historie bleibt. Nicht verhandelbar
+  (siehe Regel oben).
+- `nvs`/`otadata`/`phy_init` unverändert.
 
-Auswirkungen / Konsequenzen:
-- **Flash-Ziel neu:** Die App wird jetzt nach `ota_0@0x20000` geflasht (vorher Factory
-  `0x20000`). `otadata` entscheidet, welcher OTA-Slot bootet.
-- **Ein Factory-Boot-Fallback existiert nicht mehr** — bei fehlgeschlagenem OTA greift
-  stattdessen `esp_ota_mark_app_invalid_rollback_and_reboot()` (Rollback in den anderen
-  OTA-Slot), abgesichert durch die Boot-Confirmation-Logik (siehe geborgenes
-  `boot_confirm`/`boot_policy`).
-- **`Firmware/Receiver/flasher_args.json` angepasst** (nur `0x1000`/`0x8000`/`0xf000`/`0x20000`),
-  **storage-Eintrag entfernt** -> Flash-Bundles schreiben die Historie nie
-  (Commits `e944e04`/`aac6ee0`).
-- **Erstes Deployment nach dem Umbau erfordert Full-Flash** (neue Partitionstabelle +
-  Bootloader/Partition-Table-Update); danach sind OTA-Updates möglich.
+Auswirkungen:
+- Die App wird jetzt nach **`ota_0@0x20000`** geflasht (vorher `factory@0x20000`);
+  `otadata` entscheidet den Boot-Slot.
+- Kein Factory-Fallback mehr; Rollback in den **anderen** OTA-Slot via
+  `esp_ota_mark_app_invalid_rollback_and_reboot()` (Boot-Confirmation, s. AMS-Punkt).
+- `Firmware/Receiver/flasher_args.json` ohne `storage`-Eintrag → Bundle schreibt die
+  Historie nie (`e944e04`).
+- **Erstes Deployment = Full-Flash** (bootloader + partition-table + App), `storage`
+  bleibt unberührt.
+
+Flash-Reihenfolge (USB-Full-Flash, Empfänger):
+```
+0x1000   bootloader.bin
+0x8000   partition-table.bin
+0xf000   ota_data_initial.bin
+0x20000  receiver-sml.bin      # App jetzt in ota_0, nicht mehr factory
+# storage NICHT flashen (Historie erhalten)
+```
 
 Offen / zu verifizieren:
-- [ ] Gerät mit neuer `partitions.csv` **per Kabel komplett flashen** (bootloader + partition-table
-      + app; `storage` bleibt unberührt) und booten prüfen.
-- [ ] Danach einen **OTA-Update-Zyklus** testen (Accept + Rollback bei Fehlschlag).
-- [ ] Prüfen, dass die Historie nach dem COM-Flash **erhalten** bleibt (SPIFFS-Historie > 0).
+- [ ] Gerät per Kabel komplett flashen (`storage` unberührt), Boot prüfen.
+- [ ] OTA-Update-Zyklus testen (Accept + Rollback).
+- [ ] Historie nach COM-Flash erhalten (`record_count > 0`).
 
 ## Übergabe
 
-Stand `/workspace/esp32-IR`, Branch `cline/power-history-diag`, **4 lokale Commits vor `origin`**
-(**nicht gepusht**). Arbeitsbaum sauber. Backup: `/workspace/esp32-IR-backup-20261012.bundle`.
+Stand: Branch `cline/power-history-diag`, `origin` bei `3f58fec`. **Lokale Commits vor
+`origin` (nicht gepusht, kein Schreibzugang).** Die früher gelisteten 4 Commits
+(`aae37ec`, `4af921a`, `72004b7`, `8764f22`) sind inzwischen **gepusht**; seitdem kamen
+lokal weitere Commits hinzu (TODO-Dokumentation zu Bug/Partition/Regel).
 
-    aae37ec TODO: record push blocker, recovered AMS work and comparison follow-ups
-    4af921a power_history: migrate old record formats instead of dropping them
-    72004b7 docs: mark persistence migration done, note record-format versioning
-    8764f22 tests: add power-history stability/fault-injection harness (ASan/UBSan)
+**Push-Status (blockiert, geprüft):** `GITHUB_TOKEN` = GitHub-App-Token (`ghu_…`),
+read-only -> `403 Permission denied` beim `git push`. `GITHUB_WRITE_TOKEN` = 93 Zeichen
+(`githu…`) -> `401 Bad credentials` (ungültig). Ohne gültigen fine-grained PAT bleibt
+alles lokal.
 
-**Push-Status (blockiert):** `GITHUB_TOKEN` -> HTTP 200, aber **nur Lesen** (GitHub-App-Token
-`ghu_…`; Branch/Commit/Push scheitern mit `403 Resource not accessible by integration`).
-`GITHUB_WRITE_TOKEN` -> **401 (ungültig)**. Früherer erfolgreicher Push lief über einen
-fine-grained PAT.
+**Offen in dieser Session:** siehe die beiden Blöcke oben
+(Bug `record_count` + Partitionstabelle/Flash-Reihenfolge).
 
-**1. Schritt in der neuen Session — Token + Push:**
-```
-# erwartet 200
-curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $GITHUB_TOKEN" \
-  https://api.github.com/repos/christiansiebe/esp32-IR
-# Schreibtest (Branch anlegen + löschen); 403 = kein Schreibrecht
-curl -s -X POST -H "Authorization: Bearer $GITHUB_TOKEN" \
-  https://api.github.com/repos/christiansiebe/esp32-IR/git/refs \
-  -d "{\"ref\":\"refs/heads/probe-\$\$\",\"sha\":\"<main-sha>\"}"
-cd /workspace/esp32-IR && git push origin cline/power-history-diag
-```
-Wenn der Push erneut 403/401 gibt: **schreibfähigen fine-grained PAT (`github_pat_…`,
-*Contents: Read and write*) als `GITHUB_WRITE_TOKEN` hinterlegen** und mit diesem pushen
-(`git remote set-url origin https://x-access-token:$GITHUB_WRITE_TOKEN@github.com/christiansiebe/esp32-IR.git`).
-Danach: Bergungs-Branch `recovered/ams-features-salvage` pushen und CI-Ergebnis prüfen.
-
-**2. Am Gerät:** Bundle flashen -> SPIFFS-Verlauf muss erhalten bleiben (Flash-Bundle schreibt
-die `storage`-Partition bewusst nicht, siehe `e944e04`/`aac6ee0`).
+**2. Am Gerät:** Nach dem Flash der neuen Partitionstabelle (`c3d3420`) ist ein
+**Full-Flash** nötig (bootloader + partition-table + App nach `ota_0@0x20000`). Die
+`storage`-Partition **nicht** flashen — der SPIFFS-Verlauf muss erhalten bleiben
+(Bundle schreibt `storage` bewusst nicht, siehe `e944e04`/`aac6ee0`). Danach prüfen:
+`record_count > 0`, kein RAM-Fallback.
 
 **Tests (lokal, vor Push):** `./test/run_host_tests.sh` — alles grün, inkl. Stabilitäts-Harness
 (`test/stability/`, 10 Fehlerinjektions-Tests, ASan+UBSan, 61 Checks, 0 Failures).
 
-**Als Nächstes ohne Push möglich:** Web-Konsole (`main/web_console.c`) um `nvs dump`,
-`sntp resync`, `espnow diag` erweitern (host-testbar, siehe Debug-Konsole unten).
+**Als Nächstes:** Web-Konsole (`main/web_console.c`) um `nvs dump`, `sntp resync`,
+`espnow diag` erweitern (host-testbar, siehe Debug-Konsole unten).
 
 ### Sender-Diagnose (On-Demand über ESP-NOW)
 - [ ] **Event-Zeitstempel als Uptime darstellen** statt als 1970-Datum.
