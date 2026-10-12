@@ -49,6 +49,10 @@ static const char *TAG = "espnow_meter";
  * that never arrive). The stream is flushed and the parser reset so the next
  * telegram preamble resynchronises it. */
 #define UART_PARSER_STUCK_MS 6000
+/* A telegram normally arrives about once per second. If bytes are still flowing
+ * but no telegram has been finalised for this long, the parser is consuming the
+ * stream without ever completing a telegram, so it is reset as well. */
+#define UART_TELEGRAM_STALL_MS 15000
 /* A total receive silence this long means the read head is likely unplugged or
  * misaligned rather than just idle between telegrams. */
 #define UART_SILENCE_ALERT_MS 30000
@@ -200,6 +204,7 @@ static uint32_t g_uart_gap_loss;
 static bool g_uart_gap_mid_pending;
 static uint32_t g_uart_parser_resyncs;
 static uint64_t g_uart_last_byte_us;
+static uint64_t g_uart_last_telegram_us;
 static bool g_uart_silence_reported;
 static espnow_diag_event_t g_diag_events[ESPNOW_DIAG_EVENT_RING];
 static size_t g_diag_event_count;
@@ -1487,6 +1492,7 @@ void sml_adapter_telegram_callback(uint64_t timestamp_us, bool crc_valid,
     portENTER_CRITICAL(&g_uart_stats_lock);
     gap_pending = g_uart_gap_mid_pending;
     g_uart_gap_mid_pending = false;
+    g_uart_last_telegram_us = (uint64_t)esp_timer_get_time();
     if (gap_pending && !crc_valid) {
         ++g_uart_gap_loss;
     }
@@ -1581,17 +1587,22 @@ static void uart_capture_worker(void *arg)
     while (1) {
         int received = uart_read_bytes(UART_PORT_NUM, rx_buffer, sizeof(rx_buffer),
                                        pdMS_TO_TICKS(50));
+
+        uint64_t now_us = (uint64_t)esp_timer_get_time();
+        uint64_t last_us;
+        bool already;
+        uint64_t last_telegram_us;
+        portENTER_CRITICAL(&g_uart_stats_lock);
+        last_us = g_uart_last_byte_us;
+        already = g_uart_silence_reported;
+        last_telegram_us = g_uart_last_telegram_us;
+        portEXIT_CRITICAL(&g_uart_stats_lock);
+
         if (received <= 0) {
             /* Report a total receive silence once, in case the read head is
              * unplugged or misaligned rather than merely idle between frames. */
-            uint64_t last_us;
-            bool already;
-            portENTER_CRITICAL(&g_uart_stats_lock);
-            last_us = g_uart_last_byte_us;
-            already = g_uart_silence_reported;
-            portEXIT_CRITICAL(&g_uart_stats_lock);
             if (last_us != 0 && !already &&
-                (uint64_t)esp_timer_get_time() - last_us >= UART_SILENCE_ALERT_MS * 1000ULL) {
+                now_us - last_us >= UART_SILENCE_ALERT_MS * 1000ULL) {
                 portENTER_CRITICAL(&g_uart_stats_lock);
                 g_uart_silence_reported = true;
                 portEXIT_CRITICAL(&g_uart_stats_lock);
@@ -1599,13 +1610,11 @@ static void uart_capture_worker(void *arg)
                                UART_SILENCE_ALERT_MS);
             }
 
-            /* The byte stream stopped while the parser was still inside a
-             * telegram: the frame is truncated (the read head lost sync, or
-             * bytes were lost). Flush the driver and reset the parser so the
+            /* Recovery 1: the stream stopped while the parser was still inside
+             * a telegram, so the frame is truncated. Flush and reset so the
              * next preamble starts cleanly instead of staying desynchronised. */
             if (last_us != 0 && !sml_adapter_awaiting_telegram() &&
-                (uint64_t)esp_timer_get_time() - last_us >=
-                    (uint64_t)UART_PARSER_STUCK_MS * 1000ULL) {
+                now_us - last_us >= (uint64_t)UART_PARSER_STUCK_MS * 1000ULL) {
                 uart_flush_input(UART_PORT_NUM);
                 sml_adapter_reset();
                 portENTER_CRITICAL(&g_uart_stats_lock);
@@ -1617,13 +1626,23 @@ static void uart_capture_worker(void *arg)
             continue;
         }
 
-        uint64_t now_us = (uint64_t)esp_timer_get_time();
+        /* Recovery 2: bytes keep arriving but no telegram has been finalised
+         * for a long time, so the parser is eating the stream. Reset it. */
+        if (last_telegram_us != 0 &&
+            now_us - last_telegram_us >= (uint64_t)UART_TELEGRAM_STALL_MS * 1000ULL) {
+            sml_adapter_reset();
+            portENTER_CRITICAL(&g_uart_stats_lock);
+            ++g_uart_parser_resyncs;
+            g_uart_last_telegram_us = now_us;
+            portEXIT_CRITICAL(&g_uart_stats_lock);
+            diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "parser resync (no telegram)");
+        }
 
         /* A silent stretch between byte bursts is normal for the IR read head.
          * Distinguish a gap while waiting for a telegram (fine) from a gap in
          * the middle of one (data lost, the parser will fail its checksum). */
-        if (g_uart_last_byte_us != 0) {
-            uint64_t gap_us = now_us - g_uart_last_byte_us;
+        if (last_us != 0) {
+            uint64_t gap_us = now_us - last_us;
             if (gap_us >= UART_GAP_THRESHOLD_MS * 1000ULL) {
                 uint32_t gap_ms = (uint32_t)(gap_us / 1000ULL);
                 bool mid_telegram = !sml_adapter_awaiting_telegram();
