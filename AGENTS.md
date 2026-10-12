@@ -171,6 +171,19 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   `mqtt_bridge.c` is only compiled for the receiver and `tx_batch.c` only for
   the sender (`main/CMakeLists.txt`).
 
+## Sender ESP-NOW batching (5 s cycle)
+- The sender no longer sends one packet per telegram. `sml_adapter_telegram_callback`
+  pushes into `g_sml_tx_batch` (`main/tx_batch.c`, host-tested) and
+  `uart_transport_worker` waits `SML_TX_CYCLE_MS` (5000) then `flush_tx_batch()`
+  drains up to `SML_TX_BURST` (32) oldest-first. The sequence is the ring's own.
+- `sml_tx_batch_mark_sent()` runs only after a confirmed ESP-NOW delivery, so an
+  unconfirmed or ring-evicted telegram keeps counting in `sml_tx_batch_missing()`;
+  that value is exposed as `batch_missing` on the sender diag page and is the
+  reconciliation signal. The batch ring is `SML_TX_BATCH_CAPACITY` (256), far more
+  than one cycle, so a normal cycle never evicts.
+- Light-sleep between cycles is NOT implemented; the radio stays on. Do not add
+  `CONFIG_PM_ENABLE` for it (DFS is disabled for ESP-NOW).
+
 ## Managed components (IDF v6)
 - ESP-IDF v6 moved ESP-MQTT and cJSON out of the core. They come from the ESP
   Component Registry (`espressif/mqtt`, `espressif/cjson`) via
