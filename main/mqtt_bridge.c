@@ -29,7 +29,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 {
     (void)handler_args;
     (void)base;
-    esp_mqtt_event_handle_t event = event_data;
+    (void)event_data;
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED: {
         s_connected = true;
@@ -42,7 +42,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         const char *hub =
             "{\"name\":\"ESP32-IR\",\"unique_id\":\"esp32ir_recv\","
             "\"availability_topic\":\"%s\"}";
-        char payload[192];
+        char payload[320];
         snprintf(payload, sizeof(payload), hub, topics.status);
         esp_mqtt_client_publish(s_client, topics.state, payload, 0, 0, 1);
 
