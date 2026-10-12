@@ -320,3 +320,56 @@ alles lokal.
     OBIS-Varianten (`smlOBISCheck`, `smlOBISByUnitChecked`). Host-Test
     `test/test_sml_parser.cpp` laeuft unter AddressSanitizer und reproduziert den
     urspruenglichen Ueberlauf nachweislich (rot ohne Fix, gruen mit Fix).
+
+## Code-Historie (chronologisch, neueste zuerst)
+
+Kurz-Changelog der funktionalen Aenderungen, abgeleitet aus der Git-Historie
+(Commit-Kuerzel in Klammern). Reine Doku-/Format-Commits sind zusammengefasst.
+
+### 2026-10-12 – Infrastruktur, Robustheit, Sender
+- `c3d3420` **Partition-Layout geaendert**: `factory` entfernt, 2x 1,5 MB OTA
+  (`ota_0` @0x20000, `ota_1` @0x1A0000); `storage` bleibt @0x320000/0xE0000.
+  -> einmalige **Flash-Migration** (Partitionstabelle + otadata + App) noetig.
+- `e944e04` / `aac6ee0` Flash-Bundles schreiben die `storage`-Partition **nie**
+  (SPIFFS-Verlauf bleibt erhalten).
+- `a8a3e23` / `5a21fba` / `9c6deed` **ESP-NOW-Wall-Clock-Sync**: Sender holt die Zeit
+  vom Empfaenger (behebt 1970-Zeitstempel in `/diag`).
+- `bf3f0fd` / `81a2af9` **Sender-Selbstheilung** bei UART-Desync (auch wenn Bytes
+  fliessen, aber nie ein Telegramm fertig wird).
+- `f29b758` Post-OTA-**Rollback-Bestaetigung** statt Blind-Akzept (Empfaenger).
+- `4af921a` `power_history`: alte Record-Formate **migrieren** statt verwerfen.
+- `8764f22` Stability-/Fault-Injection-Harness (ASan/UBSan); `de3cec8` Reboot-Persistenz-Test.
+- `6a52fe6` / `f736672` `tools/build.sh` (lokaler, cachebarer Docker-Build).
+- Doku: `AGENTS.md`, `HANDOFF.md`, diverse `TODO.md`-Commits.
+
+### 2026-10-11 – Dashboard/UI, Diagnose, Persistenz
+- `3c8a669` **Chart-Zeitfenster als Slider** (Index -> Stunden).
+- `adc6154` **UTC-Tagesansicht** + hostgetestete Aggregation (Luecken nicht als 0 W).
+- `13a01ed` **Hover/Tap**: Wert + Zeitpunkt am Balken (Maus + Touch).
+- `50585ea` **Browser-Debug-Konsole** (`/console`, `/api/console`).
+- `85275f3` / `1b9dad2` Dashboard-Fixes (Stack-Overflow, Ein-Pass-Aggregation).
+- `1612975` **Reboot-Persistenz-Bug** behoben (ungueltiger Fresh-Header `magic=0`).
+- `a37cdf3` / `ec921f3` **Persistentes Crash-Journal** + Parser-Haertung
+  (`smlNewList` Off-by-one, gepruefte OBIS-Varianten).
+- `b19239b` / `740ad0f` / `f19fc51` **UART-Gap-Messung** + korrekte Klassifizierung
+  (Luecke nur bei Checksum-Fehler als Verlust).
+- `40baea3` / `fa24b5e` / `c53b028` CPU fest auf **80 MHz** + CI-Assert.
+- `71f5ea8` `storage.bin` in CI-Flash-Artefakte; `f68b4fc` HA-Long-Term-Statistics-Import (Tool).
+
+### 2026-10-10 – Basis dieser Arbeit
+- `abdb7d4` / `80fe66a` **On-Demand-Senderdiagnose** ueber ESP-NOW (unicast,
+  Request/Response, echte Sendebestaetigung, rollenscharfe Klassifizierer).
+- `a201f5a` **Persistente Leistungshistorie** im Empfaenger (SPIFFS/RAM, SNTP,
+  1-s-Sampling, 60-s-Buckets, `/api/power-samples|power-history|power-history.csv`).
+- `7606a36` SPIFFS: `format_if_mount_failed = true` (kein Mount-Fehler mehr).
+- `e712ac3` Vorformatiertes SPIFFS-Image (`spiffs_create_partition_image`).
+- `6213c3f` TODO angelegt; `4917ed6` Receiver-Firmware-Snapshot.
+
+### 2026-10-08 / 09 – Ursprung
+- `31f9f99` Initiales ESP-IDF-Projekt + Cloud-Build.
+- `4019d44` CI-Umgebung (ESP-IDF v6.1).
+- `6589f35` SML-Werte auf der Startseite.
+- `05ed7b9` Rohstream -> **SML-Telemetrie** (Transportpaket-Format).
+- `4ffdcf0` SML-Parser-Abhaengigkeit deklariert (Referenz-Commit).
+- `5035efc` / `44b6fe0` / `e5fdec1` Firmware-Staging/Upload im Workflow.
+- `664e927` / `0070840` Artefakt-Pfade + `ota_data_initial.bin` im Build.
