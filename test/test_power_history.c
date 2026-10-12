@@ -43,12 +43,24 @@ static uint32_t crc_record(const power_history_record_t *r)
 static void make_record(power_history_record_t *r, uint32_t seq, int64_t ts,
                         int32_t milliwatts, uint32_t samples)
 {
-    memset(r, 0, sizeof(*r));
-    r->sequence = seq;
-    r->interval_start_utc = ts;
-    r->average_milliwatts = milliwatts;
-    r->sample_count = samples;
-    r->format_version = 2; /* POWER_HISTORY_VERSION */
+    power_history_record_t tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.sequence = seq;
+    tmp.interval_start_utc = ts;
+    tmp.average_milliwatts = milliwatts;
+    tmp.sample_count = samples;
+    tmp.format_version = 2; /* POWER_HISTORY_VERSION */
+    tmp.checksum = crc_record(&tmp);
+    *r = tmp;
+}
+
+/* Same as make_record() but with an explicit on-disk format version, so the
+ * migration path can be exercised with records written by an older firmware. */
+static void make_record_versioned(power_history_record_t *r, uint32_t seq, int64_t ts,
+                                  int32_t milliwatts, uint32_t samples, uint16_t version)
+{
+    make_record(r, seq, ts, milliwatts, samples);
+    r->format_version = version;
     r->checksum = crc_record(r);
 }
 
@@ -279,6 +291,76 @@ static void test_fresh_header_validity(void)
           "header with foreign version is rejected");
 }
 
+/* 10) Persistence migration: a format-version bump must not drop the stored
+ *     history. A v1 record (generation stored in `reserved`) is accepted and
+ *     upgraded in place, a current-version record is passed through unchanged,
+ *     and a genuinely corrupt CRC is still rejected (strict across versions). */
+static void test_record_migration(void)
+{
+    printf("test_record_migration\n");
+    int64_t ts = 6000000000LL;
+
+    /* v1 record: `reserved` carries the old slot generation. */
+    power_history_record_t old_rec;
+    make_record_versioned(&old_rec, 7, ts, 1500, 60, 1);
+    old_rec.reserved = 0x1234u;
+    old_rec.checksum = crc_record(&old_rec);
+    power_history_record_t copy = old_rec;
+    CHECK(power_history_migrate_record(&copy), "v1 record migrates");
+    CHECK(copy.format_version == 2, "migrated record carries the current version");
+    CHECK(copy.reserved == 0, "v1 leftover generation is normalized to 0");
+    CHECK(copy.sequence == 7 && copy.interval_start_utc == ts &&
+          copy.average_milliwatts == 1500 && copy.sample_count == 60,
+          "value fields survive the migration");
+    CHECK(copy.checksum == crc_record(&copy), "checksum is recomputed after migration");
+
+    /* Current-version record is idempotent. */
+    power_history_record_t fresh_rec;
+    make_record(&fresh_rec, 8, ts + 60, 2000, 60);
+    power_history_record_t fresh_copy = fresh_rec;
+    CHECK(power_history_migrate_record(&fresh_copy), "current record is accepted");
+    CHECK(fresh_copy.checksum == fresh_rec.checksum,
+          "current record is left byte-identical");
+
+    /* A real CRC mismatch is corruption, not a migration. */
+    power_history_record_t corrupt = old_rec;
+    corrupt.checksum ^= 0xDEADBEEFu;
+    CHECK(!power_history_migrate_record(&corrupt), "CRC mismatch is rejected");
+
+    /* Unknown (future) version is rejected rather than misread. */
+    power_history_record_t future;
+    make_record_versioned(&future, 9, ts, 1000, 60, 99);
+    CHECK(!power_history_migrate_record(&future), "unknown version is rejected");
+
+    /* Sequence 0 can never be a valid record. */
+    power_history_record_t zero;
+    make_record(&zero, 0, ts, 1000, 60);
+    CHECK(!power_history_migrate_record(&zero), "sequence 0 is rejected");
+}
+
+/* 11) Aggregation keeps old-format data: a mixed v1/v2 set is fully averaged,
+ *     not just the native records. */
+static void test_migration_in_aggregation(void)
+{
+    printf("test_migration_in_aggregation\n");
+    int64_t window = 7000000000LL;
+    double sum[96];
+    uint32_t count[96];
+    int64_t starts[96];
+    power_history_record_t recs[2];
+
+    make_record_versioned(&recs[0], 1, window, 1000, 60, 1); /* v1, 1 W */
+    recs[0].reserved = 0xABCDu;
+    recs[0].checksum = crc_record(&recs[0]);
+    make_record(&recs[1], 2, window + 60, 3000, 60);         /* v2, 3 W */
+
+    power_history_aggregate_init(window, 900, sum, count, starts, 96);
+    CHECK(power_history_aggregate_core(window, 900, recs, 2, sum, count, 96) == ESP_OK,
+          "core returns OK");
+    CHECK(count[0] == 2, "both the v1 and the v2 record are aggregated");
+    CHECK(fabs(sum[0] - 4.0) < 1e-9, "v1 1 W + v2 3 W = 4 W");
+}
+
 int main(void)
 {
     test_15min_average_basic();
@@ -290,6 +372,8 @@ int main(void)
     test_leap_day_boundary();
     test_dst_neutral_utc_days();
     test_fresh_header_validity();
+    test_record_migration();
+    test_migration_in_aggregation();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -9,6 +9,13 @@
 #define POWER_HISTORY_CAPACITY 30000u
 #define POWER_HISTORY_PAGE_SIZE 128u
 
+/* On-disk record/header format version. v1 stored the slot generation in
+ * `reserved`; v2 leaves `reserved` at 0. Bumping the version must not drop the
+ * stored history: power_history_migrate_record() upgrades older records in
+ * place, and only versions outside [OLDEST, VERSION] are rejected. */
+#define POWER_HISTORY_VERSION 2u
+#define POWER_HISTORY_OLDEST_SUPPORTED_VERSION 1u
+
 typedef struct __attribute__((packed)) {
     uint32_t sequence;
     int64_t interval_start_utc;
@@ -47,6 +54,15 @@ bool power_history_header_is_valid(const power_history_header_t *header);
 
 esp_err_t power_history_init(void);
 bool power_history_enqueue(const power_history_record_t *record);
+
+/* Upgrade an on-disk record to the current format in place, so a format-version
+ * bump does not drop the stored history. Returns true for records that are
+ * usable afterwards (native OR migrated), false for unsupported versions and
+ * for records whose CRC does not match (kept strict across versions — only the
+ * storage format changed, the checksum algorithm did not). Recomputes the
+ * checksum after a migration because a migration changes the fields the CRC
+ * covers. Idempotent for the current version. Exposed for host tests. */
+bool power_history_migrate_record(power_history_record_t *record);
 esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
                              power_history_record_t *records, size_t capacity,
                              size_t *record_count, power_history_status_t *status,

@@ -14,8 +14,10 @@
 #include "freertos/task.h"
 
 #define POWER_HISTORY_MAGIC 0x50484C31u
-#define POWER_HISTORY_VERSION 2u
 #define POWER_HISTORY_MOUNT_PATH "/powerlog"
+/* Format versions live in power_history.h so the host tests and the migration
+ * helper agree on them. The header version is the current record version. */
+#define POWER_HISTORY_VERSION_MAX POWER_HISTORY_VERSION
 #define POWER_HISTORY_FILE POWER_HISTORY_MOUNT_PATH "/quarters.bin"
 #define POWER_HISTORY_PARTITION "storage"
 #define POWER_HISTORY_QUEUE_LENGTH 16u
@@ -63,10 +65,43 @@ static uint32_t record_checksum(const power_history_record_t *record)
     return ~crc;
 }
 
+bool power_history_migrate_record(power_history_record_t *record)
+{
+    if (record == NULL || record->sequence == 0) {
+        return false;
+    }
+    /* CRC stays strict across format versions: a mismatch is real corruption,
+     * not a storage-layout change. The header stores the generation, so a
+     * mismatch must not be masked by silently re-checksumming. */
+    if (record->checksum != record_checksum(record)) {
+        return false;
+    }
+    if (record->format_version > POWER_HISTORY_VERSION_MAX ||
+        record->format_version < POWER_HISTORY_OLDEST_SUPPORTED_VERSION) {
+        return false;
+    }
+    bool migrated = false;
+    if (record->format_version == 1u) {
+        /* v1 -> v2: the slot generation lived in `reserved`. v2 normalizes it
+         * to 0; the value is not needed to read the record. */
+        record->reserved = 0;
+        record->format_version = POWER_HISTORY_VERSION;
+        migrated = true;
+    }
+    if (migrated) {
+        /* The checksum covers the migrated fields, so it must be recomputed. */
+        record->checksum = record_checksum(record);
+    }
+    return true;
+}
+
 static bool record_is_valid(const power_history_record_t *record)
 {
-    return record->sequence != 0 && record->format_version == POWER_HISTORY_VERSION &&
-           record->checksum == record_checksum(record);
+    if (record == NULL || record->sequence == 0) {
+        return false;
+    }
+    power_history_record_t migrated = *record;
+    return power_history_migrate_record(&migrated);
 }
 
 static bool header_is_valid(const power_history_header_t *header)
@@ -454,6 +489,7 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
                      (unsigned long)slot);
             continue;
         }
+        (void)power_history_migrate_record(&record);
         if (record.sequence > after_sequence) {
             records[*record_count] = record;
             ++*record_count;
@@ -492,7 +528,11 @@ esp_err_t power_history_aggregate_core(int64_t window_start_utc,
         if (!record_is_valid(&records[i])) {
             continue;
         }
-        int64_t ts = records[i].interval_start_utc;
+        /* Work on a migrated copy so older-format records are aggregated too
+         * (a version bump must not silently drop the stored history). */
+        power_history_record_t record = records[i];
+        (void)power_history_migrate_record(&record);
+        int64_t ts = record.interval_start_utc;
         if (ts < window_start_utc) {
             continue;
         }
@@ -500,7 +540,7 @@ esp_err_t power_history_aggregate_core(int64_t window_start_utc,
         if (idx < 0 || idx >= (int64_t)bucket_count) {
             continue;
         }
-        sum_w[idx] += (double)records[i].average_milliwatts / 1000.0;
+        sum_w[idx] += (double)record.average_milliwatts / 1000.0;
         ++count[idx];
     }
     return ESP_OK;
