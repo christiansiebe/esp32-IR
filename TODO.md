@@ -317,7 +317,7 @@ alles lokal.
 - [ ] `current_sample_count`-Label praezisieren (aktuell: 15-min-Ringpuffer, nicht Samples im aktuellen 60-s-Bucket).
 - [ ] `resize`-Handler startet zusaetzliche 60-s-Schleifen (`updateHistory`) -> Mehrfach-Timer vermeiden.
 
-### 🐛 Bug: Button „Vortag vergleichen“ tut in der Live-Ansicht nichts
+### ✅ Behoben: Button „Vortag vergleichen“ tat in der Live-Ansicht nichts
 Betrifft die **Empfänger-Weboberfläche** (Dashboard, `root_handler`/`sml_page` in
 `main/main.c`). Der Sender hat keinen Webserver.
 
@@ -335,9 +335,9 @@ Im Live-Modus bleibt der Button daher wirkungslos; zusätzlich wird die Info-Zei
 gerade im Live-Modus geleert (`live?'':...`), sodass auch kein Hinweis erscheint.
 
 Zu tun:
-- [ ] **Fix**: in `toggleCompare()` vor `redraw()` in die Tagesansicht wechseln
+- [x] **Fix**: `setLive(false)` in `toggleCompare()` vor `redraw()` ergänzt.
       (z. B. `setLive(false);`), dann wird der Vortag (gelb) über den Tagesverlauf gelegt.
-- [ ] Optional: beim Wechsel in die Live-Ansicht `historyCompare` zurücksetzen
+- [x] Optional: der Slider-Handler (`history-range`) setzt `historyCompare` jetzt zurück.
       (der Slider-Handler `history-range` tut das derzeit nicht).
 - [ ] Verifizieren: Live → Button klicken → gestrichelte/gelbe Vergleichskurve +
       Info „Vergleich &lt;Datum&gt; (gelb)“ sichtbar.
