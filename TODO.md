@@ -66,6 +66,60 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       (In `mqtt_*` angelegt, aber nicht integriert.)
 - [ ] Optional: konfigurierbares Reboot-Intervall (nächtlich), Deckelung wie AMS.
 
+## Partitionstabelle (geändert, Commit `c3d3420`)
+
+Ziel: zwei echte OTA-Slots à 1,5 MB (für OTA-Updates ohne Kabel), **storage bleibt
+an exakt derselben Adresse**, damit die SPIFFS-Minutenhistorie einen COM-Re-Flash
+überlebt.
+
+**Vorher:**
+```
+nvs      data nvs     0x9000   0x6000
+otadata  data ota     0xf000   0x2000
+phy_init data phy     0x11000  0x1000
+factory  app  factory 0x20000  0x100000
+ota_0    app  ota_0   0x120000 0x100000
+ota_1    app  ota_1   0x220000 0x100000
+storage  data spiffs  0x320000 0xE0000
+```
+
+**Nachher:**
+```
+nvs      data nvs     0x9000   0x6000
+otadata  data ota     0xf000   0x2000
+phy_init data phy     0x11000  0x1000
+ota_0    app  ota_0   0x20000  0x180000
+ota_1    app  ota_1   0x1a0000 0x180000
+storage  data spiffs  0x320000 0xE0000
+```
+
+Konkret geändert:
+- **`factory`-App-Slot entfernt** (lag bei `0x20000`/`1 MB`).
+- **`ota_0` vergrößert und verschoben:** `0x120000`/`0x100000` -> **`0x20000`/`0x180000`**
+  (übernimmt den bisherigen Factory-Platz).
+- **`ota_1` vergrößert und verschoben:** `0x220000`/`0x100000` -> **`0x1a0000`/`0x180000`**.
+- **`storage` unverändert:** Offset `0x320000`, Größe `0xE0000` (= 917504 B) -> Historie bleibt.
+- `nvs`, `otadata`, `phy_init` unverändert.
+
+Auswirkungen / Konsequenzen:
+- **Flash-Ziel neu:** Die App wird jetzt nach `ota_0@0x20000` geflasht (vorher Factory
+  `0x20000`). `otadata` entscheidet, welcher OTA-Slot bootet.
+- **Ein Factory-Boot-Fallback existiert nicht mehr** — bei fehlgeschlagenem OTA greift
+  stattdessen `esp_ota_mark_app_invalid_rollback_and_reboot()` (Rollback in den anderen
+  OTA-Slot), abgesichert durch die Boot-Confirmation-Logik (siehe geborgenes
+  `boot_confirm`/`boot_policy`).
+- **`Firmware/Receiver/flasher_args.json` angepasst** (nur `0x1000`/`0x8000`/`0xf000`/`0x20000`),
+  **storage-Eintrag entfernt** -> Flash-Bundles schreiben die Historie nie
+  (Commits `e944e04`/`aac6ee0`).
+- **Erstes Deployment nach dem Umbau erfordert Full-Flash** (neue Partitionstabelle +
+  Bootloader/Partition-Table-Update); danach sind OTA-Updates möglich.
+
+Offen / zu verifizieren:
+- [ ] Gerät mit neuer `partitions.csv` **per Kabel komplett flashen** (bootloader + partition-table
+      + app; `storage` bleibt unberührt) und booten prüfen.
+- [ ] Danach einen **OTA-Update-Zyklus** testen (Accept + Rollback bei Fehlschlag).
+- [ ] Prüfen, dass die Historie nach dem COM-Flash **erhalten** bleibt (SPIFFS-Historie > 0).
+
 ## Übergabe
 
 Stand `/workspace/esp32-IR`, Branch `cline/power-history-diag`, **4 lokale Commits vor `origin`**
