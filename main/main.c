@@ -1155,18 +1155,18 @@ static void time_sync_worker(void *arg)
 {
     (void)arg;
     while (1) {
-        uint8_t receiver_mac[ESP_NOW_ETH_ALEN];
+        uint8_t destination[ESP_NOW_ETH_ALEN];
         portENTER_CRITICAL(&g_time_sync_lock);
         bool known = g_receiver_mac_valid;
-        memcpy(receiver_mac, g_receiver_mac, ESP_NOW_ETH_ALEN);
+        memcpy(destination, g_receiver_mac, ESP_NOW_ETH_ALEN);
         portEXIT_CRITICAL(&g_time_sync_lock);
-
         if (!known) {
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            continue;
+            /* No receiver MAC yet: broadcast the request. The receiver answers
+             * unicast, which teaches the sender the MAC for the next round. */
+            memcpy(destination, broadcast_mac, ESP_NOW_ETH_ALEN);
         }
 
-        if (add_espnow_peer(receiver_mac, WIFI_IF_STA) != ESP_OK) {
+        if (add_espnow_peer(destination, WIFI_IF_STA) != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
@@ -1190,7 +1190,7 @@ static void time_sync_worker(void *arg)
         g_utc_valid = false; /* response must arrive before the next send */
         portEXIT_CRITICAL(&g_time_sync_lock);
 
-        if (esp_now_send(receiver_mac, (const uint8_t *)&request,
+        if (esp_now_send(destination, (const uint8_t *)&request,
                          sizeof(request)) != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
