@@ -4,6 +4,64 @@ Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungsh
 
 ## Offen
 
+### Push / Zugang (blockiert)
+- [ ] **Fine-grained PAT (`github_pat_…`) als `GITHUB_WRITE_TOKEN` hinterlegen.**
+      Aktueller Stand: `GITHUB_TOKEN` ist in dieser Umgebung ein **GitHub-App-Token**
+      (`ghu_…`, kurzlebig) mit reinem **Lesezugriff**. Schreibversuche (Branch/Commit/Push)
+      scheitern mit `403 Resource not accessible by integration`. Der frühere erfolgreiche
+      Push lief über einen **PAT**. Benötigt: fine-grained Token mit *Contents: Read and write*
+      (+ *Workflows: Read and write* bei Workflow-Änderungen) auf `christiansiebe/esp32-IR`,
+      als Secret `GITHUB_WRITE_TOKEN` in OpenHands.
+      → Solange offen: **kein Push möglich**, alle neuen Commits bleiben nur lokal.
+- [ ] Nach Token-Erneuerung: Bergungs-Branch `recovered/ams-features-salvage` pushen.
+
+### Geborgene Arbeit (AMS-Features, aus verlorenem `/tmp/work` gerettet)
+Kontext: In einer früheren Session lag die Arbeit in **`/tmp/work/`** (nicht `/workspace`).
+`/tmp` wird beim Sandbox-Reset geleert → Arbeit war **nie committet** und damit **verloren**.
+Aus dem Event-Log rekonstruiert und gesichert.
+- [x] Rekonstruktion aus `/workspace/conversations/98b3432df79246699b316a09ee117d53`.
+- [x] Lokal gesichert: Branch **`recovered/ams-features-salvage`** (Commit `d10ea8c`, `README.md`
+      mit Herkunft/Grenzen) + Kopie unter `/workspace/project/.../recovered-ams/`.
+- [ ] **Nach `main.c` integrieren** (nur teilweise nachspielbar, daher noch nicht baubar):
+      - [ ] `health_policy.{c,h}`, `health_task.{c,h}` — Health-Monitor / selbstheilender Reboot + TWDT
+      - [ ] `mqtt_publish.{c,h}`, `mqtt_bridge.{c,h}`, `mqtt_client.h` — MQTT + HA-Discovery
+      - [ ] `boot_confirm.{c,h}`, `boot_policy.{c,h}` — Post-OTA-Rollback-Bestätigung
+      - [ ] `recovery_button.{c,h}`, `recovery_start.{c,h}` — BOOT-Tasten-Recovery
+      - [ ] `test/test_health_policy.c`, `test/test_mqtt_bridge.c`, `test/test_boot_policy.c`,
+            `test/test_recovery_button.c` in `test/run_host_tests.sh` aufnehmen
+      - [ ] `main/CMakeLists.txt`, `sdkconfig.defaults` (MQTT/esp-mqtt), `idf_component.yml`
+- [ ] Offene Integrationsschritte, die **nicht** rekonstruierbar waren und neu gemacht werden müssen:
+      `main/main.c`-Aufrufe, `power_history.c`-Migration (s. u.), `run_host_tests.sh`-Einträge.
+- [ ] Nach Integration: beide Rollen über CI bauen (Nachweis fehlt bisher komplett).
+
+### AMS-Reader-Vergleich (`amsreader-firmware`) — Übernahmen
+Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
+- [ ] **LICENSE + README** fehlen komplett (unabhängig, ~30 Min).
+      Lizenz wählen (MIT/Apache für dieses Projekt); README mit Build-/Flash-Anleitung.
+- [ ] **Persistenz-Migration** (echte Lücke): `power_history.c:record_is_valid()` verwirft
+      `format_version != POWER_HISTORY_VERSION` **hart** → bei Versionssprung
+      (z. B. 2→3) werden **alle** Altbestände ungültig und `read`/`aggregate` überspringen sie
+      still → **Datenverlust nach Update**. Vorbild AMS: `version` im Struct + Migrationskette.
+      → `power_history_migrate_record()` + „unbekannte Version tolerieren statt verwerfen"
+      (Checksum nach Migration neu berechnen). Host-Test ergänzen. **Nie implementiert.**
+- [ ] **Health-Reboot / Selbstheilung**: Reboot, wenn z. B. `last_rx_ago_ms` > N Minuten oder
+      Wi-Fi down > N Minuten. Nutzt vorhandenes `last_rx_ago_ms`. (Im geretteten
+      `health_*`-Modul angelegt, aber nicht integriert.)
+- [ ] **TWDT explizit**: Worker (`power_history_worker`, `uart_event_worker`) beim
+      Task-Watchdog anmelden (`esp_task_wdt_init(120,true); esp_task_wdt_add(...)`) —
+      statt IDF-Default. Aktuell **0 Treffer** für `esp_task_wdt`. (In `health_*` angelegt.)
+- [ ] **SML-Golden-Fixtures**: `test/fixtures/sml/*.bin` mit echten Zähler-Telegrammen +
+      Decode-Golden-Test (bester Regressionsschutz gegen Parser-Bugs).
+- [ ] **AP abschalten, wenn STA verbunden** (größter einzelner Spareffekt): Empfänger fährt
+      dauerhaft `WIFI_MODE_APSTA` (`main.c`); nach `GOT_IP` auf `WIFI_MODE_STA` wechseln.
+- [ ] **Tages-/Monats-Summen im Flash** (`hImport[24]`/`dImport[31]` wie AMS): aus
+      Minutenwerten ableiten, platzsparend + schnellere Langzeitgrafik.
+- [ ] **Letzte bekannte Zeit persistieren** (`lastMeterReadTime`): nach Reboot ohne SNTP ist
+      `bucket_start==0` → keine Aufzeichnung; letzte UTC im Header/NVS ablegen.
+- [ ] **MQTT-Availability (LWT)** + Service-Events (Reboot-Grund) — ergänzt Crash-Journal.
+      (In `mqtt_*` angelegt, aber nicht integriert.)
+- [ ] Optional: konfigurierbares Reboot-Intervall (nächtlich), Deckelung wie AMS.
+
 ## Übergabe
 
 Lokaler Stand: `/workspace/esp32-IR`, Branch `cline/power-history-diag`, **7 lokale Commits**
@@ -18,17 +76,21 @@ inzwischen nach `origin/cline/power-history-diag` gepusht (`cdc7cd3..569a11c`):
     569a11c TODO.md: add handoff note for the unpushed partition-layout work
 
 **Push + CI:**
-- `GITHUB_TOKEN` liefert weiterhin **401** (Secret nicht refresht); der Push lief über das
-  funktionierende `GITHUB_WRITE_TOKEN` (fine-grained PAT, Schreibrechte auf
-  `christiansiebe/esp32-IR`).
+- Historie: `GITHUB_TOKEN` lieferte **401**; der frühere Push lief über das funktionierende
+  `GITHUB_WRITE_TOKEN` (fine-grained PAT, Schreibrechte auf `christiansiebe/esp32-IR`).
+- Aktueller Stand: `GITHUB_TOKEN` (erneuert) ist ein **GitHub-App-Token** (`ghu_…`) mit
+  **Nur-Lesezugriff** -> Push/Branch-Anlage scheitern mit
+  `403 Resource not accessible by integration`. `.git/config` wurde von einem eingebetteten
+  Token bereinigt und nutzt jetzt einen Credential-Helper aus `$GITHUB_TOKEN`.
 - CI für `569a11c`: push-Lauf `38263508190` und pull_request-Lauf `38263514672`,
   beide **success**.
 
 **To do (naechste Session / am Geraet):**
 1. Bundle-Flash am Geraet -> Verlauf (SPIFFS-Historie) muss erhalten bleiben
    (der Flash-Bundle schreibt die Storage-Partition bewusst nicht, siehe `e944e04`/`aac6ee0`).
-2. Falls `GITHUB_TOKEN` in einer neuen Session erneut 401 gibt: fine-grained Token
-   (`github_pat_…`) direkt als `GITHUB_TOKEN` hinterlegen.
+2. **Schreibfähigen Token hinterlegen:** fine-grained PAT (`github_pat_…`) mit
+   *Contents: Read and write* als `GITHUB_WRITE_TOKEN` in OpenHands, sonst kein Push.
+3. Bergungs-Branch `recovered/ams-features-salvage` pushen (sobald Token schreibt).
 Backup des Stands: `/workspace/esp32-IR-backup-*.bundle` (`git bundle verify`).
 
 ### Sender-Diagnose (On-Demand über ESP-NOW)
@@ -55,11 +117,15 @@ Backup des Stands: `/workspace/esp32-IR-backup-*.bundle` (`git bundle verify`).
       Antwort senden, dann `esp_restart()`). Nuetzlich fuer den Persistenz-Test
       (Reboot ohne Stecker ziehen) und generell zum Neustart aus der Weboberflaeche.
       Muss auf der AP-Seite auch ohne STA-Verbindung funktionieren.
-- [ ] **Debug-Konsole mit Eingabe** (seriell und/oder Web): Befehle senden und
-      Antworten sehen, z. B. `status`, `history status`, `nvs dump`, `reboot`,
-      `sntp resync`, `espnow diag`. Der Empfaenger hat `esp_console` noch nicht
-      verdrahtet; UART ist belegt (SML-Eingang) -> nur RX/TX-freie Kanaele nutzen
-      oder Web-Console ueber `/api/console`. Beruehrt keine geschuetzten Bereiche.
+      **Teilweise erledigt:** die Web-Konsole (`web_console.c`, `/api/console`) hat
+      bereits den Befehl `reboot` (`console_cmd_reboot` -> `esp_restart()`); es fehlt
+      nur noch die prominente Taste im Dashboard.
+- [~] **Debug-Konsole mit Eingabe** — **teilweise erledigt:** Web-Konsole existiert
+      (`/api/console`, `web_console.c`) mit Befehlen `help`, `status`, `history`,
+      `time`, `wifi`, `power`, `reboot` (Registrierung `web_console_register_commands`).
+      Offen: weitere Befehle (`nvs dump`, `sntp resync`, `espnow diag`) und/oder eine
+      **serielle** Eingabe (UART ist durch SML-Eingang belegt). Beruehrt keine
+      geschuetzten Bereiche.
 
 ### Persistenz / Zeit
 - [ ] **Minutenwerte erst nach NTP-Sync** (`wall_clock >= 1704067200`): Vor der
