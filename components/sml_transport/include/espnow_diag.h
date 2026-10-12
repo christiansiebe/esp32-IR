@@ -71,6 +71,7 @@ typedef struct __attribute__((packed)) {
     uint32_t max_gap_ms;        /* longest gap in this session */
     uint32_t last_rx_ago_ms;    /* time since the last received byte */
     uint32_t gap_loss;          /* mid-telegram gaps that failed the checksum */
+    uint32_t parser_resyncs;    /* parser resets after a truncated telegram */
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {

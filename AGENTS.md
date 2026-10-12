@@ -71,6 +71,13 @@ Two firmware roles are built from one source tree.
   `gap_loss` (the meter may pause inside a split telegram and still pass).
   A total silence longer than `UART_SILENCE_ALERT_MS` (30 s) logs a one-shot
   ERROR event.
+- Parser-stuck recovery: if the parser is still inside a telegram
+  (`!sml_adapter_awaiting_telegram()`) and no byte has arrived for
+  `UART_PARSER_STUCK_MS` (6 s), the frame is truncated. `uart_capture_worker`
+  flushes the UART input and calls `sml_adapter_reset()` so the next preamble
+  resynchronises it, counts `parser_resyncs`, and logs a WARN. This keeps the
+  sender self-healing when the read head loses the byte stream instead of
+  staying desynchronised (which looks like a hang).
 - These are exposed in the counters diagnostic section and rendered with a
   plain-language verdict on `/diag`.
 

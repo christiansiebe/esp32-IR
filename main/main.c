@@ -44,6 +44,11 @@ static const char *TAG = "espnow_meter";
  * one byte takes ~1.04 ms; 50 ms is ~48 byte times, far longer than any
  * in-telegram inter-byte spacing but shorter than the gap between telegrams. */
 #define UART_GAP_THRESHOLD_MS 50
+/* If the parser is not waiting for a telegram for this long, the byte stream
+ * has desynchronised (a mangled frame left the state machine expecting bytes
+ * that never arrive). The stream is flushed and the parser reset so the next
+ * telegram preamble resynchronises it. */
+#define UART_PARSER_STUCK_MS 6000
 /* A total receive silence this long means the read head is likely unplugged or
  * misaligned rather than just idle between telegrams. */
 #define UART_SILENCE_ALERT_MS 30000
@@ -193,6 +198,7 @@ static uint32_t g_uart_gap_last_ms;
 static uint32_t g_uart_gap_max_ms;
 static uint32_t g_uart_gap_loss;
 static bool g_uart_gap_mid_pending;
+static uint32_t g_uart_parser_resyncs;
 static uint64_t g_uart_last_byte_us;
 static bool g_uart_silence_reported;
 static espnow_diag_event_t g_diag_events[ESPNOW_DIAG_EVENT_RING];
@@ -902,6 +908,7 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     uint32_t gap_last_ms;
     uint32_t gap_max_ms;
     uint32_t gap_loss;
+    uint32_t parser_resyncs;
     uint64_t last_byte_us;
     portENTER_CRITICAL(&g_uart_stats_lock);
     rx_bytes = g_uart_rx_bytes;
@@ -920,6 +927,7 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     gap_last_ms = g_uart_gap_last_ms;
     gap_max_ms = g_uart_gap_max_ms;
     gap_loss = g_uart_gap_loss;
+    parser_resyncs = g_uart_parser_resyncs;
     last_byte_us = g_uart_last_byte_us;
     portEXIT_CRITICAL(&g_uart_stats_lock);
 
@@ -951,6 +959,7 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .max_gap_ms = gap_max_ms,
         .last_rx_ago_ms = last_rx_ago_ms,
         .gap_loss = gap_loss,
+        .parser_resyncs = parser_resyncs,
     };
     *frame_len = sizeof(*header) + sizeof(*counters);
 }
@@ -1588,6 +1597,22 @@ static void uart_capture_worker(void *arg)
                 portEXIT_CRITICAL(&g_uart_stats_lock);
                 diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "no uart bytes for %dms",
                                UART_SILENCE_ALERT_MS);
+            }
+
+            /* The byte stream stopped while the parser was still inside a
+             * telegram: the frame is truncated (the read head lost sync, or
+             * bytes were lost). Flush the driver and reset the parser so the
+             * next preamble starts cleanly instead of staying desynchronised. */
+            if (last_us != 0 && !sml_adapter_awaiting_telegram() &&
+                (uint64_t)esp_timer_get_time() - last_us >=
+                    (uint64_t)UART_PARSER_STUCK_MS * 1000ULL) {
+                uart_flush_input(UART_PORT_NUM);
+                sml_adapter_reset();
+                portENTER_CRITICAL(&g_uart_stats_lock);
+                ++g_uart_parser_resyncs;
+                portEXIT_CRITICAL(&g_uart_stats_lock);
+                diag_log_event(ESPNOW_DIAG_LEVEL_WARN,
+                               "parser resync (telegram truncated)");
             }
             continue;
         }
@@ -3161,7 +3186,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"last_request_rssi\":%d,\"channel\":%u,"
                        "\"gap_count\":%lu,\"gap_quiet\":%lu,\"gap_mid\":%lu,"
                        "\"last_gap_ms\":%lu,\"max_gap_ms\":%lu,"
-                       "\"last_rx_ago_ms\":%lu,\"gap_loss\":%lu}",
+                       "\"last_rx_ago_ms\":%lu,\"gap_loss\":%lu,"
+                       "\"parser_resyncs\":%lu}",
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
                        (unsigned long)counters.fifo_overflows,
@@ -3183,7 +3209,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.last_gap_ms,
                        (unsigned long)counters.max_gap_ms,
                        (unsigned long)counters.last_rx_ago_ms,
-                       (unsigned long)counters.gap_loss);
+                       (unsigned long)counters.gap_loss,
+                       (unsigned long)counters.parser_resyncs);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -3299,28 +3326,38 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "pre{white-space:pre-wrap;word-break:break-word}button,a{margin:4px;padding:8px 12px}"
         "a{color:#78d6ff}</style></head><body><h1>Sender diagnostics (on demand)</h1>"
         "<button id=\"load\" type=\"button\">Request sender diagnostics</button>"
+        "<button id=\"auto\" type=\"button\">Auto-refresh: off</button>"
         "<p id=\"status\">Idle; no diagnostic packets are sent during normal operation.</p>"
         "<h2>Counters</h2><pre id=\"counters\"></pre>"
         "<h2>Last crash / previous session</h2><pre id=\"crash\"></pre>"
         "<h2>Recent events</h2><pre id=\"events\"></pre><script>"
         "const byId=id=>document.getElementById(id);"
         "function fmt(o){return JSON.stringify(o,null,2);}"
+        "let capturedUptimeMs=null;let capturedAt=0;"
+        "function relBase(ms,base){return 'T-'+Math.round((base-ms)/1000)+'s';}"
+        "function rel(ms){if(capturedUptimeMs===null)return new Date(ms).toISOString();"
+        "return relBase(ms,capturedUptimeMs);}"
         "function fmtCounters(d){const nl=String.fromCharCode(10);"
-        "const verdict=d.gap_loss===0"
-        "+'No gap has cost a telegram yet (every received telegram passed its checksum), so the pauses are normal idle time between or inside telegrams.'"
-        "+': '+d.gap_loss+' gap(s) actually cost bytes - the telegram failed its checksum and was dropped.';"
-        "return 'uptime: '+(d.uptime_ms/1000).toFixed(1)+' s  channel: '+d.channel+nl"
+        "capturedUptimeMs=d.uptime_ms;capturedAt=Date.now();"
+        "const verdict=(d.gap_loss===0&&d.parser_resyncs===0)"
+        "+'No gap has cost a telegram and the parser never had to resync: the pauses are normal idle time between or inside telegrams.'"
+        "+': '+(d.gap_loss?d.gap_loss+' gap(s) cost bytes (checksum failed); ':'')"
+        "+(d.parser_resyncs?d.parser_resyncs+' parser resync(s) after a truncated telegram; ':'')"
+        "+'the read head is losing the byte stream sometimes.';"
+        "return 'captured: '+new Date(capturedAt).toLocaleTimeString()+'  (T+'+(d.uptime_ms/1000).toFixed(1)+' s after sender boot)'+nl"
+        "+'uptime: '+(d.uptime_ms/1000).toFixed(1)+' s  channel: '+d.channel+nl"
         "+'uart rx bytes: '+d.uart_rx_bytes+'  last byte '+d.last_rx_ago_ms+' ms ago'+nl"
         "+'frame err: '+d.frame_errors+'  parity err: '+d.parity_errors+'  fifo: '+d.fifo_overflows+'  rx buf full: '+d.rx_buffer_full+nl"
         "+'sml ok/fail: '+d.sml_sent_ok+'/'+d.sml_send_fail+'  queue drops: '+d.tx_queue_drops+'  last seq: '+d.last_sequence+nl"
         "+'gaps >= 50 ms: '+d.gap_count+'  (between telegrams: '+d.gap_quiet+', mid-telegram: '+d.gap_mid+', cost a telegram: '+d.gap_loss+')'+nl"
+        "+'parser resyncs: '+d.parser_resyncs+nl"
         "+'last gap: '+d.last_gap_ms+' ms  longest gap: '+d.max_gap_ms+' ms'+nl"
         "+'free heap: '+d.free_heap+' bytes  last send: '+d.last_send_status+'  request rssi: '+d.last_request_rssi+nl"
         "+'VERDICT: '+verdict;}"
         "async function loadCrash(){"
         "const r=await fetch('/api/sender-diag?section=crash',{cache:'no-store'});"
         "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
-        "const ev=(d.events||[]).map(e=>'    '+new Date(e.timestamp_ms).toISOString()+' ['+e.level+'] '+e.text).join(String.fromCharCode(10));"
+        "const ev=(d.events||[]).map(e=>'    '+relBase(e.timestamp_ms,d.session_uptime_ms)+' ['+e.level+'] '+e.text).join(String.fromCharCode(10));"
         "let head='Previous session: '+(d.clean_shutdown?'ended cleanly':'DID NOT END CLEANLY')"
         "+String.fromCharCode(10)+'  reset reason: '+d.reset_reason_name+' ('+d.reset_reason+')'"
         "+String.fromCharCode(10)+'  uptime: '+(d.session_uptime_ms/1000).toFixed(1)+' s'"
@@ -3335,12 +3372,17 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "const r=await fetch('/api/sender-diag?section=events&page='+page,{cache:'no-store'});"
         "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
         "all=all.concat(d.events);if(!d.more)break;page++;if(page>64)break;}"
-        "byId('events').textContent=all.length?all.map(e=>new Date(e.timestamp_ms).toISOString()+' ['+e.level+'] '+e.text).join(String.fromCharCode(10)):'No events recorded.';}"
+        "byId('events').textContent=all.length?all.map(e=>rel(e.timestamp_ms)+' ['+e.level+'] '+e.text).join(String.fromCharCode(10)):'No events recorded.';}"
         "async function load(){byId('status').textContent='Requesting...';"
         "try{const r=await fetch('/api/sender-diag?section=counters',{cache:'no-store'});"
         "if(!r.ok)throw new Error(await r.text());byId('counters').textContent=fmtCounters(await r.json());"
         "await loadCrash();await loadEvents();byId('status').textContent='Diagnostics received.';}"
         "catch(e){byId('status').textContent='Request failed: '+e;}}"
+        "let autoTimer=null;"
+        "function setAuto(on){byId('auto').textContent='Auto-refresh: '+(on?'on (5 s)':'off');"
+        "if(autoTimer){clearInterval(autoTimer);autoTimer=null;}"
+        "if(on)autoTimer=setInterval(()=>{load();},5000);}"
+        "byId('auto').addEventListener('click',()=>{setAuto(autoTimer===null);});"
         "byId('load').addEventListener('click',load);"
         "</script><p><a href=\"/\">Back</a></p></body></html>";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
