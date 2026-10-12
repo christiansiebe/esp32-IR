@@ -59,7 +59,7 @@ const sandbox = {
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 try {
-  vm.runInContext(SCRIPT + "\n;globalThis.__t={getEntries:()=>historyEntries,drawHistory,showTip,clearTip};", sandbox);
+  vm.runInContext(SCRIPT + "\n;globalThis.__t={getEntries:()=>historyEntries,drawHistory,showTip,clearTip,setCompare:v=>{historyCompare=v;}};", sandbox);
 } catch (e) { console.error('FAIL load: ' + e.message); process.exit(1); }
 
 const base = 1700000000000 - (1700000000000 % 3600000);
@@ -113,6 +113,30 @@ for (const dx of dashedXs) {
   }
 }
 console.log('dashboard day boundaries ok');
+
+// The "Vortag vergleichen" compare day carries yesterday's timestamps, which
+// must be shifted onto the selected day's window before plotting. Otherwise the
+// t<start||t>end guard clips every compare bar and the button appears dead.
+const cstart = Date.UTC(2026, 9, 10, 0, 0, 0), cday = Date.UTC(2026, 9, 9, 0, 0, 0);
+const today = [{ timestamp: cstart + 8 * 3600000, watts: 120000 },
+               { timestamp: cstart + 9 * 3600000, watts: 120000 }];
+const yesterday = [{ timestamp: cday + 8 * 3600000, watts: 200 },
+                   { timestamp: cday + 9 * 3600000, watts: 900 }];
+sandbox.__t.setCompare(new Date(cday).toISOString().slice(0, 10));
+try { sandbox.__t.drawHistory(today, 24, cstart, yesterday); }
+catch (e) { console.error('FAIL drawHistory compare: ' + e.message); process.exit(1); }
+const cmpEntries = sandbox.__t.getEntries();
+const cmpVisible = cmpEntries.filter(e => e.value === 200 || e.value === 900);
+if (cmpVisible.length !== 2) {
+  console.error('FAIL compare day not aligned onto window: ' + JSON.stringify(cmpEntries));
+  process.exit(1);
+}
+for (const e of cmpVisible) {
+  if (e.plotX < 42 - 0.5 || e.plotX > 800 - 12 + 0.5) {
+    console.error('FAIL compare bar outside plot area: ' + e.plotX); process.exit(1);
+  }
+}
+console.log('dashboard compare alignment ok');
 process.exit(0);
 """
 

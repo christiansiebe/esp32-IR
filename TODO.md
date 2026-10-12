@@ -338,12 +338,21 @@ Im Live-Modus bleibt der Button daher wirkungslos; zusätzlich wird die Info-Zei
 gerade im Live-Modus geleert (`live?'':...`), sodass auch kein Hinweis erscheint.
 
 Zu tun:
-- [x] **Fix**: `setLive(false)` in `toggleCompare()` vor `redraw()` ergänzt.
+- [x] **Fix 1** (`d0ef9e9`): `setLive(false)` in `toggleCompare()` vor `redraw()` ergänzt.
       (z. B. `setLive(false);`), dann wird der Vortag (gelb) über den Tagesverlauf gelegt.
 - [x] Optional: der Slider-Handler (`history-range`) setzt `historyCompare` jetzt zurück.
       (der Slider-Handler `history-range` tut das derzeit nicht).
-- [ ] Verifizieren: Live → Button klicken → gestrichelte/gelbe Vergleichskurve +
-      Info „Vergleich &lt;Datum&gt; (gelb)“ sichtbar.
+- [x] **Fix 2** (der eigentliche, tiefere Grund, dass es „immer noch nicht“ ging): Die
+      geladenen Vergleichswerte tragen die Zeitstempel des **Vortags**, aber `plot()` filtert
+      `t<start||t>end` gegen das **gewählte** Tagesfenster. Dadurch wurden **alle**
+      Vergleichsbalken geclippt — der Button sah tot aus, obwohl er korrekt umschaltete.
+      Fix in `drawHistory()`: `dayAlign = start − Date.parse(historyCompare+'T00:00:00Z')`
+      und `plot(compare, '#e2b53e', dayAlign)` verschiebt den Vortag auf das gewählte
+      Fenster (Slot→Slot). Regressionstest in `test/check_dashboard_js.py`
+      („dashboard compare alignment ok“; rot ohne `dayAlign`, grün mit).
+- [ ] Verifizieren am Gerät: Live → Button klicken → gelbe Vergleichskurve +
+      Info „Vergleich &lt;Datum&gt; (gelb)“ sichtbar (gilt für den gewählten Tag = heute
+      wie für zurückgeblätterte Tage; Vortag im Fenster ist slotgenau kompatibel).
 
 ### 🐛 Behoben: wiederkehrende „Schreibfehler" (Ringpuffer größer als die Partition)
 `POWER_HISTORY_CAPACITY` war **30000** (→ Datei 56 + 30000·28 = 840 056 B ≈ 820 KiB).
