@@ -103,6 +103,10 @@ Sender: OTA über `http://192.168.4.1/update` → „Sender via ESP-NOW", oder p
 
 - Persistenz-Migration `4af921a` (alte Record-Formate migrieren statt verwerfen).
 - Stabilitäts-/Fault-Injection-Harness `8764f22` (ASan/UBSan, `test/stability/`).
+- Reboot-Persistenz-Host-Test (echter Init→Schreiben→Reboot-Zyklus, `fork()`),
+  belegt `record_count`-Wiederherstellung (rot/grün).
+- Post-OTA-Rollback-Bestätigung für den **Empfänger** (`boot_policy`/`boot_confirm`,
+  Host-Test `test_boot_policy.c`) — **Hardware-Verifikation offen**.
 - CI baut beide Rollen; Flash-Artefakt schreibt `storage` bewusst nicht.
 - ESP-NOW-Wall-Clock-Sync (Sender fragt Empfänger) — Feldtest offen, `clock calibrations` war 0.
 

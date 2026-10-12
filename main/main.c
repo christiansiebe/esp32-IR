@@ -23,6 +23,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "boot_confirm.h"
 #include "power_history.h"
 #include "web_console.h"
 #include "crash_journal.h"
@@ -3968,6 +3969,13 @@ static void start_webserver(void)
     httpd_handle_t server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &config));
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* The HTTP server is up: the local dashboard is reachable. This feeds the
+     * post-OTA confirm policy (see boot_confirm.c); the image is confirmed only
+     * once this flag is set and the stability window has passed. */
+    boot_confirm_note_dashboard(true);
+#endif
+
     httpd_uri_t root = {
         .uri = "/",
         .method = HTTP_GET,
@@ -4218,6 +4226,11 @@ void app_main(void)
 #endif
     ESP_ERROR_CHECK(esp_now_register_recv_cb(receive_callback));
 
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* The sender has no dashboard to confirm against, so it keeps the previous
+     * behaviour: accept the running image immediately (no rollback safety net).
+     * A dashboard-independent confirm policy for the sender is a separate task
+     * (see TODO). */
     const esp_partition_t *running_partition = esp_ota_get_running_partition();
     if (running_partition == NULL) {
         ESP_LOGE(TAG, "Could not determine the running app partition");
@@ -4231,6 +4244,14 @@ void app_main(void)
                      esp_err_to_name(ota_state_err));
         }
     }
+#else
+    /* Receiver: do not accept the running image right away. It is confirmed
+     * only after the dashboard is up and a stability window has passed; an
+     * image that never comes up is rolled back to the previous OTA slot. This
+     * keeps the CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE safety net intact.
+     * Hardware verification of the confirm/rollback path is still open. */
+    ESP_ERROR_CHECK(boot_confirm_init());
+#endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
     run_sender();
@@ -4238,6 +4259,9 @@ void app_main(void)
     start_webserver();
     ESP_LOGI(TAG, "Receiver ready: http://192.168.4.1/ | /log | /config | /update");
     while (1) {
+        /* Confirm the running OTA image once it has been stable for the policy
+         * window; a no-op on a normal (already accepted) boot. */
+        boot_confirm_poll();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 #endif

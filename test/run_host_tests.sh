@@ -53,6 +53,19 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_reboot_persistence"
 
+# Post-OTA rollback decision (receiver). Pure, host-testable logic: replays boot
+# scenarios tick by tick and asserts confirm / rollback / nothing. No ESP-IDF;
+# the production glue (boot_confirm.c) that calls the OTA API is not part of the
+# host build (hardware verification still open).
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/boot_policy.c" \
+    "$here/test_boot_policy.c" \
+    -o "$out/test_boot_policy"
+
+"$out/test_boot_policy"
+
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"

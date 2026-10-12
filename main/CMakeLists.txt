@@ -14,6 +14,7 @@ set(main_requires
 )
 
 idf_component_register(SRCS "main.c" "power_history.c" "web_console.c"
+                            "boot_policy.c" "boot_confirm.c"
                             "crash_journal.c" "crash_journal_store.c"
                     INCLUDE_DIRS "."
                     REQUIRES ${main_requires})

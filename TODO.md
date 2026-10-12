@@ -95,6 +95,15 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
 - [ ] **TWDT explizit**: Worker (`power_history_worker`, `uart_event_worker`) beim
       Task-Watchdog anmelden (`esp_task_wdt_init(120,true); esp_task_wdt_add(...)`) —
       statt IDF-Default. Aktuell **0 Treffer** für `esp_task_wdt`. (In `health_*` angelegt.)
+- [x] **Post-OTA-Rollback-Bestätigung, Empfänger** (integriert): `boot_policy.c/.h`
+      (reine, host-testbare Entscheidung) + `boot_confirm.c/.h` (Kleber) ersetzen das
+      unbedingte `esp_ota_mark_app_valid_cancel_rollback()` im Empfänger. Bestätigung erst
+      nach **45 s** stabil + Dashboard oben; kommt das Dashboard nach **30 s** Grace nicht
+      hoch → Rollback in den vorigen OTA-Slot. Sender bewusst unverändert (hat kein
+      Dashboard) — eigener Confirm-Pfad für den Sender ist offen. Tests:
+      `test/test_boot_policy.c` (10 Checks, rot/grün verifiziert), im Runner aktiv.
+      **⚠️ Hardware-Verifikation offen:** der echte OTA→bestätigt / OTA→Rollback-Pfad ist
+      am Gerät zu prüfen (host-seitig nur die Entscheidungslogik abgedeckt).
 - [ ] **SML-Golden-Fixtures**: `test/fixtures/sml/*.bin` mit echten Zähler-Telegrammen +
       Decode-Golden-Test (bester Regressionsschutz gegen Parser-Bugs).
 - [ ] **AP abschalten, wenn STA verbunden** (größter einzelner Spareffekt): Empfänger fährt
