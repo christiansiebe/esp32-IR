@@ -44,6 +44,10 @@ Two firmware roles are built from one source tree.
 - `storage` deliberately keeps its old offset **and** size, so upgrading from
   the factory layout preserves the SPIFFS minute history (data is only lost if
   `storage.bin` is flashed or the partition offset/size changes).
+- Flash bundles **never** write `storage`: the CI staging step and the committed
+  `Firmware/Receiver` bundle strip the `storage.bin` entry from
+  `flasher_args.json`, so a bundle/com flash keeps the history. OTA and app-only
+  flashes were already safe. Do not re-add the storage entry.
 
 ## CPU clock / power
 - CPU runs at a fixed 80 MHz (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y` in
