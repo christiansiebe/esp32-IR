@@ -152,17 +152,22 @@ einem Zyklus: sammeln → ~5 s → Pakete senden → (Radio nutzbar/ruhen).
       (monoton wachsende Sequenz bleibt erhalten, kein Sprung an der Spitze).
 - [x] Sequenz-/Kantenlogik für den Abgleich: `main/tx_batch.c`
       (`sml_tx_batch_mark_sent`, `sml_tx_batch_missing`) — reine Funktionen, host-getestet.
-- [ ] Sendeschleife in `uart_transport_worker` umbauen: Puffer füllen, alle
-      `SML_TX_CYCLE_MS` (5000) eine Sendephase; in der Phase bis zu `SML_TX_BURST`
-      Pakete abarbeiten (Semaphore je Paket, aber Gesamtbudget), danach Zyklus neu.
-      Telegramm-Werte kommen weiterhin aus `sml_adapter_telegram_callback()`.
+- [x] Sendeschleife in `uart_transport_worker` umgebaut: `sml_adapter_telegram_callback()`
+      pusht in den Ring (`sml_tx_batch_push`), `uart_transport_worker` wartet
+      `SML_TX_CYCLE_MS` (5000) und ruft dann `flush_tx_batch()` — bis zu `SML_TX_BURST`
+      (32) Telepgramme älteste-zuerst, Semaphore je Paket. Kein Paket mehr pro Telegramm.
+      Sequenz kommt aus dem Ring; `sml_tx_batch_mark_sent()` nur bei **bestätigter**
+      Zustellung (unbestätigt bleibt „missing" → Abgleich).
 - [ ] Optionale Funkruhe zwischen Zyklen (Light-Sleep) nur wenn verifiziert, dass
       ESP-NOW-Empfang/ACK und die 5-s-Kadenz darunter nicht leiden — **nicht** mit
       `CONFIG_PM_ENABLE` (DFS ist für ESP-NOW abgeschaltet, s. `sdkconfig.defaults`).
-- [ ] Zähler/Diagnose: `batch_pending`, `batch_dropped`, `bursts`, `last_cycle_ms` im
-      ESP-NOW-Diag-`counters`-Struct ergänzen (Sender → Empfänger-Diagnoseseite).
-- [ ] Host-Test für den Zyklus (virtuelle Zeit): Bündelung, Verdrängung, kein Verlust
-      an der Spitze, Sendephase sendet genau `min(pending, burst)`.
+- [x] Zähler/Diagnose: `batch_pending` + `batch_missing` im `espnow_diag_counters_t`
+      ergänzt; im `/api/sender-diag`-Counters-JSON mit ausgegeben. `tx_queue_drops`
+      zählt jetzt Ring-Verdrängungen (Voll).
+- [x] Host-Test `test/test_tx_batch.c` (36 Checks): Bündelung, Verdrängung, kein Verlust
+      innerhalb eines Zyklus, `missing`-Arithmetik. In `run_host_tests.sh` + CI.
+- **Am Gerät zu prüfen:** Sender-Bootlog „sent every 5000 ms (burst 32)"; Empfänger
+      bekommt weiterhin alle Minutenwerte; `batch_missing` auf der Diagnoseseite bleibt 0.
 - Akzeptanz: Der Sender funkt zwischen den Zyklen nicht mehr pro Telegramm einzeln,
   verliert dabei keine Minutenwerte (Puffer groß genug für einen Zyklus) und beide
   Rollen bauen in CI.
@@ -171,6 +176,14 @@ einem Zyklus: sammeln → ~5 s → Pakete senden → (Radio nutzbar/ruhen).
 Ziel: Der Empfänger soll Minutenwerte, die er **nicht** mitbekommen hat (Funklücke,
 Sender/Receiver-Neustart, OTA), **nachträglich vom Sender** holen — der Sender hat sie
 in seiner eigenen SPIFFS-Historie (siehe oben).
+
+**Zwei komplementäre Signale, nicht verwechseln:**
+1. *Telegramm-Lücken (Sekunden, Funk):* der Sender meldet über
+   `sml_tx_batch_missing` (Diag-Feld `batch_missing`), welche Sequenzen nie bestätigt
+   gesendet wurden. Das ist der **Live-/Regel**-Abgleich für den Batch-Zyklus.
+2. *Minuten-Historie-Lücken:* der Empfänger holt fehlende **Minutenrecords** paginiert
+   aus der Sender-SPIFFS nach (unten). Das ist der **Backfill** nach Ausfall/Neustart.
+   Die Telegramm-Sequenz ordnet dabei zu, welche Minuten betroffen waren.
 
 - [ ] Neuen Diagnose-Abschnitt `history` im vorhandenen ESP-NOW-Diag-Protokoll ergänzen:
       Request = `after_sequence`/`from_utc` + `count`; Response = eine Seite Records + `more`.

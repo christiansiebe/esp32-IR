@@ -62,7 +62,12 @@ static const char *TAG = "espnow_meter";
  * misaligned rather than just idle between telegrams. */
 #define UART_SILENCE_ALERT_MS 30000
 #define UART_EVENT_QUEUE_LENGTH 32
-#define SML_TX_QUEUE_LENGTH 16
+/* How often the sender's batched ESP-NOW send phase runs: telegrams are
+ * collected for this long, then drained in one burst. */
+#define SML_TX_CYCLE_MS 5000
+/* Most telegrams handed to ESP-NOW in a single send phase; the rest wait for
+ * the next cycle. Normal arrival is ~1/s so a 5 s window has ~5 to send. */
+#define SML_TX_BURST 32
 #define METER_MAGIC          0x48425A31u
 #define METER_VERSION        1u
 #define SML_VALUE_HISTORY_COUNT 64
@@ -193,7 +198,9 @@ static SemaphoreHandle_t g_send_done;
 static esp_now_send_status_t g_last_send_status;
 static QueueHandle_t g_espnow_ota_rx_queue;
 static QueueHandle_t g_uart_event_queue;
-static QueueHandle_t g_sml_tx_queue;
+/* Telegrams are pushed here by the parser callback and drained by the 5 s send
+ * phase. A full ring evicts the oldest (tx_batch.c) so the newest is kept. */
+static sml_tx_batch_t g_sml_tx_batch;
 static uint64_t g_uart_rx_bytes;
 static uint32_t g_sml_tx_queue_drops;
 static uint32_t g_uart_fifo_overflows;
@@ -947,6 +954,8 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     uint32_t gap_loss;
     uint32_t parser_resyncs;
     uint64_t last_byte_us;
+    uint32_t batch_pending;
+    uint32_t batch_missing;
     portENTER_CRITICAL(&g_uart_stats_lock);
     rx_bytes = g_uart_rx_bytes;
     fifo_overflows = g_uart_fifo_overflows;
@@ -958,6 +967,8 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     sml_send_fail = g_sml_send_fail;
     last_sequence = g_sml_last_sequence;
     diag_requests = g_diag_requests;
+    batch_pending = (uint32_t)sml_tx_batch_count(&g_sml_tx_batch);
+    batch_missing = sml_tx_batch_missing(&g_sml_tx_batch);
     gap_count = g_uart_gap_count;
     gap_quiet = g_uart_gap_quiet;
     gap_mid = g_uart_gap_mid;
@@ -1006,6 +1017,8 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .parser_resyncs = parser_resyncs,
         .time_syncs = time_syncs,
         .time_requests = time_requests,
+        .batch_pending = batch_pending,
+        .batch_missing = batch_missing,
     };
     *frame_len = sizeof(*header) + sizeof(*counters);
 }
@@ -1738,12 +1751,19 @@ void sml_adapter_telegram_callback(uint64_t timestamp_us, bool crc_valid,
     if (value_count != 0) {
         memcpy(item.values, values, value_count * sizeof(item.values[0]));
     }
-    if (g_sml_tx_queue == NULL || xQueueSend(g_sml_tx_queue, &item, 0) != pdTRUE) {
-        portENTER_CRITICAL(&g_uart_stats_lock);
+    portENTER_CRITICAL(&g_uart_stats_lock);
+    uint32_t drops_before = g_sml_tx_batch.dropped;
+    bool pushed = sml_tx_batch_push(&g_sml_tx_batch, &item, NULL);
+    if (g_sml_tx_batch.dropped > drops_before) {
         ++g_sml_tx_queue_drops;
-        portEXIT_CRITICAL(&g_uart_stats_lock);
-        ESP_LOGE(TAG, "SML transport queue full; validated telegram was not queued");
-        diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "sml transport queue drop");
+    }
+    portEXIT_CRITICAL(&g_uart_stats_lock);
+    if (!pushed) {
+        ESP_LOGE(TAG, "SML batch ring rejected a validated telegram");
+        diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "sml batch push failed");
+    } else if (g_sml_tx_batch.dropped > drops_before) {
+        ESP_LOGE(TAG, "SML batch ring full; oldest telegram evicted");
+        diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "sml batch ring drop");
     }
 }
 
@@ -1802,6 +1822,9 @@ static void send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
     }
     portENTER_CRITICAL(&g_uart_stats_lock);
     ++g_sml_sent_ok;
+    /* Only a confirmed delivery counts as sent, so an unconfirmed slot still
+     * shows up as missing for the receiver-side reconciliation. */
+    sml_tx_batch_mark_sent(&g_sml_tx_batch, sequence);
     portEXIT_CRITICAL(&g_uart_stats_lock);
     ESP_LOGD(TAG, "Sent SML telegram sequence=%lu crc_valid=%u values=%u",
              (unsigned long)sequence, packet.header.crc_valid,
@@ -1907,17 +1930,33 @@ static void uart_capture_worker(void *arg)
     }
 }
 
+static void flush_tx_batch(void)
+{
+    /* One send phase: drain up to SML_TX_BURST telegrams oldest-first. The
+     * sequence is the ring's own, so it stays contiguous across eviction and
+     * the receiver can reconcile gaps. */
+    for (uint32_t sent = 0; sent < SML_TX_BURST; ++sent) {
+        sml_tx_item_t item;
+        uint32_t sequence;
+        portENTER_CRITICAL(&g_uart_stats_lock);
+        bool have = sml_tx_batch_take(&g_sml_tx_batch, &item, &sequence);
+        portEXIT_CRITICAL(&g_uart_stats_lock);
+        if (!have) {
+            break;
+        }
+        send_sml_telegram(sequence, &item);
+    }
+}
+
 static void uart_transport_worker(void *arg)
 {
     (void)arg;
-    uint32_t sequence = 0;
-    sml_tx_item_t item;
 
     while (1) {
-        if (xQueueReceive(g_sml_tx_queue, &item, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-        send_sml_telegram(++sequence, &item);
+        /* Collect for one cycle, then send the accumulated telegrams as a burst
+         * instead of firing one packet per telegram. */
+        vTaskDelay(pdMS_TO_TICKS(SML_TX_CYCLE_MS));
+        flush_tx_batch();
     }
 }
 
@@ -3457,7 +3496,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"last_gap_ms\":%lu,\"max_gap_ms\":%lu,"
                        "\"last_rx_ago_ms\":%lu,\"gap_loss\":%lu,"
                        "\"parser_resyncs\":%lu,\"time_syncs\":%lu,"
-                       "\"time_requests\":%lu}",
+                       "\"time_requests\":%lu,\"batch_pending\":%lu,"
+                       "\"batch_missing\":%lu}",
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
                        (unsigned long)counters.fifo_overflows,
@@ -3482,7 +3522,9 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.gap_loss,
                        (unsigned long)counters.parser_resyncs,
                        (unsigned long)counters.time_syncs,
-                       (unsigned long)counters.time_requests);
+                       (unsigned long)counters.time_requests,
+                       (unsigned long)counters.batch_pending,
+                       (unsigned long)counters.batch_missing);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -4206,11 +4248,7 @@ static void run_sender(void)
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, UART_PIN_NO_CHANGE, UART_RX_GPIO,
                                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
-    g_sml_tx_queue = xQueueCreate(SML_TX_QUEUE_LENGTH, sizeof(sml_tx_item_t));
-    if (g_sml_tx_queue == NULL) {
-        ESP_LOGE(TAG, "Could not create SML transport queue");
-        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
-    }
+    sml_tx_batch_init(&g_sml_tx_batch);
     sml_adapter_reset();
 
     g_send_done = xSemaphoreCreateBinary();
@@ -4231,8 +4269,10 @@ static void run_sender(void)
     ESP_LOGI(TAG, "Sender ready: UART%d RX GPIO=%d at %d baud (8N1, no flow control); "
                   "ESP-NOW channel %u",
              UART_PORT_NUM, UART_RX_GPIO, UART_BAUD_RATE, g_espnow_channel);
-    ESP_LOGI(TAG, "UART RX ring buffer: %u bytes; SML transport queue: %u telegrams",
-             (unsigned int)UART_BUFFER_SIZE, (unsigned int)SML_TX_QUEUE_LENGTH);
+    ESP_LOGI(TAG, "UART RX ring buffer: %u bytes; SML batch ring: %u telegrams, "
+                  "sent every %d ms (burst %u)",
+             (unsigned int)UART_BUFFER_SIZE, (unsigned int)SML_TX_BATCH_CAPACITY,
+             SML_TX_CYCLE_MS, (unsigned int)SML_TX_BURST);
     ESP_LOGI(TAG, "Only CRC-checked SML values and telegram status are transmitted");
 
     BaseType_t task_result = xTaskCreate(uart_event_worker, "uart_events",

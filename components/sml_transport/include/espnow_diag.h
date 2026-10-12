@@ -78,6 +78,9 @@ typedef struct __attribute__((packed)) {
     uint32_t parser_resyncs;    /* parser resets after a truncated telegram */
     uint32_t time_syncs;        /* successful wall-clock calibrations */
     uint32_t time_requests;     /* wall-clock requests sent to the receiver */
+    /* Batching / reconciliation (sender's 5 s ESP-NOW send cycle). */
+    uint32_t batch_pending;     /* telegrams currently held in the batch ring */
+    uint32_t batch_missing;     /* assigned sequences never confirmed sent */
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {
