@@ -376,6 +376,48 @@ Dashboard zeigte jede Minute „Schreibfehler: N". Ein Ringpuffer muss beim Voll
 
 
 
+## Übernahmen aus großen externen SML-Projekten (Recherche 2026-10-12)
+
+Bewertung anderer SML-Projekte auf GitHub. Wir nutzen den Parser bereits
+(`olliiiver/sml_parser`, LGPL-2.1, in `components/sml_parser`), hier geht es um
+das **Drumherum**. Reihenfolge nach Nutzen/Aufwand (schnell → kompliziert).
+
+**⚠️ Lizenz-Falle zuerst:** `SMLReader`, `sml2mqtt`, `libsml` (volkszaehler) und
+`vzlogger` sind **GPL-3.0** → nur Konzepte/Lehren übernehmen, **keinen Code
+kopieren** (sonst wird das ganze Projekt GPL). `lrswss/esp32-sml-multi-reader`
+ist **Apache-2.0** (Code mit Namensnennung erlaubt). Lizenz des Projekts noch
+offen (s. u.) — **vor** dem Kopieren fremden Codes entscheiden.
+
+- [ ] **Lizenz + README festlegen** (blockiert Code-Übernahme, ~30 Min).
+- [ ] **CRC-Varianten (schnell, Lifestyle-Lehre aus `spacemanspiff2007/sml2mqtt`):**
+      Nicht jeder Zähler nutzt den Standard-SML-CRC. Der **Holley DTZ541** verlangt
+      die **Kermit-CRC** (Reflected 0x8408); sml2mqtt wählt die CRC automatisch.
+      Unser Parser nutzt genau die Standard-Tabelle (`smlCrcTable.h`, Reflected
+      0x8408) → die meisten Zähler ok, Holley bräuchte einen Umschalter.
+      Prüfen/anmerken, keinen Blind-Fix. Betrifft `components/sml_parser`.
+- [ ] **SML-Golden-Fixtures (schnell):** `test/fixtures/sml/*.bin` mit echten
+      Telegrammen + Decode-Golden-Test. Erste Fixture host-seitig aus dem Parser
+      erzeugen (nicht byte-copy), Zielwerte hart prüfen. Bestehende Randfall-Fixture
+      (ABER-CRC): `smlOBISCheck` liefert `true` (Struktur dekodiert), die
+      Telemetrie gilt wegen `crc_valid=false` als ungültig — gegen bestehendes
+      Produktionsverhalten (Adapter/Transport) absichern. Telegramm-Referenz/Inspiration:
+      `olliiiver/sml_parser`-Tests, `volkszaehler/libsml`-Frames (nur Konzept).
+- [ ] **MQTT-Topic-Schema + HA-Discovery (mittel):** Vorbild `mruettgers/SMLReader`
+      (GPL-3.0, nur Konzept): pro OBIS-Code ein eigenes Topic statt Sammel-JSON,
+      z. B. `<prefix>/sensor/<n>/obis/1-0:16.7.0/255/value`. Deckt den MQTT/HA-Block
+      unten ab; zuerst als **reine, host-testbare Topic-/Discovery-Builder-Logik**
+      (wie `boot_policy.c`) bauen, dann an esp-mqtt hängen.
+- [ ] **MQTT over TLS (kompliziert, optional):** Vorbild `lrswss/esp32-sml-multi-reader`
+      (Apache-2.0): esp-mqtt mit TLS + optionaler Auth. Nur wenn der Broker
+      abgesichert angebunden werden soll.
+- [ ] **Aggregation beim Lesen statt nachträglich (Lehre aus `vzlogger`
+      `aggtime`/`aggmode`):** bestätigt den Plan „Tages-/Monats-Summen im Flash";
+      reduziert Schreiblast/Flash-Verschleiß erheblich (s. o., AMS-Punkt).
+- _Nicht übernehmen:_ MicroPython-Parser (`SmlParserLight`), Kamera/OCR-Projekte,
+      ESPHome-Komponenten (wir haben eigenes ESP-IDF-Firmware) — passt nicht.
+
+
+
 ## Erledigt (in dieser Session)
 - **Tagesgrenzen im Chart exakt um 0:00 UTC** (`e7e7cb7`): `drawHistory()` zeichnet bei
   `hours >= 24` gestrichelte Linien auf jedes echte UTC-Mitternacht

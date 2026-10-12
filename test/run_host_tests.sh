@@ -85,6 +85,18 @@ cxx="${CXX:-g++}"
 
 ASAN_OPTIONS=detect_leaks=1 "$out/test_sml_parser"
 
+# Golden decode: a real eHZ telegram must be decoded to its exact OBIS values,
+# and a flipped byte must be rejected as a checksum error. Locks the parser's
+# byte-level output against silent regressions.
+"$cxx" -std=c++17 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I"$repo/components/sml_parser/src" \
+    -I"$repo/test" \
+    "$repo/components/sml_parser/src/sml.cpp" \
+    "$here/test_sml_parser_golden.cpp" \
+    -o "$out/test_sml_parser_golden"
+
+ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_parser_golden"
+
 # Stability / fault-injection harness for the power-history logic (ASan+UBSan):
 # corrupted, truncated, adversarial and boundary inputs must never crash or be
 # accepted as consistent records.
