@@ -1,0 +1,30 @@
+choice ESPNOW_ROLE
+    prompt "ESP-NOW firmware role"
+    default ESPNOW_ROLE_RECEIVER
+
+config ESPNOW_ROLE_SENDER
+    bool "Sender (UART SML decoder and ESP-NOW value transport)"
+
+config ESPNOW_ROLE_RECEIVER
+    bool "Receiver (SML value transport and Wi-Fi dashboard)"
+
+endchoice
+
+config RECOVERY_BUTTON_GPIO
+    int "Recovery button GPIO (BOOT button; -1 disables)"
+    default 0
+    range -1 39
+    help
+        Holding this pin low for RECOVERY_BUTTON_HOLD_MS at startup forces a
+        rollback to the previous firmware (esp_ota_mark_app_invalid_rollback_and_reboot),
+        even if the running image was already confirmed. The default 0 is the
+        on-board BOOT button on most ESP32 devkits. Set to -1 to disable.
+
+config RECOVERY_BUTTON_HOLD_MS
+    int "Recovery button hold time (ms)"
+    default 3000
+    depends on RECOVERY_BUTTON_GPIO != -1
+    range 1000 30000
+    help
+        How long the recovery button must be held at startup to force a
+        rollback.
