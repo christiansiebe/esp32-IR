@@ -7,7 +7,7 @@ Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungsh
 ### ⚠️ Verbindliche Regel: SPIFFS-Historie muss erhalten bleiben (nicht verhandelbar)
 Die persistente Leistungshistorie liegt in der SPIFFS-Partition `storage`
 (Offset **0x320000**, Größe **0xE0000** = 917504 B, Datei `/powerlog/quarters.bin`,
-bis zu 30000 Minutenwerte).
+bis zu 29000 Minutenwerte, ~20 Tage).
 
 **Diese Daten dürfen NIE verloren gehen.** Konkret:
 - `storage`-Offset und -Größe niemals ändern und niemals verschieben — sonst ist der
@@ -56,7 +56,8 @@ Zu prüfen / zu tun:
 - Workaround: `origin`-URL trägt jetzt den Write-Token, `git push` funktioniert direkt.
       `gh` liest weiterhin `GITHUB_TOKEN` (Env schlägt gespeicherte Credentials) —
       dafür `GH_TOKEN=$GITHUB_WRITE_TOKEN gh …` setzen.
-- [ ] Bergungs-Branch `recovered/ams-features-salvage` (lokal, Commit `d10ea8c`) pushen.
+- [x] Bergungs-Branch `recovered/ams-features-salvage` (Commit `d10ea8c`) gepusht
+      (`origin/recovered/ams-features-salvage`). Integration nach `main.c` bleibt offen.
 
 ### Geborgene Arbeit (AMS-Features, aus verlorenem `/tmp/work` gerettet)
 Kontext: In einer früheren Session lag die Arbeit in **`/tmp/work/`** (nicht `/workspace`).
@@ -90,7 +91,8 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       CRC (Formatwechsel != Korruption; nach der Migration wird die Checksumme neu berechnet).
       `read()` und `aggregate()` migrieren jetzt vor der Nutzung. Tests:
       `test_record_migration` + `test_migration_in_aggregation` (11 Checks). Ohne Fix rot
-      (v1-Datensatz wird verworfen), mit Fix grün - rot/grün verifiziert. **Noch nicht gepusht.**
+      (v1-Datensatz wird verworfen), mit Fix grün - rot/grün verifiziert. **Gepusht** (in
+      `origin/cline/power-history-diag` enthalten).
 - [ ] **Health-Reboot / Selbstheilung**: Reboot, wenn z. B. `last_rx_ago_ms` > N Minuten oder
       Wi-Fi down > N Minuten. Nutzt vorhandenes `last_rx_ago_ms`. (Im geretteten
       `health_*`-Modul angelegt, aber nicht integriert.)
@@ -158,7 +160,7 @@ in seiner eigenen SPIFFS-Historie (siehe oben).
 - [ ] Voraussetzung Zeit: Der Sender kann nur mit Wall-Clock korrekt stempeln → der
       ESP-NOW-Wall-Clock-Sync (`a8a3e23`) muss vor dem Aufzeichnen gelaufen sein; sonst
       `bucket_start==0` sauber behandeln (Uptime-Fallback).
-- [ ] Rate/Dauer: 30000 × 28 B ≈ 840 KB → über ESP-NOW (~1–10 KB/s) **Stunden**.
+- [ ] Rate/Dauer: 29000 × 28 B ≈ 812 KB → über ESP-NOW (~1–10 KB/s) **Stunden**.
       Daher nur **inkrementell** (nur die Lücke) und gedrosselt; große Nachladungen
       lieber in Häppchen (z. B. max. N Seiten pro Zyklus).
 - [ ] Auslöser: automatisch nach Boot/Reconnect **und** manuell per Button/Endpoint
@@ -220,17 +222,16 @@ Offen / zu verifizieren:
 
 ## Übergabe
 
-Stand: Branch `cline/power-history-diag`, `origin` bei `3f58fec`. **Lokale Commits vor
-`origin` (nicht gepusht, kein Schreibzugang).** Die früher gelisteten 4 Commits
-(`aae37ec`, `4af921a`, `72004b7`, `8764f22`) sind inzwischen **gepusht**; seitdem kamen
-lokal weitere Commits hinzu (TODO-Dokumentation zu Bug/Partition/Regel).
+Stand: Branch `cline/power-history-diag`, alle Commits **gepusht** (HEAD `bfed7e7`,
+`origin/cline/power-history-diag` folgt). PR #1 (`main` ← `cline/power-history-diag`)
+ist offen und aktuell, CI für die letzten Pushes grün
+(Run `38314938729`, 2m47s; PR-Check `38314945182`, 3m1s).
 
-**Push-Status (blockiert, geprüft):** `GITHUB_TOKEN` = GitHub-App-Token (`ghu_…`),
-read-only -> `403 Permission denied` beim `git push`. `GITHUB_WRITE_TOKEN` = 93 Zeichen
-(`githu…`) -> `401 Bad credentials` (ungültig). Ohne gültigen fine-grained PAT bleibt
-alles lokal.
+**Push-Status (gelöst):** Schreibzugang über `GITHUB_WRITE_TOKEN` (fine-grained PAT,
+läuft 2026-11-11 ab). `origin`-URL trägt den Write-Token, `git push` funktioniert direkt;
+`gh` liest weiterhin `GITHUB_TOKEN` → `GH_TOKEN=$GITHUB_WRITE_TOKEN gh …` setzen.
 
-**Offen in dieser Session:** siehe die beiden Blöcke oben
+**Offen in dieser Session:** siehe die Blöcke oben
 (Bug `record_count` + Partitionstabelle/Flash-Reihenfolge).
 
 **2. Am Gerät:** Nach dem Flash der neuen Partitionstabelle (`c3d3420`) ist ein
@@ -287,7 +288,7 @@ alles lokal.
       mit Nutzer abstimmen.
 - [ ] **`storage_ready` praezisieren**: `status->ready` ist auch im RAM-Fallback
       `true` (nur bei fehlgeschlagenem Task-Start `false`). Verlaesslich ist bisher
-      nur die Boot-Log-Zeile `Persistent history ready: N of 30000`. Echten
+      nur die Boot-Log-Zeile `Persistent history ready: N of 29000`. Echten
       SPIFFS-Status (Datei offen) melden, damit „bereit" nicht in die Irre fuehrt.
 
 ### MQTT / Home Assistant (geplant)

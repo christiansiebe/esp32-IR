@@ -18,31 +18,22 @@ dann läuft es ohne Vorgeschichte weiter.
 | Ref | Commit | Status |
 |---|---|---|
 | `origin/main` | `0070840` | ok |
-| `origin/cline/power-history-diag` | `3f58fec` | ok |
-| lokal `cline/power-history-diag` | 1 Commit **unpushed** (oberster lokaler Commit) |
-| `origin/recovered/ams-features-salvage` | `d10ea8c` | ✅ schon gepusht |
+| `origin/cline/power-history-diag` | `bfed7e7` | ok, alle Commits gepusht |
+| `origin/recovered/ams-features-salvage` | `d10ea8c` | ✅ gepusht |
 
-- Unpushed: der oberste lokale Commit („TODO/HANDOFF: record_count boot bug, partition change, binding SPIFFS rule").
-- Lokal liegen keine anderen unpushed Commits. Kein `recovered/ams-features-salvage`-Push mehr nötig.
+- Keine lokalen unpushed Commits. PR #1 (`main` ← `cline/power-history-diag`) offen, CI grün.
 
-## ⚠️ Push blockiert — zuerst lösen
+## ✅ Push gelöst (2026-10-12)
 
-In der letzten Session gab es **keinen schreibfähigen Zugang** (hart geprüft):
+Der frühere Blocker (`GITHUB_TOKEN` read-only → 403; `GITHUB_WRITE_TOKEN` abgelaufen → 401)
+ist behoben:
 
-- `GITHUB_TOKEN` = GitHub-App-Token (`ghu_…`, 40 Z.) → **`403 Permission … denied`** (read-only).
-- `GITHUB_WRITE_TOKEN` = 93 Z., Prefix `githu…` → **`401 Bad credentials`** (ungültig/abgelaufen),
-  für API *und* Git.
-
-**Aktion:** fine-grained PAT (`github_pat_…`, *Contents: Read and write*, optional
-*Workflows: Read and write*) auf `christiansiebe/esp32-IR` anlegen und als Secret
-`GITHUB_WRITE_TOKEN` in OpenHands hinterlegen. Dann in **diesem** neuen Chat:
-
-```bash
-git remote set-url origin "https://x-access-token:${GITHUB_WRITE_TOKEN}@github.com/christiansiebe/esp32-IR.git"
-git push origin cline/power-history-diag      # schiebt den lokalen Commit nach
-```
-
-Erst danach ist der Push-Blocker in der TODO.md abzuhaken.
+- `GITHUB_WRITE_TOKEN` = gültiges fine-grained PAT (`github_pat_…`, läuft 2026-11-11 ab)
+  und **darf pushen**.
+- `origin`-URL trägt den Write-Token; `git push origin cline/power-history-diag` funktioniert
+  direkt.
+- `gh` liest weiterhin `GITHUB_TOKEN` (Env schlägt gespeicherte Credentials) → für API/`gh`
+  `GH_TOKEN=$GITHUB_WRITE_TOKEN gh …` setzen.
 
 ## ⚠️ Verbindliche Regel: SPIFFS-Historie darf nie verloren gehen
 
@@ -91,7 +82,6 @@ Sender: OTA über `http://192.168.4.1/update` → „Sender via ESP-NOW", oder p
 ## Offene Tasks (Details in `TODO.md`)
 
 - `record_count`-Bug beheben (oben).
-- Push-Blocker lösen (PAT), den lokalen Commit pushen.
 - AMS-Übernahmen integrieren (geborgene Module liegen auf `origin/recovered/ams-features-salvage`):
   `health_*`, `mqtt_*` (HA-Discovery/LWT), `boot_confirm`/`boot_policy`, `recovery_*`, Host-Tests,
   CMakeLists/sdkconfig. Stand: rekonstruiert, **nicht** integriert, nicht baubar.
@@ -101,6 +91,11 @@ Sender: OTA über `http://192.168.4.1/update` → „Sender via ESP-NOW", oder p
 
 ## Zuletzt erledigt (in Arbeit)
 
+- Wiederkehrende „Schreibfehler" behoben `af88bbd`: Ringpuffer-Kapazität 30000 → 29000,
+  weil 30000 Datensätze nicht in die 896-KiB-`storage`-Partition passen (Ringpuffer konnte
+  nie überschreiben → `SPIFFS_ERR_FULL` ab ~29600 Sätzen).
+- Tagesgrenzen im Chart exakt um 0:00 UTC `e7e7cb7` (gestrichelte Linien auf jedem echten
+  UTC-Mitternacht; Host-Test `check_dashboard_js.py` erzwingt es).
 - Persistenz-Migration `4af921a` (alte Record-Formate migrieren statt verwerfen).
 - Stabilitäts-/Fault-Injection-Harness `8764f22` (ASan/UBSan, `test/stability/`).
 - Reboot-Persistenz-Host-Test (echter Init→Schreiben→Reboot-Zyklus, `fork()`),
