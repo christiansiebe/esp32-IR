@@ -22,8 +22,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MAIN_C = os.path.join(HERE, "..", "main", "main.c")
 
 HARNESS = r"""
+const dashedXs = [];
+let dashOn = false;
 const ctxStub = new Proxy({}, {
-  get: (t, p) => (p in t ? t[p] : (() => {})),
+  get: (t, p) => {
+    if (p in t) return t[p];
+    switch (p) {
+      case 'setLineDash': return (a) => { dashOn = !!(a && a.length); };
+      case 'moveTo': return (x) => { if (dashOn) dashedXs.push(x); };
+      default: return () => {};
+    }
+  },
   set: (t, p, v) => { t[p] = v; return true; },
 });
 function makeEl() {
@@ -78,6 +87,32 @@ if (tip.style.display !== 'none') { console.error('FAIL tip not hidden'); proces
 sandbox.__t.showTip({ clientX: 5000, clientY: 100 });
 if (els['history-tip'].style.display !== 'none') { console.error('FAIL tip far'); process.exit(1); }
 console.log('dashboard tooltip runtime ok');
+
+// Day windows must break exactly at 0:00 UTC, not at arbitrary quarters.
+// Start at 06:00 UTC over 48 h: the UTC midnights must fall at 18 h and 42 h
+// into the window (distinct from the plain quarter grid at 0/12/24/36/48 h).
+const dstart = 6 * 3600000, dspan = 48 * 3600000;
+try { sandbox.__t.drawHistory(rows, 48, dstart, null); }
+catch (e) { console.error('FAIL drawHistory day: ' + e.message); process.exit(1); }
+if (dashedXs.length !== 2) {
+  console.error('FAIL day boundaries: ' + JSON.stringify(dashedXs)); process.exit(1);
+}
+const innerW = 800 - 42 - 12;
+for (const [i, hOff] of [18, 42].entries()) {
+  const expectX = 42 + (hOff / 48) * innerW;
+  if (Math.abs(dashedXs[i] - expectX) > 0.5) {
+    console.error('FAIL day boundary x: got ' + dashedXs[i] + ' want ' + expectX);
+    process.exit(1);
+  }
+}
+// The marked positions must land on exact UTC midnights.
+for (const dx of dashedXs) {
+  const t = dstart + (dx - 42) / innerW * dspan;
+  if (Math.abs(t % 86400000) > 1) {
+    console.error('FAIL day boundary not midnight UTC: ' + t); process.exit(1);
+  }
+}
+console.log('dashboard day boundaries ok');
 process.exit(0);
 """
 
