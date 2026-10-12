@@ -2,6 +2,26 @@
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
 
+## ⚠️ Verbindliche Regel: SPIFFS-Historie muss erhalten bleiben
+
+Die persistente Leistungshistorie liegt in der SPIFFS-Partition `storage`
+(Offset **`0x320000`**, Größe **`0xE0000`** = 917504 B, Datei `/powerlog/quarters.bin`,
+bis zu 30000 Minutenwerte).
+
+**Diese Daten dürfen NIE verloren gehen.** Konkret einzuhalten:
+
+- **`storage`-Offset und -Größe niemals ändern** und niemals verschieben — sonst ist
+  der bestehende Verlauf nach einem Flash weg.
+- **Flash-Bundles/`flasher_args.json` dürfen die `storage`-Partition nicht schreiben.**
+  (bereits umgesetzt: `e944e04`/`aac6ee0`; Bundle enthält keinen `storage`-Eintrag und
+  keine `storage.bin`.) Vor jeder Bundle-Änderung erneut prüfen.
+- **Kein `erase-flash` / kein Full-Chip-Erase** beim Deployment — nur
+  bootloader + partition-table + app schreiben, `storage` bleibt unberührt.
+- Bei jeder Partitions-/OTA-/Build-/Flash-Änderung prüfen: **bleibt `storage` an exakt
+  derselben Adresse?** Wenn nein, Änderung verwerfen oder Verlust ausdrücklich absprechen.
+- Nach jedem Deployment am Gerät verifizieren: **Verlauf noch vorhanden**
+  (`record_count` > 0, nicht RAM-Fallback) — Akzeptanzkriterium, kein „nice to have".
+
 ## Offen
 
 ### Push / Zugang (blockiert)
@@ -99,6 +119,7 @@ Konkret geändert:
   (übernimmt den bisherigen Factory-Platz).
 - **`ota_1` vergrößert und verschoben:** `0x220000`/`0x100000` -> **`0x1a0000`/`0x180000`**.
 - **`storage` unverändert:** Offset `0x320000`, Größe `0xE0000` (= 917504 B) -> Historie bleibt.
+  **Nicht verhandelbar** — siehe Regel oben („SPIFFS-Historie muss erhalten bleiben").
 - `nvs`, `otadata`, `phy_init` unverändert.
 
 Auswirkungen / Konsequenzen:
