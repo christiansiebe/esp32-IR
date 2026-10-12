@@ -37,7 +37,7 @@ grün mit dem Fix.
 Zu prüfen / zu tun:
 - [ ] Beim Boot verifizieren, dass `power_history` die SPIFFS-Datei öffnet und den
       Header liest (nicht in den RAM-Fallback fällt). Logzeile `Persistent history
-      ready: N of 30000` gegen `record_count` in `/api/power-history` abgleichen.
+      ready: N of 29000` gegen `record_count` in `/api/power-history` abgleichen.
 - [ ] Header-Handling prüfen: Nach dem Fix `1612975` (gültiger Fresh-Header + In-Place-
       Reparatur) darf ein gültiger Bestand **nicht** als „leer" gewertet werden.
 - [ ] Migration prüfen (`4af921a`): Alte `format_version` darf die Datensätze nicht
@@ -45,15 +45,17 @@ Zu prüfen / zu tun:
 - [ ] Akzeptanzkriterium (Pflicht): nach Reboot sofort `record_count > 0`, kein RAM-Fallback,
       0 Schreibfehler. Am Gerät verifizieren.
 
-### Push / Zugang (blockiert)
-- [ ] **Gültigen fine-grained PAT (`github_pat_…`) als `GITHUB_WRITE_TOKEN` hinterlegen.**
-      Geprüfter Stand in dieser Session: `GITHUB_TOKEN` = GitHub-App-Token (`ghu_…`), read-only
-      (`git push` -> `403 Permission to christiansiebe/esp32-IR.git denied`, auch auf bestehenden
-      Branch). `GITHUB_WRITE_TOKEN` = 93 Zeichen, Prefix `githu…` -> **`401 Bad credentials`**
-      (ungültig/abgelaufen), für API *und* Git. Ein Schreibzugang fehlt damit komplett.
-      Benötigt: fine-grained Token mit *Contents: Read and write* (+ *Workflows: Read and write*
-      bei Workflow-Änderungen) auf `christiansiebe/esp32-IR`.
-      → Solange offen: alle neuen Commits bleiben nur lokal.
+### Push / Zugang (gelöst)
+- [x] **Schreibzugang gefunden (2026-10-12).** `GITHUB_TOKEN` = GitHub-App-Token (`ghu_…`),
+      read-only (`git push` -> `403`). `GITHUB_WRITE_TOKEN` = gültiges fine-grained PAT
+      (`github_pat_…`, läuft 2026-11-11 ab), Prefix `github_pat_…` -> **darf pushen**
+      (`git push --dry-run` bestätigt). Frühere `401 Bad credentials`-Notiz war ein
+      alter/abgelaufener Tokenstand.
+- [x] Beide Commits (`e7e7cb7` Tagesgrenzen, `af88bbd` Kapazitäts-Fix) auf
+      `cline/power-history-diag` gepusht; CI grün (Run `38312096355`).
+- Workaround: `origin`-URL trägt jetzt den Write-Token, `git push` funktioniert direkt.
+      `gh` liest weiterhin `GITHUB_TOKEN` (Env schlägt gespeicherte Credentials) —
+      dafür `GH_TOKEN=$GITHUB_WRITE_TOKEN gh …` setzen.
 - [ ] Bergungs-Branch `recovered/ams-features-salvage` (lokal, Commit `d10ea8c`) pushen.
 
 ### Geborgene Arbeit (AMS-Features, aus verlorenem `/tmp/work` gerettet)
@@ -365,6 +367,14 @@ Dashboard zeigte jede Minute „Schreibfehler: N". Ein Ringpuffer muss beim Voll
 
 
 ## Erledigt (in dieser Session)
+- **Tagesgrenzen im Chart exakt um 0:00 UTC** (`e7e7cb7`): `drawHistory()` zeichnet bei
+  `hours >= 24` gestrichelte Linien auf jedes echte UTC-Mitternacht
+  (`Math.ceil(start/86400000)*86400000`) statt auf beliebige Rasterpositionen; der
+  Host-Test `test/check_dashboard_js.py` erzwingt das (rot ohne Fix, grün mit Fix).
+- **Wiederkehrende „Schreibfehler" behoben** (`af88bbd`): Ringpuffer-Kapazität
+  30000 → 29000, weil 30000 Datensätze (840056 B) nicht in die 896-KiB-`storage`-Partition
+  passen — der Puffer konnte nie überschreiben und lief ab ~29600 Sätzen auf
+  `SPIFFS_ERR_FULL`. Details oben im Abschnitt „🐛 Behoben".
 - On-Demand-Senderdiagnose ueber ESP-NOW (unicast, Request/Response, echte Sendebestaetigung via Callback).
 - Persistente Leistungshistorie (SPIFFS/RAM-Fallback, SNTP, 1-s-Sampling, 60-s-Buckets, `/api/power-*`).
 - SPIFFS-Robustheit: `format_if_mount_failed = true` + vorformatiertes Image (`spiffs_create_partition_image`).
