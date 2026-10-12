@@ -48,6 +48,11 @@ Two firmware roles are built from one source tree.
   `Firmware/Receiver` bundle strip the `storage.bin` entry from
   `flasher_args.json`, so a bundle/com flash keeps the history. OTA and app-only
   flashes were already safe. Do not re-add the storage entry.
+- Record format is versioned (`POWER_HISTORY_VERSION`, currently 2). A version
+  bump does not drop the stored history: `power_history_migrate_record()` upgrades
+  older records in place, kept versions are `[POWER_HISTORY_OLDEST_SUPPORTED_VERSION,
+  POWER_HISTORY_VERSION]`, and the CRC stays strict (a format change is not
+  corruption). When bumping a version, add the migration step and a host test.
 
 ## CPU clock / power
 - CPU runs at a fixed 80 MHz (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y` in

@@ -38,12 +38,16 @@ Aus dem Event-Log rekonstruiert und gesichert.
 Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
 - [ ] **LICENSE + README** fehlen komplett (unabhängig, ~30 Min).
       Lizenz wählen (MIT/Apache für dieses Projekt); README mit Build-/Flash-Anleitung.
-- [ ] **Persistenz-Migration** (echte Lücke): `power_history.c:record_is_valid()` verwirft
-      `format_version != POWER_HISTORY_VERSION` **hart** → bei Versionssprung
-      (z. B. 2→3) werden **alle** Altbestände ungültig und `read`/`aggregate` überspringen sie
-      still → **Datenverlust nach Update**. Vorbild AMS: `version` im Struct + Migrationskette.
-      → `power_history_migrate_record()` + „unbekannte Version tolerieren statt verwerfen"
-      (Checksum nach Migration neu berechnen). Host-Test ergänzen. **Nie implementiert.**
+- [x] **Persistenz-Migration** (echte Lücke, **erledigt** `4af921a`): `record_is_valid()`
+      verwarf `format_version != POWER_HISTORY_VERSION` hart -> bei Versionssprung wurden **alle**
+      Altbestände ungültig und `read`/`aggregate` übersprangen sie still (Datenverlust nach Update).
+      Neu: `power_history_migrate_record()` (in `power_history.h/.c`) hebt einen Datensatz in
+      Ort und Stelle auf das aktuelle Format, toleriert Versionen in
+      `[POWER_HISTORY_OLDEST_SUPPORTED_VERSION, POWER_HISTORY_VERSION]`, bleibt aber streng beim
+      CRC (Formatwechsel != Korruption; nach der Migration wird die Checksumme neu berechnet).
+      `read()` und `aggregate()` migrieren jetzt vor der Nutzung. Tests:
+      `test_record_migration` + `test_migration_in_aggregation` (11 Checks). Ohne Fix rot
+      (v1-Datensatz wird verworfen), mit Fix grün - rot/grün verifiziert. **Noch nicht gepusht.**
 - [ ] **Health-Reboot / Selbstheilung**: Reboot, wenn z. B. `last_rx_ago_ms` > N Minuten oder
       Wi-Fi down > N Minuten. Nutzt vorhandenes `last_rx_ago_ms`. (Im geretteten
       `health_*`-Modul angelegt, aber nicht integriert.)
