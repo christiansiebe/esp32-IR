@@ -981,6 +981,10 @@ static void crash_journal_shutdown_handler(void)
     xSemaphoreGive(g_crash_journal_mutex);
 }
 
+/* Defined with the boot-marker block below; declared here because the clean
+ * restart path calls it before esp_restart(). */
+static void boot_marker_flag_planned_reboot(void);
+
 /* Mark the running session as a clean, deliberate restart before esp_restart().
  * esp_restart() does not run the registered shutdown handler, so an OTA or
  * console reboot would otherwise look like a crash on the next boot. */
