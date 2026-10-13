@@ -95,11 +95,12 @@ static sim_result_t simulate(uint32_t period_a, uint32_t switch_after,
         /* The burst arrives: one gap byte, then the telegram bytes. */
         if (have_last) {
             uart_sleep_note_byte(&ctrl, (uint64_t)next_burst * 1000ULL,
-                                 (uint64_t)last_byte_ms * 1000ULL, GAP_THRESHOLD_MS);
+                                 (uint64_t)last_byte_ms * 1000ULL, GAP_THRESHOLD_MS,
+                                 true);
         }
         /* Second byte 1 ms later: shows a burst is open (gap < threshold). */
         uart_sleep_note_byte(&ctrl, (uint64_t)(next_burst + 1u) * 1000ULL,
-                             (uint64_t)next_burst * 1000ULL, GAP_THRESHOLD_MS);
+                             (uint64_t)next_burst * 1000ULL, GAP_THRESHOLD_MS, true);
         last_byte_ms = next_burst + BURST_MS;
         have_last = true;
 

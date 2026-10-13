@@ -7,10 +7,14 @@
 #include "soc/soc_caps.h"
 
 #define UART_SLEEP_GAP_THRESHOLD_MS 50u
+/* Must match UART_PORT_NUM in main.c; used only to peek at the RX buffer after
+ * a sleep window to decide whether the window was clean or too long. */
+#define UART_SLEEP_PORT_NUM UART_NUM_1
 
 #if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP && SOC_PM_SUPPORT_LP_TIMER && \
     (SOC_PM_SUPPORT_EXT_WAKEUP || SOC_PM_SUPPORT_GPIO_WAKEUP)
 
+#include "driver/uart.h"
 #include "esp_pm.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -70,10 +74,12 @@ static void uart_sleep_lock(bool lock)
     s_locked = lock;
 }
 
-void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t received)
+void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t received,
+                               bool awaiting)
 {
     (void)received;
-    uart_sleep_note_byte(&s_ctrl, now_us, last_byte_us, UART_SLEEP_GAP_THRESHOLD_MS);
+    uart_sleep_note_byte(&s_ctrl, now_us, last_byte_us, UART_SLEEP_GAP_THRESHOLD_MS,
+                         awaiting);
     if (!uart_sleep_should_request(&s_ctrl)) {
         /* Bytes are flowing: keep the CPU awake for the whole burst. */
         uart_sleep_lock(true);
@@ -115,9 +121,18 @@ void uart_sleep_maybe_sleep_idf(void)
     vTaskDelay(pdMS_TO_TICKS(window_ms));
     uart_sleep_lock(true);
 
-    /* A clean window (no byte arrived while we slept) lets the window grow; a
-     * byte that arrived early is caught by uart_sleep_note_uart_byte(). */
-    uart_sleep_note_clean(&s_ctrl);
+    /* If the UART buffer is still empty after the window, nothing arrived while
+     * we slept: the window was clean and may grow. If bytes are already pending,
+     * the window was too long (a telegram started inside it) -> cut it. */
+    size_t pending = 0;
+    if (uart_get_buffered_data_len(UART_SLEEP_PORT_NUM, &pending) != ESP_OK) {
+        pending = 0;
+    }
+    if (pending == 0) {
+        uart_sleep_note_clean(&s_ctrl);
+    } else {
+        uart_sleep_note_short_sleep(&s_ctrl);
+    }
 }
 
 uint32_t uart_sleep_window_ms(void) { return s_ctrl.window_ms; }
@@ -130,11 +145,13 @@ bool uart_sleep_hold_is_active(void)
 #else /* feature disabled or unsupported target: the glue is a no-op */
 
 bool uart_sleep_init_idf(void) { return false; }
-void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t received)
+void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t received,
+                               bool awaiting)
 {
     (void)now_us;
     (void)last_byte_us;
     (void)received;
+    (void)awaiting;
 }
 void uart_sleep_note_uart_idle(void) {}
 void uart_sleep_hold(uint32_t hold_ms) { (void)hold_ms; }

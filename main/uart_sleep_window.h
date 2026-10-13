@@ -81,17 +81,19 @@ static inline void uart_sleep_apply_cap(uart_sleep_ctrl_t *s)
 }
 
 /* Feed every received UART byte. A quiet stretch at/after gap_threshold_ms
- * between bytes marks the end of a burst; the gap itself is a candidate quiet
- * interval and tightens the cap. */
+ * between bytes is a candidate quiet interval, but it only tightens the window
+ * when `awaiting` says the parser is genuinely between telegrams: the meter also
+ * pauses ~50-90 ms *inside* a telegram, and using those would pin the window to
+ * min_ms and make it sleep mid-telegram. */
 static inline void uart_sleep_note_byte(uart_sleep_ctrl_t *s, uint64_t now_us,
                                         uint64_t last_byte_us,
-                                        uint32_t gap_threshold_ms)
+                                        uint32_t gap_threshold_ms, bool awaiting)
 {
     (void)now_us;
     uint64_t gap_us = (last_byte_us != 0) ? (now_us - last_byte_us) : 0;
     uint32_t gap_ms = (uint32_t)(gap_us / 1000ULL);
     if (gap_ms >= gap_threshold_ms) {
-        if (s->last_min_gap_ms == 0 || gap_ms < s->last_min_gap_ms) {
+        if (awaiting && (s->last_min_gap_ms == 0 || gap_ms < s->last_min_gap_ms)) {
             s->last_min_gap_ms = gap_ms;
         }
     } else {
@@ -148,7 +150,8 @@ static inline void uart_sleep_note_short_sleep(uart_sleep_ctrl_t *s)
  * Declared unconditionally so the sender call sites need no #if; the functions
  * are no-ops when CONFIG_ESPNOW_SENDER_LIGHT_SLEEP is off. */
 bool uart_sleep_init_idf(void);
-void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t received);
+void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t received,
+                               bool awaiting);
 void uart_sleep_note_uart_idle(void);
 void uart_sleep_maybe_sleep_idf(void);
 

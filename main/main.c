@@ -2079,12 +2079,20 @@ static void uart_capture_worker(void *arg)
         portEXIT_CRITICAL(&g_uart_stats_lock);
 
         if (received <= 0) {
-            /* The UART read timed out: the line has been quiet for at least the
-             * read window, so the burst is over. Update the adaptive window and
-             * park the CPU in the quiet gap before the next telegram. No-ops
-             * unless CONFIG_ESPNOW_SENDER_LIGHT_SLEEP is enabled. */
-            uart_sleep_note_uart_idle();
-            uart_sleep_maybe_sleep_idf();
+            /* The UART read timed out. That alone does NOT mean the telegram is
+             * over: the meter pauses ~50-90 ms inside a telegram too, and this
+             * read timeout is only 50 ms, so it also fires mid-telegram. Only the
+             * parser knows whether it is genuinely between telegrams. Sleeping
+             * (or clearing "burst active") on a mid-telegram timeout let the CPU
+             * park inside a telegram and clip its tail -> the mid-telegram gaps
+             * and checksum failures seen with light sleep enabled.
+             * So update the adaptive window and park the CPU only when the parser
+             * is waiting for the next telegram. No-ops unless
+             * CONFIG_ESPNOW_SENDER_LIGHT_SLEEP is enabled. */
+            if (sml_adapter_awaiting_telegram()) {
+                uart_sleep_note_uart_idle();
+                uart_sleep_maybe_sleep_idf();
+            }
             /* Report a total receive silence once, in case the read head is
              * unplugged or misaligned rather than merely idle between frames. */
             if (last_us != 0 && !already &&
@@ -2157,7 +2165,8 @@ static void uart_capture_worker(void *arg)
         g_uart_silence_reported = false;
         g_uart_rx_bytes += (uint64_t)received;
         portEXIT_CRITICAL(&g_uart_stats_lock);
-        uart_sleep_note_uart_byte(now_us, last_us, (uint32_t)received);
+        uart_sleep_note_uart_byte(now_us, last_us, (uint32_t)received,
+                                  sml_adapter_awaiting_telegram());
 
         for (int i = 0; i < received; ++i) {
             (void)sml_adapter_feed_byte(rx_buffer[i], now_us);
