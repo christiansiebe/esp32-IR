@@ -19,9 +19,9 @@ jobs:
       - name: Compile the adaptive sender sleep path
         shell: bash
         run: |
-          # The adaptive light sleep is off by default; this compiles the
-          # enabled branch of uart_sleep_window.c so it cannot rot silently.
-          # IDF headers are stubbed, so this checks C syntax only.
+          # The adaptive light sleep is enabled by default in Kconfig; this
+          # compiles its branch of uart_sleep_window.c explicitly so it cannot
+          # rot silently. IDF headers are stubbed, so this checks C syntax only.
           gcc -std=c11 -fsyntax-only \
             -DCONFIG_ESPNOW_SENDER_LIGHT_SLEEP=1 \
             -DSOC_PM_SUPPORT_LP_TIMER=1 \
@@ -52,13 +52,10 @@ jobs:
         include:
           - role: receiver
             kconfig_role: RECEIVER
+          # The sender ships as a single image with the adaptive light sleep
+          # enabled by default (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y in Kconfig).
           - role: sender
             kconfig_role: SENDER
-          # Sender with the adaptive light sleep enabled, shipped so the sleep
-          # path can be bench-verified (see TODO.md). Same role, extra config.
-          - role: sender-sleep
-            kconfig_role: SENDER
-            extra_config: CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y
     env:
       IDF_CCACHE_ENABLE: "1"
       CCACHE_DIR: /root/.cache/ccache
@@ -88,7 +85,6 @@ jobs:
           CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
           CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
           CONFIG_ESPNOW_ROLE_${{ matrix.kconfig_role }}=y
-          ${{ matrix.extra_config }}
           EOF
           echo "SDKCONFIG_DEFAULTS=sdkconfig.defaults;$RUNNER_TEMP/sdkconfig.defaults" >> "$GITHUB_ENV"
 
@@ -121,14 +117,20 @@ jobs:
           [ "$fail" -eq 0 ]
           echo "CPU clock: 80 MHz ceiling with DFS + tickless idle"
 
-      - name: Verify adaptive sleep config (sender-sleep)
-        if: matrix.role == 'sender-sleep'
+      - name: Verify adaptive sleep config (sender)
+        if: matrix.role == 'sender'
         shell: bash
         run: |
           set -euo pipefail
+          # The sender ships as one image with light sleep enabled by default.
           grep -q '^CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y$' sdkconfig
           grep -q '^CONFIG_ESPNOW_ROLE_SENDER=y$' sdkconfig
-          echo "Adaptive sender light sleep is enabled in this build"
+          # Guard against shipping a sender image without the sleep path: the
+          # log string is compiled in only when the feature is on, so grepping
+          # the built app proves the flashed image carries it.
+          test -s "build/sender/esp32-IR.bin"
+          grep -a -q 'Adaptive sender light sleep enabled' "build/sender/esp32-IR.bin"
+          echo "Sender image contains the adaptive light-sleep path"
 
       - name: Stage firmware and flash files
         shell: bash
@@ -170,9 +172,9 @@ jobs:
           # partition: flashing a blank storage.bin wipes the persisted
           # minute history. Strip the storage entry so flashing this bundle
           # keeps the data; OTA updates never touch it either.
-          python3 - "$out_dir/flasher_args.json" <<'PYEOF'
+          python3 - "$out_dir/flasher_args.json" "${{ matrix.role }}" <<'PYEOF'
           import json, sys
-          path = sys.argv[1]
+          path, role = sys.argv[1], sys.argv[2]
           with open(path) as fh:
               args = json.load(fh)
           for off in [k for k, v in list(args.get("flash_files", {}).items())
@@ -180,9 +182,18 @@ jobs:
               del args["flash_files"][off]
           args.get("flash_settings", {}).pop("storage", None)
           args.pop("storage", None)
+          # The staged app image is renamed to <role>-sml.bin; point the flash
+          # args at it, otherwise `esptool write_flash @flasher_args.json` looks
+          # for esp32-IR.bin and the flash fails or silently keeps the old image.
+          app_name = f"{role}-sml.bin"
+          for off, val in args.get("flash_files", {}).items():
+              if str(val).endswith("esp32-IR.bin"):
+                  args["flash_files"][off] = app_name
+          if "app" in args:
+              args["app"]["file"] = app_name
           with open(path, "w") as fh:
               json.dump(args, fh, indent=4)
-          print("flasher_args.json: storage entry stripped (SPIFFS preserved).")
+          print(f"flasher_args.json: storage stripped, app -> {app_name}.")
           PYEOF
 
       - name: Upload firmware artifact

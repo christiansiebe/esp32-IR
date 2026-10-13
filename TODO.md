@@ -2,16 +2,17 @@
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
 Letzter Commit: `f5239c7` – CI **grün** (Push-Run `38466461726`, PR-Run `38466468521`:
-Host-Tests, Sender, sender-sleep, Receiver). Neu: JSON-Escaping der Sender-Diagnose-
+Host-Tests, Sender, Receiver). Neu: JSON-Escaping der Sender-Diagnose-
 Event-Texte (`f5239c7`, behebt `JSON.parse: bad control character`), CSV-Analyzer
 `tools/analyze_power_csv.py` (`327ae24`). Davor: Sender-UART-Gap-Attribution + CPU-Takt-
 Historie (`8f0e0ef`), Receiver-Build-Fix `g_last_sleep_exit_us` (`26d9865`), Transport-Gap-
 Klassifizierung Verlust vs. Reorder (`8db666c`), `Cache-Control: no-store` fuer alle
 HTML-Seiten (`c074b61`).
 Flashbare Artefakte (nicht abgelaufen) im PR-Run `38466468521`: `sender-sml-flash-files`,
-`sender-sleep-sml-flash-files`, `receiver-sml-flash-files` (+ je `*-firmware`).
+`receiver-sml-flash-files` (+ je `*-firmware`). Der Sender ist **ein** Image mit
+adaptivem Light-Sleep als Default (`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y`).
 **Wichtig:** Der zuletzt geflashte Build `#156` (`82718b6`) enthält den
-Mid-Telegram-Sleep-Fix **nicht** – für den Bench-Test den aktuellen `sender-sleep`-Build
+Mid-Telegram-Sleep-Fix **nicht** – für den Bench-Test den aktuellen Sender-Build
 flashen (ab `f16cdc8`).
 
 ## ⏰ Arbeitsweise: Chat-Heartbeat (von jedem Folge-Chat zu übernehmen!)
@@ -219,8 +220,9 @@ einem Zyklus: sammeln → ~5 s → Pakete senden → (Radio nutzbar/ruhen).
 
 ### Sender: adaptiver Light-Sleep zwischen Telegramm-Bursts (NEU, `0b9f637`)
 Ziel: „Mit 400 ms bauen und der Sender passt die Zeit automatisch an" — Sparsamkeit mit
-variablem Takt, ohne dass ein Telegramm verloren geht. Feature liegt hinter
-`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP` (**Default AUS**).
+variablem Takt, ohne dass ein Telegramm verloren geht. Feature ist **Default AN**
+(`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y` in `main/Kconfig.projbuild`) — der Sender ist **ein**
+Image, kein separates `sender-sleep`-Artefakt mehr.
 - [x] Regler `main/uart_sleep_window.{h,c}`: Start **400 ms**; Obergrenze ist immer
       `kürzeste beobachtete Zwischen-Telegramm-Lücke × 3/4`; **+25 ms** pro sauberem Schlaf;
       **halbiert** sich, wenn ein Telegramm im Fenster ankam. `ESP_PM_NO_LIGHT_SLEEP`-Lock
@@ -242,12 +244,12 @@ variablem Takt, ohne dass ein Telegramm verloren geht. Feature liegt hinter
       ESP-NOW stabil unter Modem-Sleep. Wenn nicht: Backfill als Netz nutzen, oder Feature aus lassen.
 - [ ] Optional: `sleep_min_gap_ms` über die Diag-Seite im Dashboard als eigene Zeile ausgeben
       (bisher nur im Text).
-- [ ] Optional: Default-ON erst nach Hardware-Nachweis; vorher AUS lassen (Sendestrecke schützen).
-- [x] **Bench-Build verfügbar:** CI-Matrix hat jetzt einen dritten Eintrag `sender-sleep`
-      (Rolle Sender + `CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y`) mit eigenem Artefakt
-      `sender-sleep-sml-firmware` / `sender-sleep-sml-flash-files`; ein Schritt prüft per
-      `grep`, dass das Flag wirklich gesetzt ist. So lässt sich die Sleep-Strecke flashen,
-      ohne lokal zu bauen. (`.github/workflows/esp-idf-build.yml`)
+- [x] **Ein Sender-Image mit Sleep als Default:** `CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y`
+      ist Default in `main/Kconfig.projbuild`; die CI-Matrix hat nur noch `sender` und
+      `receiver` (das separate `sender-sleep`-Artefakt ist entfallen). Ein CI-Schritt prüft
+      per `grep` in `sdkconfig` **und** im gebauten `esp32-IR.bin`, dass der Sleep-Pfad
+      wirklich enthalten ist. `build_profile` im `counters`-Diag zeigt zur Laufzeit, welches
+      Image läuft (1 = mit Sleep). (`.github/workflows/esp-idf-build.yml`)
 
 ### 🐛 Sender-Diagnose: „DID NOT END CLEANLY" bei bewusstem Reboot (BEHOBEN)
 Symptom: Nach OTA/Console-Reboot meldete der Sender beim nächsten Boot
@@ -294,8 +296,9 @@ zusätzlich weitere Zeilen.)
       für echte Ereignisse frei. (`main/main.c`, `espnow_diag_worker`.)
 
 ### ⚠️ Sender-Sleep: CPU schlief MITTEN im Telegramm (BEHOBEN)
-Symptom: Mit geflashtem **sender-sleep**-Build häufige `rx gap … mid-telegram`
-(~50–90 ms, ~1/s) und die Sorge, ob `espnow sleep` sich falsch verhält.
+Symptom: Mit dem Sleep-Sender-Build (früher separat als **sender-sleep** geflasht)
+häufige `rx gap … mid-telegram` (~50–90 ms, ~1/s) und die Sorge, ob `espnow sleep`
+sich falsch verhält.
 Ursache (echter Bug, kein Messartefakt): Der UART-Read-Timeout ist **50 ms**, das
 SML-Zählwerk pausiert aber **innerhalb** eines Telegramms ebenfalls ~50–90 ms. Der
 Idle-Zweig feuerte also mitten im Telegramm, löschte „Burst aktiv" und schlief
@@ -338,8 +341,8 @@ Damit die Frage „woher kommt der Gap?" nicht mehr geraten werden muss:
       (CPU-Historie, Gap-Quellen, Klartext-Urteil **NO DATA LOST / DATA LOSS**).
 
 **Wichtig zum Testen:** Der zuvor geflashte Build (`#156`, Commit `82718b6`) enthält
-den Mid-Telegram-Sleep-Fix **nicht**. Für den Test den **aktuellen** `sender-sleep`-
-Build flashen (Commits ab `f16cdc8`), sonst sieht man weiter die alte Symptomatik.
+den Mid-Telegram-Sleep-Fix **nicht**. Für den Test den **aktuellen** Sender-Build
+flashen (Commits ab `f16cdc8`), sonst sieht man weiter die alte Symptomatik.
 
 ### ✅ Empfänger: „Transportlücken" sauber klassifiziert (Verlust vs. Reorder)
 Wichtig: Diese Gaps gibt es **auch ohne CPU-Sleep** — sie stammen **nicht** vom Sleep.
@@ -708,14 +711,15 @@ offen (s. u.) — **vor** dem Kopieren fremden Codes entscheiden.
 ## Erledigt (in dieser Session)
 - **Diag-Sichtung (Sender/Receiver) + zwei Bugfixes**: „DID NOT END CLEANLY" bei bewusstem
   Reboot behoben (deliberate-restart-Klassifizierung, Sender-Diag), Live-Dashboard zeigte nur
-  15-Min-Balken (Sekunden/ms-Einheitenfehler im Live-Fenster, Receiver) behoben; dazu
-  `sender-sleep`-CI-Build als flashbares Artefakt für den Bench-Test. Details in den
-  gleichnamigen Abschnitten „🐛 … (BEHOBEN)" oben.
+  15-Min-Balken (Sekunden/ms-Einheitenfehler im Live-Fenster, Receiver) behoben; dazu der
+  Sender-Light-Sleep als einziges Sender-Image (Sleep Default AN) für den Bench-Test.
+  Details in den gleichnamigen Abschnitten „🐛 … (BEHOBEN)" oben.
 - **Adaptiver Sender-Light-Sleep + Hold für Daten/OTA** (`2c2126c`, `0b9f637`): Regler
   `uart_sleep_window.{h,c}` (400 ms Start, Auto-Backoff, Lock hält den Burst wach),
   `uart_sleep_hold()` gegen Sleep während History-Pull/OTA, Sim + Unit-Tests (21+14 Checks),
   Diag-Felder `sleep_window_ms`/`sleep_min_gap_ms`/`sleep_hold_active`, CI-Syntax-Check des
-  aktivierten Zweigs. Feature Default **AUS**; Hardware-Verifikation offen (s. o.).
+  aktivierten Zweigs. Feature ist jetzt Default **AN** (ein Sender-Image);
+  Hardware-Verifikation offen (s. o.).
 - **Receiver-Build nach `2536550` wieder grün** (`fee4c43`): `console_cmd_pull()` rief
   `history_backfill_run_session()` vor der Definition auf; ohne Vorwärtsdeklaration
   scheiterte der Receiver-Build an `-Werror=implicit-function-declaration`

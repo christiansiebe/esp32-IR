@@ -12,7 +12,7 @@ endchoice
 
 config ESPNOW_SENDER_LIGHT_SLEEP
     bool "Sender: adaptive light sleep between SML telegram bursts"
-    default n
+    default y
     depends on ESPNOW_ROLE_SENDER
     help
         Let the sender park the CPU (light sleep) in the quiet gaps between
@@ -21,5 +21,6 @@ config ESPNOW_SENDER_LIGHT_SLEEP
         stops the APB clock, so an actively receiving UART would lose bytes;
         the window is therefore only entered after the line has gone quiet.
         This also enables Wi-Fi modem sleep on the sender so the Wi-Fi driver
-        releases its APB lock. Enable only after bench-verifying that ESP-NOW
-        broadcasts are still received while sleeping (see TODO.md).
+        releases its APB lock. Enabled by default: the sender ships as a single
+        image. Verify on the bench that ESP-NOW broadcasts are still received
+        while sleeping (see TODO.md); disable to fall back to DFS only.

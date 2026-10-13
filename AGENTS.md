@@ -110,17 +110,21 @@ Two firmware roles are built from one source tree.
 - Wi-Fi power save stays at the default `WIFI_PS_MIN_MODEM`; `WIFI_PS_NONE`
   would burn power and power save beyond the default hurts ESP-NOW reliability.
 - Adaptive sender light sleep (`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP`, default
-  **off**): `main/uart_sleep_window.{h,c}` parks the CPU only in the quiet gap
-  between SML telegram bursts. The window starts at 400 ms, is capped below the
-  shortest inter-telegram gap seen (3/4 margin), grows 25 ms per clean sleep and
-  halves on an overrun. An `ESP_PM_NO_LIGHT_SLEEP` lock is held for the whole
-  burst so the APB clock never stops mid-telegram (there is no UART wake-up
-  source). `uart_sleep_hold()` from the ESP-NOW receive path keeps the CPU awake
-  for an in-flight history pull (2 s) or OTA (5 s). Host tests:
-  `test/test_uart_sleep_window.c` and `test/test_uart_sleep_sim.c` (the sim
-  models the lost bytes when a telegram arrives mid-sleep). CI syntax-checks the
-  enabled branch with IDF stubs in `test/host/include`. Bench verification of the
-  enabled path is still open (see `TODO.md`).
+  **on**, sender ships as a single image): `main/uart_sleep_window.{h,c}` parks
+  the CPU only in the quiet gap between SML telegram bursts. The window starts at
+  400 ms, is capped below the shortest inter-telegram gap seen (3/4 margin),
+  grows 25 ms per clean sleep and halves on an overrun. An
+  `ESP_PM_NO_LIGHT_SLEEP` lock is held for the whole burst so the APB clock never
+  stops mid-telegram (there is no UART wake-up source). `uart_sleep_hold()` from
+  the ESP-NOW receive path keeps the CPU awake for an in-flight history pull (2 s)
+  or OTA (5 s). Enabling it also sets `WIFI_PS_MIN_MODEM`, which is what lets the
+  Wi-Fi driver release its `ESP_PM_APB_FREQ_MAX` lock so light sleep is entered at
+  all. The `counters` diagnostic reports `build_profile` (1 = this image) so the
+  running image is unambiguous. Host tests: `test/test_uart_sleep_window.c` and
+  `test/test_uart_sleep_sim.c` (the sim models the lost bytes when a telegram
+  arrives mid-sleep). CI syntax-checks the enabled branch with IDF stubs in
+  `test/host/include` and greps the built sender image for the sleep log string.
+  Bench verification of the enabled path is still open (see `TODO.md`).
 
 ## Tests
 - Host tests: `./test/run_host_tests.sh` plus
