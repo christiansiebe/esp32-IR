@@ -82,7 +82,7 @@ static const char *TAG = "espnow_meter";
 #define SML_TX_BURST 32
 #define METER_MAGIC          0x48425A31u
 #define METER_VERSION        1u
-#define SML_VALUE_HISTORY_COUNT 64
+#define SML_VALUE_HISTORY_COUNT 256
 #define SML_API_PAGE_SIZE    16
 #define SML_POWER_API_PAGE_SIZE 128
 #define RSSI_HISTORY_COUNT   256
@@ -329,7 +329,9 @@ static size_t g_sml_value_history_next;
 static uint32_t g_sml_latest_value_sequence;
 static uint32_t g_sml_valid_telegrams;
 static uint32_t g_sml_invalid_crc_telegrams;
-static uint32_t g_sml_transport_gaps;
+static uint32_t g_sml_transport_gaps;     /* total out-of-order packets seen */
+static uint32_t g_sml_transport_losses;   /* forward jumps: broadcast(s) lost */
+static uint32_t g_sml_transport_reorders; /* retried older packets (recovered) */
 static uint32_t g_sml_last_transport_sequence;
 static sml_value_record_t g_sml_latest_values[3];
 static bool g_sml_latest_value_valid[3];
@@ -1729,12 +1731,26 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
     }
     if (g_sml_last_transport_sequence != 0 &&
         packet.header.sequence != g_sml_last_transport_sequence + 1) {
+        /* The sequence is assigned per packet by the sender and a not-yet-sent
+         * packet can be re-queued with its OLD (smaller) sequence (retry), so
+         * there are two very different cases:
+         *   - backward/duplicate (<=): a retry or reorder that was recovered,
+         *     NOT data loss; nothing to reset.
+         *   - forward jump (>): a broadcast packet (or several) really was lost
+         *     over the air; the 60 s power average is then incomplete, so its
+         *     accumulator is reset. Recovered data still flows in via backfill. */
+        bool lost = packet.header.sequence > g_sml_last_transport_sequence + 1;
         portENTER_CRITICAL(&g_sml_history_lock);
         ++g_sml_transport_gaps;
-        g_sml_power_sample_count = 0;
-        g_sml_power_sample_next = 0;
-        g_sml_power_sample_sum_w = 0.0;
-        g_sml_latest_power_valid = false;
+        if (lost) {
+            ++g_sml_transport_losses;
+            g_sml_power_sample_count = 0;
+            g_sml_power_sample_next = 0;
+            g_sml_power_sample_sum_w = 0.0;
+            g_sml_latest_power_valid = false;
+        } else {
+            ++g_sml_transport_reorders;
+        }
         portEXIT_CRITICAL(&g_sml_history_lock);
     }
     g_sml_last_transport_sequence = packet.header.sequence;
@@ -2505,7 +2521,8 @@ static esp_err_t root_handler(httpd_req_t *req)
         "'seit Start, sammelt 15 Minuten');}"
         "else{byId('meter-average').textContent='Sammle…';}"
         "byId('meter-status').textContent='SML CRC gültig: '+d.crc_valid+"
-        "' · CRC fehlerhaft: '+d.crc_invalid+' · Transportlücken: '+d.transport_gaps+"
+        "' · CRC fehlerhaft: '+d.crc_invalid+"
+        "' · Funkpakete verloren: '+d.transport_losses+' (rückgewonnen/Reorder: '+d.transport_reorders+')'+"
         "' · CPU: '+d.cpu_freq_mhz+' MHz (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)'+"
         "' · Sleep: '+(d.sleep_state?'leicht':'wach')+(d.light_sleep_enabled?' (aktiv)':' (aus)');"
         "}catch(e){byId('meter-status').textContent='Verbindung zum Zähler fehlgeschlagen: '+e;}"
@@ -2734,11 +2751,15 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
     uint32_t valid_telegrams;
     uint32_t invalid_crc_telegrams;
     uint32_t transport_gaps;
+    uint32_t transport_losses;
+    uint32_t transport_reorders;
     portENTER_CRITICAL(&g_sml_history_lock);
     latest_sequence = g_sml_latest_value_sequence;
     valid_telegrams = g_sml_valid_telegrams;
     invalid_crc_telegrams = g_sml_invalid_crc_telegrams;
     transport_gaps = g_sml_transport_gaps;
+    transport_losses = g_sml_transport_losses;
+    transport_reorders = g_sml_transport_reorders;
     size_t oldest_index = (g_sml_value_history_next +
                            SML_VALUE_HISTORY_COUNT -
                            g_sml_value_history_count) % SML_VALUE_HISTORY_COUNT;
@@ -2763,13 +2784,16 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
                               "{\"oldest_sequence\":%lu,\"latest_sequence\":%lu,"
                               "\"overflow\":%s,\"crc_valid\":%lu,"
                               "\"crc_invalid\":%lu,\"transport_gaps\":%lu,"
+                              "\"transport_losses\":%lu,\"transport_reorders\":%lu,"
                               "\"values\":[",
                               (unsigned long)oldest_sequence,
                               (unsigned long)latest_sequence,
                               overflow ? "true" : "false",
                               (unsigned long)valid_telegrams,
                               (unsigned long)invalid_crc_telegrams,
-                              (unsigned long)transport_gaps);
+                              (unsigned long)transport_gaps,
+                              (unsigned long)transport_losses,
+                              (unsigned long)transport_reorders);
     if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
         return ESP_FAIL;
     }
@@ -2809,6 +2833,8 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     uint32_t crc_valid;
     uint32_t crc_invalid;
     uint32_t transport_gaps;
+    uint32_t transport_losses;
+    uint32_t transport_reorders;
     double power_sum;
     size_t power_count = 0;
     uint64_t power_reference_us = 0;
@@ -2820,6 +2846,8 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     crc_valid = g_sml_valid_telegrams;
     crc_invalid = g_sml_invalid_crc_telegrams;
     transport_gaps = g_sml_transport_gaps;
+    transport_losses = g_sml_transport_losses;
+    transport_reorders = g_sml_transport_reorders;
 
     power_sum = g_sml_power_sample_sum_w;
     power_count = g_sml_power_sample_count;
@@ -2876,6 +2904,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        "\"average_power_w\":%s,\"average_samples\":%u,"
                        "\"average_duration_s\":%llu,\"crc_valid\":%lu,"
                        "\"crc_invalid\":%lu,\"transport_gaps\":%lu,"
+                       "\"transport_losses\":%lu,\"transport_reorders\":%lu,"
                        "\"cpu_freq_mhz\":%d,\"cpu_freq_max_mhz\":%d,"
                        "\"cpu_freq_min_mhz\":%d,\"sleep_state\":%u,"
                        "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu}",
@@ -2886,6 +2915,8 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        (unsigned long)crc_valid,
                        (unsigned long)crc_invalid,
                        (unsigned long)transport_gaps,
+                       (unsigned long)transport_losses,
+                       (unsigned long)transport_reorders,
                        pm_current_freq_mhz,
                        pm_max_freq_mhz,
                        pm_min_freq_mhz,
@@ -3518,11 +3549,12 @@ static esp_err_t log_page_handler(httpd_req_t *req)
         "rssiStatus.textContent='No RSSI samples captured yet';};"
         "async function pollSml(){try{const r=await fetch('/api/sml?after='+smlCursor,{cache:'no-store'});"
         "if(!r.ok)throw new Error(r.status);const d=await r.json();if(d.overflow){smlGap=true;"
-        "smlOut.textContent+='[GAP: decoded-value history overflowed]\\n';}"
+        "smlOut.textContent+='[DISPLAY GAP: browser polled slower than the 64-value RAM ring; no measurement was lost]\\n';}"
         "for(const v of d.values){smlCaptured.push(v);smlCursor=v.sequence;}render();"
         "smlStatus.textContent='CRC valid: '+d.crc_valid+' | CRC invalid: '+d.crc_invalid+"
-        "' | transport gaps: '+d.transport_gaps+"
-        "(smlGap?' | VALUE GAP DETECTED':'');setTimeout(pollSml,d.values.length?0:250);}"
+        "' | packets lost over air: '+d.transport_losses+' (recovered/reordered: '+d.transport_reorders+')'+"
+        "(smlGap?' | DISPLAY GAP (browser fell behind, not a measurement loss)':'');"
+        "setTimeout(pollSml,d.values.length?0:250);}"
         "catch(e){smlStatus.textContent='Connection error: '+e;setTimeout(pollSml,1000);}}"
         "async function pollRssi(){if(!rssiActive)return;try{const r=await fetch('/api/rssi?after='+rssiCursor,"
         "{cache:'no-store'});if(!r.ok)throw new Error(r.status);const d=await r.json();"
