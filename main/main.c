@@ -24,6 +24,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "boot_confirm.h"
+#include "history_backfill.h"
 #include "power_history.h"
 #include "web_console.h"
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -149,6 +150,10 @@ typedef struct {
     uint16_t flags;
     uint32_t page;
     int8_t rssi;
+    /* Only meaningful for ESPNOW_DIAG_SECTION_HISTORY. */
+    int64_t from_utc;
+    int64_t to_utc;
+    uint32_t after_sequence;
 } espnow_diag_request_item_t;
 
 static const uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = {
@@ -173,6 +178,27 @@ typedef struct __attribute__((packed)) {
 } espnow_diag_crash_response_t;
 _Static_assert(sizeof(espnow_diag_crash_response_t) <= ESP_NOW_MAX_DATA_LEN,
                "crash diagnostic response must fit one ESP-NOW payload");
+
+/* Wire layout for the `history` backfill diagnostic section (receiver pulls the
+ * sender's minute records after a radio gap / restart). Declared here because
+ * the response embeds power_history_record_t from power_history.h. */
+typedef struct __attribute__((packed)) {
+    espnow_diag_header_t header;
+    int64_t from_utc;       /* request: window start (inclusive) */
+    int64_t to_utc;         /* request: window end (exclusive) */
+    uint32_t after_sequence; /* request: page cursor; 0 = from the window start */
+} espnow_diag_history_request_t;
+
+typedef struct __attribute__((packed)) {
+    espnow_diag_header_t header; /* flags: HISTORY, plus FLAG_MORE if more follow */
+    uint32_t first_sequence;
+    uint32_t records_capacity;
+    uint8_t record_count;
+    uint8_t reserved[3];
+    power_history_record_t records[ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET];
+} espnow_diag_history_response_t;
+_Static_assert(sizeof(espnow_diag_history_response_t) <= ESP_NOW_MAX_DATA_LEN,
+               "history diagnostic response must fit one ESP-NOW payload");
 
 /* Minute-history sampling state. Used by BOTH roles: the receiver records the
  * telemetry it receives, the sender records the values it decodes from UART. */
@@ -272,6 +298,20 @@ static QueueHandle_t g_diag_response_queue;
 static uint8_t g_sender_mac[ESP_NOW_ETH_ALEN];
 static bool g_sender_mac_valid;
 static portMUX_TYPE g_sender_mac_lock = portMUX_INITIALIZER_UNLOCKED;
+/* History backfill: the receiver pulls the minute records it missed from the
+ * sender's own SPIFFS history. The presence map holds one byte per minute in
+ * the window (~4.3 KB for the 3-day default). */
+#define HISTORY_BACKFILL_PRESENT_BUCKETS \
+    ((size_t)(HISTORY_BACKFILL_WINDOW_SECONDS / HISTORY_BACKFILL_BUCKET_SECONDS) + 1u)
+#define HISTORY_BACKFILL_MAX_PAGES 256u
+#define HISTORY_BACKFILL_PERIOD_MS (30u * 60u * 1000u)
+static uint8_t g_history_backfill_present[HISTORY_BACKFILL_PRESENT_BUCKETS];
+static portMUX_TYPE g_history_backfill_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t g_history_backfill_merged;
+static uint32_t g_history_backfill_pages;
+static uint32_t g_history_backfill_errors;
+static int64_t g_history_backfill_last_utc;
+static bool g_history_backfill_force;
 static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
                             const char *value, int8_t scaler, uint8_t unit);
 static esp_err_t power_samples_api_handler(httpd_req_t *req);
@@ -1064,6 +1104,45 @@ static void build_diag_events_response(const espnow_diag_request_item_t *request
                  emitted * sizeof(espnow_diag_event_t);
 }
 
+static void build_diag_history_response(const espnow_diag_request_item_t *request,
+                                        uint8_t *frame, size_t *frame_len)
+{
+    espnow_diag_history_response_t *response =
+        (espnow_diag_history_response_t *)frame;
+    response->header = (espnow_diag_header_t) {
+        .magic = ESPNOW_DIAG_MAGIC,
+        .version = ESPNOW_DIAG_VERSION,
+        .type = ESPNOW_DIAG_TYPE_RESPONSE,
+        .flags = ESPNOW_DIAG_SECTION_HISTORY,
+        .request_id = request->request_id,
+        .page = request->page,
+    };
+    response->first_sequence = request->after_sequence;
+    response->records_capacity = ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET;
+    response->record_count = 0;
+    memset(response->reserved, 0, sizeof(response->reserved));
+
+    size_t count = 0;
+    bool more = false;
+    esp_err_t err = power_history_read_window(
+        request->from_utc, request->to_utc, request->after_sequence,
+        ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET, response->records,
+        ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET, &count, &(power_history_status_t){0},
+        &more);
+    if (err == ESP_OK) {
+        response->record_count = (uint8_t)count;
+        if (more) {
+            response->header.flags |= ESPNOW_DIAG_FLAG_MORE;
+        }
+    } else {
+        ESP_LOGW(TAG, "History backfill read failed: %s", esp_err_to_name(err));
+    }
+    *frame_len = sizeof(response->header) + sizeof(response->first_sequence) +
+                 sizeof(response->records_capacity) + sizeof(response->record_count) +
+                 sizeof(response->reserved) +
+                 count * sizeof(power_history_record_t);
+}
+
 static void build_diag_crash_response(const espnow_diag_request_item_t *request,
                                       uint8_t *frame, size_t *frame_len)
 {
@@ -1110,6 +1189,8 @@ static void espnow_diag_worker(void *arg)
             build_diag_events_response(&request, frame, &frame_len);
         } else if (request.flags & ESPNOW_DIAG_SECTION_CRASH) {
             build_diag_crash_response(&request, frame, &frame_len);
+        } else if (request.flags & ESPNOW_DIAG_SECTION_HISTORY) {
+            build_diag_history_response(&request, frame, &frame_len);
         } else {
             continue;
         }
@@ -1337,6 +1418,14 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             .page = diag_header.page,
             .rssi = (info->rx_ctrl != NULL) ? info->rx_ctrl->rssi : 0,
         };
+        if ((diag_header.flags & ESPNOW_DIAG_SECTION_HISTORY) &&
+            data_len >= (int)sizeof(espnow_diag_history_request_t)) {
+            espnow_diag_history_request_t history_request;
+            memcpy(&history_request, data, sizeof(history_request));
+            request.from_utc = history_request.from_utc;
+            request.to_utc = history_request.to_utc;
+            request.after_sequence = history_request.after_sequence;
+        }
         memcpy(request.source, info->src_addr, ESP_NOW_ETH_ALEN);
         /* The receiver polling diagnostics is an early source of its MAC, so a
          * later time-sync request can go unicast right away. */
@@ -1767,7 +1856,9 @@ void sml_adapter_telegram_callback(uint64_t timestamp_us, bool crc_valid,
     }
 }
 
-static void send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
+/* Returns true only when ESP-NOW confirmed the delivery, so the caller can put
+ * an unconfirmed telegram back into the batch ring and retry it. */
+static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
 {
     sml_transport_packet_t packet = {
         .header = {
@@ -1799,7 +1890,7 @@ static void send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
         ESP_LOGE(TAG, "ESP-NOW SML telegram send failed: %s", esp_err_to_name(err));
         diag_log_event(ESPNOW_DIAG_LEVEL_ERROR, "sml send err %s",
                        esp_err_to_name(err));
-        return;
+        return false;
     }
     if (xSemaphoreTake(g_send_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
         portENTER_CRITICAL(&g_uart_stats_lock);
@@ -1808,7 +1899,7 @@ static void send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
         ESP_LOGE(TAG, "Timed out waiting for ESP-NOW SML telegram completion");
         diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "sml send timeout seq=%lu",
                        (unsigned long)sequence);
-        return;
+        return false;
     }
     if (g_last_send_status != ESP_NOW_SEND_SUCCESS) {
         portENTER_CRITICAL(&g_uart_stats_lock);
@@ -1818,17 +1909,16 @@ static void send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
                  (unsigned long)sequence);
         diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "sml send unconfirmed seq=%lu",
                        (unsigned long)sequence);
-        return;
+        return false;
     }
     portENTER_CRITICAL(&g_uart_stats_lock);
     ++g_sml_sent_ok;
-    /* Only a confirmed delivery counts as sent, so an unconfirmed slot still
-     * shows up as missing for the receiver-side reconciliation. */
     sml_tx_batch_mark_sent(&g_sml_tx_batch, sequence);
     portEXIT_CRITICAL(&g_uart_stats_lock);
     ESP_LOGD(TAG, "Sent SML telegram sequence=%lu crc_valid=%u values=%u",
              (unsigned long)sequence, packet.header.crc_valid,
              (unsigned int)packet.header.value_count);
+    return true;
 }
 
 static void uart_capture_worker(void *arg)
@@ -1934,7 +2024,9 @@ static void flush_tx_batch(void)
 {
     /* One send phase: drain up to SML_TX_BURST telegrams oldest-first. The
      * sequence is the ring's own, so it stays contiguous across eviction and
-     * the receiver can reconcile gaps. */
+     * the receiver can reconcile gaps. An unconfirmed delivery is put back at
+     * the head and the phase stops, so the telegram is retried next cycle
+     * instead of being dropped (ESP-NOW is connectionless and unreliable). */
     for (uint32_t sent = 0; sent < SML_TX_BURST; ++sent) {
         sml_tx_item_t item;
         uint32_t sequence;
@@ -1944,7 +2036,12 @@ static void flush_tx_batch(void)
         if (!have) {
             break;
         }
-        send_sml_telegram(sequence, &item);
+        if (!send_sml_telegram(sequence, &item)) {
+            portENTER_CRITICAL(&g_uart_stats_lock);
+            (void)sml_tx_batch_requeue_front(&g_sml_tx_batch, &item, sequence);
+            portEXIT_CRITICAL(&g_uart_stats_lock);
+            break;
+        }
     }
 }
 
@@ -3194,6 +3291,25 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         snprintf(out, out_size, "history: output truncated\n");
     }
 }
+
+static void console_cmd_pull(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    uint32_t merged = 0;
+    uint32_t pages = 0;
+    bool ok = history_backfill_run_session(HISTORY_BACKFILL_MAX_PAGES, &merged, &pages);
+    if (!ok) {
+        snprintf(out, out_size,
+                 "backfill: no session run (clock not synced, or sender MAC unknown)\n");
+        return;
+    }
+    int written = snprintf(out, out_size,
+                           "backfill: %u record(s) merged over %u page(s)\n",
+                           (unsigned int)merged, (unsigned int)pages);
+    if (written < 0 || (size_t)written >= out_size) {
+        snprintf(out, out_size, "backfill: output truncated\n");
+    }
+}
 #endif /* !CONFIG_ESPNOW_ROLE_SENDER */
 
 static void console_cmd_time(const char *args, char *out, size_t out_size)
@@ -3276,6 +3392,8 @@ static void web_console_register_commands(void)
 #if !CONFIG_ESPNOW_ROLE_SENDER
     web_console_register("history", "persistent power-history counters",
                          console_cmd_history);
+    web_console_register("pull", "pull missing sender history now (backfill)",
+                         console_cmd_pull);
 #endif
     web_console_register("time", "current UTC clock and sync state",
                          console_cmd_time);
@@ -3366,8 +3484,12 @@ static esp_err_t console_page_handler(httpd_req_t *req)
 }
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
-static esp_err_t sender_diag_exchange(uint16_t flags, uint32_t page,
-                                      uint8_t *response, size_t *response_len)
+/* Send one diagnostic request (whose header/body is already built in `payload`)
+ * to the sender and wait for the matching response. Shared by the section
+ * queries and the history-backfill session. */
+static esp_err_t sender_diag_exchange_raw(const void *payload, size_t payload_len,
+                                          uint32_t request_id,
+                                          uint8_t *response, size_t *response_len)
 {
     uint8_t sender_mac[ESP_NOW_ETH_ALEN];
     portENTER_CRITICAL(&g_sender_mac_lock);
@@ -3383,23 +3505,10 @@ static esp_err_t sender_diag_exchange(uint16_t flags, uint32_t page,
         return err;
     }
 
-    uint32_t request_id = (uint32_t)esp_random();
-    if (request_id == 0) {
-        request_id = 1;
-    }
-    espnow_diag_header_t request = {
-        .magic = ESPNOW_DIAG_MAGIC,
-        .version = ESPNOW_DIAG_VERSION,
-        .type = ESPNOW_DIAG_TYPE_REQUEST,
-        .flags = flags,
-        .request_id = request_id,
-        .page = page,
-    };
-
     while (xQueueReceive(g_diag_response_queue, &(espnow_ota_rx_item_t){0}, 0) == pdTRUE) {
     }
 
-    err = esp_now_send(sender_mac, (const uint8_t *)&request, sizeof(request));
+    err = esp_now_send(sender_mac, (const uint8_t *)payload, payload_len);
     if (err != ESP_OK) {
         return err;
     }
@@ -3425,6 +3534,246 @@ static esp_err_t sender_diag_exchange(uint16_t flags, uint32_t page,
         return ESP_OK;
     }
     return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t sender_diag_exchange(uint16_t flags, uint32_t page,
+                                      uint8_t *response, size_t *response_len)
+{
+    uint32_t request_id = (uint32_t)esp_random();
+    if (request_id == 0) {
+        request_id = 1;
+    }
+    espnow_diag_header_t request = {
+        .magic = ESPNOW_DIAG_MAGIC,
+        .version = ESPNOW_DIAG_VERSION,
+        .type = ESPNOW_DIAG_TYPE_REQUEST,
+        .flags = flags,
+        .request_id = request_id,
+        .page = page,
+    };
+    return sender_diag_exchange_raw(&request, sizeof(request), request_id,
+                                    response, response_len);
+}
+
+/* One backfill session: mark the minutes the receiver already holds, then pull
+ * the missing pages from the sender and merge them. Returns true when at least
+ * one request/response round completed (even if nothing was missing). */
+static bool history_backfill_run_session(uint32_t max_pages, uint32_t *merged_out,
+                                         uint32_t *pages_out)
+{
+    if (merged_out != NULL) {
+        *merged_out = 0;
+    }
+    if (pages_out != NULL) {
+        *pages_out = 0;
+    }
+    time_t now_s;
+    time(&now_s);
+    int64_t now = (int64_t)now_s;
+    if (!system_time_is_valid() || now < 1704067200) {
+        return false;
+    }
+    /* Do not ask for the minute that is still being filled, and stop at the
+     * sender's own recording horizon (it is a little behind live). */
+    int64_t to_utc = now - 120;
+    int64_t from_utc = to_utc - (int64_t)HISTORY_BACKFILL_WINDOW_SECONDS;
+
+    history_backfill_t bf;
+    if (!history_backfill_reset(&bf, from_utc, to_utc, g_history_backfill_present,
+                                sizeof(g_history_backfill_present))) {
+        return false;
+    }
+
+    /* Mark the minutes the receiver already recorded live so only the holes are
+     * pulled and the sender never overwrites local data. This must use the same
+     * windowed read as the sender, not the oldest-first power_history_read():
+     * on a full store the oldest records are ~20 days old and would leave the
+     * whole window "missing", causing duplicate merges. */
+    power_history_record_t *local =
+        heap_caps_malloc(POWER_HISTORY_PAGE_SIZE * sizeof(*local), MALLOC_CAP_DEFAULT);
+    if (local != NULL) {
+        uint32_t after = 0;
+        for (uint32_t page = 0; page < 128; ++page) {
+            size_t count = 0;
+            power_history_status_t status;
+            bool more = false;
+            if (power_history_read_window(from_utc, to_utc, after,
+                                          POWER_HISTORY_PAGE_SIZE, local,
+                                          POWER_HISTORY_PAGE_SIZE, &count, &status,
+                                          &more) != ESP_OK ||
+                count == 0) {
+                break;
+            }
+            for (size_t i = 0; i < count; ++i) {
+                history_backfill_mark_present(&bf, local[i].interval_start_utc);
+                after = local[i].sequence;
+            }
+            if (!more) {
+                break;
+            }
+        }
+        free(local);
+    }
+
+    uint32_t merged_total = 0;
+    uint32_t pages = 0;
+    uint32_t after_sequence = 0;
+    bool any_round = false;
+    for (uint32_t page = 0; page < max_pages; ++page) {
+        uint32_t request_id = (uint32_t)esp_random();
+        if (request_id == 0) {
+            request_id = 1;
+        }
+        espnow_diag_history_request_t request = {
+            .header = {
+                .magic = ESPNOW_DIAG_MAGIC,
+                .version = ESPNOW_DIAG_VERSION,
+                .type = ESPNOW_DIAG_TYPE_REQUEST,
+                .flags = ESPNOW_DIAG_SECTION_HISTORY,
+                .request_id = request_id,
+                .page = page,
+            },
+            .from_utc = from_utc,
+            .to_utc = to_utc,
+            .after_sequence = after_sequence,
+        };
+        uint8_t response[ESP_NOW_MAX_DATA_LEN];
+        size_t response_len = 0;
+        if (sender_diag_exchange_raw(&request, sizeof(request), request_id,
+                                     response, &response_len) != ESP_OK) {
+            portENTER_CRITICAL(&g_history_backfill_lock);
+            ++g_history_backfill_errors;
+            portEXIT_CRITICAL(&g_history_backfill_lock);
+            break;
+        }
+        any_round = true;
+        const size_t header_size = sizeof(espnow_diag_header_t) + sizeof(uint32_t) * 2u +
+                                   sizeof(uint8_t) + 3u;
+        if (response_len < header_size) {
+            break;
+        }
+        espnow_diag_history_response_t reply;
+        memset(&reply, 0, sizeof(reply));
+        memcpy(&reply, response,
+               response_len < sizeof(reply) ? response_len : sizeof(reply));
+        uint8_t count = reply.record_count;
+        size_t expected = header_size + (size_t)count * sizeof(reply.records[0]);
+        if (count > ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET || response_len < expected) {
+            break;
+        }
+        if (count == 0) {
+            break;
+        }
+        power_history_record_t merge_buf[ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET];
+        size_t merge_count = 0;
+        for (uint8_t i = 0; i < count; ++i) {
+            power_history_record_t record = reply.records[i];
+            if (record.sequence > after_sequence) {
+                after_sequence = record.sequence;
+            }
+            if (!history_backfill_should_merge(&bf, record.interval_start_utc)) {
+                continue;
+            }
+            merge_buf[merge_count++] = record;
+            history_backfill_mark_present(&bf, record.interval_start_utc);
+        }
+        if (merge_count != 0) {
+            size_t merged = 0;
+            if (power_history_merge(merge_buf, merge_count, &merged) == ESP_OK) {
+                merged_total += (uint32_t)merged;
+            }
+        }
+        ++pages;
+        if ((reply.header.flags & ESPNOW_DIAG_FLAG_MORE) == 0) {
+            break;
+        }
+    }
+
+    portENTER_CRITICAL(&g_history_backfill_lock);
+    g_history_backfill_merged += merged_total;
+    g_history_backfill_pages += pages;
+    g_history_backfill_last_utc = now;
+    portEXIT_CRITICAL(&g_history_backfill_lock);
+    if (merged_out != NULL) {
+        *merged_out = merged_total;
+    }
+    if (pages_out != NULL) {
+        *pages_out = pages;
+    }
+    if (any_round) {
+        ESP_LOGI(TAG, "History backfill: merged %lu record(s) over %lu page(s)",
+                 (unsigned long)merged_total, (unsigned long)pages);
+    }
+    return any_round;
+}
+
+static void history_backfill_request(void)
+{
+    portENTER_CRITICAL(&g_history_backfill_lock);
+    g_history_backfill_force = true;
+    portEXIT_CRITICAL(&g_history_backfill_lock);
+}
+
+static void history_backfill_worker(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(15000));
+    while (1) {
+        bool forced;
+        portENTER_CRITICAL(&g_history_backfill_lock);
+        forced = g_history_backfill_force;
+        g_history_backfill_force = false;
+        int64_t last = g_history_backfill_last_utc;
+        portEXIT_CRITICAL(&g_history_backfill_lock);
+
+        time_t now_s;
+        time(&now_s);
+        int64_t now = (int64_t)now_s;
+        bool due = (last == 0) ||
+                   (now - last >= (int64_t)(HISTORY_BACKFILL_PERIOD_MS / 1000u));
+        if (system_time_is_valid() && (forced || due)) {
+            (void)history_backfill_run_session(HISTORY_BACKFILL_MAX_PAGES, NULL, NULL);
+        }
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
+static esp_err_t history_backfill_api_handler(httpd_req_t *req)
+{
+    if (req->method == HTTP_POST) {
+        if (!ota_key_is_valid(req)) {
+            return send_http_error_status(req, "401 Unauthorized",
+                                          "X-OTA-Key missing or wrong");
+        }
+        history_backfill_request();
+    }
+    uint32_t merged;
+    uint32_t pages;
+    uint32_t errors;
+    int64_t last;
+    portENTER_CRITICAL(&g_history_backfill_lock);
+    merged = g_history_backfill_merged;
+    pages = g_history_backfill_pages;
+    errors = g_history_backfill_errors;
+    last = g_history_backfill_last_utc;
+    portEXIT_CRITICAL(&g_history_backfill_lock);
+
+    char payload[256];
+    int len = snprintf(payload, sizeof(payload),
+                       "{\"merged_total\":%lu,\"pages_total\":%lu,\"errors\":%lu,"
+                       "\"last_utc\":%lld,\"window_seconds\":%u,"
+                       "\"sender_mac_known\":%s}",
+                       (unsigned long)merged, (unsigned long)pages,
+                       (unsigned long)errors, (long long)last,
+                       (unsigned int)HISTORY_BACKFILL_WINDOW_SECONDS,
+                       g_sender_mac_valid ? "true" : "false");
+    if (len < 0 || (size_t)len >= sizeof(payload)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Backfill status too large");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, payload, len);
 }
 
 static esp_err_t sender_diag_api_handler(httpd_req_t *req)
@@ -4150,6 +4499,16 @@ static void start_webserver(void)
         .method = HTTP_GET,
         .handler = sender_diag_api_handler,
     };
+    httpd_uri_t history_backfill_api = {
+        .uri = "/api/history-pull",
+        .method = HTTP_GET,
+        .handler = history_backfill_api_handler,
+    };
+    httpd_uri_t history_backfill_trigger = {
+        .uri = "/api/history-pull",
+        .method = HTTP_POST,
+        .handler = history_backfill_api_handler,
+    };
     httpd_uri_t diag_page = {
         .uri = "/diag",
         .method = HTTP_GET,
@@ -4209,6 +4568,8 @@ static void start_webserver(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_history_api));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_history_csv));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sender_diag_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &history_backfill_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &history_backfill_trigger));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &diag_page));
 #endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
@@ -4385,6 +4746,11 @@ void app_main(void)
     run_sender();
 #else
     start_webserver();
+    BaseType_t backfill_result = xTaskCreate(history_backfill_worker, "hist_backfill",
+                                             4096, NULL, 3, NULL);
+    if (backfill_result != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the history-backfill worker");
+    }
     ESP_LOGI(TAG, "Receiver ready: http://192.168.4.1/ | /log | /config | /update");
     while (1) {
         /* Confirm the running OTA image once it has been stable for the policy

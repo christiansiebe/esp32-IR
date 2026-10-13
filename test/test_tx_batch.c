@@ -132,12 +132,71 @@ static void test_missing_detection(void)
     CHECK(sml_tx_batch_missing(&c) == 1, "sequence 2 (evicted) still missing");
 }
 
+static void test_requeue_front_retries_oldest(void)
+{
+    /* A taken-but-undelivered entry must come back at the head so the next
+     * flush retries it first, preserving the sequence order. */
+    sml_tx_batch_t b;
+    sml_tx_batch_init(&b);
+    uint32_t seq = 0;
+    for (uint32_t i = 1; i <= 3; ++i) {
+        sml_tx_item_t item = make_item((int)i);
+        sml_tx_batch_push(&b, &item, &seq);
+    }
+    sml_tx_item_t out;
+    uint32_t taken_seq = 0;
+    CHECK(sml_tx_batch_take(&b, &out, &taken_seq), "take first");
+    CHECK(taken_seq == 1, "took sequence 1");
+    CHECK(sml_tx_batch_requeue_front(&b, &out, taken_seq), "requeue ok");
+    CHECK(sml_tx_batch_count(&b) == 3, "count restored");
+    CHECK(sml_tx_batch_dropped(&b) == 0, "requeue into space does not drop");
+
+    sml_tx_item_t again;
+    uint32_t again_seq = 0;
+    CHECK(sml_tx_batch_take(&b, &again, &again_seq), "take again");
+    CHECK(again_seq == 1, "the retried entry is oldest again");
+    CHECK(again.values[0].value == 1, "payload preserved across requeue");
+    /* The rest are still in order. */
+    CHECK(sml_tx_batch_take(&b, &again, &again_seq) && again_seq == 2, "then 2");
+    CHECK(sml_tx_batch_take(&b, &again, &again_seq) && again_seq == 3, "then 3");
+    CHECK(sml_tx_batch_count(&b) == 0, "drained");
+}
+
+static void test_requeue_full_ring_evicts_oldest(void)
+{
+    /* Requeueing into a full ring must evict the oldest queued entry (counted),
+     * keeping the ring invariant while the retried entry stays at the head. */
+    sml_tx_batch_t b;
+    sml_tx_batch_init(&b);
+    uint32_t seq = 0;
+    for (uint32_t i = 1; i <= SML_TX_BATCH_CAPACITY; ++i) {
+        sml_tx_item_t item = make_item((int)(i % 100));
+        sml_tx_batch_push(&b, &item, &seq);
+    }
+    sml_tx_item_t out;
+    uint32_t taken_seq = 0;
+    CHECK(sml_tx_batch_take(&b, &out, &taken_seq), "take from full ring");
+    /* Refill so the ring is full again before the requeue. */
+    sml_tx_item_t extra = make_item(7);
+    CHECK(sml_tx_batch_push(&b, &extra, &seq), "refill");
+    CHECK(sml_tx_batch_count(&b) == SML_TX_BATCH_CAPACITY, "full again");
+    CHECK(sml_tx_batch_requeue_front(&b, &out, taken_seq), "requeue into full");
+    CHECK(sml_tx_batch_count(&b) == SML_TX_BATCH_CAPACITY, "still full");
+    CHECK(sml_tx_batch_dropped(&b) == 1, "one oldest entry evicted");
+    sml_tx_item_t first;
+    uint32_t first_seq = 0;
+    CHECK(sml_tx_batch_take(&b, &first, &first_seq), "take head");
+    CHECK(first_seq == taken_seq, "the retried entry is at the head");
+}
+
 int main(void)
 {
     test_fifo_and_sequence();
     test_eviction_keeps_newest();
     test_capacity_survives_a_cycle();
     test_missing_detection();
+    test_requeue_front_retries_oldest();
+    test_requeue_full_ring_evicts_oldest();
     printf("test_tx_batch: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

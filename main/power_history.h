@@ -73,6 +73,23 @@ bool power_history_header_is_valid(const power_history_header_t *header);
 esp_err_t power_history_init(void);
 bool power_history_enqueue(const power_history_record_t *record);
 
+/* Merge minute records pulled from the sender (backfill). Each record is
+ * validated/migrated first; corrupt or unsupported entries are skipped. A valid
+ * record is enqueued only when it is new for the receiver: either its sequence
+ * is ahead of the local tail, or (when the sender's sequence counter is ahead
+ * because the receiver restarted) its minute is later than the newest local
+ * minute. That second rule prevents duplicating already-recorded minutes after
+ * a receiver reboot. Sets *merged_out to the number of records taken. */
+esp_err_t power_history_merge(const power_history_record_t *records, size_t count,
+                              size_t *merged_out);
+
+#ifdef POWER_HISTORY_TEST_HOOKS
+/* Test-only: set the store metadata without SPIFFS so the merge decision can be
+ * exercised on the host (the firmware never calls this). */
+void power_history_test_set_status(uint32_t oldest_sequence, uint32_t latest_sequence,
+                                   uint32_t record_count);
+#endif
+
 /* Upgrade an on-disk record to the current format in place, so a format-version
  * bump does not drop the stored history. Returns true for records that are
  * usable afterwards (native OR migrated), false for unsupported versions and
@@ -85,6 +102,23 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
                              power_history_record_t *records, size_t capacity,
                              size_t *record_count, power_history_status_t *status,
                              bool *overflow);
+/* Page read for the ESP-NOW history backfill: return up to max_records records
+ * with `sequence > after_sequence` whose `interval_start_utc` lies in
+ * [from_utc, to_utc). Records are ordered by time, so the caller pages forward
+ * by passing the last returned sequence. `*more` is set while further matching
+ * records remain. Unlike power_history_read() it applies no recent_count/oldest
+ * clamp, so an explicit server-side window is honoured exactly. */
+esp_err_t power_history_read_window(int64_t from_utc, int64_t to_utc,
+                                    uint32_t after_sequence, uint32_t max_records,
+                                    power_history_record_t *records, size_t capacity,
+                                    size_t *record_count, power_history_status_t *status,
+                                    bool *more);
+/* True when the record's minute interval falls inside [from_utc, to_utc). The
+ * record is validated (and migrated in a local copy) first, so corrupt or
+ * unsupported entries are rejected. Exposed so the backfill window filter is
+ * host-testable without SPIFFS. */
+bool power_history_record_in_window(const power_history_record_t *record,
+                                    int64_t from_utc, int64_t to_utc);
 /* Single-Pass-Aggregation: iteriert alle gespeicherten Saetze genau einmal und
  * mittelt sie in feste Zeit-Buckets. Vermeidet O(n^2)-Paging bei vollem
  * Speicher (29000 Saetze). count != 0 markiert belegte Buckets. */

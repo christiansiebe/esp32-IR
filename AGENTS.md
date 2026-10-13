@@ -64,12 +64,21 @@ Two firmware roles are built from one source tree.
   corruption). When bumping a version, add the migration step and a host test.
 
 ## CPU clock / power
-- CPU runs at a fixed 80 MHz (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y` in
-  `sdkconfig.defaults`), not the IDF default 160 MHz. The device is I/O bound.
-- Deliberately **not** dynamic frequency scaling (DFS / `CONFIG_PM_ENABLE`):
-  the Wi-Fi driver holds an `ESP_PM_APB_FREQ_MAX` lock while interfaces are up
-  (so DFS settles at 80 MHz anyway), and on the ESP32 DFS must be disabled for
-  reliable ESP-NOW (connectionless) timing.
+- CPU is capped at 80 MHz (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y` in
+  `sdkconfig.defaults`), not the IDF default 160 MHz, and the clock is
+  **variable**: `CONFIG_PM_ENABLE=y` + `CONFIG_PM_DFS_INIT_AUTO=y` scale it down
+  to the 40 MHz XTAL when idle, and `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y` adds
+  automatic light sleep between cycles (with `CONFIG_PM_SLP_IRAM_OPT`,
+  `CONFIG_PM_RTOS_IDLE_OPT`, `CONFIG_ESP_WIFI_SLP_IRAM_OPT` to cut wake cost).
+  The 80 MHz ceiling is kept for the ESP-NOW send burst.
+- Trade-off accepted deliberately: on the ESP32 the Wi-Fi driver holds an
+  `ESP_PM_APB_FREQ_MAX` lock while interfaces are up, and light sleep can make
+  the receiver miss the sender's connectionless ESP-NOW broadcasts. That is
+  **safe** because of the history backfill (below): any minute missed over the
+  air is pulled from the sender's own SPIFFS history afterwards. If ESP-NOW ever
+  proves unreliable on the bench, drop `CONFIG_PM_ENABLE` to get the old fixed
+  80 MHz behaviour; the CI job "Verify the variable CPU clock is in effect"
+  checks the four PM options and the 80 MHz ceiling.
 - Wi-Fi power save stays at the default `WIFI_PS_MIN_MODEM`; `WIFI_PS_NONE`
   would burn power and power save beyond the default hurts ESP-NOW reliability.
 
@@ -176,13 +185,50 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   pushes into `g_sml_tx_batch` (`main/tx_batch.c`, host-tested) and
   `uart_transport_worker` waits `SML_TX_CYCLE_MS` (5000) then `flush_tx_batch()`
   drains up to `SML_TX_BURST` (32) oldest-first. The sequence is the ring's own.
-- `sml_tx_batch_mark_sent()` runs only after a confirmed ESP-NOW delivery, so an
-  unconfirmed or ring-evicted telegram keeps counting in `sml_tx_batch_missing()`;
-  that value is exposed as `batch_missing` on the sender diag page and is the
-  reconciliation signal. The batch ring is `SML_TX_BATCH_CAPACITY` (256), far more
-  than one cycle, so a normal cycle never evicts.
-- Light-sleep between cycles is NOT implemented; the radio stays on. Do not add
-  `CONFIG_PM_ENABLE` for it (DFS is disabled for ESP-NOW).
+- **Unconfirmed sends are retried, not dropped.** `send_sml_telegram()` returns
+  true only when the ESP-NOW callback reported `ESP_NOW_SEND_SUCCESS`; otherwise
+  `flush_tx_batch()` puts the item back at the head with
+  `sml_tx_batch_requeue_front()` and stops the phase, so the telegram is sent
+  again next cycle. `sml_tx_batch_mark_sent()` therefore advances only on
+  confirmed delivery, and `sml_tx_batch_missing()` counts sequences not yet
+  confirmed (0 in normal operation). The ring is `SML_TX_BATCH_CAPACITY` (256),
+  far more than one cycle, so a normal cycle never evicts; a long stall (>256
+  unconfirmed at ~1 telegram/s ≈ 4–5 min) evicts the oldest and that value shows
+  up in `batch_missing`/`tx_queue_drops` on the sender diag page.
+- Light sleep between cycles: see "CPU clock / power" above. The radio stays on
+  by default (`WIFI_PS_MIN_MODEM`).
+- **Note**: the SML telemetry is sent by *broadcast*, and on the ESP32 the send
+  callback for broadcast reports the driver hand-off, not a real MAC ACK. The
+  retry above therefore only bites for genuine driver errors. A true
+  delivery-confirmed path would need unicast (as the diagnostics already use).
+
+## History backfill (receiver pulls the sender's minutes)
+- Both roles persist their own minute history (`power_history.c`). When the
+  receiver misses minutes (radio gap, sleep, a restart of either side) it asks
+  the sender for them over ESP-NOW, section `ESPNOW_DIAG_SECTION_HISTORY`
+  (`0x0010`), and merges them into its own store. This is the data-loss safety
+  net that makes the power-management trade-off above acceptable.
+- Protocol: request = header + `from_utc`/`to_utc` + `after_sequence` cursor
+  (`espnow_diag_history_request_t`); response = header + up to
+  `ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET` (7) `power_history_record_t` + a
+  `MORE` flag (`espnow_diag_history_response_t`). Both structs live in `main.c`
+  (they embed `power_history_record_t`) with a `_Static_assert` against
+  `ESP_NOW_MAX_DATA_LEN`.
+- Sender side: `build_diag_history_response()` -> `power_history_read_window()`
+  (binary-search to `from_utc`, block-read forward, stop at `to_utc`, `*more`
+  when a further in-window record exists).
+- Receiver side: `history_backfill_worker()` runs a session ~15 s after boot and
+  every 30 min; a session marks the minutes it already holds into a presence map
+  (`main/history_backfill.c`, host-tested: window/dedupe logic), then pages the
+  sender for the holes and calls `power_history_merge()` (validates/migrates and
+  enqueues; the pull loop already filtered duplicates). The window is the last
+  `HISTORY_BACKFILL_WINDOW_SECONDS` (3 days); a deeper gap needs a manual pull.
+- Manual/tools: `POST /api/history-pull` (X-OTA-Key) triggers a session,
+  `GET /api/history-pull` shows `merged_total`/`pages_total`/`errors`, and the
+  receiver console command `pull` runs one synchronously ("N record(s) merged").
+- Never overwrite the receiver's own live values: only minutes that are still
+  absent in the window are requested and merged, and the store renumbers pulled
+  records, so the two independent sequence counters never have to line up.
 
 ## Managed components (IDF v6)
 - ESP-IDF v6 moved ESP-MQTT and cJSON out of the core. They come from the ESP

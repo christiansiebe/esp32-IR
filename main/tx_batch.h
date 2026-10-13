@@ -46,7 +46,7 @@ typedef struct {
     uint16_t count;        /* occupied slots */
     uint32_t dropped;      /* items evicted because the ring was full */
     uint32_t next_sequence; /* sequence to assign on the next push */
-    uint32_t sent_sequence; /* highest sequence handed to ESP-NOW (0 = none) */
+    uint32_t sent_sequence; /* highest sequence confirmed delivered (0 = none) */
 } sml_tx_batch_t;
 
 void sml_tx_batch_init(sml_tx_batch_t *b);
@@ -60,6 +60,15 @@ bool sml_tx_batch_push(sml_tx_batch_t *b, const sml_tx_item_t *item,
 /* Pop the oldest entry. Returns false when empty. */
 bool sml_tx_batch_take(sml_tx_batch_t *b, sml_tx_item_t *out,
                        uint32_t *out_sequence);
+
+/* Put a taken-but-undelivered entry back at the *oldest* position (the head),
+ * preserving its original sequence. The sender calls this when ESP-NOW does not
+ * confirm a delivery: without it the telegram is gone from the ring and is
+ * never retried, so a single lost radio ACK would lose the value. If the ring
+ * is currently full the oldest queued entry is evicted (counted in `dropped`),
+ * so the ring's invariant is preserved. */
+bool sml_tx_batch_requeue_front(sml_tx_batch_t *b, const sml_tx_item_t *item,
+                                uint32_t sequence);
 
 uint16_t sml_tx_batch_count(const sml_tx_batch_t *b);
 uint32_t sml_tx_batch_dropped(const sml_tx_batch_t *b);

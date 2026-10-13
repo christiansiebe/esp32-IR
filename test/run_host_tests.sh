@@ -88,6 +88,31 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_tx_batch"
 
+# Receiver-side backfill merge bookkeeping (window/presence/dedupe). Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/history_backfill.c" \
+    "$here/test_history_backfill.c" \
+    -o "$out/test_history_backfill"
+
+"$out/test_history_backfill"
+
+# The store-side half of the backfill: power_history_merge() must validate and
+# persist pulled records and reject corrupt ones. Same plain-file fallback as
+# the reboot-persistence test (scratch mount under the temp build dir).
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog-merge\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_history_backfill_merge.c" \
+    -lm -o "$out/test_history_backfill_merge"
+
+"$out/test_history_backfill_merge"
+
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"

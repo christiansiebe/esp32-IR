@@ -77,17 +77,27 @@ jobs:
           idf.py --version
           idf.py -B "build/${{ matrix.role }}" build
 
-      - name: Verify 80 MHz CPU clock is in effect
+      - name: Verify the variable CPU clock is in effect
         shell: bash
         run: |
           set -euo pipefail
           conf="sdkconfig"
-          if ! grep -q '^CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80$' "$conf"; then
-            echo "Expected CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80 but got:"
-            grep 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ' "$conf" || echo "(not set)"
-            exit 1
-          fi
-          echo "CPU default frequency is 80 MHz"
+          # 80 MHz ceiling, scaled down by dynamic frequency scaling (DFS), with
+          # automatic light sleep. assert() so all mismatches are reported.
+          fail=0
+          assert() {
+            if ! grep -q "^$1$" "$conf"; then
+              echo "Expected $1 but got:"
+              grep "${1%%=*}" "$conf" || echo "(not set)"
+              fail=1
+            fi
+          }
+          assert 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80'
+          assert 'CONFIG_PM_ENABLE=y'
+          assert 'CONFIG_PM_DFS_INIT_AUTO=y'
+          assert 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y'
+          [ "$fail" -eq 0 ]
+          echo "CPU clock: 80 MHz ceiling with DFS + tickless idle"
 
       - name: Stage firmware and flash files
         shell: bash

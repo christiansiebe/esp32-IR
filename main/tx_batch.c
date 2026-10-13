@@ -50,6 +50,28 @@ bool sml_tx_batch_take(sml_tx_batch_t *b, sml_tx_item_t *out,
     return true;
 }
 
+bool sml_tx_batch_requeue_front(sml_tx_batch_t *b, const sml_tx_item_t *item,
+                                uint32_t sequence)
+{
+    if (b == NULL || item == NULL) {
+        return false;
+    }
+    if (b->count == SML_TX_BATCH_CAPACITY) {
+        /* Full: evict the oldest queued entry so the ring stays consistent.
+         * The re-queued entry keeps its original (older) sequence, so it is
+         * tried first on the next flush. */
+        b->head = (uint16_t)((b->head + 1) % SML_TX_BATCH_CAPACITY);
+        --b->count;
+        ++b->dropped;
+    }
+    b->head = (uint16_t)((b->head + SML_TX_BATCH_CAPACITY - 1) %
+                         SML_TX_BATCH_CAPACITY);
+    b->entries[b->head].item = *item;
+    b->entries[b->head].sequence = sequence;
+    ++b->count;
+    return true;
+}
+
 uint16_t sml_tx_batch_count(const sml_tx_batch_t *b)
 {
     return b == NULL ? 0 : b->count;

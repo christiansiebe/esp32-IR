@@ -28,6 +28,16 @@
  * side with an NTP-synced clock). The request carries the sender's uptime; the
  * response carries the receiver's UTC seconds. */
 #define ESPNOW_DIAG_SECTION_TIME_SYNC 0x0008u
+/* The receiver pulls missing minute records from the sender's own SPIFFS
+ * history (backfill after a radio gap or a restart). The request carries the
+ * UTC window and a paging cursor; the response is one page of records, with
+ * ESPNOW_DIAG_FLAG_MORE set while further records follow. The wire structs are
+ * declared next to the history store in main.c because they embed
+ * power_history_record_t. */
+#define ESPNOW_DIAG_SECTION_HISTORY  0x0010u
+/* 7 records: header (16) + 12 byte trailer + 7*28 = 224 fits ESP_NOW_MAX_DATA_LEN
+ * (250); 8 records would need 252 and not fit a single ESP-NOW payload. */
+#define ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET 7u
 
 /* Response flag: at least one more event page follows for this request. */
 #define ESPNOW_DIAG_FLAG_MORE 0x8000u

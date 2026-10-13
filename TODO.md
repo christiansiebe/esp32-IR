@@ -158,16 +158,31 @@ einem Zyklus: sammeln → ~5 s → Pakete senden → (Radio nutzbar/ruhen).
       (32) Telepgramme älteste-zuerst, Semaphore je Paket. Kein Paket mehr pro Telegramm.
       Sequenz kommt aus dem Ring; `sml_tx_batch_mark_sent()` nur bei **bestätigter**
       Zustellung (unbestätigt bleibt „missing" → Abgleich).
-- [ ] Optionale Funkruhe zwischen Zyklen (Light-Sleep) nur wenn verifiziert, dass
-      ESP-NOW-Empfang/ACK und die 5-s-Kadenz darunter nicht leiden — **nicht** mit
-      `CONFIG_PM_ENABLE` (DFS ist für ESP-NOW abgeschaltet, s. `sdkconfig.defaults`).
+- [x] **Kein Verlust bei fehlgeschlagener Zustellung**: `send_sml_telegram()` gibt jetzt
+      `bool` zurück (nur `ESP_NOW_SEND_SUCCESS` = true); bei Fehlschlag legt
+      `flush_tx_batch()` das Element mit `sml_tx_batch_requeue_front()` an den Kopf
+      zurück und beendet die Phase → nächster Zyklus sendet es erneut. Vorher war ein
+      unbestätigtes Telegramm aus dem Ring verschwunden und wurde nie wiederholt.
+      Host-Test erweitert (`test_tx_batch.c`, 55 Checks: Requeue an den Kopf,
+      Reihenfolge, Voll-Ring-Verdrängung beim Requeue).
+      Einschränkung: Telemetrie wird per **Broadcast** gesendet, der Callback meldet
+      damit die Treiber-Übergabe, kein echtes MAC-ACK — der Retry greift nur bei echten
+      Treiberfehlern. Echtes Delivery-Confirm bräuchte Unicast (wie die Diagnose).
+- [x] Optionale Funkruhe zwischen Zyklen: jetzt **umgesetzt** über
+      `CONFIG_PM_ENABLE` + DFS + Tickless-Idle (variabler Takt 80↔40 MHz, Light-Sleep
+      im Idle). Die frühere Sorge (ESP-NOW-Verluste) ist durch den Backfill abgedeckt
+      (s. u.): verlorene Funkminuten holt der Empfänger aus der Sender-SPIFFS nach.
+      Details: `sdkconfig.defaults`, CI-Job „Verify the variable CPU clock".
 - [x] Zähler/Diagnose: `batch_pending` + `batch_missing` im `espnow_diag_counters_t`
       ergänzt; im `/api/sender-diag`-Counters-JSON mit ausgegeben. `tx_queue_drops`
       zählt jetzt Ring-Verdrängungen (Voll).
-- [x] Host-Test `test/test_tx_batch.c` (36 Checks): Bündelung, Verdrängung, kein Verlust
-      innerhalb eines Zyklus, `missing`-Arithmetik. In `run_host_tests.sh` + CI.
+- [x] Host-Test `test/test_tx_batch.c` (55 Checks): Bündelung, Verdrängung, kein Verlust
+      innerhalb eines Zyklus, `missing`-Arithmetik, Requeue/Retry. In `run_host_tests.sh`
+      + CI.
 - **Am Gerät zu prüfen:** Sender-Bootlog „sent every 5000 ms (burst 32)"; Empfänger
-      bekommt weiterhin alle Minutenwerte; `batch_missing` auf der Diagnoseseite bleibt 0.
+      bekommt weiterhin alle Minutenwerte; `batch_missing` bleibt 0. Zusätzlich: unter
+      aktivem PM/DFS/Light-Sleep prüfen, dass ESP-NOW-Empfang stabil bleibt (sonst
+      Backfill als Netz, oder `CONFIG_PM_ENABLE` wieder entfernen).
 - Akzeptanz: Der Sender funkt zwischen den Zyklen nicht mehr pro Telegramm einzeln,
   verliert dabei keine Minutenwerte (Puffer groß genug für einen Zyklus) und beide
   Rollen bauen in CI.
@@ -185,27 +200,34 @@ in seiner eigenen SPIFFS-Historie (siehe oben).
    aus der Sender-SPIFFS nach (unten). Das ist der **Backfill** nach Ausfall/Neustart.
    Die Telegramm-Sequenz ordnet dabei zu, welche Minuten betroffen waren.
 
-- [ ] Neuen Diagnose-Abschnitt `history` im vorhandenen ESP-NOW-Diag-Protokoll ergänzen:
-      Request = `after_sequence`/`from_utc` + `count`; Response = eine Seite Records + `more`.
-      Platz: ESP-NOW-Payload 250 B, `power_history_record_t` = 28 B → ca. 8 Records/Paket.
-- [ ] Pagination mit `more`-Flag und fester Seitengröße (z. B. 6–8 Records), analog zum
-      OTA-Chunking (BEGIN/DATA/END) — inklusive ACK/Retry, ESP-NOW ist unzuverlässig.
-- [ ] Empfänger merkt sich seinen letzten Stand (Sequenz/Zeitstempel) und fordert gezielt
-      „alles danach“ an. **Merge/Dedupe nach Zeitstempel**; Live-Daten des Empfängers
-      bleiben erhalten, der Sender füllt nur Lücken.
-- [ ] Voraussetzung Zeit: Der Sender kann nur mit Wall-Clock korrekt stempeln → der
-      ESP-NOW-Wall-Clock-Sync (`a8a3e23`) muss vor dem Aufzeichnen gelaufen sein; sonst
-      `bucket_start==0` sauber behandeln (Uptime-Fallback).
-- [ ] Rate/Dauer: 29000 × 28 B ≈ 812 KB → über ESP-NOW (~1–10 KB/s) **Stunden**.
-      Daher nur **inkrementell** (nur die Lücke) und gedrosselt; große Nachladungen
-      lieber in Häppchen (z. B. max. N Seiten pro Zyklus).
-- [ ] Auslöser: automatisch nach Boot/Reconnect **und** manuell per Button/Endpoint
-      (z. B. `POST /api/history-pull`) mit Statusanzeige („x/y Records übernommen“).
-- [ ] Host-Test für Merge/Dedupe; CI baut beide Rollen.
+- [x] Neuen Diagnose-Abschnitt `history` im vorhandenen ESP-NOW-Diag-Protokoll ergänzt:
+      Request = `after_sequence`/`from_utc`/`to_utc`; Response = eine Seite Records + `more`
+      (`espnow_diag_history_request_t` / `_response_t` in `main.c`, Flag `0x0010`).
+      Platz: ESP-NOW-Payload 250 B, `power_history_record_t` = 28 B → 7 Records/Paket
+      (der `_Static_assert` in `main.c` verhindert, dass Header+Trailer die 250 B sprengen).
+- [x] Pagination mit `more`-Flag und fester Seitengröße (7 Records). Request/Response,
+      Timeout/Fehlerzähler. (Kein separates ACK/Retry-Gremium — fehlgeschlagene Runden
+      brechen die Session ab und werden beim nächsten 30-min-Lauf wiederholt.)
+- [x] Empfänger fordert gezielt „alles danach“ an (Zeitfenster + Cursor) und **merged
+      dedupliziert**: `main/history_backfill.{c,h}` (Präsenz-Bitmap pro Minute, host-getestet)
+      + `power_history_merge()` (validiert/migriert, reiht ein; Store nummeriert um).
+      Live-Daten des Empfängers bleiben erhalten, der Sender füllt nur Lücken.
+- [x] Voraussetzung Zeit: Der Sender stempelt mit Wall-Clock (Sync `a8a3e23`); der
+      Empfänger startet eine Session nur bei gültiger lokaler Uhr und fordert nur das
+      Fenster `[now-3d-2min, now-2min]` an (`bucket_start==0`-Sätze liegen außerhalb).
+- [x] Rate/Dauer: nur **inkrementell** (nur die fehlenden Minuten) und gedeckelt
+      (Session max. 256 Seiten; Default-Fenster 3 Tage). Große Nachladungen bleiben bewusst
+      außen vor (dauern Stunden); das Fenster deckt Funklücken/Neustarts ab.
+- [x] Auslöser: automatisch ~15 s nach Boot und alle 30 min (`history_backfill_worker`),
+      **und** manuell: `POST /api/history-pull` (X-OTA-Key), Status per `GET /api/history-pull`
+      (`merged_total`/`pages_total`/`errors`), Konsolen-Befehl `pull` (Empfänger).
+- [x] Host-Tests: `test/test_history_backfill.c` (27 Checks, Fenster/Dedupe),
+      `test/test_history_backfill_merge.c` (29 Checks, echter Store: Merge + Reject korrupt
+      + `power_history_read_window`-Paging). Im Runner + CI.
 
-**Offene Designfrage:** Quelle der Wahrheit, wenn beide gleichzeitig aufzeichnen — der
-Sender liest den Zähler direkt, der Empfänger sieht nur die Funkkopie. Vorschlag:
-**Sender = Quelle**, Empfänger merged nur die Lücken (kein Überschreiben eigener Werte).
+**Quelle der Wahrheit:** Sender = Quelle (er liest den Zähler direkt), der Empfänger merged
+nur die Lücken und überschreibt nie eigene Werte — so umgesetzt. Die Minutenhistorie wird
+auf **beiden** Rollen lokal geschrieben (SPIFFS), der Sender speichert also alles selbst.
 
 ## Partitionstabelle (geändert, `c3d3420`) — Flash-Reihenfolge & Auswirkungen
 Ziel: zwei echte OTA-Slots à 1,5 MB; `storage` bleibt an exakt derselben Adresse, damit
