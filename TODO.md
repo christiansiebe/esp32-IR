@@ -264,14 +264,22 @@ Auswirkungen:
 - **Erstes Deployment = Full-Flash** (bootloader + partition-table + App), `storage`
   bleibt unberührt.
 
-Flash-Reihenfolge (USB-Full-Flash, Empfänger):
+Flash-Reihenfolge (USB-Full-Flash, gilt fuer **beide** Rollen — identische
+Partitionstabelle; `storage` nur beim **allerersten** Deployment mitschreiben):
 ```
 0x1000   bootloader.bin
 0x8000   partition-table.bin
 0xf000   ota_data_initial.bin
-0x20000  receiver-sml.bin      # App jetzt in ota_0, nicht mehr factory
-# storage NICHT flashen (Historie erhalten)
+0x20000  <role>-sml.bin        # receiver-sml.bin ODER sender-sml.bin
+0x320000 storage.bin           # NUR erstes Deployment (leeres SPIFFS, 917504 B)
 ```
+- Ohne `storage.bin` ist es ebenfalls okay: `power_history_init()` formatiert eine
+  leere Partition beim ersten Boot (`format_if_mount_failed = true`).
+- Im CI-Artefakt/`Firmware/Receiver`-Bundle ist `storage.bin` zwar enthalten, aber
+  aus `flasher_args.json` **entfernt** → das Bundle schreibt die Historie nie
+  (`e944e04`); `storage.bin` nur manuell bei Erst-Deployment auf 0x320000 schreiben.
+- Sender alternativ per OTA (`http://192.168.4.1/update` → „Sender via ESP-NOW"),
+  OTA beruehrt `storage` nie.
 
 Offen / zu verifizieren:
 - [ ] Gerät per Kabel komplett flashen (`storage` unberührt), Boot prüfen.

@@ -124,6 +124,17 @@ jobs:
             "$out_dir/flasher_args.json"
           cp partitions.csv "$out_dir/partitions.csv"
 
+          # Ship the freshly generated (empty) SPIFFS image too, so a first-time
+          # full flash can write a valid "storage" partition. It is NOT in
+          # flasher_args.json (stripped below), so flashing the bundle as-is
+          # never touches the partition and keeps the persisted history; write it
+          # to 0x320000 by hand only on the very first deployment.
+          if [[ -s "$build_dir/storage.bin" ]]; then
+            cp "$build_dir/storage.bin" "$out_dir/storage.bin"
+          else
+            echo "::warning::storage.bin missing from $build_dir; first-time full flash cannot initialize storage"
+          fi
+
           # The aggregate bundle must never write the SPIFFS "storage"
           # partition: flashing a blank storage.bin wipes the persisted
           # minute history. Strip the storage entry so flashing this bundle

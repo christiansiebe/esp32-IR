@@ -3270,6 +3270,11 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
 }
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
+/* Defined further down with the rest of the backfill session, but called from
+ * console_cmd_pull() above it, so it needs a forward declaration here. */
+static bool history_backfill_run_session(uint32_t max_pages, uint32_t *merged_out,
+                                         uint32_t *pages_out);
+
 static void console_cmd_history(const char *args, char *out, size_t out_size)
 {
     (void)args;

@@ -48,6 +48,13 @@ Two firmware roles are built from one source tree.
   `Firmware/Receiver` bundle strip the `storage.bin` entry from
   `flasher_args.json`, so a bundle/com flash keeps the history. OTA and app-only
   flashes were already safe. Do not re-add the storage entry.
+- **Both roles** have the `storage` SPIFFS partition and run `power_history`
+  (the sender persists the minutes it decodes from the UART, the receiver
+  persists what it receives), so the per-role build emits its own
+  `build/<role>/storage.bin`. A USB full flash should write the (empty)
+  `storage.bin` **only on the very first deployment** — afterwards leaving it out
+  keeps the history. A missing/blank partition is auto-formatted at first boot
+  (`format_if_mount_failed = true`), so omitting `storage.bin` is safe.
 - The ring buffer holds `POWER_HISTORY_CAPACITY` (29000) minute records; when it
   is full it overwrites the oldest slot (`next_slot = (next_slot + 1) %
   CAPACITY`). The value is bounded by the SPIFFS partition, not chosen freely:

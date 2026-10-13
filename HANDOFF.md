@@ -68,16 +68,32 @@ storage  data spiffs  0x320000 0xE0000   # unverändert, nicht verhandelbar
 - Kein Factory-Fallback; Rollback in den anderen OTA-Slot via Boot-Confirmation.
 - **Erstes Deployment = Full-Flash.**
 
-USB-Full-Flash (Empfänger), `storage` **nicht** flashen:
+USB-Full-Flash — gilt für **beide** Rollen (identische Partitionstabelle),
+`storage` nur beim **allerersten** Deployment mitschreiben:
 
 ```
 0x1000   bootloader.bin
 0x8000   partition-table.bin
 0xf000   ota_data_initial.bin
-0x20000  receiver-sml.bin
+0x20000  <role>-sml.bin      # receiver-sml.bin ODER sender-sml.bin
+0x320000 storage.bin         # NUR beim ersten Full-Flash, sonst WEGLASSEN
 ```
 
-Sender: OTA über `http://192.168.4.1/update` → „Sender via ESP-NOW", oder per USB `sender-sml.bin`.
+- **Empfänger**: `receiver-sml.bin`. **Sender**: `sender-sml.bin` — beide Rollen
+  teilen dieselbe Partitionstabelle und dieselbe `storage`-Partition.
+- `storage.bin` (leeres SPIFFS, 917504 B = 896 KiB) entsteht im Build unter
+  `build/<role>/storage.bin`; im CI-Artefakt/`Firmware/Receiver`-Bundle ist der
+  Eintrag **absichtlich entfernt** (`e944e04`), damit ein Bundle-Flash die
+  Historie nicht überschreibt.
+- **Wann mitschreiben?** Nur beim ersten Full-Flash (Alt-Layout `factory` →
+  neues Layout), damit die Partition sauber initialisiert ist. Danach
+  **weglassen**, sonst wird die Historie überschrieben.
+- **Ohne `storage.bin` geht es auch**: `power_history_init()` mountet mit
+  `format_if_mount_failed = true`, d. h. eine leere `storage`-Partition wird beim
+  ersten Boot automatisch formatiert und ist danach nutzbar.
+- **Nie** ein *befülltes* `storage.bin` flashen — nur das leere aus dem Build.
+- **Sender sonst per OTA** über `http://192.168.4.1/update` → „Sender via ESP-NOW";
+  OTA schreibt `storage` nie und ist damit immer datenschonend.
 
 ## Offene Tasks (Details in `TODO.md`)
 
