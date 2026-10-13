@@ -133,6 +133,13 @@ typedef struct __attribute__((packed)) {
     uint32_t gap_cause_sleep;
     uint32_t gap_cause_stall;
     uint32_t gap_cause_buffer;
+    /* Boot marker: the sender fills the offline window of a restart/OTA/battery
+     * with reason-tagged minute records, so the receiver can tell an expected
+     * outage apart from a real data loss. Counts the minutes filled for the
+     * previous session's gap, and why (POWER_HISTORY_REASON_*). */
+    uint32_t boot_marker_count;
+    uint8_t boot_marker_reason;
+    uint8_t reserved4[3];
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {

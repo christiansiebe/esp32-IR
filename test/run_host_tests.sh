@@ -121,6 +121,18 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_uart_sleep_sim"
 
+# Failure question for the sleep controller: when the window is wrong, where
+# does the loss end up? Drives the controller against a synthetic read head and
+# shows that transient clipping never empties a minute (recoverable) while a
+# persistently jammed head does (real loss, not repairable by backfill).
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$here/test_sleep_misbehavior.c" \
+    -o "$out/test_sleep_misbehavior"
+
+"$out/test_sleep_misbehavior"
+
 # Receiver-side backfill merge bookkeeping (window/presence/dedupe). Pure C.
 "$cc" -std=c11 -Wall -Wextra -O2 \
     -Wno-unused-variable -Wno-unused-const-variable \
@@ -158,6 +170,21 @@ trap 'rm -rf "$out"' EXIT
     -lm -o "$out/test_history_backfill_merge"
 
 "$out/test_history_backfill_merge"
+
+# Boot-marker exchange: proves a marker minute persists with its reason, crosses
+# the backfill merge intact and idempotently, and that the window summary counts
+# only minutes with no record at all as real loss.
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog-marker\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_boot_marker_exchange.c" \
+    -lm -o "$out/test_boot_marker_exchange"
+
+"$out/test_boot_marker_exchange"
 
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"

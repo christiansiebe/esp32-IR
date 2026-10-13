@@ -187,6 +187,12 @@ typedef struct __attribute__((packed)) {
     espnow_diag_header_t header;
     int32_t current_reset_reason;
     crash_journal_t journal;
+    /* Boot marker for this session: how many offline minutes the previous
+     * session's gap filled and why. Fits the single ESP-NOW payload with 6
+     * spare bytes (249/250). */
+    uint32_t boot_marker_count;
+    uint8_t boot_marker_reason;
+    uint8_t reserved_boot_marker;
 } espnow_diag_crash_response_t;
 _Static_assert(sizeof(espnow_diag_crash_response_t) <= ESP_NOW_MAX_DATA_LEN,
                "crash diagnostic response must fit one ESP-NOW payload");
@@ -981,6 +987,158 @@ static void crash_journal_shutdown_handler(void)
 static void crash_journal_mark_clean_restart(void)
 {
     crash_journal_shutdown_handler();
+    boot_marker_flag_planned_reboot();
+}
+
+/* --- Boot marker ---------------------------------------------------------
+ * The sender can only record minutes while it is running and its clock is
+ * valid. A restart, an OTA or a flat battery therefore leaves a hole in the
+ * stored history. On the next boot the hole is filled with "boot marker"
+ * records (reason != 0), so the receiver can tell an expected outage apart
+ * from a real data loss. The window is derived from the store itself (the gap
+ * between the last measured minute and this boot) plus the reset reason, so no
+ * extra NVS bookkeeping is needed. */
+#define BOOT_MARKER_NVS_NAMESPACE "bootmark"
+#define BOOT_MARKER_OTA_FLAG_KEY  "ota_pending"
+#define BOOT_MARKER_MAX_MINUTES   1440u
+
+static uint32_t g_boot_marker_count;
+static uint8_t  g_boot_marker_reason;
+
+static void boot_marker_flag_planned_reboot(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(BOOT_MARKER_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    if (nvs_set_u8(handle, BOOT_MARKER_OTA_FLAG_KEY, 1) == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+}
+
+/* The wall clock survives a reboot via the receiver's NTP time sync. Read the
+ * flag that the previous session set before a deliberate reboot, then clear it
+ * so an unrelated crash does not inherit the OTA label. */
+static bool boot_marker_consume_ota_flag(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(BOOT_MARKER_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return false;
+    }
+    uint8_t flag = 0;
+    bool set = nvs_get_u8(handle, BOOT_MARKER_OTA_FLAG_KEY, &flag) == ESP_OK && flag != 0;
+    (void)nvs_erase_key(handle, BOOT_MARKER_OTA_FLAG_KEY);
+    (void)nvs_commit(handle);
+    nvs_close(handle);
+    return set;
+}
+
+/* Fill the offline window [last measured minute + 60, this boot minute) with
+ * marker records. Returns the number of minutes filled. Safe to call before the
+ * wall clock is calibrated: it then stores nothing (the gap cannot be bounded)
+ * and runs again once the clock is valid. */
+static uint32_t boot_marker_fill(int64_t now_utc, uint8_t reason)
+{
+    if (now_utc < 1704067200) {
+        return 0; /* clock not valid yet; retried after time sync */
+    }
+    /* Newest measured minute currently stored. power_history_read() with a
+     * zero recent_count pages from the oldest record; the last one is the
+     * newest because the store is time ordered. */
+    power_history_record_t page[POWER_HISTORY_PAGE_SIZE];
+    size_t count = 0;
+    power_history_status_t status;
+    bool overflow = false;
+    if (power_history_read(0, 0, page, POWER_HISTORY_PAGE_SIZE, &count,
+                           &status, &overflow) != ESP_OK) {
+        return 0;
+    }
+    /* Page forward to the newest record (a full store needs several pages). */
+    int64_t newest_measured = 0;
+    uint32_t last_sequence = 0;
+    while (count != 0) {
+        for (size_t i = 0; i < count; ++i) {
+            if (page[i].reason == POWER_HISTORY_REASON_NONE &&
+                page[i].interval_start_utc > newest_measured) {
+                newest_measured = page[i].interval_start_utc;
+            }
+            if (page[i].sequence > last_sequence) {
+                last_sequence = page[i].sequence;
+            }
+        }
+        if (count < POWER_HISTORY_PAGE_SIZE) {
+            break;
+        }
+        size_t next_count = 0;
+        if (power_history_read(last_sequence, 0, page, POWER_HISTORY_PAGE_SIZE,
+                               &next_count, &status, &overflow) != ESP_OK ||
+            next_count == 0) {
+            break;
+        }
+        count = next_count;
+    }
+    if (newest_measured == 0) {
+        return 0; /* cold boot: nothing was measured before, no gap to fill */
+    }
+
+    int64_t boot_minute = now_utc - (now_utc % 60);
+    int64_t first_missing = newest_measured + 60;
+    if (boot_minute <= first_missing) {
+        return 0; /* no whole missing minute between the two boots */
+    }
+    uint32_t minutes = (uint32_t)((boot_minute - first_missing) / 60);
+    if (minutes > BOOT_MARKER_MAX_MINUTES) {
+        /* Bound a long outage (flat battery for days): the history ring only
+         * holds ~20 days anyway, so cap the fill and keep the newest part. */
+        first_missing = boot_minute - (int64_t)BOOT_MARKER_MAX_MINUTES * 60;
+        minutes = BOOT_MARKER_MAX_MINUTES;
+    }
+
+    uint32_t written = 0;
+    for (uint32_t i = 0; i < minutes; ++i) {
+        power_history_record_t marker = {0};
+        marker.interval_start_utc = first_missing + (int64_t)i * 60;
+        marker.average_milliwatts = 0;
+        marker.sample_count = 0;
+        marker.format_version = POWER_HISTORY_VERSION;
+        marker.reason = reason;
+        if (power_history_enqueue(&marker)) {
+            ++written;
+        }
+    }
+    return written;
+}
+
+static const char *boot_marker_reason_label(uint8_t reason)
+{
+    return power_history_reason_token(reason);
+}
+
+static void boot_marker_note_and_log(int64_t now_utc, uint8_t reason)
+{
+    g_boot_marker_reason = reason;
+    uint32_t written = boot_marker_fill(now_utc, reason);
+    g_boot_marker_count = written;
+    if (written != 0) {
+        ESP_LOGW(TAG, "Boot marker: filled %lu offline minute(s) as %s "
+                 "(no measurement was possible while the device was off)",
+                 (unsigned long)written, boot_marker_reason_label(reason));
+        diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "boot marker %lu min %s",
+                       (unsigned long)written, boot_marker_reason_label(reason));
+    }
+}
+
+/* Called once after every successful wall-clock calibration: fills the offline
+ * gap of a boot that started without a valid clock (e.g. a battery change while
+ * the receiver was also down). No-op once the gap is closed. */
+static void boot_marker_on_clock_valid(void)
+{
+    int64_t now_utc = (int64_t)(event_wall_ms() / 1000);
+    if (now_utc < 1704067200) {
+        return;
+    }
+    boot_marker_note_and_log(now_utc, g_boot_marker_reason);
 }
 
 /* Load the previous session's journal, report the reset reason, then start a
@@ -1057,6 +1215,14 @@ static void crash_journal_init(void)
                  esp_err_to_name(err));
     }
     ESP_ERROR_CHECK(esp_register_shutdown_handler(crash_journal_shutdown_handler));
+
+    /* Fill the offline window left by the previous session with marker records
+     * so an expected outage (restart/OTA/battery) is not counted as data loss.
+     * Needs a valid wall clock; retried from the time-sync path otherwise. */
+    bool ota_reboot = boot_marker_consume_ota_flag();
+    uint8_t boot_reason =
+        power_history_reason_from_reset((int)g_current_reset_reason, ota_reboot);
+    boot_marker_note_and_log((int64_t)(event_wall_ms() / 1000), boot_reason);
 }
 
 static void build_diag_counters_response(const espnow_diag_request_item_t *request,
@@ -1201,6 +1367,9 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .gap_cause_sleep = gap_cause_sleep,
         .gap_cause_stall = gap_cause_stall,
         .gap_cause_buffer = gap_cause_buffer,
+        .boot_marker_count = g_boot_marker_count,
+        .boot_marker_reason = g_boot_marker_reason,
+        .reserved4 = {0, 0, 0},
     };
     *frame_len = sizeof(*header) + sizeof(*counters);
 }
@@ -1333,6 +1502,9 @@ static void build_diag_crash_response(const espnow_diag_request_item_t *request,
         memset(&response->journal, 0, sizeof(response->journal));
     }
     response->current_reset_reason = g_current_reset_reason;
+    response->boot_marker_count = g_boot_marker_count;
+    response->boot_marker_reason = g_boot_marker_reason;
+    response->reserved_boot_marker = 0;
     *frame_len = sizeof(*response);
 }
 
@@ -1629,11 +1801,19 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             if ((response.header.flags & ESPNOW_DIAG_SECTION_TIME_SYNC) &&
                 response.valid && response.utc_seconds > 0) {
                 int64_t uptime_us = (int64_t)response.uptime_ms * 1000;
+                bool was_valid;
                 portENTER_CRITICAL(&g_time_sync_lock);
+                was_valid = g_utc_valid;
                 g_utc_offset_us = response.utc_seconds * 1000000 - uptime_us;
                 g_utc_valid = true;
                 ++g_time_sync_count;
                 portEXIT_CRITICAL(&g_time_sync_lock);
+                if (!was_valid) {
+                    /* First calibration this session: a boot without a clock
+                     * (e.g. battery change while the receiver was down) can now
+                     * bound its offline window and fill it with boot markers. */
+                    boot_marker_on_clock_valid();
+                }
             }
         }
         return;
