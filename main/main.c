@@ -234,6 +234,7 @@ static uint64_t g_last_published_power_us;
 static volatile uint8_t g_sleep_state;
 static volatile uint64_t g_sleep_accumulated_ms;
 static uint64_t g_sleep_entered_us;
+static uint64_t g_last_sleep_exit_us; /* when light sleep last woke the CPU */
 /* CPU clock (DFS) history, sampled once per second: min/max/average MHz, how
  * often it stepped, and the last value, so the counters page and the crash
  * journal can show how hard the variable clock worked. */
@@ -296,7 +297,6 @@ static uint32_t g_uart_gap_cause_sleep;
 static uint32_t g_uart_gap_cause_stall;
 static uint32_t g_uart_gap_cause_buffer;
 static uint8_t g_uart_gap_last_cause;
-static uint64_t g_last_sleep_exit_us; /* when light sleep last woke the CPU */
 static uint32_t g_uart_parser_resyncs;
 static uint64_t g_uart_last_byte_us;
 static uint64_t g_uart_last_telegram_us;
