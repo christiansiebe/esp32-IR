@@ -270,6 +270,40 @@ verworfen; nur der Tagespfad (`windowStart=Date.parse(day+'T00:00:00Z')`, ms) re
       Sekunden-Start clippt alle (rot/grün-Gegenprobe).
 - [ ] Verifizieren am Gerät: Live-Slider 2 ↔ 24 h → Auflösung wechselt, Balken bleiben sichtbar.
 
+### 🔎 Sender-Diag: Ring-Flooding durch „diag response confirmed" (BEHOBEN)
+Symptom: Im Reiter „Recent events" tauchten fast nur `diag response confirmed flags=…`
+auf, die eigentlich interessanten `rx gap`-Zeilen wurden verdrängt; man sah scheinbar
+„weniger" Diagnosepunkte.
+Ursache: **Kein Logikfehler, sondern Beobachtungs-/Ring-Effekt.** Der Event-Ring fasst nur
+`ESPNOW_DIAG_EVENT_RING = 16` Einträge. Jedes Antwortpaket schrieb eine Zeile
+`diag response confirmed`; ein events-Fetch über mehrere Seiten (4 Events/Paket) erzeugt
+**ein Paket pro Seite**, also viele solcher Zeilen. Der Ring lief voll → die UART-/Gap-Events
+wurden herausgeschoben. (Ein Auto-Refresh-Zyklus ruft die Diag alle 5 s ab und schreibt
+zusätzlich weitere Zeilen.)
+- [x] `diag response confirmed` wird nur noch **einmal pro Anfrage** (Seite 0) geloggt;
+      Fehlerfälle (`not confirmed`, Timeout) bleiben vollständig. Damit bleibt der Ring
+      für echte Ereignisse frei. (`main/main.c`, `espnow_diag_worker`.)
+
+### ℹ️ Sender: mehr `mid-telegram`-Gaps — kein Regressionsbug
+Symptom: `rx gap … mid-telegram` tritt häufig auf (~1 pro Sekunde, 50–90 ms), dazu
+~830 ms „between telegrams".
+Bewertung: Das ist **erwartetes Verhalten des IR-Lesekopfs**, kein Fehler und keine Regression
+durch die letzten Commits:
+- `mid-telegram` heißt: die Stille liegt **innerhalb** eines noch laufenden Telegramms
+  (`!sml_adapter_awaiting_telegram()`). Das SML-Zählwerk sendet kurze Pausen mitten im
+  Telegramm; das ist normal.
+- Ein solcher Gap zählt **nicht** als Verlust. `gap_loss` steigt nur, wenn anschließend die
+  CRC fehlschlägt (`gap cost bytes (crc failed)`, `main.c:1963`). Bei dir: `frame err 0`,
+  `parity err 0`, `sml ok 50/0` → nichts ging verloren.
+- `UART_GAP_THRESHOLD_MS = 50` (seit `b19239b`/`740ad0f`/`f19fc51`, 2026-10-11) ist so
+  eingestellt, dass die normalen IR-Pausen als „Gap" protokolliert werden, um Verluste
+  überhaupt sichtbar zu machen. Die **Zählung** `gap_count` läuft live mit, es gab nur zuvor
+  kein detailliertes Live-Event → der Eindruck „jetzt mehr Gaps" ist eine Sichtbarkeits-,
+  keine Mengenänderung.
+- Die Sleep-Hooks sind bei Default (Light-Sleep AUS) **No-ops**, erzeugen also keine Gaps.
+- **Faustregel:** `gap_loss == 0` und `frame/parity err == 0` ⇒ nur normale IR-Pausen.
+  Erst `gap_loss > 0` oder steigende `parser_resyncs` sind ein echtes Problem.
+
 ### Synchronisation: Empfänger holt fehlende Sender-Daten (Backfill)
 Ziel: Der Empfänger soll Minutenwerte, die er **nicht** mitbekommen hat (Funklücke,
 Sender/Receiver-Neustart, OTA), **nachträglich vom Sender** holen — der Sender hat sie

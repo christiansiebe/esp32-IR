@@ -1318,7 +1318,10 @@ static void espnow_diag_worker(void *arg)
         if (g_diag_send_status != ESP_NOW_SEND_SUCCESS) {
             ESP_LOGW(TAG, "Diagnostic response not confirmed by ESP-NOW callback");
             diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "diag response not confirmed");
-        } else {
+        } else if (request.page == 0) {
+            /* Log only the first page of a request. A paged events fetch is
+             * several packets; logging every one of them flooded the 16-slot
+             * ring and pushed the interesting UART/gap events out. */
             diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "diag response confirmed flags=0x%04x",
                            request.flags);
         }
