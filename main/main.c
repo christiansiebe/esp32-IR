@@ -53,6 +53,14 @@ static const char *TAG = "espnow_meter";
  * one byte takes ~1.04 ms; 50 ms is ~48 byte times, far longer than any
  * in-telegram inter-byte spacing but shorter than the gap between telegrams. */
 #define UART_GAP_THRESHOLD_MS 50
+/* Log a receive gap at most once per this interval; the gap totals are always
+ * live in the counters, so the log stays readable instead of one line per pause. */
+#define GAP_LOG_INTERVAL_MS 10000u
+/* Cause codes for g_uart_gap_last_cause / the counters. */
+#define GAP_CAUSE_METER  0u /* the IR head's own pause (short, normal) */
+#define GAP_CAUSE_SLEEP  1u /* a light-sleep window overlapped the gap */
+#define GAP_CAUSE_STALL  2u /* long mid-telegram gap, no recorded sleep */
+#define GAP_CAUSE_BUFFER 3u /* UART RX buffer was full (bytes were dropped) */
 /* If the parser is not waiting for a telegram for this long, the byte stream
  * has desynchronised (a mangled frame left the state machine expecting bytes
  * that never arrive). The stream is flushed and the parser reset so the next
@@ -226,6 +234,15 @@ static uint64_t g_last_published_power_us;
 static volatile uint8_t g_sleep_state;
 static volatile uint64_t g_sleep_accumulated_ms;
 static uint64_t g_sleep_entered_us;
+/* CPU clock (DFS) history, sampled once per second: min/max/average MHz, how
+ * often it stepped, and the last value, so the counters page and the crash
+ * journal can show how hard the variable clock worked. */
+static uint8_t g_cpu_freq_min_mhz;
+static uint8_t g_cpu_freq_max_mhz;
+static uint32_t g_cpu_freq_sum_mhz;
+static uint32_t g_cpu_freq_samples;
+static uint32_t g_cpu_freq_changes;
+static uint8_t g_cpu_freq_last_mhz;
 static esp_timer_handle_t g_power_sample_timer;
 static int64_t g_power_bucket_start_utc;
 static int64_t g_power_bucket_first_sample_utc;
@@ -270,6 +287,16 @@ static uint32_t g_uart_gap_last_ms;
 static uint32_t g_uart_gap_max_ms;
 static uint32_t g_uart_gap_loss;
 static bool g_uart_gap_mid_pending;
+static uint64_t g_uart_gap_log_us; /* rate limit for the gap log line */
+/* Why a receive gap happened (attribution). meter = the IR head's own pause,
+ * sleep = a light-sleep window overlapped it, stall = mid-telegram gap longer
+ * than the sleep window without a recorded sleep, buffer = UART RX buffer full. */
+static uint32_t g_uart_gap_cause_meter;
+static uint32_t g_uart_gap_cause_sleep;
+static uint32_t g_uart_gap_cause_stall;
+static uint32_t g_uart_gap_cause_buffer;
+static uint8_t g_uart_gap_last_cause;
+static uint64_t g_last_sleep_exit_us; /* when light sleep last woke the CPU */
 static uint32_t g_uart_parser_resyncs;
 static uint64_t g_uart_last_byte_us;
 static uint64_t g_uart_last_telegram_us;
@@ -880,6 +907,16 @@ static void crash_journal_capture(crash_journal_t *journal)
     journal->diag_requests = diag_requests;
     journal->last_sequence = last_sequence;
     journal->clean_shutdown = 0;
+    journal->cpu_freq_min_mhz = g_cpu_freq_min_mhz;
+    journal->cpu_freq_max_mhz = g_cpu_freq_max_mhz;
+    journal->cpu_freq_avg_mhz = g_cpu_freq_samples
+                                    ? (uint8_t)(g_cpu_freq_sum_mhz / g_cpu_freq_samples)
+                                    : 0;
+    journal->cpu_freq_changes = g_cpu_freq_changes;
+    journal->gap_cause_meter = g_uart_gap_cause_meter;
+    journal->gap_cause_sleep = g_uart_gap_cause_sleep;
+    journal->gap_cause_stall = g_uart_gap_cause_stall;
+    journal->gap_cause_buffer = g_uart_gap_cause_buffer;
     crash_journal_set_events(journal, events, count - start);
 }
 
@@ -988,6 +1025,17 @@ static void crash_journal_init(void)
                      (unsigned long)previous.frame_errors,
                      (unsigned long)previous.parity_errors,
                      (unsigned long)previous.tx_queue_drops);
+            ESP_LOGW(TAG,
+                     "  previous cpu clock: min=%u max=%u avg=%u MHz, %lu steps; "
+                     "gaps: meter=%lu sleep=%lu stall=%lu buffer=%lu",
+                     (unsigned)previous.cpu_freq_min_mhz,
+                     (unsigned)previous.cpu_freq_max_mhz,
+                     (unsigned)previous.cpu_freq_avg_mhz,
+                     (unsigned long)previous.cpu_freq_changes,
+                     (unsigned long)previous.gap_cause_meter,
+                     (unsigned long)previous.gap_cause_sleep,
+                     (unsigned long)previous.gap_cause_stall,
+                     (unsigned long)previous.gap_cause_buffer);
             for (uint8_t i = 0; i < previous.event_count; ++i) {
                 ESP_LOGW(TAG, "  last event %u: [%u] %s", (unsigned)i,
                          (unsigned)previous.events[i].level,
@@ -1064,6 +1112,11 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     gap_max_ms = g_uart_gap_max_ms;
     gap_loss = g_uart_gap_loss;
     parser_resyncs = g_uart_parser_resyncs;
+    uint32_t gap_cause_meter = g_uart_gap_cause_meter;
+    uint32_t gap_cause_sleep = g_uart_gap_cause_sleep;
+    uint32_t gap_cause_stall = g_uart_gap_cause_stall;
+    uint32_t gap_cause_buffer = g_uart_gap_cause_buffer;
+    uint8_t gap_last_cause = g_uart_gap_last_cause;
     last_byte_us = g_uart_last_byte_us;
     portEXIT_CRITICAL(&g_uart_stats_lock);
 
@@ -1135,6 +1188,16 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .sleep_window_ms = uart_sleep_window_ms(),
         .sleep_min_gap_ms = uart_sleep_min_gap_ms(),
         .sleep_hold_active = uart_sleep_hold_is_active() ? 1 : 0,
+        .cpu_freq_avg_mhz = g_cpu_freq_samples ? (uint8_t)(g_cpu_freq_sum_mhz /
+                                                           g_cpu_freq_samples) : 0,
+        .cpu_freq_hist_min_mhz = g_cpu_freq_min_mhz,
+        .cpu_freq_hist_max_mhz = g_cpu_freq_max_mhz,
+        .gap_last_cause = gap_last_cause,
+        .cpu_freq_changes = g_cpu_freq_changes,
+        .gap_cause_meter = gap_cause_meter,
+        .gap_cause_sleep = gap_cause_sleep,
+        .gap_cause_stall = gap_cause_stall,
+        .gap_cause_buffer = gap_cause_buffer,
     };
     *frame_len = sizeof(*header) + sizeof(*counters);
 }
@@ -1769,14 +1832,38 @@ static esp_err_t sleep_exit_callback(int64_t sleep_time_us, void *arg)
         g_sleep_accumulated_ms += ((uint64_t)esp_timer_get_time() - g_sleep_entered_us) / 1000ULL;
         g_sleep_entered_us = 0;
     }
+    g_last_sleep_exit_us = (uint64_t)esp_timer_get_time();
     g_sleep_state = 0;
     return ESP_OK;
 }
 #endif
 
+/* Sample the live CPU clock into the min/max/average history. Called from the
+ * 1 Hz power-sample timer so it is told apart from the light-sleep callbacks. */
+static void cpu_freq_sample(void)
+{
+    uint8_t mhz = (uint8_t)(esp_clk_cpu_freq() / 1000000);
+    if (mhz == 0) {
+        return;
+    }
+    if (g_cpu_freq_min_mhz == 0 || mhz < g_cpu_freq_min_mhz) {
+        g_cpu_freq_min_mhz = mhz;
+    }
+    if (mhz > g_cpu_freq_max_mhz) {
+        g_cpu_freq_max_mhz = mhz;
+    }
+    if (g_cpu_freq_last_mhz != 0 && mhz != g_cpu_freq_last_mhz) {
+        ++g_cpu_freq_changes;
+    }
+    g_cpu_freq_last_mhz = mhz;
+    g_cpu_freq_sum_mhz += mhz;
+    ++g_cpu_freq_samples;
+}
+
 static void power_sample_timer_callback(void *arg)
 {
     (void)arg;
+    cpu_freq_sample();
     const uint64_t now_us = (uint64_t)esp_timer_get_time();
     const int64_t wall_clock = current_utc_seconds();
     power_history_record_t completed_interval = {0};
@@ -2064,6 +2151,11 @@ static void uart_capture_worker(void *arg)
     (void)arg;
     uint8_t rx_buffer[UART_PACKET_BYTES];
 
+    /* Explain the gap log once so a "mid-telegram" line is not misread as data
+     * loss: only gap_loss (a telegram that then fails its checksum) is a loss. */
+    diag_log_event(ESPNOW_DIAG_LEVEL_INFO,
+                   "gaps=normal; only gap_loss is loss");
+
     while (1) {
         int received = uart_read_bytes(UART_PORT_NUM, rx_buffer, sizeof(rx_buffer),
                                        pdMS_TO_TICKS(50));
@@ -2134,7 +2226,9 @@ static void uart_capture_worker(void *arg)
 
         /* A silent stretch between byte bursts is normal for the IR read head.
          * Distinguish a gap while waiting for a telegram (fine) from a gap in
-         * the middle of one (data lost, the parser will fail its checksum). */
+         * the middle of one. A mid-telegram gap is NOT data loss on its own: the
+         * meter also pauses inside a telegram, so it only counts as loss when the
+         * telegram then fails its checksum (see the callback -> gap_loss). */
         if (last_us != 0) {
             uint64_t gap_us = now_us - last_us;
             if (gap_us >= UART_GAP_THRESHOLD_MS * 1000ULL) {
@@ -2152,12 +2246,51 @@ static void uart_capture_worker(void *arg)
                 if (gap_ms > g_uart_gap_max_ms) {
                     g_uart_gap_max_ms = gap_ms;
                 }
+                /* Attribute the gap to a cause. Our light sleep only runs while
+                 * the parser is between telegrams and its window is at least
+                 * GAP min (>=100 ms), so a mid-telegram gap shorter than the
+                 * window cannot have been sleep: it is the meter's own pause. */
+                uint32_t sleep_window_ms = uart_sleep_window_ms();
+                bool buffer_full = g_uart_rx_buffer_full != 0;
+                bool sleep_overlapped = (sleep_window_ms != 0) &&
+                                        (gap_ms >= sleep_window_ms) &&
+                                        ((now_us - g_last_sleep_exit_us) <=
+                                         (uint64_t)gap_ms * 1000ULL + 20000ULL);
+                uint8_t cause;
+                if (buffer_full) {
+                    cause = GAP_CAUSE_BUFFER;
+                    ++g_uart_gap_cause_buffer;
+                } else if (sleep_overlapped) {
+                    cause = GAP_CAUSE_SLEEP;
+                    ++g_uart_gap_cause_sleep;
+                } else if (!mid_telegram) {
+                    cause = GAP_CAUSE_METER;
+                    ++g_uart_gap_cause_meter;
+                } else if (sleep_window_ms != 0 && gap_ms >= sleep_window_ms) {
+                    cause = GAP_CAUSE_STALL;
+                    ++g_uart_gap_cause_stall;
+                } else {
+                    cause = GAP_CAUSE_METER;
+                    ++g_uart_gap_cause_meter;
+                }
+                g_uart_gap_last_cause = cause;
+                bool log_now = (now_us - g_uart_gap_log_us) >=
+                               (uint64_t)GAP_LOG_INTERVAL_MS * 1000ULL;
+                if (log_now) {
+                    g_uart_gap_log_us = now_us;
+                }
                 portEXIT_CRITICAL(&g_uart_stats_lock);
-                /* Logged at INFO: a mid-telegram gap is not proven data loss
-                 * until the telegram fails its checksum (see the callback). */
-                diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "rx gap %lums %s",
-                               (unsigned long)gap_ms,
-                               mid_telegram ? "mid-telegram" : "between telegrams");
+                /* Rate limited so the log is readable; totals are always live in
+                 * the counters page. */
+                if (log_now) {
+                    static const char *const cause_name[] = {
+                        "meter", "sleep", "stall", "buffer"};
+                    diag_log_event(ESPNOW_DIAG_LEVEL_INFO,
+                                   "gap %lums %s cause=%s",
+                                   (unsigned long)gap_ms,
+                                   mid_telegram ? "mid" : "between",
+                                   cause_name[cause < 4 ? cause : 0]);
+                }
             }
         }
         portENTER_CRITICAL(&g_uart_stats_lock);
@@ -4158,6 +4291,11 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"sleep_hold_active\":%u,"
                        "\"cpu_freq_mhz\":%u,\"cpu_freq_max_mhz\":%u,"
                        "\"cpu_freq_min_mhz\":%u,\"light_sleep_enabled\":%u,"
+                       "\"cpu_freq_avg_mhz\":%u,\"cpu_freq_hist_min_mhz\":%u,"
+                       "\"cpu_freq_hist_max_mhz\":%u,\"cpu_freq_changes\":%lu,"
+                       "\"gap_last_cause\":%u,\"gap_cause_meter\":%lu,"
+                       "\"gap_cause_sleep\":%lu,\"gap_cause_stall\":%lu,"
+                       "\"gap_cause_buffer\":%lu,"
                        "\"wifi_ps_mode\":%u}",
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
@@ -4200,6 +4338,15 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned int)counters.cpu_freq_max_mhz,
                        (unsigned int)counters.cpu_freq_min_mhz,
                        (unsigned int)counters.light_sleep_enabled,
+                       (unsigned int)counters.cpu_freq_avg_mhz,
+                       (unsigned int)counters.cpu_freq_hist_min_mhz,
+                       (unsigned int)counters.cpu_freq_hist_max_mhz,
+                       (unsigned long)counters.cpu_freq_changes,
+                       (unsigned int)counters.gap_last_cause,
+                       (unsigned long)counters.gap_cause_meter,
+                       (unsigned long)counters.gap_cause_sleep,
+                       (unsigned long)counters.gap_cause_stall,
+                       (unsigned long)counters.gap_cause_buffer,
                        (unsigned int)counters.wifi_ps_mode);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
@@ -4271,7 +4418,12 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"free_heap\":%lu,\"uart_rx_bytes\":%lu,\"fifo_overflows\":%lu,"
                        "\"rx_buffer_full\":%lu,\"frame_errors\":%lu,\"parity_errors\":%lu,"
                        "\"tx_queue_drops\":%lu,\"sml_sent_ok\":%lu,\"sml_send_fail\":%lu,"
-                       "\"diag_requests\":%lu,\"last_sequence\":%lu,\"events\":[%s]}",
+                       "\"diag_requests\":%lu,\"last_sequence\":%lu,"
+                       "\"cpu_freq_min_mhz\":%u,\"cpu_freq_max_mhz\":%u,"
+                       "\"cpu_freq_avg_mhz\":%u,\"cpu_freq_changes\":%lu,"
+                       "\"gap_cause_meter\":%lu,\"gap_cause_sleep\":%lu,"
+                       "\"gap_cause_stall\":%lu,\"gap_cause_buffer\":%lu,"
+                       "\"events\":[%s]}",
                        crash_journal_is_valid(j) ? "true" : "false",
                        (unsigned long)j->boot_count,
                        (int)j->reset_reason,
@@ -4292,6 +4444,14 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)j->sml_send_fail,
                        (unsigned long)j->diag_requests,
                        (unsigned long)j->last_sequence,
+                       (unsigned)j->cpu_freq_min_mhz,
+                       (unsigned)j->cpu_freq_max_mhz,
+                       (unsigned)j->cpu_freq_avg_mhz,
+                       (unsigned long)j->cpu_freq_changes,
+                       (unsigned long)j->gap_cause_meter,
+                       (unsigned long)j->gap_cause_sleep,
+                       (unsigned long)j->gap_cause_stall,
+                       (unsigned long)j->gap_cause_buffer,
                        events_len != 0 ? events_json : "");
     } else {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
@@ -4333,11 +4493,12 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "function relBase(ms,base){return fmtTs(ms,base);}"
         "function fmtCounters(d){const nl=String.fromCharCode(10);"
         "capturedUptimeMs=d.uptime_ms;capturedAt=Date.now();"
-        "const verdict=(d.gap_loss===0&&d.parser_resyncs===0)"
-        "? 'No gap has cost a telegram and the parser never had to resync: the pauses are normal idle time between or inside telegrams.'"
-        ": ((d.gap_loss?d.gap_loss+' gap(s) cost bytes (checksum failed); ':'')"
-        "+(d.parser_resyncs?d.parser_resyncs+' parser resync(s) after a truncated telegram; ':'')"
-        "+'the read head is losing the byte stream sometimes.');"
+        "const CAUSE=['meter (the IR head pauses on its own)','light sleep window','stall (long pause, no sleep)','UART buffer full'];"
+        "const loss=d.gap_loss||0,resync=d.parser_resyncs||0;"
+        "const verdict=(loss===0&&resync===0)"
+        "? 'NO DATA LOST: no gap failed a checksum and the parser never had to resync. Every gap was a normal pause.'"
+        ": ('DATA LOSS: '+loss+' telegram(s) failed their checksum after a gap'"
+        "+(resync?(', '+resync+' parser resync(s) after a truncated telegram'):'')+'.');"
         "return 'captured: '+new Date(capturedAt).toLocaleTimeString()+'  (T+'+(d.uptime_ms/1000).toFixed(1)+' s after sender boot)'+nl"
         "+'uptime: '+(d.uptime_ms/1000).toFixed(1)+' s  channel: '+d.channel+nl"
         "+'uart rx bytes: '+d.uart_rx_bytes+'  last byte '+d.last_rx_ago_ms+' ms ago'+nl"
@@ -4351,12 +4512,14 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "+'storage: '+(d.storage_ready?'SPIFFS ready':'RAM fallback (NOT persistent)')"
         "+'  records: '+d.storage_records+' / '+d.storage_capacity"
         "+'  write errors: '+d.storage_write_errors+'  queue drops: '+d.storage_queue_drops+nl"
-        "+'cpu: '+d.cpu_freq_mhz+' MHz now (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)'+nl"
+        "+'cpu: '+d.cpu_freq_mhz+' MHz now (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)  session clock: min '+d.cpu_freq_hist_min_mhz+' / avg '+d.cpu_freq_avg_mhz+' / max '+d.cpu_freq_hist_max_mhz+' MHz, '+d.cpu_freq_changes+' steps'+nl"
         "+'sleep: '+(d.sleep_state?'in light sleep':(d.light_sleep_enabled?'awake, light sleep enabled':'awake, light sleep disabled'))"
         "+'  slept this session: '+(d.uptime_sleep_ms/1000).toFixed(1)+' s'+nl"
         "+'adaptive sleep window: '+(d.sleep_window_ms||0)+' ms (shortest gap seen: '+(d.sleep_min_gap_ms||0)+' ms)'"
         "+(d.sleep_hold_active?'  HELD AWAKE (data / OTA request active)':'')+nl"
-        "+'modem sleep (Wi-Fi PS): '+[0,1,2].indexOf(d.wifi_ps_mode)>=0?['off (WIFI_PS_NONE)','min (WIFI_PS_MIN_MODEM)','max (WIFI_PS_MAX_MODEM)'][d.wifi_ps_mode]:('unknown ('+d.wifi_ps_mode+')')+nl"
+        "+'gap sources: meter '+d.gap_cause_meter+', light sleep '+d.gap_cause_sleep+', stall '+d.gap_cause_stall+', uart buffer '+d.gap_cause_buffer"
+        "+'  (last gap: '+(CAUSE[d.gap_last_cause]||'?')+')'+nl"
+        "+'modem sleep (Wi-Fi PS): '+([0,1,2].indexOf(d.wifi_ps_mode)>=0?['off (WIFI_PS_NONE)','min (WIFI_PS_MIN_MODEM)','max (WIFI_PS_MAX_MODEM)'][d.wifi_ps_mode]:('unknown ('+d.wifi_ps_mode+')'))+nl"
         "+'VERDICT: '+verdict;}"
         "async function loadCrash(){"
         "const r=await fetch('/api/sender-diag?section=crash',{cache:'no-store'});"
@@ -4370,6 +4533,8 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "+String.fromCharCode(10)+'  sml ok/fail: '+d.sml_sent_ok+'/'+d.sml_send_fail"
         "+String.fromCharCode(10)+'  uart rx: '+d.uart_rx_bytes+'  fifo: '+d.fifo_overflows+'  frame err: '+d.frame_errors+'  parity err: '+d.parity_errors"
         "+String.fromCharCode(10)+'  queue drops: '+d.tx_queue_drops"
+        "+String.fromCharCode(10)+'  cpu clock: min '+d.cpu_freq_min_mhz+' / avg '+d.cpu_freq_avg_mhz+' / max '+d.cpu_freq_max_mhz+' MHz, '+d.cpu_freq_changes+' steps'"
+        "+String.fromCharCode(10)+'  gap sources: meter '+d.gap_cause_meter+', light sleep '+d.gap_cause_sleep+', stall '+d.gap_cause_stall+', uart buffer '+d.gap_cause_buffer"
         "+String.fromCharCode(10)+'This boot started with: '+d.current_reset_reason_name+' ('+d.current_reset_reason+')  <- why the previous session ended';"
         "byId('crash').textContent=head+(ev?String.fromCharCode(10)+'  last events:'+String.fromCharCode(10)+ev:'');}"
         "async function loadEvents(){let page=0,all=[];for(;;){"

@@ -117,6 +117,22 @@ typedef struct __attribute__((packed)) {
     uint32_t sleep_min_gap_ms;  /* shortest inter-telegram quiet observed */
     uint8_t sleep_hold_active;  /* 1 = awake due to a history pull / OTA */
     uint8_t reserved3[3];
+    /* CPU clock (DFS) history, sampled once per second: the average/min/max MHz
+     * the clock reached, and how often it stepped. `cpu_freq_mhz` above is the
+     * live value; these show how hard the variable clock worked this session. */
+    uint8_t cpu_freq_avg_mhz;
+    uint8_t cpu_freq_hist_min_mhz;
+    uint8_t cpu_freq_hist_max_mhz;
+    uint8_t gap_last_cause;     /* why the most recent gap happened (see below) */
+    uint32_t cpu_freq_changes;
+    /* Receive-gap attribution: how many of the gaps were caused by the meter's
+     * own pause, by a light-sleep window, by a long stall without sleep, or by a
+     * full UART RX buffer. Lets the receiver answer "where does the gap come
+     * from?" without guessing. */
+    uint32_t gap_cause_meter;
+    uint32_t gap_cause_sleep;
+    uint32_t gap_cause_stall;
+    uint32_t gap_cause_buffer;
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {

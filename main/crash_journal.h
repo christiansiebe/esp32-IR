@@ -23,9 +23,9 @@
  */
 
 #define CRASH_JOURNAL_MAGIC   0x4E524A43u /* "CJRN" */
-#define CRASH_JOURNAL_VERSION 1u
+#define CRASH_JOURNAL_VERSION 2u
 #define CRASH_JOURNAL_EVENT_COUNT    3u
-#define CRASH_JOURNAL_EVENT_TEXT_LEN 40u
+#define CRASH_JOURNAL_EVENT_TEXT_LEN 32u
 
 typedef struct __attribute__((packed)) {
     uint64_t timestamp_ms;
@@ -58,6 +58,17 @@ typedef struct __attribute__((packed)) {
      * reboot), 0 while running or after a crash. */
     uint8_t clean_shutdown;
     uint16_t reserved2;
+    /* CPU clock (DFS) history and gap attribution, so a crash report shows how
+     * hard the variable clock worked and where the receive gaps came from. */
+    uint8_t cpu_freq_min_mhz;
+    uint8_t cpu_freq_max_mhz;
+    uint8_t cpu_freq_avg_mhz;
+    uint8_t reserved3;
+    uint32_t cpu_freq_changes;
+    uint32_t gap_cause_meter;
+    uint32_t gap_cause_sleep;
+    uint32_t gap_cause_stall;
+    uint32_t gap_cause_buffer;
     crash_journal_event_t events[CRASH_JOURNAL_EVENT_COUNT];
     uint32_t checksum;
 } crash_journal_t;
