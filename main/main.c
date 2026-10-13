@@ -61,6 +61,13 @@ static const char *TAG = "espnow_meter";
 #define GAP_CAUSE_METER  0u /* the IR head's own pause (short, normal) */
 #define GAP_CAUSE_SLEEP  1u /* a light-sleep window overlapped the gap */
 #define GAP_CAUSE_STALL  2u /* long mid-telegram gap, no recorded sleep */
+/* Reported in the diagnostics so the receiver can tell which sender image is
+ * running: a plain build vs. one with the adaptive light sleep compiled in. */
+#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
+#define BUILD_PROFILE_ID 1u
+#else
+#define BUILD_PROFILE_ID 0u
+#endif
 #define GAP_CAUSE_BUFFER 3u /* UART RX buffer was full (bytes were dropped) */
 /* If the parser is not waiting for a telegram for this long, the byte stream
  * has desynchronised (a mangled frame left the state machine expecting bytes
@@ -1373,7 +1380,8 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .gap_cause_buffer = gap_cause_buffer,
         .boot_marker_count = g_boot_marker_count,
         .boot_marker_reason = g_boot_marker_reason,
-        .reserved4 = {0, 0, 0},
+        .build_profile = BUILD_PROFILE_ID,
+        .reserved4 = {0, 0},
     };
     *frame_len = sizeof(*header) + sizeof(*counters);
 }
@@ -4518,7 +4526,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"gap_last_cause\":%u,\"gap_cause_meter\":%lu,"
                        "\"gap_cause_sleep\":%lu,\"gap_cause_stall\":%lu,"
                        "\"gap_cause_buffer\":%lu,"
-                       "\"wifi_ps_mode\":%u}",
+                       "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
+                       "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u}",
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
                        (unsigned long)counters.fifo_overflows,
@@ -4569,7 +4578,10 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.gap_cause_sleep,
                        (unsigned long)counters.gap_cause_stall,
                        (unsigned long)counters.gap_cause_buffer,
-                       (unsigned int)counters.wifi_ps_mode);
+                       (unsigned int)counters.wifi_ps_mode,
+                       (unsigned int)counters.build_profile,
+                       (unsigned long)counters.boot_marker_count,
+                       (unsigned int)counters.boot_marker_reason);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -4745,6 +4757,8 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "+'cpu: '+d.cpu_freq_mhz+' MHz now (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)  session clock: min '+d.cpu_freq_hist_min_mhz+' / avg '+d.cpu_freq_avg_mhz+' / max '+d.cpu_freq_hist_max_mhz+' MHz, '+d.cpu_freq_changes+' steps'+nl"
         "+'sleep: '+(d.sleep_state?'in light sleep':(d.light_sleep_enabled?'awake, light sleep enabled':'awake, light sleep disabled'))"
         "+'  slept this session: '+(d.uptime_sleep_ms/1000).toFixed(1)+' s'+nl"
+        "+'build profile: '+(d.build_profile===1?'sender-sleep (light sleep compiled in)':'plain sender (light sleep NOT compiled in)')"
+        "+'  boot markers: '+d.boot_marker_count+' ('+d.boot_marker_reason+')'+nl"
         "+'adaptive sleep window: '+(d.sleep_window_ms||0)+' ms (shortest gap seen: '+(d.sleep_min_gap_ms||0)+' ms)'"
         "+(d.sleep_hold_active?'  HELD AWAKE (data / OTA request active)':'')+nl"
         "+'gap sources: meter '+d.gap_cause_meter+', light sleep '+d.gap_cause_sleep+', stall '+d.gap_cause_stall+', uart buffer '+d.gap_cause_buffer"

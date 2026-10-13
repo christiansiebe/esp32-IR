@@ -139,7 +139,11 @@ typedef struct __attribute__((packed)) {
      * previous session's gap, and why (POWER_HISTORY_REASON_*). */
     uint32_t boot_marker_count;
     uint8_t boot_marker_reason;
-    uint8_t reserved4[3];
+    /* Build identity: 0 = plain sender, 1 = CONFIG_ESPNOW_SENDER_LIGHT_SLEEP.
+     * Lets the diagnostics page (and the receiver) tell which sender image is
+     * actually running, so a flashed-but-inactive sleep path is unambiguous. */
+    uint8_t build_profile;
+    uint8_t reserved4[2];
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {
