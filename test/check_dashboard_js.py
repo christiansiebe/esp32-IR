@@ -178,6 +178,29 @@ if (liveCmp[0].plotX < 42 - 0.5 || liveCmp[0].plotX > 800 - 12 + 0.5) {
   process.exit(1);
 }
 console.log('dashboard live compare shift ok');
+
+// Live-mode window start must be in milliseconds: record timestamps are ms, and
+// the t<start||t>end guard drops every bar if start is (wrongly) seconds. That
+// left only the 15-minute day mode rendering in any live range.
+const liveEnd = Date.now();
+const liveStartMs = sandbox.liveWindowStartMs(2, liveEnd);
+const liveRows = [
+  { timestamp: liveStartMs + 10 * 60000, watts: 200 },
+  { timestamp: liveStartMs + 60 * 60000, watts: -300 },
+  { timestamp: liveStartMs + 110 * 60000, watts: 400 },
+];
+sandbox.__t.drawHistory(liveRows, 2, liveStartMs, null);
+if (sandbox.__t.getEntries().length !== 3) {
+  console.error('FAIL live window clipped rows: ' + JSON.stringify(sandbox.__t.getEntries()));
+  process.exit(1);
+}
+// Regression guard: a seconds-based start must clip every row (the old bug).
+sandbox.__t.drawHistory(liveRows, 2, sandbox.toUtcSeconds(liveStartMs), null);
+if (sandbox.__t.getEntries().length !== 0) {
+  console.error('FAIL live window units guard: seconds start must clip all rows');
+  process.exit(1);
+}
+console.log('dashboard live window units ok');
 process.exit(0);
 """
 

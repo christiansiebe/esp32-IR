@@ -79,3 +79,10 @@ const char *crash_journal_reset_reason_name(int reason)
     default: return "other";
     }
 }
+
+bool crash_journal_reset_is_deliberate(int reason)
+{
+    /* esp_reset_reason_t: 3 = software restart (esp_restart()), 8 = deep sleep.
+     * Both are the firmware's own doing, not a fault. */
+    return reason == 3 || reason == 8;
+}

@@ -756,6 +756,7 @@ static void espnow_ota_worker(void *arg)
                     send_sender_ota_ack(retry_item.source, &retry, ESP_OK);
                 }
             }
+            crash_journal_mark_clean_restart();
             esp_restart();
         }
         if (status != ESP_OK && request.type != ESPNOW_OTA_BEGIN) {
@@ -930,6 +931,14 @@ static void crash_journal_shutdown_handler(void)
     xSemaphoreGive(g_crash_journal_mutex);
 }
 
+/* Mark the running session as a clean, deliberate restart before esp_restart().
+ * esp_restart() does not run the registered shutdown handler, so an OTA or
+ * console reboot would otherwise look like a crash on the next boot. */
+static void crash_journal_mark_clean_restart(void)
+{
+    crash_journal_shutdown_handler();
+}
+
 /* Load the previous session's journal, report the reset reason, then start a
  * fresh record for this session. */
 static void crash_journal_init(void)
@@ -952,6 +961,11 @@ static void crash_journal_init(void)
             ESP_LOGI(TAG, "Previous session (boot %lu) ended cleanly after %llu ms",
                      (unsigned long)previous.boot_count,
                      (unsigned long long)previous.session_uptime_ms);
+        } else if (crash_journal_reset_is_deliberate((int)previous.reset_reason)) {
+            ESP_LOGI(TAG, "Previous session (boot %lu) was restarted on purpose: "
+                     "reason=%s; not a crash",
+                     (unsigned long)previous.boot_count,
+                     crash_journal_reset_reason_name((int)previous.reset_reason));
         } else {
             ESP_LOGW(TAG,
                      "Previous session (boot %lu) did NOT end cleanly: reason=%s "
@@ -2402,6 +2416,10 @@ static esp_err_t root_handler(httpd_req_t *req)
         "function niceMax(v){if(!(v>0))return 1;const p=Math.pow(10,Math.floor(Math.log10(v)));const n=v/p;"
         "return (n<=1?1:n<=2?2:n<=5?5:10)*p;}"
         "function setLive(on){historyView=on?'live':'day';}"
+        /* Live window start must be in milliseconds (record timestamps are ms);
+         * the ?start= query parameter is seconds, so convert explicitly. */
+        "function liveWindowStartMs(hours,endMs){return endMs-hours*3600000;}"
+        "function toUtcSeconds(ms){return Math.floor(ms/1000);}"
         "function fmtTick(t,hours){const d=new Date(t);"
         "if(hours<24)return d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});"
         "return d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})+' '+"
@@ -2450,9 +2468,9 @@ static esp_err_t root_handler(httpd_req_t *req)
         "const hours=live?historyHours():24;"
         "byId('history-range-label').textContent=historyLabel();"
         "let url,windowStart=null,compareUrl=null,compareShift=null,compareLabel=null;"
-        "if(live){const endMs=Date.now();windowStart=Math.floor(endMs/1000)-hours*3600;"
-        "url='/api/power-history?hours='+hours+'&points=240&start='+windowStart;"
-        "if(historyCompare){compareUrl='/api/power-history?hours='+hours+'&points=240&start='+(windowStart-86400);"
+        "if(live){const endMs=Date.now();windowStart=liveWindowStartMs(hours,endMs);"
+        "url='/api/power-history?hours='+hours+'&points=240&start='+toUtcSeconds(windowStart);"
+        "if(historyCompare){compareUrl='/api/power-history?hours='+hours+'&points=240&start='+(toUtcSeconds(windowStart)-86400);"
         "compareShift=86400000;compareLabel='Vortag';}}"
         "else{const day=byId('history-day').value||dayISO(new Date());"
         "url='/api/power-history?day='+day+'&points=96';windowStart=Date.parse(day+'T00:00:00Z');"
@@ -4233,7 +4251,7 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "{\"section\":\"crash\",\"valid\":%s,\"boot_count\":%lu,"
                        "\"reset_reason\":%d,\"reset_reason_name\":\"%s\","
                        "\"current_reset_reason\":%d,\"current_reset_reason_name\":\"%s\","
-                       "\"clean_shutdown\":%s,\"session_uptime_ms\":%llu,"
+                       "\"clean_shutdown\":%s,\"deliberate_restart\":%s,\"session_uptime_ms\":%llu,"
                        "\"free_heap\":%lu,\"uart_rx_bytes\":%lu,\"fifo_overflows\":%lu,"
                        "\"rx_buffer_full\":%lu,\"frame_errors\":%lu,\"parity_errors\":%lu,"
                        "\"tx_queue_drops\":%lu,\"sml_sent_ok\":%lu,\"sml_send_fail\":%lu,"
@@ -4245,6 +4263,7 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (int)crash.current_reset_reason,
                        crash_journal_reset_reason_name((int)crash.current_reset_reason),
                        j->clean_shutdown ? "true" : "false",
+                       crash_journal_reset_is_deliberate((int)j->reset_reason) ? "true" : "false",
                        (unsigned long long)j->session_uptime_ms,
                        (unsigned long)j->free_heap,
                        (unsigned long)j->uart_rx_bytes,
@@ -4312,7 +4331,7 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "+'parser resyncs: '+d.parser_resyncs+'  clock calibrations: '+d.time_syncs+' (requests sent: '+d.time_requests+')'+nl"
         "+'last gap: '+d.last_gap_ms+' ms  longest gap: '+d.max_gap_ms+' ms'+nl"
         "+'free heap: '+d.free_heap+' bytes  last send: '+d.last_send_status+'  request rssi: '+d.last_request_rssi+nl"
-        "+'batch ring: '+d.batch_pending+' pending, '+d.batch_missing+' never confirmed'+nl"
+        "+'batch ring: '+d.batch_pending+' waiting for the next burst, '+d.batch_missing+' unconfirmed backlog (0 = all confirmed)'+nl"
         "+'storage: '+(d.storage_ready?'SPIFFS ready':'RAM fallback (NOT persistent)')"
         "+'  records: '+d.storage_records+' / '+d.storage_capacity"
         "+'  write errors: '+d.storage_write_errors+'  queue drops: '+d.storage_queue_drops+nl"
@@ -4327,7 +4346,7 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "const r=await fetch('/api/sender-diag?section=crash',{cache:'no-store'});"
         "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
         "const ev=(d.events||[]).map(e=>'    '+relBase(e.timestamp_ms,d.session_uptime_ms)+' ['+e.level+'] '+e.text).join(String.fromCharCode(10));"
-        "let head='Previous session: '+(d.clean_shutdown?'ended cleanly':'DID NOT END CLEANLY')"
+        "let head='Previous session: '+(d.clean_shutdown?'ended cleanly':(d.deliberate_restart?'restarted on purpose (not a crash)':'DID NOT END CLEANLY'))"
         "+String.fromCharCode(10)+'  reset reason: '+d.reset_reason_name+' ('+d.reset_reason+')'"
         "+String.fromCharCode(10)+'  uptime: '+(d.session_uptime_ms/1000).toFixed(1)+' s'"
         "+String.fromCharCode(10)+'  boot count: '+d.boot_count"

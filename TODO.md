@@ -232,6 +232,41 @@ variablem Takt, ohne dass ein Telegramm verloren geht. Feature liegt hinter
 - [ ] Optional: `sleep_min_gap_ms` über die Diag-Seite im Dashboard als eigene Zeile ausgeben
       (bisher nur im Text).
 - [ ] Optional: Default-ON erst nach Hardware-Nachweis; vorher AUS lassen (Sendestrecke schützen).
+- [x] **Bench-Build verfügbar:** CI-Matrix hat jetzt einen dritten Eintrag `sender-sleep`
+      (Rolle Sender + `CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y`) mit eigenem Artefakt
+      `sender-sleep-sml-firmware` / `sender-sleep-sml-flash-files`; ein Schritt prüft per
+      `grep`, dass das Flag wirklich gesetzt ist. So lässt sich die Sleep-Strecke flashen,
+      ohne lokal zu bauen. (`.github/workflows/esp-idf-build.yml`)
+
+### 🐛 Sender-Diagnose: „DID NOT END CLEANLY" bei bewusstem Reboot (BEHOBEN)
+Symptom: Nach OTA/Console-Reboot meldete der Sender beim nächsten Boot
+„Previous session: DID NOT END CLEANLY" mit `reset reason: software-restart (3)` —
+obwohl kein Absturz vorlag.
+Ursache: `clean_shutdown` wird nur gesetzt, wenn der registrierte Shutdown-Handler läuft.
+Die bewussten Reboots rufen `esp_restart()` direkt auf (Sender: OTA-Ende `main.c:759`),
+da laufen keine Shutdown-Handler mehr → Journal bleibt „nicht clean".
+- [x] `crash_journal_reset_is_deliberate(reason)` (reine Funktion, host-getestet):
+      `software-restart (3)` und `deep-sleep (8)` = gewollt; `panic/watchdog/...` = echter Fehler.
+- [x] Vor den bewussten `esp_restart()`s wird jetzt `crash_journal_mark_clean_restart()`
+      aufgerufen (Sender-OTA-Pfad; Receiver-Pfade rufen es ebenfalls auf).
+- [x] Bootlog + Dashboard zeigen bei gewolltem Reboot „restarted on purpose (not a crash)"
+      statt „DID NOT END CLEANLY" (neues Diag-Feld `deliberate_restart`).
+- [x] Test: `test/test_crash_journal.c` 19 → **24 Checks** (deliberate-Klassifizierung).
+
+### 🐛 Empfänger-Dashboard: im Live-Modus nur 15-Min-Balken (BEHOBEN)
+Symptom: In **jedem** Live-Zeitraum (2/6/12/24 h/3 T/7 T/Max) zeichnete das Dashboard nur
+die 15-Minuten-Tagesbalken; der Slider schien wirkungslos.
+Ursache: Ein **Einheiten-Mismatch**. `updateHistory()` setzte
+`windowStart=Math.floor(endMs/1000)-hours*3600` (Sekunden), aber die Record-Timestamps
+sind **Millisekunden** (`bucket_start_ms = window_start_utc*1000 + …`). Im `drawHistory`-
+Wächter `t<start||t>end` liegt `start` damit ~1000× zu klein → **jeder** Balken wird
+verworfen; nur der Tagespfad (`windowStart=Date.parse(day+'T00:00:00Z')`, ms) rendert.
+- [x] Fix in `main/main.c` (`sml_page`): `windowStart=liveWindowStartMs(hours,endMs)` (ms);
+      der `?start=`-Query bleibt Sekunden (`toUtcSeconds(windowStart)`), ebenso der
+      Vergleichs-Start (`toUtcSeconds(windowStart)-86400`).
+- [x] Test: `test/check_dashboard_js.py` „live window units" — ms-Start zeigt alle Balken,
+      Sekunden-Start clippt alle (rot/grün-Gegenprobe).
+- [ ] Verifizieren am Gerät: Live-Slider 2 ↔ 24 h → Auflösung wechselt, Balken bleiben sichtbar.
 
 ### Synchronisation: Empfänger holt fehlende Sender-Daten (Backfill)
 Ziel: Der Empfänger soll Minutenwerte, die er **nicht** mitbekommen hat (Funklücke,
@@ -578,6 +613,11 @@ offen (s. u.) — **vor** dem Kopieren fremden Codes entscheiden.
 
 
 ## Erledigt (in dieser Session)
+- **Diag-Sichtung (Sender/Receiver) + zwei Bugfixes**: „DID NOT END CLEANLY" bei bewusstem
+  Reboot behoben (deliberate-restart-Klassifizierung, Sender-Diag), Live-Dashboard zeigte nur
+  15-Min-Balken (Sekunden/ms-Einheitenfehler im Live-Fenster, Receiver) behoben; dazu
+  `sender-sleep`-CI-Build als flashbares Artefakt für den Bench-Test. Details in den
+  gleichnamigen Abschnitten „🐛 … (BEHOBEN)" oben.
 - **Adaptiver Sender-Light-Sleep + Hold für Daten/OTA** (`2c2126c`, `0b9f637`): Regler
   `uart_sleep_window.{h,c}` (400 ms Start, Auto-Backoff, Lock hält den Burst wach),
   `uart_sleep_hold()` gegen Sleep während History-Pull/OTA, Sim + Unit-Tests (21+14 Checks),

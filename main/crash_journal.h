@@ -80,6 +80,12 @@ bool crash_journal_is_valid(const crash_journal_t *journal);
 /* Human-readable name for an esp_reset_reason_t value. */
 const char *crash_journal_reset_reason_name(int reason);
 
+/* True when a reset reason denotes a reset the firmware itself asked for
+ * (software restart, deep sleep) rather than a fault. A deliberate reboot must
+ * not be reported as a crash: the sender's own OTA/console restarts hit
+ * esp_restart() directly, which never runs the registered shutdown handler. */
+bool crash_journal_reset_is_deliberate(int reason);
+
 /* NVS-backed persistence (implemented in crash_journal_store.c). */
 esp_err_t crash_journal_save(const crash_journal_t *journal);
 /* Loads the stored record; *found is set to false when none/valid record

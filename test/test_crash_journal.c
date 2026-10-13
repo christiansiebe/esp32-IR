@@ -46,6 +46,11 @@ int main(void)
           "reset reason name for brownout");
     CHECK(strcmp(crash_journal_reset_reason_name(1234), "other") == 0,
           "unknown reset reason falls back to other");
+    CHECK(crash_journal_reset_is_deliberate(3), "software restart is deliberate");
+    CHECK(crash_journal_reset_is_deliberate(8), "deep sleep is deliberate");
+    CHECK(!crash_journal_reset_is_deliberate(4), "panic is not deliberate");
+    CHECK(!crash_journal_reset_is_deliberate(6), "task watchdog is not deliberate");
+    CHECK(!crash_journal_reset_is_deliberate(1), "power-on is not deliberate");
 
     crash_journal_event_t events[3] = {
         make_event(1000, 2, "uart fifo overflow"),

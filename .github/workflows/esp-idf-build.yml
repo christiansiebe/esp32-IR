@@ -49,7 +49,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        role: [receiver, sender]
+        include:
+          - role: receiver
+            kconfig_role: RECEIVER
+          - role: sender
+            kconfig_role: SENDER
+          # Sender with the adaptive light sleep enabled, shipped so the sleep
+          # path can be bench-verified (see TODO.md). Same role, extra config.
+          - role: sender-sleep
+            kconfig_role: SENDER
+            extra_config: CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y
     env:
       IDF_CCACHE_ENABLE: "1"
       CCACHE_DIR: /root/.cache/ccache
@@ -71,7 +80,6 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP"
-          role_upper="$(printf '%s' '${{ matrix.role }}' | tr '[:lower:]' '[:upper:]')"
           cat > "$RUNNER_TEMP/sdkconfig.defaults" <<EOF
           CONFIG_IDF_TARGET="esp32"
           CONFIG_PARTITION_TABLE_CUSTOM=y
@@ -79,7 +87,8 @@ jobs:
           CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
           CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
           CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-          CONFIG_ESPNOW_ROLE_${role_upper}=y
+          CONFIG_ESPNOW_ROLE_${{ matrix.kconfig_role }}=y
+          ${{ matrix.extra_config }}
           EOF
           echo "SDKCONFIG_DEFAULTS=sdkconfig.defaults;$RUNNER_TEMP/sdkconfig.defaults" >> "$GITHUB_ENV"
 
@@ -111,6 +120,15 @@ jobs:
           assert 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y'
           [ "$fail" -eq 0 ]
           echo "CPU clock: 80 MHz ceiling with DFS + tickless idle"
+
+      - name: Verify adaptive sleep config (sender-sleep)
+        if: matrix.role == 'sender-sleep'
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '^CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y$' sdkconfig
+          grep -q '^CONFIG_ESPNOW_ROLE_SENDER=y$' sdkconfig
+          echo "Adaptive sender light sleep is enabled in this build"
 
       - name: Stage firmware and flash files
         shell: bash
