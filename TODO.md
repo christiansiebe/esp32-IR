@@ -1,7 +1,9 @@
 # To-do – esp32-IR
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
-Letzter Commit: `0b9f637` (adaptiver Sender-Light-Sleep + Hold für Daten/OTA) – CI grün.
+Letzter Commit: `8f12dc7` – CI-Run `38407371756` **grün** (Sender, sender-sleep, Receiver,
+Host-Tests). Enthält: adaptiver Sender-Light-Sleep + Hold, deliberate-restart-Fix,
+Live-Dashboard-Einheitenfix, `sender-sleep`-Bench-Artefakt.
 
 ## ⏰ Arbeitsweise: Chat-Heartbeat (von jedem Folge-Chat zu übernehmen!)
 Diese Session läuft in einer Sandbox mit **Inaktivitäts-Timeout (~20 Min)**. Wird der Chat
