@@ -1064,9 +1064,12 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
 
     esp_pm_config_t pm_config = {0};
     (void)esp_pm_get_configuration(&pm_config);
-    /* esp_clk_cpu_freq() reads the *live* clock, so it shows DFS stepping down
-     * to the idle frequency, not just the configured maximum. */
-    int current_freq = esp_clk_cpu_freq();
+    /* esp_clk_cpu_freq() reads the *live* clock in Hz, so it shows DFS stepping
+     * down to the idle frequency, not just the configured maximum. */
+    int current_freq_hz = esp_clk_cpu_freq();
+    uint8_t current_freq_mhz = (uint8_t)(current_freq_hz / 1000000);
+    wifi_ps_type_t wifi_ps = WIFI_PS_NONE;
+    (void)esp_wifi_get_ps(&wifi_ps);
 
     *counters = (espnow_diag_counters_t) {
         .uptime_ms = (uint64_t)(esp_timer_get_time() / 1000),
@@ -1099,10 +1102,11 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .batch_missing = batch_missing,
         .storage_ready = storage.ready ? 1 : 0,
         .sleep_state = (uint8_t)g_sleep_state,
-        .cpu_freq_mhz = (uint8_t)(current_freq > 0 ? current_freq : 0),
+        .cpu_freq_mhz = current_freq_mhz,
         .cpu_freq_max_mhz = (uint8_t)(pm_config.max_freq_mhz > 0 ? pm_config.max_freq_mhz : 0),
         .cpu_freq_min_mhz = (uint8_t)(pm_config.min_freq_mhz > 0 ? pm_config.min_freq_mhz : 0),
         .light_sleep_enabled = pm_config.light_sleep_enable ? 1 : 0,
+        .wifi_ps_mode = (uint8_t)wifi_ps,
         .reserved2 = 0,
         .storage_records = storage.record_count,
         .storage_capacity = POWER_HISTORY_CAPACITY,
@@ -2683,6 +2687,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     (void)esp_pm_get_configuration(&pm_config);
     int pm_max_freq_mhz = pm_config.max_freq_mhz;
     int pm_min_freq_mhz = pm_config.min_freq_mhz;
+    int pm_current_freq_mhz = esp_clk_cpu_freq() / 1000000;
     int len = snprintf(payload, sizeof(payload),
                        "{\"import\":%s,\"export\":%s,\"power\":%s,"
                        "\"average_power_w\":%s,\"average_samples\":%u,"
@@ -2698,7 +2703,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        (unsigned long)crc_valid,
                        (unsigned long)crc_invalid,
                        (unsigned long)transport_gaps,
-                       esp_clk_cpu_freq(),
+                       pm_current_freq_mhz,
                        pm_max_freq_mhz,
                        pm_min_freq_mhz,
                        (unsigned int)g_sleep_state,
@@ -4100,7 +4105,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"storage_queue_drops\":%lu,"
                        "\"sleep_state\":%u,\"uptime_sleep_ms\":%lu,"
                        "\"cpu_freq_mhz\":%u,\"cpu_freq_max_mhz\":%u,"
-                       "\"cpu_freq_min_mhz\":%u,\"light_sleep_enabled\":%u}",
+                       "\"cpu_freq_min_mhz\":%u,\"light_sleep_enabled\":%u,"
+                       "\"wifi_ps_mode\":%u}",
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
                        (unsigned long)counters.fifo_overflows,
@@ -4138,7 +4144,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned int)counters.cpu_freq_mhz,
                        (unsigned int)counters.cpu_freq_max_mhz,
                        (unsigned int)counters.cpu_freq_min_mhz,
-                       (unsigned int)counters.light_sleep_enabled);
+                       (unsigned int)counters.light_sleep_enabled,
+                       (unsigned int)counters.wifi_ps_mode);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -4291,6 +4298,7 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "+'cpu: '+d.cpu_freq_mhz+' MHz now (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)'+nl"
         "+'sleep: '+(d.sleep_state?'in light sleep':(d.light_sleep_enabled?'awake, light sleep enabled':'awake, light sleep disabled'))"
         "+'  slept this session: '+(d.uptime_sleep_ms/1000).toFixed(1)+' s'+nl"
+        "+'modem sleep (Wi-Fi PS): '+[0,1,2].indexOf(d.wifi_ps_mode)>=0?['off (WIFI_PS_NONE)','min (WIFI_PS_MIN_MODEM)','max (WIFI_PS_MAX_MODEM)'][d.wifi_ps_mode]:('unknown ('+d.wifi_ps_mode+')')+nl"
         "+'VERDICT: '+verdict;}"
         "async function loadCrash(){"
         "const r=await fetch('/api/sender-diag?section=crash',{cache:'no-store'});"

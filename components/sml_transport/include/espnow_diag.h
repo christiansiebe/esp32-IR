@@ -105,7 +105,8 @@ typedef struct __attribute__((packed)) {
     uint8_t cpu_freq_max_mhz;   /* configured DFS maximum */
     uint8_t cpu_freq_min_mhz;   /* configured DFS minimum (idle) */
     uint8_t light_sleep_enabled;/* DFS config allows light sleep in idle */
-    uint16_t reserved2;
+    uint8_t wifi_ps_mode;       /* Wi-Fi power save (modem sleep): 0=off,1=min,2=max */
+    uint8_t reserved2;
     uint32_t storage_records;   /* minute records currently stored */
     uint32_t storage_capacity;  /* ring capacity */
     uint32_t storage_write_errors;
