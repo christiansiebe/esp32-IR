@@ -16,6 +16,19 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Compile the adaptive sender sleep path
+        shell: bash
+        run: |
+          # The adaptive light sleep is off by default; this compiles the
+          # enabled branch of uart_sleep_window.c so it cannot rot silently.
+          # IDF headers are stubbed, so this checks C syntax only.
+          gcc -std=c11 -fsyntax-only \
+            -DCONFIG_ESPNOW_SENDER_LIGHT_SLEEP=1 \
+            -DSOC_PM_SUPPORT_LP_TIMER=1 \
+            -DSOC_PM_SUPPORT_EXT_WAKEUP=1 \
+            -I test/host/include \
+            main/uart_sleep_window.c
+
       - name: Run aggregation / data-gap / day-boundary tests
         shell: bash
         run: ./test/run_host_tests.sh

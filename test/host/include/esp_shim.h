@@ -189,6 +189,10 @@ static inline BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint3
 static inline void portENTER_CRITICAL(portMUX_TYPE *m) { (void)m; }
 static inline void portEXIT_CRITICAL(portMUX_TYPE *m) { (void)m; }
 
+/* Only the syntax-check of the sleep glue calls this; real wait behaviour is
+ * not exercised on the host. */
+static inline void vTaskDelay(uint32_t ticks) { (void)ticks; }
+
 typedef struct {
     const char *partition_label;
     const char *base_path;

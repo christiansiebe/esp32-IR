@@ -30,3 +30,13 @@ CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
 # Wi-Fi sleep-related code in IRAM (lower power-save wake latency).
 CONFIG_ESP_WIFI_SLP_IRAM_OPT=y
+
+# Optional: adaptive sender light sleep. Off by default so the ESP-NOW send path
+# keeps its current timing until it is bench-verified. When enabled
+# (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y) the sender parks the CPU in the quiet gaps
+# between SML telegram bursts only: the window starts at 400 ms, is always capped
+# below the shortest inter-telegram gap it has observed, and halves itself if a
+# telegram ever arrives while it slept. A ESP_PM_NO_LIGHT_SLEEP lock keeps the
+# CPU awake for the whole burst, so the UART FIFO is never starved. Enabling it
+# also switches the sender to WIFI_PS_MIN_MODEM (required to release the Wi-Fi
+# driver's APB_MAX lock). See TODO.md for the open bench verification.

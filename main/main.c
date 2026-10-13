@@ -236,6 +236,7 @@ static portMUX_TYPE g_sml_history_lock = portMUX_INITIALIZER_UNLOCKED;
 
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* sml_tx_item_t lives in tx_batch.h so the batching ring is host-testable. */
+#include "uart_sleep_window.h"
 
 static SemaphoreHandle_t g_send_done;
 static esp_now_send_status_t g_last_send_status;
@@ -2049,6 +2050,12 @@ static void uart_capture_worker(void *arg)
         portEXIT_CRITICAL(&g_uart_stats_lock);
 
         if (received <= 0) {
+            /* The UART read timed out: the line has been quiet for at least the
+             * read window, so the burst is over. Update the adaptive window and
+             * park the CPU in the quiet gap before the next telegram. No-ops
+             * unless CONFIG_ESPNOW_SENDER_LIGHT_SLEEP is enabled. */
+            uart_sleep_note_uart_idle();
+            uart_sleep_maybe_sleep_idf();
             /* Report a total receive silence once, in case the read head is
              * unplugged or misaligned rather than merely idle between frames. */
             if (last_us != 0 && !already &&
@@ -2121,6 +2128,7 @@ static void uart_capture_worker(void *arg)
         g_uart_silence_reported = false;
         g_uart_rx_bytes += (uint64_t)received;
         portEXIT_CRITICAL(&g_uart_stats_lock);
+        uart_sleep_note_uart_byte(now_us, last_us, (uint32_t)received);
 
         for (int i = 0; i < received; ++i) {
             (void)sml_adapter_feed_byte(rx_buffer[i], now_us);
@@ -4888,6 +4896,16 @@ static void run_sender(void)
     ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, UART_PIN_NO_CHANGE, UART_RX_GPIO,
                                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+
+#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
+    if (uart_sleep_init_idf()) {
+        ESP_LOGI(TAG, "Adaptive sender light sleep enabled (initial window %u ms)",
+                 (unsigned)uart_sleep_default_cfg().initial_ms);
+    } else {
+        ESP_LOGW(TAG, "Adaptive sender light sleep requested but not available "
+                      "on this target; keeping DFS only");
+    }
+#endif
 
     sml_tx_batch_init(&g_sml_tx_batch);
     sml_adapter_reset();

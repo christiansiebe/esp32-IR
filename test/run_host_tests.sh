@@ -88,6 +88,16 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_tx_batch"
 
+# Adaptive sender light-sleep window (main/uart_sleep_window.h). Pure C: the
+# min-gap cap and the back-off must never let the window clip a telegram.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$here/test_uart_sleep_window.c" \
+    -o "$out/test_uart_sleep_window"
+
+"$out/test_uart_sleep_window"
+
 # Receiver-side backfill merge bookkeeping (window/presence/dedupe). Pure C.
 "$cc" -std=c11 -Wall -Wextra -O2 \
     -Wno-unused-variable -Wno-unused-const-variable \

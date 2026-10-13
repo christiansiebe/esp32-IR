@@ -25,7 +25,7 @@ if(CONFIG_ESPNOW_ROLE_RECEIVER)
     list(APPEND main_srcs "mqtt_bridge.c")
 endif()
 if(CONFIG_ESPNOW_ROLE_SENDER)
-    list(APPEND main_srcs "tx_batch.c")
+    list(APPEND main_srcs "tx_batch.c" "uart_sleep_window.c")
 endif()
 
 idf_component_register(SRCS ${main_srcs}
