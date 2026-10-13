@@ -1,6 +1,7 @@
 #include "power_history.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -86,6 +87,18 @@ bool power_history_migrate_record(power_history_record_t *record)
          * to 0; the value is not needed to read the record. */
         record->reserved = 0;
         record->format_version = POWER_HISTORY_VERSION;
+        migrated = true;
+    }
+    if (record->format_version == 2u) {
+        /* v2 -> v3: the new `reason` field did not exist yet, so every stored
+         * minute is a measured one. */
+        record->reason = POWER_HISTORY_REASON_NONE;
+        record->reserved = 0;
+        record->format_version = POWER_HISTORY_VERSION;
+        migrated = true;
+    }
+    if (record->reason >= POWER_HISTORY_REASON_COUNT) {
+        record->reason = POWER_HISTORY_REASON_UNKNOWN;
         migrated = true;
     }
     if (migrated) {
@@ -862,6 +875,110 @@ bool power_history_has_minute(int64_t interval_start_utc)
     }
     xSemaphoreGive(g_history_mutex);
     return found;
+}
+
+const char *power_history_reason_token(uint8_t reason)
+{
+    switch (reason) {
+    case POWER_HISTORY_REASON_NONE: return "none";
+    case POWER_HISTORY_REASON_UNKNOWN: return "unknown";
+    case POWER_HISTORY_REASON_OTA: return "ota";
+    case POWER_HISTORY_REASON_CRASH: return "crash";
+    case POWER_HISTORY_REASON_BROWNOUT: return "brownout";
+    case POWER_HISTORY_REASON_POWERON: return "poweron";
+    case POWER_HISTORY_REASON_RESTART: return "restart";
+    default: return "unknown";
+    }
+}
+
+uint8_t power_history_reason_from_reset(int reset_reason, bool deliberate_ota)
+{
+    if (deliberate_ota) {
+        return POWER_HISTORY_REASON_OTA;
+    }
+    switch (reset_reason) {
+    /* esp_reset_reason_t numbering. 1 = power-on, 3 = software restart,
+     * 8 = deep sleep. A power-on reset with no prior "seen" minute is handled
+     * by the caller (it is a cold boot, not a gap). */
+    case 1: return POWER_HISTORY_REASON_POWERON;
+    case 4: /* panic */
+    case 5: /* interrupt watchdog */
+    case 6: /* task watchdog */
+    case 7: /* other watchdog */
+        return POWER_HISTORY_REASON_CRASH;
+    case 9: return POWER_HISTORY_REASON_BROWNOUT;
+    case 3: /* software restart */
+    case 8: /* deep sleep */
+        return POWER_HISTORY_REASON_RESTART;
+    default: return POWER_HISTORY_REASON_UNKNOWN;
+    }
+}
+
+esp_err_t power_history_summarize_window(int64_t from_utc, int64_t to_utc,
+                                         power_history_gap_summary_t *summary)
+{
+    if (summary == NULL || to_utc <= from_utc) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(summary, 0, sizeof(*summary));
+    from_utc -= from_utc % 60;
+    to_utc -= to_utc % 60;
+    summary->total = (uint32_t)((to_utc - from_utc) / 60);
+    if (!g_history_ready) {
+        summary->missing = summary->total;
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* Page through the window in time order; both backends return the records
+     * sorted by minute, so a walk of the returned pages sees every stored
+     * minute in [from_utc, to_utc) exactly once. */
+    power_history_record_t *records =
+        calloc(POWER_HISTORY_PAGE_SIZE, sizeof(*records));
+    if (records == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    int64_t after = from_utc - 1;
+    for (;;) {
+        power_history_status_t status;
+        bool more = false;
+        size_t count = 0;
+        esp_err_t err = power_history_read_after(after, POWER_HISTORY_PAGE_SIZE,
+                                                 records, POWER_HISTORY_PAGE_SIZE,
+                                                 &count, &status, &more);
+        if (err != ESP_OK) {
+            free(records);
+            return err;
+        }
+        bool stop = false;
+        for (size_t i = 0; i < count; ++i) {
+            int64_t ts = records[i].interval_start_utc;
+            if (ts < from_utc) {
+                continue;
+            }
+            if (ts >= to_utc) {
+                stop = true;
+                break;
+            }
+            ++summary->present;
+            if (records[i].reason == POWER_HISTORY_REASON_NONE) {
+                ++summary->measured;
+            } else {
+                ++summary->expected;
+            }
+            uint8_t reason = records[i].reason;
+            if (reason < POWER_HISTORY_REASON_COUNT) {
+                ++summary->reasons[reason];
+            }
+            after = ts;
+        }
+        if (stop || !more || count == 0) {
+            break;
+        }
+    }
+    free(records);
+    if (summary->present <= summary->total) {
+        summary->missing = summary->total - summary->present;
+    }
+    return ESP_OK;
 }
 
 void power_history_aggregate_init(int64_t window_start_utc, int64_t bucket_seconds,

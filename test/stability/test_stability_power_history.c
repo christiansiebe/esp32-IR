@@ -183,7 +183,8 @@ static void test_version_matrix(void)
         power_history_record_t r;
         make_record(&r, 5, 1000, 1000, 60, versions[i]);
         bool ok = power_history_migrate_record(&r);
-        bool expect = versions[i] >= 1u && versions[i] <= 2u;
+        bool expect = versions[i] >= POWER_HISTORY_OLDEST_SUPPORTED_VERSION &&
+                      versions[i] <= POWER_HISTORY_VERSION;
         CHECK(ok == expect, "version in-range accepted, out-of-range rejected");
         if (ok) {
             CHECK(r.format_version == POWER_HISTORY_VERSION, "migrated to current");
@@ -348,18 +349,27 @@ static void test_idempotent_layout(void)
 
     power_history_record_t r;
     make_record(&r, 9, 1000, 2000, 60, 1);
-    r.reserved = 0xBEEFu;
+    r.reserved = 0xBEu;
     r.checksum = crc_record(&r);
     CHECK(power_history_migrate_record(&r), "v1 migrates");
     power_history_record_t after_first = r;
     CHECK(power_history_migrate_record(&r), "second migration accepted");
     CHECK(memcmp(&after_first, &r, sizeof(r)) == 0, "migration is idempotent");
 
+    /* A current-version (v3) record must be passed through untouched; a v2 one
+     * is upgraded in place because the new `reason` field did not exist yet. */
+    power_history_record_t v3;
+    make_record(&v3, 10, 2000, 3000, 60, POWER_HISTORY_VERSION);
+    power_history_record_t v3_before = v3;
+    CHECK(power_history_migrate_record(&v3), "v3 accepted");
+    CHECK(memcmp(&v3_before, &v3, sizeof(v3)) == 0, "v3 left byte-identical");
+
     power_history_record_t v2;
-    make_record(&v2, 10, 2000, 3000, 60, 2);
-    power_history_record_t v2_before = v2;
+    make_record(&v2, 11, 3000, 4000, 60, 2);
     CHECK(power_history_migrate_record(&v2), "v2 accepted");
-    CHECK(memcmp(&v2_before, &v2, sizeof(v2)) == 0, "v2 left byte-identical");
+    CHECK(v2.format_version == POWER_HISTORY_VERSION &&
+          v2.reason == POWER_HISTORY_REASON_NONE,
+          "v2 upgraded to a measured v3 minute");
     TEND();
 }
 

@@ -49,7 +49,8 @@ static void make_record(power_history_record_t *r, uint32_t seq, int64_t ts,
     tmp.interval_start_utc = ts;
     tmp.average_milliwatts = milliwatts;
     tmp.sample_count = samples;
-    tmp.format_version = 2; /* POWER_HISTORY_VERSION */
+    tmp.format_version = POWER_HISTORY_VERSION;
+    tmp.reason = POWER_HISTORY_REASON_NONE;
     tmp.checksum = crc_record(&tmp);
     *r = tmp;
 }
@@ -277,7 +278,7 @@ static void test_fresh_header_validity(void)
     power_history_make_fresh_header(&header);
     CHECK(power_history_header_is_valid(&header), "fresh header is valid");
     CHECK(header.magic != 0, "fresh header carries a magic");
-    CHECK(header.version == 2, "fresh header carries the current version");
+    CHECK(header.version == POWER_HISTORY_VERSION, "fresh header carries the current version");
 
     power_history_header_t zeroed;
     memset(&zeroed, 0, sizeof(zeroed));
@@ -303,16 +304,30 @@ static void test_record_migration(void)
     /* v1 record: `reserved` carries the old slot generation. */
     power_history_record_t old_rec;
     make_record_versioned(&old_rec, 7, ts, 1500, 60, 1);
-    old_rec.reserved = 0x1234u;
+    old_rec.reserved = 0x12u;
     old_rec.checksum = crc_record(&old_rec);
     power_history_record_t copy = old_rec;
     CHECK(power_history_migrate_record(&copy), "v1 record migrates");
-    CHECK(copy.format_version == 2, "migrated record carries the current version");
+    CHECK(copy.format_version == POWER_HISTORY_VERSION,
+          "migrated record carries the current version");
     CHECK(copy.reserved == 0, "v1 leftover generation is normalized to 0");
+    CHECK(copy.reason == POWER_HISTORY_REASON_NONE,
+          "v1 record becomes a measured minute");
     CHECK(copy.sequence == 7 && copy.interval_start_utc == ts &&
           copy.average_milliwatts == 1500 && copy.sample_count == 60,
           "value fields survive the migration");
     CHECK(copy.checksum == crc_record(&copy), "checksum is recomputed after migration");
+
+    /* v2 record (no reason field yet) migrates to a measured v3 minute. */
+    power_history_record_t v2_rec;
+    make_record_versioned(&v2_rec, 9, ts + 120, 1750, 60, 2);
+    v2_rec.reason = 0;
+    v2_rec.checksum = crc_record(&v2_rec);
+    power_history_record_t v2_copy = v2_rec;
+    CHECK(power_history_migrate_record(&v2_copy), "v2 record migrates");
+    CHECK(v2_copy.format_version == POWER_HISTORY_VERSION &&
+          v2_copy.reason == POWER_HISTORY_REASON_NONE,
+          "v2 -> v3 record becomes a measured minute");
 
     /* Current-version record is idempotent. */
     power_history_record_t fresh_rec;
@@ -338,7 +353,7 @@ static void test_record_migration(void)
     CHECK(!power_history_migrate_record(&zero), "sequence 0 is rejected");
 }
 
-/* 11) Aggregation keeps old-format data: a mixed v1/v2 set is fully averaged,
+/* 11) Aggregation keeps old-format data: a mixed v1/v3 set is fully averaged,
  *     not just the native records. */
 static void test_migration_in_aggregation(void)
 {
@@ -350,14 +365,14 @@ static void test_migration_in_aggregation(void)
     power_history_record_t recs[2];
 
     make_record_versioned(&recs[0], 1, window, 1000, 60, 1); /* v1, 1 W */
-    recs[0].reserved = 0xABCDu;
+    recs[0].reserved = 0xABu;
     recs[0].checksum = crc_record(&recs[0]);
-    make_record(&recs[1], 2, window + 60, 3000, 60);         /* v2, 3 W */
+    make_record(&recs[1], 2, window + 60, 3000, 60);         /* v3, 3 W */
 
     power_history_aggregate_init(window, 900, sum, count, starts, 96);
     CHECK(power_history_aggregate_core(window, 900, recs, 2, sum, count, 96) == ESP_OK,
           "core returns OK");
-    CHECK(count[0] == 2, "both the v1 and the v2 record are aggregated");
+    CHECK(count[0] == 2, "both the v1 and the v3 record are aggregated");
     CHECK(fabs(sum[0] - 4.0) < 1e-9, "v1 1 W + v2 3 W = 4 W");
 }
 

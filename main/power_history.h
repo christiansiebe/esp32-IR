@@ -28,11 +28,28 @@
 #endif
 
 /* On-disk record/header format version. v1 stored the slot generation in
- * `reserved`; v2 leaves `reserved` at 0. Bumping the version must not drop the
- * stored history: power_history_migrate_record() upgrades older records in
- * place, and only versions outside [OLDEST, VERSION] are rejected. */
-#define POWER_HISTORY_VERSION 2u
+ * `reserved`; v2 left `reserved` at 0; v3 uses `reason` to mark a minute the
+ * sender could not measure (it was offline: restart/OTA/battery). Bumping the
+ * version must not drop the stored history: power_history_migrate_record()
+ * upgrades older records in place, and only versions outside [OLDEST, VERSION]
+ * are rejected. */
+#define POWER_HISTORY_VERSION 3u
 #define POWER_HISTORY_OLDEST_SUPPORTED_VERSION 1u
+
+/* Why a minute carries no live measurement. 0 is a normal measured minute (or
+ * one merged live from the sender); anything else is a "boot marker": the
+ * sender filled an offline window with a marker record instead of a value, so
+ * the receiver can tell an expected outage apart from a real data loss. */
+enum {
+    POWER_HISTORY_REASON_NONE = 0,    /* measured (live) */
+    POWER_HISTORY_REASON_UNKNOWN = 1, /* offline, cause not determinable */
+    POWER_HISTORY_REASON_OTA = 2,     /* planned OTA reboot */
+    POWER_HISTORY_REASON_CRASH = 3,   /* panic / watchdog reset */
+    POWER_HISTORY_REASON_BROWNOUT = 4,/* battery / power loss */
+    POWER_HISTORY_REASON_POWERON = 5, /* cold power-on */
+    POWER_HISTORY_REASON_RESTART = 6, /* other deliberate restart */
+};
+#define POWER_HISTORY_REASON_COUNT 7u
 
 typedef struct __attribute__((packed)) {
     uint32_t sequence;
@@ -40,7 +57,8 @@ typedef struct __attribute__((packed)) {
     int32_t average_milliwatts;
     uint32_t sample_count;
     uint16_t format_version;
-    uint16_t reserved;
+    uint8_t reason;   /* POWER_HISTORY_REASON_*; 0 = measured */
+    uint8_t reserved;
     uint32_t checksum;
 } power_history_record_t;
 
@@ -98,6 +116,31 @@ void power_history_test_set_status(uint32_t oldest_sequence, uint32_t latest_seq
  * checksum after a migration because a migration changes the fields the CRC
  * covers. Idempotent for the current version. Exposed for host tests. */
 bool power_history_migrate_record(power_history_record_t *record);
+
+/* Machine token for a record reason ("none", "unknown", "ota", "crash",
+ * "brownout", "poweron", "restart"). Used by the CSV export and the JSON. */
+const char *power_history_reason_token(uint8_t reason);
+
+/* Map an esp_reset_reason_t value (ESP-IDF numbering) plus the "planned OTA
+ * reboot" flag to a POWER_HISTORY_REASON_*. Pure, so the boot-marker decision is
+ * host-testable without ESP-IDF. */
+uint8_t power_history_reason_from_reset(int reset_reason, bool deliberate_ota);
+
+/* Summary of a minute window for the "is anything really lost?" answer. */
+typedef struct {
+    uint32_t total;      /* minutes in [from_utc, to_utc) */
+    uint32_t present;    /* a record exists (measured or boot marker) */
+    uint32_t missing;    /* no record at all -> real loss */
+    uint32_t expected;   /* present AND reason != 0 (offline/OTA/crash/battery) */
+    uint32_t measured;   /* present AND reason == 0 */
+    uint32_t reasons[POWER_HISTORY_REASON_COUNT];
+} power_history_gap_summary_t;
+
+/* Fill *summary for the minutes in [from_utc, to_utc) (both rounded down to a
+ * whole minute). Missing minutes are the only real loss; "expected" minutes are
+ * boot markers the sender wrote for an offline window. */
+esp_err_t power_history_summarize_window(int64_t from_utc, int64_t to_utc,
+                                         power_history_gap_summary_t *summary);
 esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
                              power_history_record_t *records, size_t capacity,
                              size_t *record_count, power_history_status_t *status,

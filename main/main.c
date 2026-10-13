@@ -3358,7 +3358,7 @@ static esp_err_t power_history_csv_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Content-Disposition",
                        "attachment; filename=\"power-history.csv\"");
     err = httpd_resp_sendstr_chunk(
-        req, "sequence,interval_start_ms,average_w,sample_count\r\n");
+        req, "sequence,interval_start_ms,average_w,sample_count,reason\r\n");
     while (err == ESP_OK && record_count != 0) {
         for (size_t i = 0; err == ESP_OK && i < record_count; ++i) {
             time_t interval_start =
@@ -3374,12 +3374,13 @@ static esp_err_t power_history_csv_handler(httpd_req_t *req)
                 free(records);
                 return ESP_FAIL;
             }
-            char row[128];
-            int row_len = snprintf(row, sizeof(row), "%lu,%s,%.3f,%lu\r\n",
+            char row[160];
+            int row_len = snprintf(row, sizeof(row), "%lu,%s,%.3f,%lu,%s\r\n",
                                    (unsigned long)records[i].sequence,
                                    interval_text,
                                    (double)records[i].average_milliwatts / 1000.0,
-                                   (unsigned long)records[i].sample_count);
+                                   (unsigned long)records[i].sample_count,
+                                   power_history_reason_token(records[i].reason));
             if (row_len < 0 || (size_t)row_len >= sizeof(row)) {
                 free(records);
                 return ESP_FAIL;
