@@ -312,6 +312,26 @@ alles gut). Bei **an** geschaltetem Sleep waren sie bis zum Fix oben ein echtes
 Problem. **Faustregel:** `gap_loss == 0` und `frame/parity err == 0` ⇒ normal;
 erst `gap_loss > 0` oder steigende `parser_resyncs` sind echt.
 
+### ✅ Gap-Ursachen im Gerät selbst zugeordnet + alle CPU/Sleep-Daten sichtbar
+Damit die Frage „woher kommt der Gap?" nicht mehr geraten werden muss:
+- [x] Gap-Log **ratenbegrenzt** (10 s) und mit **Ursache** gelabelt:
+      `cause=meter` (Zähler-Pause), `sleep` (Schlaffenster), `stall` (lange Pause
+      ohne Schlaf), `buffer` (UART-RX voll). Einmalige Startzeile erklärt, dass nur
+      `gap_loss` Verlust ist.
+- [x] Zuordnung im Capture-Worker: buffer voll > sleep (Gap ≥ Fenster **und** gerade
+      aufgewacht) > meter (kurz/zwischen) > stall (lang mid-telegram, kein Sleep).
+      Zähler `gap_cause_{meter,sleep,stall,buffer}` + `gap_last_cause`.
+- [x] CPU-Takt-Historie (1-s-Sampling): Session min/avg/max MHz + Anzahl Taktschritte.
+- [x] Crash-Journal v2: CPU-Takt-Historie + Gap-Ursachen; Event-Text 32 B, damit
+      Header+Journal ≤ 250 B bleiben (243 B geprüft).
+- [x] Diag-Seite: Präzedenz-Bug behoben (die Modem-Sleep-Zeile verwarf per
+      `+ … ? … : …` den ganzen Rest der Ausgabe) und die neuen Zeilen ergänzt
+      (CPU-Historie, Gap-Quellen, Klartext-Urteil **NO DATA LOST / DATA LOSS**).
+
+**Wichtig zum Testen:** Der zuvor geflashte Build (`#156`, Commit `82718b6`) enthält
+den Mid-Telegram-Sleep-Fix **nicht**. Für den Test den **aktuellen** `sender-sleep`-
+Build flashen (Commits ab `f16cdc8`), sonst sieht man weiter die alte Symptomatik.
+
 ### Synchronisation: Empfänger holt fehlende Sender-Daten (Backfill)
 Ziel: Der Empfänger soll Minutenwerte, die er **nicht** mitbekommen hat (Funklücke,
 Sender/Receiver-Neustart, OTA), **nachträglich vom Sender** holen — der Sender hat sie
