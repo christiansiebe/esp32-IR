@@ -239,9 +239,25 @@ Image, kein separates `sender-sleep`-Artefakt mehr.
       `/api/sender-diag`-Counters + Dashboard-Text (Counters 160 B < 250 B ESP-NOW-Limit).
 - [x] CI: Syntax-Check des **aktivierten** Zweigs (`gcc -fsyntax-only` mit IDF-Stubs in
       `test/host/include`), damit der sonst ausgeblendete Pfad nicht verrottet.
-- [ ] **Am Gerät verifizieren (offen):** Light Sleep als aktiv in der Diag; `uptime_sleep_ms > 0`;
-      `parser_resyncs`/`gap_loss` bleiben **0**; Receiver bekommt weiter alle Minutenwerte;
-      ESP-NOW stabil unter Modem-Sleep. Wenn nicht: Backfill als Netz nutzen, oder Feature aus lassen.
+- [ ] **Am Gerät verifizieren (offen):** Nach dem Flashen des *neuen* Sender-Images muss
+      `adaptive sleep window: 400 ms` erscheinen (nicht `0 ms`), `light sleep enabled` +
+      `uptime_sleep_ms > 0`; `parser_resyncs`/`gap_loss` bleiben **0**; Receiver bekommt
+      weiter alle Minutenwerte. Wenn nicht: Backfill als Netz nutzen, oder Feature aus lassen.
+- [x] **🐛 Wurzel gefunden: `0 ms` trotz `build profile: sender-sleep` (BEHOBEN).**
+      Die Guard `#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP && SOC_PM_SUPPORT_LP_TIMER &&
+      (SOC_PM_SUPPORT_EXT_WAKEUP || SOC_PM_SUPPORT_GPIO_WAKEUP)` war auf dem ESP32 **immer
+      falsch**: `SOC_PM_SUPPORT_LP_TIMER` existiert im `soc_caps.h` des ESP32 **nicht**
+      (`grep -c` = 0; es gibt nur `SOC_LIGHT_SLEEP_SUPPORTED`). Damit wurde trotz gesetztem
+      Config der **Stub** kompiliert → `uart_sleep_init_idf()` = `false`,
+      `uart_sleep_window_ms()` = `0`, kein `esp_pm_configure()`. Symptom am Gerät:
+      `build profile: sender-sleep` **und** gleichzeitig `window: 0 ms` /
+      `light sleep disabled` / `slept: 0.0 s`.
+      Fix: Guard auf `SOC_LIGHT_SLEEP_SUPPORTED` reduziert (`main/uart_sleep_window.c`);
+      Host-Stub `test/host/include/soc/soc_caps.h` und CI-Syntax-Check entsprechend
+      umgestellt. **CI-Grep entwaffnet:** Er prüfte `main.c`-Text, der auch im Stub-Build
+      vorkommt; jetzt greppt er `adaptive sleep path compiled in` aus dem **echten** Zweig
+      von `uart_sleep_window.c` (im Stub nicht enthalten) → ein Sender-Image ohne Sleep-Code
+      fällt jetzt auf.
 - [ ] Optional: `sleep_min_gap_ms` über die Diag-Seite im Dashboard als eigene Zeile ausgeben
       (bisher nur im Text).
 - [x] **Ein Sender-Image mit Sleep als Default:** `CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y`

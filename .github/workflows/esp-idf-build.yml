@@ -24,8 +24,7 @@ jobs:
           # rot silently. IDF headers are stubbed, so this checks C syntax only.
           gcc -std=c11 -fsyntax-only \
             -DCONFIG_ESPNOW_SENDER_LIGHT_SLEEP=1 \
-            -DSOC_PM_SUPPORT_LP_TIMER=1 \
-            -DSOC_PM_SUPPORT_EXT_WAKEUP=1 \
+            -DSOC_LIGHT_SLEEP_SUPPORTED=1 \
             -I test/host/include \
             main/uart_sleep_window.c
 
@@ -125,11 +124,12 @@ jobs:
           # The sender ships as one image with light sleep enabled by default.
           grep -q '^CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y$' sdkconfig
           grep -q '^CONFIG_ESPNOW_ROLE_SENDER=y$' sdkconfig
-          # Guard against shipping a sender image without the sleep path: the
-          # log string is compiled in only when the feature is on, so grepping
-          # the built app proves the flashed image carries it.
+          # Guard against shipping a sender image without the sleep path. The
+          # string below lives in uart_sleep_window.c's real branch only (the
+          # stub build never emits it), so grepping the built app proves the
+          # sleep code is actually compiled in, not just the config flag.
           test -s "build/sender/esp32-IR.bin"
-          grep -a -q 'Adaptive sender light sleep enabled' "build/sender/esp32-IR.bin"
+          grep -a -q 'adaptive sleep path compiled in' "build/sender/esp32-IR.bin"
           echo "Sender image contains the adaptive light-sleep path"
 
       - name: Stage firmware and flash files

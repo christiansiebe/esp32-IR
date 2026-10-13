@@ -1,13 +1,8 @@
 /* Host-test shim: enough of soc/soc_caps.h for the light-sleep feature gate in
- * main/uart_sleep_window.c. The values are overridden on the CI command line. */
+ * main/uart_sleep_window.c. Mirrors the real ESP32 caps: light sleep is
+ * supported, SOC_PM_SUPPORT_LP_TIMER does not exist there. */
 #pragma once
 
-#ifndef SOC_PM_SUPPORT_LP_TIMER
-#define SOC_PM_SUPPORT_LP_TIMER 1
-#endif
-#ifndef SOC_PM_SUPPORT_EXT_WAKEUP
-#define SOC_PM_SUPPORT_EXT_WAKEUP 1
-#endif
-#ifndef SOC_PM_SUPPORT_GPIO_WAKEUP
-#define SOC_PM_SUPPORT_GPIO_WAKEUP 0
+#ifndef SOC_LIGHT_SLEEP_SUPPORTED
+#define SOC_LIGHT_SLEEP_SUPPORTED 1
 #endif

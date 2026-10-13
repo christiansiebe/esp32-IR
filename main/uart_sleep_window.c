@@ -1,7 +1,7 @@
 #include "uart_sleep_window.h"
 
-/* CONFIG_ESPNOW_SENDER_LIGHT_SLEEP and the SOC_PM_SUPPORT_* macros arrive via
- * the IDF-injected sdkconfig.h / soc_caps.h, exactly as in main.c. */
+/* CONFIG_ESPNOW_SENDER_LIGHT_SLEEP arrives via the IDF-injected sdkconfig.h and
+ * SOC_LIGHT_SLEEP_SUPPORTED via soc_caps.h, exactly as in main.c. */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "soc/soc_caps.h"
@@ -11,13 +11,19 @@
  * a sleep window to decide whether the window was clean or too long. */
 #define UART_SLEEP_PORT_NUM UART_NUM_1
 
-#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP && SOC_PM_SUPPORT_LP_TIMER && \
-    (SOC_PM_SUPPORT_EXT_WAKEUP || SOC_PM_SUPPORT_GPIO_WAKEUP)
+/* SOC_LIGHT_SLEEP_SUPPORTED is the capability that actually exists on the
+ * ESP32; SOC_PM_SUPPORT_LP_TIMER does NOT exist there, so a guard on it made
+ * the whole file compile to the no-op stub while the build still reported the
+ * sleep profile. */
+#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP && SOC_LIGHT_SLEEP_SUPPORTED
 
 #include "driver/uart.h"
+#include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+
+#define UART_SLEEP_TAG "uart_sleep"
 
 /* Keep the CPU awake for at least this long after the last ESP-NOW request, so
  * a history pull or OTA exchange is not starved by a sleep window. */
@@ -55,6 +61,9 @@ bool uart_sleep_init_idf(void)
     (void)esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
     esp_pm_lock_acquire(s_no_light_sleep);
+    /* Compiled in only when this real branch is active (not the stub), so the
+     * CI can grep the built image to prove the sleep path is present. */
+    ESP_LOGI(UART_SLEEP_TAG, "adaptive sleep path compiled in");
     return true;
 }
 

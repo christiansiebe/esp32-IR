@@ -125,6 +125,16 @@ Two firmware roles are built from one source tree.
   arrives mid-sleep). CI syntax-checks the enabled branch with IDF stubs in
   `test/host/include` and greps the built sender image for the sleep log string.
   Bench verification of the enabled path is still open (see `TODO.md`).
+- Gotcha (fixed): the sleep code is guarded by
+  `#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP && SOC_LIGHT_SLEEP_SUPPORTED`. It must NOT
+  be guarded on `SOC_PM_SUPPORT_LP_TIMER`/`SOC_PM_SUPPORT_EXT_WAKEUP`: the ESP32
+  `soc_caps.h` does not define `SOC_PM_SUPPORT_LP_TIMER`, so such a guard is
+  silently false and the whole file compiles to the no-op stub — the device then
+  reports `build_profile: sender-sleep` together with `window: 0 ms` and
+  `light sleep disabled`. Any capability macro used in a `#if` guard must be
+  confirmed to exist for the target. The CI grep must match a string that lives
+  in the real branch only (e.g. `adaptive sleep path compiled in`), never one in
+  `main.c`, or it passes even when the stub is compiled.
 
 ## Tests
 - Host tests: `./test/run_host_tests.sh` plus
