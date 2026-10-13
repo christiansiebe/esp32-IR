@@ -1,6 +1,25 @@
 # To-do – esp32-IR
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
+Letzter Commit: `0b9f637` (adaptiver Sender-Light-Sleep + Hold für Daten/OTA) – CI grün.
+
+## ⏰ Arbeitsweise: Chat-Heartbeat (von jedem Folge-Chat zu übernehmen!)
+Diese Session läuft in einer Sandbox mit **Inaktivitäts-Timeout (~20 Min)**. Wird der Chat
+nicht benutzt, wird die Sandbox zurückgesetzt und nicht committete Arbeit ist weg (siehe
+„Geborgene Arbeit" unten). Deshalb gibt es einen automatischen Ping:
+
+- Automation **`chat-heartbeat`** (OpenHands Cloud), Cron **`*/15 * * * *`**, Status ACTIVE.
+  Jeder Lauf weckt die Session und setzt den Idle-Timer zurück (15 Min < 20 Min ⇒ 5 Min Puffer).
+- **Was Folge-Chats tun sollen:**
+  1. Beim ersten eigenen Schritt prüfen, dass `chat-heartbeat` noch ACTIVE ist (Liste der
+     Automations). Falls nicht: neu anlegen (Cron `*/15 * * * *`, Nachricht enthält den
+     Hinweis `[heartbeat]`), damit die Sandbox nicht wieder einschläft.
+  2. Nach jedem bedeutenden Schritt **sofort committen + pushen** (kleine Commits) — der
+     Heartbeat schützt nur den Chat, nicht die Arbeit. Nichts Wichtiges in `/tmp` halten.
+  3. Bei einem eingehenden `[heartbeat] … keine Aktion noetig`-Ping: keine Aktion nötig,
+     aber offene Arbeit aus diesem TODO weiterführen, falls vorhanden.
+- Ein einzelner transienter `FAILED`-Lauf („Failed to get execution context") ist Infra,
+  nicht der Script-Fehler — nur bei mehreren Fehlschlägen eingreifen.
 
 ## Offen
 
@@ -186,6 +205,33 @@ einem Zyklus: sammeln → ~5 s → Pakete senden → (Radio nutzbar/ruhen).
 - Akzeptanz: Der Sender funkt zwischen den Zyklen nicht mehr pro Telegramm einzeln,
   verliert dabei keine Minutenwerte (Puffer groß genug für einen Zyklus) und beide
   Rollen bauen in CI.
+
+### Sender: adaptiver Light-Sleep zwischen Telegramm-Bursts (NEU, `0b9f637`)
+Ziel: „Mit 400 ms bauen und der Sender passt die Zeit automatisch an" — Sparsamkeit mit
+variablem Takt, ohne dass ein Telegramm verloren geht. Feature liegt hinter
+`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP` (**Default AUS**).
+- [x] Regler `main/uart_sleep_window.{h,c}`: Start **400 ms**; Obergrenze ist immer
+      `kürzeste beobachtete Zwischen-Telegramm-Lücke × 3/4`; **+25 ms** pro sauberem Schlaf;
+      **halbiert** sich, wenn ein Telegramm im Fenster ankam. `ESP_PM_NO_LIGHT_SLEEP`-Lock
+      hält die CPU für den ganzen Burst wach (sonst würde die APB-Clock die UART-FIFO
+      aushungern); `esp_pm_configure()` (DFS 80↔40 MHz + Light Sleep) + `WIFI_PS_MIN_MODEM`.
+- [x] **Wachbleiben bei Anforderung/OTA:** `uart_sleep_hold()` — der ESP-NOW-Empfangspfad
+      erneuert einen selbstlöschenden Hold (**5 s OTA, 2 s History-/Diag-Request**). Kein
+      Acquire/Release-Paar über viele Pfade ⇒ kein Leck.
+- [x] Tests: `test/test_uart_sleep_window.c` (21 Checks) + `test/test_uart_sleep_sim.c`
+      (14 Checks, simuliert den APB-Stop: ein Telegramm im Schlaf verliert Bytes).
+      Ergebnis: pendelt ein (1 s ⇒ ~616 ms, 2,5 s ⇒ ~1600 ms), ein plötzlicher
+      Schneller-Wechsel kostet genau **1** Telegramm, dann adaptiert er.
+- [x] Diagnose: `sleep_window_ms`, `sleep_min_gap_ms`, `sleep_hold_active` in
+      `/api/sender-diag`-Counters + Dashboard-Text (Counters 160 B < 250 B ESP-NOW-Limit).
+- [x] CI: Syntax-Check des **aktivierten** Zweigs (`gcc -fsyntax-only` mit IDF-Stubs in
+      `test/host/include`), damit der sonst ausgeblendete Pfad nicht verrottet.
+- [ ] **Am Gerät verifizieren (offen):** Light Sleep als aktiv in der Diag; `uptime_sleep_ms > 0`;
+      `parser_resyncs`/`gap_loss` bleiben **0**; Receiver bekommt weiter alle Minutenwerte;
+      ESP-NOW stabil unter Modem-Sleep. Wenn nicht: Backfill als Netz nutzen, oder Feature aus lassen.
+- [ ] Optional: `sleep_min_gap_ms` über die Diag-Seite im Dashboard als eigene Zeile ausgeben
+      (bisher nur im Text).
+- [ ] Optional: Default-ON erst nach Hardware-Nachweis; vorher AUS lassen (Sendestrecke schützen).
 
 ### Synchronisation: Empfänger holt fehlende Sender-Daten (Backfill)
 Ziel: Der Empfänger soll Minutenwerte, die er **nicht** mitbekommen hat (Funklücke,
@@ -532,6 +578,11 @@ offen (s. u.) — **vor** dem Kopieren fremden Codes entscheiden.
 
 
 ## Erledigt (in dieser Session)
+- **Adaptiver Sender-Light-Sleep + Hold für Daten/OTA** (`2c2126c`, `0b9f637`): Regler
+  `uart_sleep_window.{h,c}` (400 ms Start, Auto-Backoff, Lock hält den Burst wach),
+  `uart_sleep_hold()` gegen Sleep während History-Pull/OTA, Sim + Unit-Tests (21+14 Checks),
+  Diag-Felder `sleep_window_ms`/`sleep_min_gap_ms`/`sleep_hold_active`, CI-Syntax-Check des
+  aktivierten Zweigs. Feature Default **AUS**; Hardware-Verifikation offen (s. o.).
 - **Receiver-Build nach `2536550` wieder grün** (`fee4c43`): `console_cmd_pull()` rief
   `history_backfill_run_session()` vor der Definition auf; ohne Vorwärtsdeklaration
   scheiterte der Receiver-Build an `-Werror=implicit-function-declaration`

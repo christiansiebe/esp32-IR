@@ -3,6 +3,15 @@
 ESP-IDF firmware for the ESP32-IR project (GitHub `christiansiebe/esp32-IR`).
 Two firmware roles are built from one source tree.
 
+## Working in this sandbox (read first)
+- The chat runs in a sandbox with a ~20 min inactivity timeout. On idle it is
+  reset and any **uncommitted** work is lost. A cron automation `chat-heartbeat`
+  (`*/15 * * * *`, ACTIVE) pings the chat to keep it alive - but it protects the
+  chat, not the work.
+- Commit and push small steps promptly; never leave important work only in
+  `/tmp`. Check that `chat-heartbeat` is still ACTIVE (if not, recreate it) and
+  see the "Arbeitsweise: Chat-Heartbeat" section at the top of `TODO.md`.
+
 ## Roles
 - **Sender**: UART SML decoder (9600 baud 8N1 on UART1, RX GPIO16) and ESP-NOW
   value transport. No web server.
@@ -96,6 +105,18 @@ Two firmware roles are built from one source tree.
   checks the four PM options and the 80 MHz ceiling.
 - Wi-Fi power save stays at the default `WIFI_PS_MIN_MODEM`; `WIFI_PS_NONE`
   would burn power and power save beyond the default hurts ESP-NOW reliability.
+- Adaptive sender light sleep (`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP`, default
+  **off**): `main/uart_sleep_window.{h,c}` parks the CPU only in the quiet gap
+  between SML telegram bursts. The window starts at 400 ms, is capped below the
+  shortest inter-telegram gap seen (3/4 margin), grows 25 ms per clean sleep and
+  halves on an overrun. An `ESP_PM_NO_LIGHT_SLEEP` lock is held for the whole
+  burst so the APB clock never stops mid-telegram (there is no UART wake-up
+  source). `uart_sleep_hold()` from the ESP-NOW receive path keeps the CPU awake
+  for an in-flight history pull (2 s) or OTA (5 s). Host tests:
+  `test/test_uart_sleep_window.c` and `test/test_uart_sleep_sim.c` (the sim
+  models the lost bytes when a telegram arrives mid-sleep). CI syntax-checks the
+  enabled branch with IDF stubs in `test/host/include`. Bench verification of the
+  enabled path is still open (see `TODO.md`).
 
 ## Tests
 - Host tests: `./test/run_host_tests.sh` plus
