@@ -1,9 +1,15 @@
 # To-do – esp32-IR
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
-Letzter Commit: `8f12dc7` – CI-Run `38407371756` **grün** (Sender, sender-sleep, Receiver,
-Host-Tests). Enthält: adaptiver Sender-Light-Sleep + Hold, deliberate-restart-Fix,
-Live-Dashboard-Einheitenfix, `sender-sleep`-Bench-Artefakt.
+Letzter Commit: `6eaf553` – CI **grün** (Push-Run `38426097516`, PR-Run `38426108793`:
+Host-Tests, Sender, sender-sleep, Receiver). Enthält zusätzlich: Sender-UART-Gap-
+Attribution + CPU-Takt-Historie (`8f0e0ef`), Receiver-Build-Fix `g_last_sleep_exit_us`
+(`26d9865`), Transport-Gap-Klassifizierung Verlust vs. Reorder (`8db666c`).
+Flashbare Artefakte (nicht abgelaufen) im PR-Run `38426108793`: `sender-sml-flash-files`,
+`sender-sleep-sml-flash-files`, `receiver-sml-flash-files` (+ je `*-firmware`).
+**Wichtig:** Der zuletzt geflashte Build `#156` (`82718b6`) enthält den
+Mid-Telegram-Sleep-Fix **nicht** – für den Bench-Test den aktuellen `sender-sleep`-Build
+flashen (ab `f16cdc8`).
 
 ## ⏰ Arbeitsweise: Chat-Heartbeat (von jedem Folge-Chat zu übernehmen!)
 Diese Session läuft in einer Sandbox mit **Inaktivitäts-Timeout (~20 Min)**. Wird der Chat
