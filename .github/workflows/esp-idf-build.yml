@@ -173,27 +173,45 @@ jobs:
           # minute history. Strip the storage entry so flashing this bundle
           # keeps the data; OTA updates never touch it either.
           python3 - "$out_dir/flasher_args.json" "${{ matrix.role }}" <<'PYEOF'
-          import json, sys
+          import json, os, sys
           path, role = sys.argv[1], sys.argv[2]
           with open(path) as fh:
               args = json.load(fh)
-          for off in [k for k, v in list(args.get("flash_files", {}).items())
-                      if str(v).endswith("storage.bin")]:
-              del args["flash_files"][off]
-          args.get("flash_settings", {}).pop("storage", None)
-          args.pop("storage", None)
-          # The staged app image is renamed to <role>-sml.bin; point the flash
-          # args at it, otherwise `esptool write_flash @flasher_args.json` looks
-          # for esp32-IR.bin and the flash fails or silently keeps the old image.
+
+          # The bundle is staged flat (no bootloader/ or partition_table/ subdir),
+          # so rewrite every path to its basename; otherwise `esptool write_flash
+          # @flasher_args.json` cannot find bootloader/bootloader.bin.
+          for off, val in list(args.get("flash_files", {}).items()):
+              if str(val).endswith("storage.bin"):
+                  del args["flash_files"][off]
+                  continue
+              args["flash_files"][off] = os.path.basename(str(val))
+
           app_name = f"{role}-sml.bin"
           for off, val in args.get("flash_files", {}).items():
-              if str(val).endswith("esp32-IR.bin"):
+              if val == "esp32-IR.bin":
                   args["flash_files"][off] = app_name
-          if "app" in args:
-              args["app"]["file"] = app_name
+          args.get("flash_settings", {}).pop("storage", None)
+          args.pop("storage", None)
+          for key, fname in (("bootloader", "bootloader.bin"),
+                             ("partition-table", "partition-table.bin"),
+                             ("app", app_name)):
+              if key in args:
+                  args[key]["file"] = fname
           with open(path, "w") as fh:
               json.dump(args, fh, indent=4)
-          print(f"flasher_args.json: storage stripped, app -> {app_name}.")
+          print(f"flasher_args.json: flat paths, storage stripped, app -> {app_name}")
+
+          # flasher_args.json is metadata for idf.py, not an esptool argument
+          # file. Emit the esptool-native flash_project_args (flat paths) so
+          # `esptool write_flash @flash_project_args` works directly.
+          arg_path = os.path.join(os.path.dirname(path), "flash_project_args")
+          parts = list(args.get("write_flash_args", []))
+          for off, val in args["flash_files"].items():
+              parts += [off, val]
+          with open(arg_path, "w") as fh:
+              fh.write(" ".join(parts) + "\n")
+          print("flash_project_args written for direct esptool use")
           PYEOF
 
       - name: Upload firmware artifact
