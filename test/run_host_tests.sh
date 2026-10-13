@@ -66,6 +66,17 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_boot_policy"
 
+# JSON string escaper: the sender-diagnostics JSON interpolates free-form event
+# texts, so a stray control character must not break the payload the browser
+# parses ("bad control character in string literal").
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -I"$repo/main" \
+    "$repo/main/json_escape.c" \
+    "$here/test_json_escape.c" \
+    -o "$out/test_json_escape"
+
+"$out/test_json_escape"
+
 # Pure MQTT topic / Home Assistant discovery builders (no esp-mqtt): the string
 # layout is what breaks silently, so it is host-tested like boot_policy.c.
 "$cc" -std=c11 -Wall -Wextra -O2 \

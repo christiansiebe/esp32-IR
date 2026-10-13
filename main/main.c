@@ -28,6 +28,7 @@
 #include "boot_confirm.h"
 #include "history_backfill.h"
 #include "history_sync.h"
+#include "json_escape.h"
 #include "power_history.h"
 #include "web_console.h"
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -4298,7 +4299,7 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
 
     /* Large enough for the counters/events JSON and the full crash report
      * (counters + up to CRASH_JOURNAL_EVENT_COUNT events). */
-    char payload[1600];
+    char payload[2048];
     int len;
     if ((header.flags & ESPNOW_DIAG_SECTION_COUNTERS) &&
         response_len >= sizeof(header) + sizeof(espnow_diag_counters_t)) {
@@ -4407,11 +4408,15 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
             char text[ESPNOW_DIAG_EVENT_TEXT_LEN + 1];
             memcpy(text, event.text, ESPNOW_DIAG_EVENT_TEXT_LEN);
             text[ESPNOW_DIAG_EVENT_TEXT_LEN] = '\0';
+            char text_json[ESPNOW_DIAG_EVENT_TEXT_LEN * 6 + 1];
+            if (json_escape(text, text_json, sizeof(text_json)) >= sizeof(text_json)) {
+                strlcpy(text_json, "[unprintable event]", sizeof(text_json));
+            }
             int written = snprintf(payload + len, sizeof(payload) - len,
                                    "%s{\"timestamp_ms\":%llu,\"level\":%u,\"text\":\"%s\"}",
                                    i == 0 ? "" : ",",
                                    (unsigned long long)event.timestamp_ms,
-                                   (unsigned int)event.level, text);
+                                   (unsigned int)event.level, text_json);
             if (written < 0 || (size_t)(len + written) >= sizeof(payload)) {
                 return ESP_FAIL;
             }
@@ -4433,12 +4438,16 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
             char text[CRASH_JOURNAL_EVENT_TEXT_LEN + 1];
             memcpy(text, j->events[i].text, CRASH_JOURNAL_EVENT_TEXT_LEN);
             text[CRASH_JOURNAL_EVENT_TEXT_LEN] = '\0';
+            char text_json[CRASH_JOURNAL_EVENT_TEXT_LEN * 6 + 1];
+            if (json_escape(text, text_json, sizeof(text_json)) >= sizeof(text_json)) {
+                strlcpy(text_json, "[unprintable event]", sizeof(text_json));
+            }
             int written = snprintf(events_json + events_len,
                                    sizeof(events_json) - (size_t)events_len,
                                    "%s{\"timestamp_ms\":%llu,\"level\":%u,\"text\":\"%s\"}",
                                    i == 0 ? "" : ",",
                                    (unsigned long long)j->events[i].timestamp_ms,
-                                   (unsigned int)j->events[i].level, text);
+                                   (unsigned int)j->events[i].level, text_json);
             if (written < 0 ||
                 (size_t)(events_len + written) >= sizeof(events_json)) {
                 events_len = 0;

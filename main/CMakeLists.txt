@@ -20,7 +20,8 @@ set(main_requires
 set(main_srcs "main.c" "power_history.c" "web_console.c"
               "boot_policy.c" "boot_confirm.c"
               "crash_journal.c" "crash_journal_store.c"
-              "mqtt_topics.c" "history_backfill.c" "history_sync.c")
+              "mqtt_topics.c" "history_backfill.c" "history_sync.c"
+              "json_escape.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
     list(APPEND main_srcs "mqtt_bridge.c")
 endif()
