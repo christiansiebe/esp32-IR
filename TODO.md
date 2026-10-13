@@ -332,6 +332,26 @@ Damit die Frage „woher kommt der Gap?" nicht mehr geraten werden muss:
 den Mid-Telegram-Sleep-Fix **nicht**. Für den Test den **aktuellen** `sender-sleep`-
 Build flashen (Commits ab `f16cdc8`), sonst sieht man weiter die alte Symptomatik.
 
+### ✅ Empfänger: „Transportlücken" sauber klassifiziert (Verlust vs. Reorder)
+Wichtig: Diese Gaps gibt es **auch ohne CPU-Sleep** — sie stammen **nicht** vom Sleep.
+Die Sequenz wird im Sender **pro Paket** vergeben (`sml_tx_batch_push`), ein noch
+nicht gesendetes Paket kann per `sml_tx_batch_requeue_front` mit seiner **alten**
+Sequenz erneut vorne eingereiht werden (Retry). Daher:
+- [x] **Rückwärts/Duplikat** (`sequence <= last`, Retry/Reorder) = **rückgewonnen**,
+      **kein** Verlust, **kein** Reset der 60-s-Sammlung mehr.
+- [x] **Vorwärtssprung** (`sequence > last+1`) = echtes über die Luft verlorenes
+      Broadcast-Paket (kein ACK); nur dann wird die 60-s-Leistungssammlung
+      zurückgesetzt. Fehlende Daten kommen weiterhin per Backfill nach.
+- [x] Zähler getrennt: `transport_losses` (Verlust) vs. `transport_reorders`
+      (rückgewonnen). `/api/sml` + `/api/dashboard` liefern beide; die Meter-Seite
+      zeigt „Funkpakete verloren: N (rückgewonnen/Reorder: M)".
+- [x] Wert-Ring von 64 → 256 vergrößert. Der Überlauf (`overflow=true`) ist ein
+      **reines Anzeige-Artefakt** (Browser-Cursor älter als der RAM-Ring), **kein**
+      Messverlust — die Meldung heißt jetzt entsprechend „DISPLAY GAP …" statt
+      „VALUE GAP DETECTED".
+- [x] 5-s-Zyklus (`SML_TX_CYCLE_MS 5000`, `SML_TX_BURST 32`) ist der Auslöser der
+      Burst-Verluste (~0,65 %), aber **nicht** die Ursache der Zählung selbst.
+
 ### Synchronisation: Empfänger holt fehlende Sender-Daten (Backfill)
 Ziel: Der Empfänger soll Minutenwerte, die er **nicht** mitbekommen hat (Funklücke,
 Sender/Receiver-Neustart, OTA), **nachträglich vom Sender** holen — der Sender hat sie
