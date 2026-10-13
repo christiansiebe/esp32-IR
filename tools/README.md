@@ -48,3 +48,15 @@ python3 test/test_ha_stats.py
 python3 test/test_ws_min.py
 python3 test/test_ws_client.py   # runs ws_min.Client against a real local server
 ```
+
+## Analysing a power-history CSV
+
+`analyze_power_csv.py` checks a downloaded `/api/power-history.csv` for missing
+minutes (the "no data loss" requirement). It reports time gaps (real loss),
+sequence anomalies (forward loss vs. backward reorder), duplicate minutes and
+minutes with an unusually low `sample_count`:
+
+```bash
+python3 tools/analyze_power_csv.py power-history.csv
+```
+
