@@ -284,25 +284,33 @@ zusätzlich weitere Zeilen.)
       Fehlerfälle (`not confirmed`, Timeout) bleiben vollständig. Damit bleibt der Ring
       für echte Ereignisse frei. (`main/main.c`, `espnow_diag_worker`.)
 
-### ℹ️ Sender: mehr `mid-telegram`-Gaps — kein Regressionsbug
-Symptom: `rx gap … mid-telegram` tritt häufig auf (~1 pro Sekunde, 50–90 ms), dazu
-~830 ms „between telegrams".
-Bewertung: Das ist **erwartetes Verhalten des IR-Lesekopfs**, kein Fehler und keine Regression
-durch die letzten Commits:
-- `mid-telegram` heißt: die Stille liegt **innerhalb** eines noch laufenden Telegramms
-  (`!sml_adapter_awaiting_telegram()`). Das SML-Zählwerk sendet kurze Pausen mitten im
-  Telegramm; das ist normal.
-- Ein solcher Gap zählt **nicht** als Verlust. `gap_loss` steigt nur, wenn anschließend die
-  CRC fehlschlägt (`gap cost bytes (crc failed)`, `main.c:1963`). Bei dir: `frame err 0`,
-  `parity err 0`, `sml ok 50/0` → nichts ging verloren.
-- `UART_GAP_THRESHOLD_MS = 50` (seit `b19239b`/`740ad0f`/`f19fc51`, 2026-10-11) ist so
-  eingestellt, dass die normalen IR-Pausen als „Gap" protokolliert werden, um Verluste
-  überhaupt sichtbar zu machen. Die **Zählung** `gap_count` läuft live mit, es gab nur zuvor
-  kein detailliertes Live-Event → der Eindruck „jetzt mehr Gaps" ist eine Sichtbarkeits-,
-  keine Mengenänderung.
-- Die Sleep-Hooks sind bei Default (Light-Sleep AUS) **No-ops**, erzeugen also keine Gaps.
-- **Faustregel:** `gap_loss == 0` und `frame/parity err == 0` ⇒ nur normale IR-Pausen.
-  Erst `gap_loss > 0` oder steigende `parser_resyncs` sind ein echtes Problem.
+### ⚠️ Sender-Sleep: CPU schlief MITTEN im Telegramm (BEHOBEN)
+Symptom: Mit geflashtem **sender-sleep**-Build häufige `rx gap … mid-telegram`
+(~50–90 ms, ~1/s) und die Sorge, ob `espnow sleep` sich falsch verhält.
+Ursache (echter Bug, kein Messartefakt): Der UART-Read-Timeout ist **50 ms**, das
+SML-Zählwerk pausiert aber **innerhalb** eines Telegramms ebenfalls ~50–90 ms. Der
+Idle-Zweig feuerte also mitten im Telegramm, löschte „Burst aktiv" und schlief
+~100 ms → der Telegramm-Rest wurde abgeschnitten (Checksum-Fehler / Datenverlust).
+Zusätzlich wurde das Schlaffenster aus genau diesen ~80 ms Pausen berechnet
+(auf `min_ms = 100 ms` gepinnt) und `uart_sleep_note_short_sleep()` (Backoff bei
+zu langem Schlaf) war in der Firmware **nie verdrahtet**.
+- [x] Nur schlafen bzw. das Fenster aktualisieren, wenn `sml_adapter_awaiting_telegram()`
+      „zwischen Telegrammen" meldet (`main.c`).
+- [x] `uart_sleep_note_byte(..., awaiting)`: nur echte Telegramm-Pausen verkleinern
+      das Fenster (mid-telegram-Gaps werden ignoriert).
+- [x] Nach dem Fenster RX-Puffer prüfen: leer ⇒ wachsen (`note_clean`), Bytes vorhanden
+      ⇒ Backoff (`note_short_sleep`) — jetzt tatsächlich aufgerufen.
+- [x] Host-Test `test_mid_telegram_gap_does_not_shrink_the_window` (24 Checks) +
+      Stub `driver/uart.h` für den Sleep-Syntax-Check.
+
+### ℹ️ Sender: viele `mid-telegram`-Gaps — Einordnung
+Bewertung: `mid-telegram` heißt, die Stille liegt **innerhalb** eines laufenden
+Telegramms (`!sml_adapter_awaiting_telegram()`). Bei **aus** geschaltetem Sleep sind
+das normale Pausen des IR-Lesekopfs (kein Verlust: `gap_loss` steigt nur bei
+CRC-Fehler, `main.c:1963`; bei `frame/parity err 0` und `sml ok/fail` ohne Fehler ist
+alles gut). Bei **an** geschaltetem Sleep waren sie bis zum Fix oben ein echtes
+Problem. **Faustregel:** `gap_loss == 0` und `frame/parity err == 0` ⇒ normal;
+erst `gap_loss > 0` oder steigende `parser_resyncs` sind echt.
 
 ### Synchronisation: Empfänger holt fehlende Sender-Daten (Backfill)
 Ziel: Der Empfänger soll Minutenwerte, die er **nicht** mitbekommen hat (Funklücke,
