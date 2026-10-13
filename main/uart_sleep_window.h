@@ -151,3 +151,21 @@ bool uart_sleep_init_idf(void);
 void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t received);
 void uart_sleep_note_uart_idle(void);
 void uart_sleep_maybe_sleep_idf(void);
+
+/* Keep the CPU awake for at least `hold_ms`. Called from the ESP-NOW receive
+ * path so an in-flight history pull or OTA keeps the sender responsive: every
+ * packet refreshes the hold, and it self-clears once traffic stops (no
+ * acquire/release pairing to leak). */
+void uart_sleep_hold(uint32_t hold_ms);
+
+/* True while a hold set with uart_sleep_hold() is still active. Pure so it is
+ * host-tested. */
+static inline bool uart_sleep_hold_active(int64_t hold_until_us, int64_t now_us)
+{
+    return hold_until_us != 0 && now_us < hold_until_us;
+}
+
+/* Diagnostics for the on-demand sender counters page (no-ops when disabled). */
+uint32_t uart_sleep_window_ms(void);
+uint32_t uart_sleep_min_gap_ms(void);
+bool uart_sleep_hold_is_active(void);

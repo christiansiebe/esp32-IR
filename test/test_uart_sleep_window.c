@@ -102,6 +102,16 @@ static void test_burst_blocks_sleep(void)
     CHECK(uart_sleep_should_request(&s), "sleeps again once the burst is idle");
 }
 
+static void test_request_hold_blocks_sleep(void)
+{
+    /* An on-demand request (history pull / OTA) sets a hold that keeps the CPU
+     * awake until it expires. */
+    CHECK(uart_sleep_hold_active(1000000, 500000), "hold active before expiry");
+    CHECK(!uart_sleep_hold_active(1000000, 1000000), "hold inactive at expiry");
+    CHECK(!uart_sleep_hold_active(1000000, 1500000), "hold inactive after expiry");
+    CHECK(!uart_sleep_hold_active(0, 0), "no hold set means inactive");
+}
+
 int main(void)
 {
     test_starts_at_initial_and_does_not_sleep_idle();
@@ -109,6 +119,7 @@ int main(void)
     test_clean_sleep_grows_but_respects_the_cap();
     test_short_sleep_halves_the_window();
     test_burst_blocks_sleep();
+    test_request_hold_blocks_sleep();
 
     printf("uart sleep window: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

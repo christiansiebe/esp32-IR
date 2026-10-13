@@ -1114,6 +1114,9 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .storage_write_errors = storage.write_errors,
         .storage_queue_drops = storage.queue_drops,
         .uptime_sleep_ms = (uint32_t)g_sleep_accumulated_ms,
+        .sleep_window_ms = uart_sleep_window_ms(),
+        .sleep_min_gap_ms = uart_sleep_min_gap_ms(),
+        .sleep_hold_active = uart_sleep_hold_is_active() ? 1 : 0,
     };
     *frame_len = sizeof(*header) + sizeof(*counters);
 }
@@ -1473,6 +1476,8 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             ESP_LOGE(TAG, "Sender OTA receiver is unavailable or packet is oversized");
             return;
         }
+        /* OTA traffic must not be interrupted by a light-sleep window. */
+        uart_sleep_hold(5000);
         espnow_ota_rx_item_t item = {
             .length = (uint16_t)data_len,
         };
@@ -1488,6 +1493,9 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             ESP_LOGE(TAG, "Sender diagnostic receiver is unavailable");
             return;
         }
+        /* A history pull is an on-demand data request: keep the CPU awake while
+         * the receiver is paginating, so the next page is not delayed by sleep. */
+        uart_sleep_hold(2000);
         espnow_diag_header_t diag_header;
         memcpy(&diag_header, data, sizeof(diag_header));
         espnow_diag_request_item_t request = {
@@ -4112,6 +4120,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"storage_capacity\":%lu,\"storage_write_errors\":%lu,"
                        "\"storage_queue_drops\":%lu,"
                        "\"sleep_state\":%u,\"uptime_sleep_ms\":%lu,"
+                       "\"sleep_window_ms\":%lu,\"sleep_min_gap_ms\":%lu,"
+                       "\"sleep_hold_active\":%u,"
                        "\"cpu_freq_mhz\":%u,\"cpu_freq_max_mhz\":%u,"
                        "\"cpu_freq_min_mhz\":%u,\"light_sleep_enabled\":%u,"
                        "\"wifi_ps_mode\":%u}",
@@ -4149,6 +4159,9 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.storage_queue_drops,
                        (unsigned int)counters.sleep_state,
                        (unsigned long)counters.uptime_sleep_ms,
+                       (unsigned long)counters.sleep_window_ms,
+                       (unsigned long)counters.sleep_min_gap_ms,
+                       (unsigned int)counters.sleep_hold_active,
                        (unsigned int)counters.cpu_freq_mhz,
                        (unsigned int)counters.cpu_freq_max_mhz,
                        (unsigned int)counters.cpu_freq_min_mhz,
@@ -4306,6 +4319,8 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "+'cpu: '+d.cpu_freq_mhz+' MHz now (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)'+nl"
         "+'sleep: '+(d.sleep_state?'in light sleep':(d.light_sleep_enabled?'awake, light sleep enabled':'awake, light sleep disabled'))"
         "+'  slept this session: '+(d.uptime_sleep_ms/1000).toFixed(1)+' s'+nl"
+        "+'adaptive sleep window: '+(d.sleep_window_ms||0)+' ms (shortest gap seen: '+(d.sleep_min_gap_ms||0)+' ms)'"
+        "+(d.sleep_hold_active?'  HELD AWAKE (data / OTA request active)':'')+nl"
         "+'modem sleep (Wi-Fi PS): '+[0,1,2].indexOf(d.wifi_ps_mode)>=0?['off (WIFI_PS_NONE)','min (WIFI_PS_MIN_MODEM)','max (WIFI_PS_MAX_MODEM)'][d.wifi_ps_mode]:('unknown ('+d.wifi_ps_mode+')')+nl"
         "+'VERDICT: '+verdict;}"
         "async function loadCrash(){"

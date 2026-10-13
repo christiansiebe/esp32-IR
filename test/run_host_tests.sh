@@ -98,6 +98,18 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_uart_sleep_window"
 
+# Timing simulation: the adaptive controller driven against a synthetic SML
+# read head, modelling the APB-clock stop on light sleep (a telegram that
+# arrives mid-sleep loses its leading bytes). Proves settling, the longer-sleep
+# optimum, and that a sudden speed-up costs only a bounded number of telegrams.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$here/test_uart_sleep_sim.c" \
+    -o "$out/test_uart_sleep_sim"
+
+"$out/test_uart_sleep_sim"
+
 # Receiver-side backfill merge bookkeeping (window/presence/dedupe). Pure C.
 "$cc" -std=c11 -Wall -Wextra -O2 \
     -Wno-unused-variable -Wno-unused-const-variable \

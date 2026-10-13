@@ -12,11 +12,17 @@
     (SOC_PM_SUPPORT_EXT_WAKEUP || SOC_PM_SUPPORT_GPIO_WAKEUP)
 
 #include "esp_pm.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
+
+/* Keep the CPU awake for at least this long after the last ESP-NOW request, so
+ * a history pull or OTA exchange is not starved by a sleep window. */
+#define UART_SLEEP_HOLD_MS 1000u
 
 static uart_sleep_ctrl_t s_ctrl;
 static bool s_locked = true; /* NO_LIGHT_SLEEP is held by default */
 static esp_pm_lock_handle_t s_no_light_sleep;
+static volatile int64_t s_hold_until_us;
 
 bool uart_sleep_init_idf(void)
 {
@@ -79,9 +85,23 @@ void uart_sleep_note_uart_idle(void)
     uart_sleep_burst_idle(&s_ctrl);
 }
 
+void uart_sleep_hold(uint32_t hold_ms)
+{
+    int64_t now = esp_timer_get_time();
+    int64_t until = now + (int64_t)hold_ms * 1000;
+    /* Refresh monotonically: a burst of requests extends the hold. */
+    if (until > s_hold_until_us) {
+        s_hold_until_us = until;
+    }
+}
+
 void uart_sleep_maybe_sleep_idf(void)
 {
     if (!uart_sleep_should_request(&s_ctrl)) {
+        return;
+    }
+    /* Never sleep while an ESP-NOW request (history pull / OTA) is in flight. */
+    if (uart_sleep_hold_active(s_hold_until_us, esp_timer_get_time())) {
         return;
     }
     uint32_t window_ms = s_ctrl.window_ms;
@@ -100,6 +120,13 @@ void uart_sleep_maybe_sleep_idf(void)
     uart_sleep_note_clean(&s_ctrl);
 }
 
+uint32_t uart_sleep_window_ms(void) { return s_ctrl.window_ms; }
+uint32_t uart_sleep_min_gap_ms(void) { return s_ctrl.last_min_gap_ms; }
+bool uart_sleep_hold_is_active(void)
+{
+    return uart_sleep_hold_active(s_hold_until_us, esp_timer_get_time());
+}
+
 #else /* feature disabled or unsupported target: the glue is a no-op */
 
 bool uart_sleep_init_idf(void) { return false; }
@@ -110,6 +137,10 @@ void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t 
     (void)received;
 }
 void uart_sleep_note_uart_idle(void) {}
+void uart_sleep_hold(uint32_t hold_ms) { (void)hold_ms; }
 void uart_sleep_maybe_sleep_idf(void) {}
+uint32_t uart_sleep_window_ms(void) { return 0; }
+uint32_t uart_sleep_min_gap_ms(void) { return 0; }
+bool uart_sleep_hold_is_active(void) { return false; }
 
 #endif

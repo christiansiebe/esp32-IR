@@ -112,6 +112,11 @@ typedef struct __attribute__((packed)) {
     uint32_t storage_write_errors;
     uint32_t storage_queue_drops;
     uint32_t uptime_sleep_ms;   /* time spent in light sleep this session */
+    /* Adaptive sender light sleep (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP). */
+    uint32_t sleep_window_ms;   /* current adaptive sleep window */
+    uint32_t sleep_min_gap_ms;  /* shortest inter-telegram quiet observed */
+    uint8_t sleep_hold_active;  /* 1 = awake due to a history pull / OTA */
+    uint8_t reserved3[3];
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {
