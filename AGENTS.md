@@ -4,13 +4,17 @@ ESP-IDF firmware for the ESP32-IR project (GitHub `christiansiebe/esp32-IR`).
 Two firmware roles are built from one source tree.
 
 ## Working in this sandbox (read first)
+- **Read `TODO.md` first.** It holds the current work state (open + done) and,
+  at the top, the "Arbeitsweise: Chat-Heartbeat" section with the rules below.
+  Every follow-up chat must pick up the open items from it.
 - The chat runs in a sandbox with a ~20 min inactivity timeout. On idle it is
   reset and any **uncommitted** work is lost. A cron automation `chat-heartbeat`
   (`*/15 * * * *`, ACTIVE) pings the chat to keep it alive - but it protects the
   chat, not the work.
+- At the start of a chat, check that `chat-heartbeat` is still ACTIVE (recreate
+  it if not), then continue the open `TODO.md` items.
 - Commit and push small steps promptly; never leave important work only in
-  `/tmp`. Check that `chat-heartbeat` is still ACTIVE (if not, recreate it) and
-  see the "Arbeitsweise: Chat-Heartbeat" section at the top of `TODO.md`.
+  `/tmp`.
 
 ## Roles
 - **Sender**: UART SML decoder (9600 baud 8N1 on UART1, RX GPIO16) and ESP-NOW
