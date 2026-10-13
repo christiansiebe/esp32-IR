@@ -1,11 +1,12 @@
 # To-do – esp32-IR
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
-Letzter Commit: `6eaf553` – CI **grün** (Push-Run `38426097516`, PR-Run `38426108793`:
+Letzter Commit: `c074b61` – CI **grün** (Push-Run `38461468009`, PR-Run `38461473380`:
 Host-Tests, Sender, sender-sleep, Receiver). Enthält zusätzlich: Sender-UART-Gap-
 Attribution + CPU-Takt-Historie (`8f0e0ef`), Receiver-Build-Fix `g_last_sleep_exit_us`
-(`26d9865`), Transport-Gap-Klassifizierung Verlust vs. Reorder (`8db666c`).
-Flashbare Artefakte (nicht abgelaufen) im PR-Run `38426108793`: `sender-sml-flash-files`,
+(`26d9865`), Transport-Gap-Klassifizierung Verlust vs. Reorder (`8db666c`),
+`Cache-Control: no-store` fuer alle HTML-Seiten (`c074b61`).
+Flashbare Artefakte (nicht abgelaufen) im PR-Run `38461473380`: `sender-sml-flash-files`,
 `sender-sleep-sml-flash-files`, `receiver-sml-flash-files` (+ je `*-firmware`).
 **Wichtig:** Der zuletzt geflashte Build `#156` (`82718b6`) enthält den
 Mid-Telegram-Sleep-Fix **nicht** – für den Bench-Test den aktuellen `sender-sleep`-Build
