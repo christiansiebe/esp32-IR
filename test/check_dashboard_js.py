@@ -36,13 +36,20 @@ const ctxStub = new Proxy({}, {
   set: (t, p, v) => { t[p] = v; return true; },
 });
 function makeEl() {
-  return {
+  const el = {
     style: {}, textContent: '', value: '', width: 0, height: 0,
     offsetWidth: 40, offsetHeight: 18,
     addEventListener: () => {}, appendChild: () => {},
     getContext: () => ctxStub,
     getBoundingClientRect: () => ({ width: 800, height: 260, left: 0, top: 0 }),
   };
+  // innerHTML/textContent both feed the assertions: the tooltip sets innerHTML
+  // (colored per-series rows), plain text elements set textContent.
+  Object.defineProperty(el, 'innerHTML', {
+    get() { return this.__html || ''; },
+    set(v) { this.__html = String(v); },
+  });
+  return el;
 }
 const els = {};
 const documentStub = {
@@ -77,8 +84,8 @@ try { sandbox.__t.showTip({ clientX: target.plotX + 1, clientY: 100 }); }
 catch (e) { console.error('FAIL showTip: ' + e.message); process.exit(1); }
 const tip = els['history-tip'];
 if (tip.style.display !== 'block') { console.error('FAIL tip not shown'); process.exit(1); }
-if (!tip.textContent.includes('120') || !/W/.test(tip.textContent)) {
-  console.error('FAIL tip text: ' + tip.textContent); process.exit(1);
+if (!/120/.test(tip.innerHTML) || !/W/.test(tip.innerHTML)) {
+  console.error('FAIL tip text: ' + tip.innerHTML); process.exit(1);
 }
 try { sandbox.__t.clearTip(); }
 catch (e) { console.error('FAIL clearTip: ' + e.message); process.exit(1); }
@@ -137,6 +144,40 @@ for (const e of cmpVisible) {
   }
 }
 console.log('dashboard compare alignment ok');
+
+// Hovering a compare view must show BOTH series' values (not just the nearest
+// bar), plus the difference. Regression guard for the two-value tooltip.
+const t2 = [{ timestamp: cstart + 8 * 3600000, watts: 300 }];
+const y2 = [{ timestamp: cday + 8 * 3600000, watts: 500 }];
+sandbox.__t.setCompare(new Date(cday).toISOString().slice(0, 10));
+sandbox.__t.drawHistory(t2, 24, cstart, y2);
+const cmpBar = sandbox.__t.getEntries().find(e => e.value === 500);
+try { sandbox.__t.showTip({ clientX: cmpBar.plotX + 1, clientY: 100 }); }
+catch (e) { console.error('FAIL showTip compare: ' + e.message); process.exit(1); }
+const chtml = els['history-tip'].innerHTML;
+if (!/300/.test(chtml) || !/500/.test(chtml)) {
+  console.error('FAIL compare tip missing a series: ' + chtml); process.exit(1);
+}
+if (!/Δ/.test(chtml)) {
+  console.error('FAIL compare tip missing delta: ' + chtml); process.exit(1);
+}
+console.log('dashboard compare tooltip ok');
+
+// Live compare passes an explicit shift (not derived from a compare-day
+// string); yesterday's rows must still land inside today's window.
+const yLive = [{ timestamp: cstart - 86400000 + 8 * 3600000, watts: 700 }];
+sandbox.__t.setCompare(null);
+sandbox.__t.drawHistory(t2, 24, cstart, yLive, 86400000);
+const liveCmp = sandbox.__t.getEntries().filter(e => e.value === 700);
+if (liveCmp.length !== 1) {
+  console.error('FAIL live compare shift dropped rows: ' + JSON.stringify(sandbox.__t.getEntries()));
+  process.exit(1);
+}
+if (liveCmp[0].plotX < 42 - 0.5 || liveCmp[0].plotX > 800 - 12 + 0.5) {
+  console.error('FAIL live compare bar outside plot area: ' + liveCmp[0].plotX);
+  process.exit(1);
+}
+console.log('dashboard live compare shift ok');
 process.exit(0);
 """
 

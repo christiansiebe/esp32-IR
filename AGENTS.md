@@ -76,8 +76,16 @@ Two firmware roles are built from one source tree.
   **variable**: `CONFIG_PM_ENABLE=y` + `CONFIG_PM_DFS_INIT_AUTO=y` scale it down
   to the 40 MHz XTAL when idle, and `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y` adds
   automatic light sleep between cycles (with `CONFIG_PM_SLP_IRAM_OPT`,
-  `CONFIG_PM_RTOS_IDLE_OPT`, `CONFIG_ESP_WIFI_SLP_IRAM_OPT` to cut wake cost).
-  The 80 MHz ceiling is kept for the ESP-NOW send burst.
+  `CONFIG_PM_RTOS_IDLE_OPT`, `CONFIG_ESP_WIFI_SLP_IRAM_OPT` to cut wake cost,
+  and `CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y` so the firmware can report whether it
+  actually slept). The 80 MHz ceiling is kept for the ESP-NOW send burst.
+- The sender reports its live clock and sleep state in the `counters`
+  diagnostic section: `cpu_freq_mhz` (from `esp_clk_cpu_freq()`, i.e. the DFS
+  clock as it is right now), `cpu_freq_max_mhz`/`cpu_freq_min_mhz` (the
+  configured DFS range), `light_sleep_enabled`, `sleep_state` (0 awake /
+  1 light sleep) and `uptime_sleep_ms` (accumulated light-sleep time). The
+  receiver's own dashboard shows the same CPU clock and sleep state in the
+  meter status line, so both devices' power saving is visible.
 - Trade-off accepted deliberately: on the ESP32 the Wi-Fi driver holds an
   `ESP_PM_APB_FREQ_MAX` lock while interfaces are up, and light sleep can make
   the receiver miss the sender's connectionless ESP-NOW broadcasts. That is
@@ -182,6 +190,11 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   differ: the receiver records received telegrams, the sender records what it
   decodes off UART (`record_sender_power`). Do not move that init into a role
   branch without keeping the other role covered.
+- The store dedupes by minute: `write_records()` skips a record whose
+  `interval_start_utc` is already on disk (`minute_is_stored()`, a binary search
+  over the time-ordered ring), so the live recorder and the backfill sync cannot
+  create the same minute twice. `power_history_has_minute()` exposes the same
+  check to the sync's per-minute dedupe.
 - This is why managed components are declared globally in `main/idf_component.yml`
   (mqtt + cjson): the component manager resolves them for both roles, but
   `mqtt_bridge.c` is only compiled for the receiver and `tx_batch.c` only for
@@ -233,6 +246,16 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 - Manual/tools: `POST /api/history-pull` (X-OTA-Key) triggers a session,
   `GET /api/history-pull` shows `merged_total`/`pages_total`/`errors`, and the
   receiver console command `pull` runs one synchronously ("N record(s) merged").
+- Sync diagnostics: `GET /api/history-pull` also reports `sessions` (how often a
+  session ran), `last_merged`/`last_pages`/`last_duration_ms`/`last_round_ok`
+  (what the most recent session achieved and how long it took) and
+  `lag_seconds` (how far the resume `cursor_utc` trails the sender's newest
+  minute, i.e. the current backfill lag). The receiver dashboard shows this in a
+  "Sender-Abgleich" line under the history chart, so a stalled or failing sync
+  is visible without reading the console. A healthy install shows
+  `caught_up=true`, a small `lag_seconds` and `errors` staying flat; a growing
+  lag with `last_round_ok=false` points at the ESP-NOW link or a missing sender
+  MAC, while `errors` climbing points at transport timeouts.
 - Never overwrite the receiver's own live values: only minutes that are still
   absent in the window are requested and merged, and the store renumbers pulled
   records, so the two independent sequence counters never have to line up.

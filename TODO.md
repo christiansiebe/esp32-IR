@@ -396,6 +396,41 @@ läuft 2026-11-11 ab). `origin`-URL trägt den Write-Token, `git push` funktioni
 - [ ] `current_sample_count`-Label praezisieren (aktuell: 15-min-Ringpuffer, nicht Samples im aktuellen 60-s-Bucket).
 - [ ] `resize`-Handler startet zusaetzliche 60-s-Schleifen (`updateHistory`) -> Mehrfach-Timer vermeiden.
 
+### Diagnose-Ausbau (CPU-Takt, Sleep, Speicher, Sync) + Vergleich in allen Ansichten
+Ziel: Die Energie-/Sync-Diagnose fuer **beide** Rollen sichtbar machen und den
+Vortag-Vergleich aus der Tagesansicht heraus auf **alle** Zeitraeume (bis 24 h und
+darueber) ausdehnen.
+
+- [x] **Light-Sleep meldbar machen:** `CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y` in
+      `sdkconfig.defaults`, `esp_pm` in `main/CMakeLists.txt`; `sleep_enter_callback()`/
+      `sleep_exit_callback()` setzen `sleep_state` und summieren `uptime_sleep_ms`.
+      Ohne diese Callbacks wurden die Felder im Diag-Struct nie befuellt.
+- [x] **Sender-Diag (`section=counters`):** `cpu_freq_mhz` (live `esp_clk_cpu_freq()`),
+      `cpu_freq_max_mhz`/`cpu_freq_min_mhz` (DFS-Bereich), `light_sleep_enabled`,
+      `sleep_state`, `uptime_sleep_ms`, plus Speicher (`storage_ready`, `storage_records`,
+      `storage_capacity`, `storage_write_errors`, `storage_queue_drops`).
+- [x] **Empfaenger-Diag:** eigenes Dashboard-JSON liefert CPU-Takt + Sleep; `GET /api/history-pull`
+      liefert zusaetzlich `sessions`, `last_merged`, `last_pages`, `last_duration_ms`,
+      `last_round_ok`, `lag_seconds` (Rueckstand des Resume-Cursors hinter der neuesten
+      Sender-Minute).
+- [x] **Dashboard-Zeilen:** Meterzeile zeigt `CPU: … MHz (DFS a-b MHz) · Sleep: …`;
+      neue Zeile **„Sender-Abgleich"** unter dem Diagramm (Rueckstand, Sitzungen, zuletzt
+      uebernommen, Dauer, Fehler, Sender-Speicherbereich, Cursor).
+- [x] **Tooltip zeigt beide Werte:** Im Vergleichsmodus findet `showTip()` pro Serie den
+      naechsten Balken und listet **Aktuell und Vortag** mit Farbmarkierung + einer
+      Δ-Zeile (Differenz zum Vortag). `plot()` taggt jeden Eintrag mit `srcT`/`label`/`swatch`.
+- [x] **Vergleich in jeder Ansicht (bis mind. 24 h):** Der Vergleich wird jetzt auch im
+      **Live-Modus** geladen. Neuer Server-Parameter `start` (Epoch-Sekunden) verankert das
+      Aggregat-Fenster; der Empfaenger fragt das Vortags-Fenster `start-86400` ab und
+      verschiebt es mit `compareShift` (+1 Tag) slotgenau aufs sichtbare Fenster. Der
+      „Vortag vergleichen"-Button schaltet nicht mehr zwangsweise in die Tagesansicht um,
+      der gewaehlte Zeitraum bleibt erhalten.
+- [x] **Host-Tests:** `test/check_dashboard_js.py` prueft jetzt zusaetzlich
+      „dashboard compare tooltip ok" (beide Serien + Δ im Tooltip) und
+      „dashboard live compare shift ok" (Live-Vergleich landet im Fenster).
+- [ ] Am Geraet verifizieren: Live-Slider auf 6/12/24 h + „Vortag vergleichen" -> gelbe
+      Kurve + Tooltip mit beiden Werten.
+
 ### ✅ Behoben: Button „Vortag vergleichen“ tat in der Live-Ansicht nichts
 Betrifft die **Empfänger-Weboberfläche** (Dashboard, `root_handler`/`sml_page` in
 `main/main.c`). Der Sender hat keinen Webserver.

@@ -98,6 +98,19 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_history_backfill"
 
+# End-to-end sync session with a mock sender: full mirror, resume after a
+# simulated link drop, and dedupe against the receiver's own data.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/history_sync.c" \
+    "$repo/main/history_backfill.c" \
+    "$here/test_history_sync.c" \
+    -o "$out/test_history_sync"
+
+"$out/test_history_sync"
+
 # The store-side half of the backfill: power_history_merge() must validate and
 # persist pulled records and reject corrupt ones. Same plain-file fallback as
 # the reboot-persistence test (scratch mount under the temp build dir).

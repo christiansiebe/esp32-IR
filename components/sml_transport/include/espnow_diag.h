@@ -41,6 +41,12 @@
 
 /* Response flag: at least one more event page follows for this request. */
 #define ESPNOW_DIAG_FLAG_MORE 0x8000u
+/* Request flag (OR'd with SECTION_HISTORY): full-store sync. The sender ignores
+ * to_utc/after_sequence and treats the request's from_utc as a time cursor,
+ * answering with time-ordered pages via power_history_read_after(), so the
+ * receiver can mirror the sender's whole ring (including the oldest record that
+ * a zero-window read cannot reach). The response carries oldest_utc/latest_utc. */
+#define ESPNOW_DIAG_FLAG_SYNC_FULL 0x4000u
 
 #define ESPNOW_DIAG_EVENT_TEXT_LEN    40u
 #define ESPNOW_DIAG_EVENT_RING        16u
@@ -91,6 +97,20 @@ typedef struct __attribute__((packed)) {
     /* Batching / reconciliation (sender's 5 s ESP-NOW send cycle). */
     uint32_t batch_pending;     /* telegrams currently held in the batch ring */
     uint32_t batch_missing;     /* assigned sequences never confirmed sent */
+    /* Storage (SPIFFS power history) and power management (variable CPU clock /
+     * sleep). `storage_ready` is 0 when the store fell back to RAM. */
+    uint8_t storage_ready;      /* 1 = persistent SPIFFS history mounted */
+    uint8_t sleep_state;        /* 0 = awake, 1 = light sleep, 2 = deep sleep */
+    uint8_t cpu_freq_mhz;       /* current CPU clock */
+    uint8_t cpu_freq_max_mhz;   /* configured DFS maximum */
+    uint8_t cpu_freq_min_mhz;   /* configured DFS minimum (idle) */
+    uint8_t light_sleep_enabled;/* DFS config allows light sleep in idle */
+    uint16_t reserved2;
+    uint32_t storage_records;   /* minute records currently stored */
+    uint32_t storage_capacity;  /* ring capacity */
+    uint32_t storage_write_errors;
+    uint32_t storage_queue_drops;
+    uint32_t uptime_sleep_ms;   /* time spent in light sleep this session */
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {

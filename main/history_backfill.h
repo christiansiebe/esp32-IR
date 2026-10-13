@@ -52,3 +52,25 @@ bool history_backfill_should_merge(const history_backfill_t *bf,
 
 /* Minutes in the window the receiver still misses (shrinks as records merge). */
 uint32_t history_backfill_missing_count(const history_backfill_t *bf);
+
+/* Full-store sync cursor: the newest minute already merged from the sender.
+ * `after_utc` is a pure value the caller persists (NVS), so a session resumes
+ * after a restart instead of re-pulling. A fresh cursor is 0, which makes the
+ * first page start at the sender's oldest record (read_after(0) returns every
+ * minute > 0). Kept here so the resume decision is host-testable. */
+typedef struct {
+    int64_t after_utc; /* 0 = nothing merged yet */
+} history_backfill_cursor_t;
+
+/* Reset to "nothing merged yet". */
+void history_backfill_cursor_init(history_backfill_cursor_t *cursor);
+
+/* Advance monotonically: only a later minute moves the cursor, so a page that
+ * arrives out of order never rewinds the resume point. */
+void history_backfill_cursor_advance(history_backfill_cursor_t *cursor,
+                                     int64_t minute_utc);
+
+/* True once the cursor has reached the sender's newest minute, i.e. the store is
+ * mirrored and only new minutes remain. */
+bool history_backfill_caught_up(const history_backfill_cursor_t *cursor,
+                                int64_t sender_latest_utc);

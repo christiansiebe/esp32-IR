@@ -113,6 +113,20 @@ esp_err_t power_history_read_window(int64_t from_utc, int64_t to_utc,
                                     power_history_record_t *records, size_t capacity,
                                     size_t *record_count, power_history_status_t *status,
                                     bool *more);
+/* Time-ordered page read for a full-store sync: up to max_records records with
+ * interval_start_utc > after_utc (oldest first). Paging forward by the last
+ * returned minute walks the whole ring, including the oldest record that
+ * power_history_read_window() cannot reach with a zero time cursor. `*more` is
+ * set while further records follow. Records are validated/migrated on the way
+ * out; corrupt entries are skipped. */
+esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
+                                   power_history_record_t *records, size_t capacity,
+                                   size_t *record_count, power_history_status_t *status,
+                                   bool *more);
+/* True when a valid minute with that interval_start_utc is already stored.
+ * Backs the full-store sync's per-minute dedupe so the receiver never merges a
+ * minute it already holds. Binary search, so it stays cheap on a full store. */
+bool power_history_has_minute(int64_t interval_start_utc);
 /* True when the record's minute interval falls inside [from_utc, to_utc). The
  * record is validated (and migrated in a local copy) first, so corrupt or
  * unsupported entries are rejected. Exposed so the backfill window filter is

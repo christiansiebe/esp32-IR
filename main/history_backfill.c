@@ -81,3 +81,27 @@ uint32_t history_backfill_missing_count(const history_backfill_t *bf)
     }
     return missing;
 }
+
+void history_backfill_cursor_init(history_backfill_cursor_t *cursor)
+{
+    if (cursor != NULL) {
+        cursor->after_utc = 0;
+    }
+}
+
+void history_backfill_cursor_advance(history_backfill_cursor_t *cursor,
+                                     int64_t minute_utc)
+{
+    if (cursor != NULL && minute_utc > cursor->after_utc) {
+        cursor->after_utc = minute_utc;
+    }
+}
+
+bool history_backfill_caught_up(const history_backfill_cursor_t *cursor,
+                                int64_t sender_latest_utc)
+{
+    if (cursor == NULL) {
+        return false;
+    }
+    return cursor->after_utc >= sender_latest_utc;
+}

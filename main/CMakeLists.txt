@@ -5,6 +5,7 @@ set(main_requires
     esp_event
     esp_http_server
     esp_netif
+    esp_pm
     esp_timer
     esp_wifi
     nvs_flash
@@ -19,7 +20,7 @@ set(main_requires
 set(main_srcs "main.c" "power_history.c" "web_console.c"
               "boot_policy.c" "boot_confirm.c"
               "crash_journal.c" "crash_journal_store.c"
-              "mqtt_topics.c" "history_backfill.c")
+              "mqtt_topics.c" "history_backfill.c" "history_sync.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
     list(APPEND main_srcs "mqtt_bridge.c")
 endif()

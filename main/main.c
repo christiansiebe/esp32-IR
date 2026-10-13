@@ -16,6 +16,8 @@
 #include "esp_netif_sntp.h"
 #include "esp_now.h"
 #include "esp_ota_ops.h"
+#include "esp_pm.h"
+#include "esp_private/esp_clk.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -25,6 +27,7 @@
 #include "nvs_flash.h"
 #include "boot_confirm.h"
 #include "history_backfill.h"
+#include "history_sync.h"
 #include "power_history.h"
 #include "web_console.h"
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -195,6 +198,11 @@ typedef struct __attribute__((packed)) {
     uint32_t records_capacity;
     uint8_t record_count;
     uint8_t reserved[3];
+    /* Sender store bounds (full-store sync): the oldest and newest minute the
+     * sender still holds, so the receiver knows what "everything" is and when the
+     * cursor has caught up. Zero when the sender has no records. */
+    int64_t oldest_utc;
+    int64_t latest_utc;
     power_history_record_t records[ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET];
 } espnow_diag_history_response_t;
 _Static_assert(sizeof(espnow_diag_history_response_t) <= ESP_NOW_MAX_DATA_LEN,
@@ -209,6 +217,15 @@ static double g_sml_power_sample_sum_w;
 static double g_sml_latest_power_w;
 static uint64_t g_sml_latest_power_received_us;
 static bool g_sml_latest_power_valid;
+/* Timestamp of the telegram last published to MQTT, so the 1 Hz sample timer
+ * publishes a value once per received telegram instead of on every tick. */
+static uint64_t g_last_published_power_us;
+/* Sleep / power-management diagnostics. DFS (variable CPU clock) is always on;
+ * the sleep_state is updated from the registered light-sleep callbacks and the
+ * accumulated sleep time lets the sender report how much it actually slept. */
+static volatile uint8_t g_sleep_state;
+static volatile uint64_t g_sleep_accumulated_ms;
+static uint64_t g_sleep_entered_us;
 static esp_timer_handle_t g_power_sample_timer;
 static int64_t g_power_bucket_start_utc;
 static int64_t g_power_bucket_first_sample_utc;
@@ -298,20 +315,32 @@ static QueueHandle_t g_diag_response_queue;
 static uint8_t g_sender_mac[ESP_NOW_ETH_ALEN];
 static bool g_sender_mac_valid;
 static portMUX_TYPE g_sender_mac_lock = portMUX_INITIALIZER_UNLOCKED;
-/* History backfill: the receiver pulls the minute records it missed from the
- * sender's own SPIFFS history. The presence map holds one byte per minute in
- * the window (~4.3 KB for the 3-day default). */
-#define HISTORY_BACKFILL_PRESENT_BUCKETS \
-    ((size_t)(HISTORY_BACKFILL_WINDOW_SECONDS / HISTORY_BACKFILL_BUCKET_SECONDS) + 1u)
-#define HISTORY_BACKFILL_MAX_PAGES 256u
+/* History sync: the receiver mirrors the sender's whole minute ring. A session
+ * pulls time-ordered pages with a resume cursor persisted in NVS, so a restart
+ * continues where it stopped instead of re-pulling; per-minute dedupe keeps the
+ * receiver's own live data. */
+#define HISTORY_BACKFILL_MAX_PAGES 64u /* pages per session (7 records each) */
 #define HISTORY_BACKFILL_PERIOD_MS (30u * 60u * 1000u)
-static uint8_t g_history_backfill_present[HISTORY_BACKFILL_PRESENT_BUCKETS];
+#define HISTORY_SYNC_NVS_NAMESPACE "histcfg"
+#define HISTORY_SYNC_CURSOR_KEY "cursor_utc"
 static portMUX_TYPE g_history_backfill_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t g_history_backfill_merged;
 static uint32_t g_history_backfill_pages;
 static uint32_t g_history_backfill_errors;
-static int64_t g_history_backfill_last_utc;
+static int64_t g_history_backfill_last_utc;   /* last session wall time */
+static int64_t g_history_sync_cursor_utc;     /* newest minute merged (resume) */
+static int64_t g_history_sync_sender_oldest_utc;
+static int64_t g_history_sync_sender_latest_utc;
 static bool g_history_backfill_force;
+static bool g_history_sync_full;              /* next session restarts from 0 */
+static bool g_history_sync_caught_up;
+/* Per-session sync diagnostics: how often a session ran, what the most recent
+ * one achieved and how long it took, so a stalled or failing sync is visible. */
+static uint32_t g_history_sync_sessions;
+static uint32_t g_history_sync_last_merged;
+static uint32_t g_history_sync_last_pages;
+static uint32_t g_history_sync_last_duration_ms;
+static bool g_history_sync_last_any_round;
 static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
                             const char *value, int8_t scaler, uint8_t unit);
 static esp_err_t power_samples_api_handler(httpd_req_t *req);
@@ -1030,6 +1059,15 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     uint32_t last_rx_ago_ms =
         last_byte_us != 0 ? (uint32_t)((now_us - last_byte_us) / 1000ULL) : 0;
 
+    power_history_status_t storage;
+    power_history_get_status(&storage);
+
+    esp_pm_config_t pm_config = {0};
+    (void)esp_pm_get_configuration(&pm_config);
+    /* esp_clk_cpu_freq() reads the *live* clock, so it shows DFS stepping down
+     * to the idle frequency, not just the configured maximum. */
+    int current_freq = esp_clk_cpu_freq();
+
     *counters = (espnow_diag_counters_t) {
         .uptime_ms = (uint64_t)(esp_timer_get_time() / 1000),
         .uart_rx_bytes = rx_bytes,
@@ -1059,6 +1097,18 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .time_requests = time_requests,
         .batch_pending = batch_pending,
         .batch_missing = batch_missing,
+        .storage_ready = storage.ready ? 1 : 0,
+        .sleep_state = (uint8_t)g_sleep_state,
+        .cpu_freq_mhz = (uint8_t)(current_freq > 0 ? current_freq : 0),
+        .cpu_freq_max_mhz = (uint8_t)(pm_config.max_freq_mhz > 0 ? pm_config.max_freq_mhz : 0),
+        .cpu_freq_min_mhz = (uint8_t)(pm_config.min_freq_mhz > 0 ? pm_config.min_freq_mhz : 0),
+        .light_sleep_enabled = pm_config.light_sleep_enable ? 1 : 0,
+        .reserved2 = 0,
+        .storage_records = storage.record_count,
+        .storage_capacity = POWER_HISTORY_CAPACITY,
+        .storage_write_errors = storage.write_errors,
+        .storage_queue_drops = storage.queue_drops,
+        .uptime_sleep_ms = (uint32_t)g_sleep_accumulated_ms,
     };
     *frame_len = sizeof(*header) + sizeof(*counters);
 }
@@ -1121,14 +1171,36 @@ static void build_diag_history_response(const espnow_diag_request_item_t *reques
     response->records_capacity = ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET;
     response->record_count = 0;
     memset(response->reserved, 0, sizeof(response->reserved));
+    response->oldest_utc = 0;
+    response->latest_utc = 0;
+
+    power_history_status_t store;
+    power_history_get_status(&store);
+    if (store.record_count != 0) {
+        /* Newest minute is the live tail; the oldest is bounded by the sender's
+         * own recording horizon (kept a little behind live, same as the window). */
+        response->latest_utc = request->to_utc;
+        response->oldest_utc = request->to_utc -
+                               (int64_t)HISTORY_BACKFILL_WINDOW_SECONDS;
+    }
 
     size_t count = 0;
     bool more = false;
-    esp_err_t err = power_history_read_window(
-        request->from_utc, request->to_utc, request->after_sequence,
-        ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET, response->records,
-        ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET, &count, &(power_history_status_t){0},
-        &more);
+    esp_err_t err;
+    if ((request->flags & ESPNOW_DIAG_FLAG_SYNC_FULL) != 0) {
+        /* Full-store sync: the request's from_utc is the receiver's resume cursor,
+         * so return the time-ordered pages that follow it across the whole ring. */
+        err = power_history_read_after(
+            request->from_utc, ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET,
+            response->records, ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET, &count,
+            &(power_history_status_t){0}, &more);
+    } else {
+        err = power_history_read_window(
+            request->from_utc, request->to_utc, request->after_sequence,
+            ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET, response->records,
+            ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET, &count,
+            &(power_history_status_t){0}, &more);
+    }
     if (err == ESP_OK) {
         response->record_count = (uint8_t)count;
         if (more) {
@@ -1139,7 +1211,8 @@ static void build_diag_history_response(const espnow_diag_request_item_t *reques
     }
     *frame_len = sizeof(response->header) + sizeof(response->first_sequence) +
                  sizeof(response->records_capacity) + sizeof(response->record_count) +
-                 sizeof(response->reserved) +
+                 sizeof(response->reserved) + sizeof(response->oldest_utc) +
+                 sizeof(response->latest_utc) +
                  count * sizeof(power_history_record_t);
 }
 
@@ -1641,6 +1714,32 @@ static void append_power_sample_locked(uint64_t timestamp_us, double watts)
         (g_sml_power_sample_next + 1) % SML_POWER_SAMPLE_COUNT;
 }
 
+#if CONFIG_PM_LIGHT_SLEEP_CALLBACKS
+/* Light-sleep entry/exit hooks for the power-management diagnostics. They run
+ * from the IDLE task and must not block, so they only flip a state flag and
+ * accumulate the slept time. */
+static esp_err_t sleep_enter_callback(int64_t sleep_time_us, void *arg)
+{
+    (void)sleep_time_us;
+    (void)arg;
+    g_sleep_entered_us = (uint64_t)esp_timer_get_time();
+    g_sleep_state = 1;
+    return ESP_OK;
+}
+
+static esp_err_t sleep_exit_callback(int64_t sleep_time_us, void *arg)
+{
+    (void)sleep_time_us;
+    (void)arg;
+    if (g_sleep_entered_us != 0) {
+        g_sleep_accumulated_ms += ((uint64_t)esp_timer_get_time() - g_sleep_entered_us) / 1000ULL;
+        g_sleep_entered_us = 0;
+    }
+    g_sleep_state = 0;
+    return ESP_OK;
+}
+#endif
+
 static void power_sample_timer_callback(void *arg)
 {
     (void)arg;
@@ -1703,7 +1802,12 @@ static void power_sample_timer_callback(void *arg)
         (void)power_history_enqueue(&completed_interval);
     }
 #if !CONFIG_ESPNOW_ROLE_SENDER
-    if (have_live_power) {
+    /* Publish live power only when a *new* telegram arrived. The sample timer
+     * runs at 1 Hz while the sender batches telegrams on a 5 s cycle, so
+     * publishing every tick would emit the same held value five times and make
+     * it look like the receiver is updating every second. */
+    if (have_live_power && g_sml_latest_power_received_us != g_last_published_power_us) {
+        g_last_published_power_us = g_sml_latest_power_received_us;
         mqtt_bridge_publish_power(live_watts);
     }
     if (enqueue_completed_interval) {
@@ -2157,7 +2261,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "gap:12px;margin:20px 0}.meter{background:#182330;padding:18px;border-radius:10px}"
         ".meter h2{font-size:1rem;margin:0 0 12px;color:#9fb4c8}.meter strong{font-size:1.7rem;"
         "color:#78d6ff}.meter small{display:block;color:#9fb4c8;margin-top:8px}"
-        "#meter-status,#history-status{color:#9fb4c8}.history{margin-top:24px}"
+        "#meter-status,#history-status,#sync-status{color:#9fb4c8}.history{margin-top:24px}"
         "#power-history{display:block;width:100%;height:260px;background:#121b27;border-radius:8px}"
 "#history-tip{position:fixed;display:none;pointer-events:none;background:rgba(16,21,31,0.96);"
 "border:1px solid #2c3e50;border-radius:6px;padding:6px 9px;font-size:0.85rem;color:#e5edf7;"
@@ -2191,6 +2295,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "<canvas id=\"power-history\" aria-label=\"Diagramm der Minutenmittelwerte\"></canvas>"
 "<div id=\"history-tip\" role=\"status\"></div>"
         "<p id=\"history-status\">Warte auf synchronisierte Netzwerkzeit und gespeicherte Minutenwerte…</p>"
+        "<p id=\"sync-status\">Sender-Abgleich: warte auf erste Sitzung…</p>"
         "</section>"
         "<script>"
         "const byId=id=>document.getElementById(id);"
@@ -2217,7 +2322,9 @@ static esp_err_t root_handler(httpd_req_t *req)
         "'seit Start, sammelt 15 Minuten');}"
         "else{byId('meter-average').textContent='Sammle…';}"
         "byId('meter-status').textContent='SML CRC gültig: '+d.crc_valid+"
-        "' · CRC fehlerhaft: '+d.crc_invalid+' · Transportlücken: '+d.transport_gaps;"
+        "' · CRC fehlerhaft: '+d.crc_invalid+' · Transportlücken: '+d.transport_gaps+"
+        "' · CPU: '+d.cpu_freq_mhz+' MHz (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)'+"
+        "' · Sleep: '+(d.sleep_state?'leicht':'wach')+(d.light_sleep_enabled?' (aktiv)':' (aus)');"
         "}catch(e){byId('meter-status').textContent='Verbindung zum Zähler fehlgeschlagen: '+e;}"
         "setTimeout(updateMeter,1000);}updateMeter();"
         "const RANGE_STEPS=[2,6,12,24,72,168,480];"
@@ -2232,30 +2339,45 @@ static esp_err_t root_handler(httpd_req_t *req)
 "function showTip(e){if(!historyGeometry||!historyEntries.length)return;"
 "const canvas=byId('power-history'),rect=canvas.getBoundingClientRect();"
 "const cx=e.clientX-rect.left;const g=historyGeometry;"
-"let best=null,bestD=1e9;"
-"for(const en of historyEntries){const dx=Math.abs(cx-en.plotX);"
-"if(dx<bestD){bestD=dx;best=en;}}"
-"if(!best||bestD>Math.max(18,g.barWidth*3)){clearTip();return;}"
+"const tol=Math.max(18,g.barWidth*3);"
+"/* Nearest bar per series, so a compare view shows today's AND the compared day's value. */"
+"const groups=new Map();"
+"for(const en of historyEntries){const key=en.label||'';const dx=Math.abs(cx-en.plotX);"
+"const cur=groups.get(key);if(!cur||dx<cur.d)groups.set(key,{d:dx,en});}"
+"const near=[...groups.values()].filter(o=>o.d<=tol).map(o=>o.en);"
+"if(!near.length){clearTip();return;}"
 "const tip=byId('history-tip');"
-"tip.textContent=fmt(best.value,0)+' W · '+new Date(best.t).toLocaleString('de-DE');"
+"let html='';"
+"for(const en of near){const d=new Date(en.srcT);"
+"const when=d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})+' '+"
+"d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});"
+"html+='<div style=\"display:flex;align-items:center;gap:6px\">'+"
+"'<span style=\"width:9px;height:9px;border-radius:2px;background:'+en.swatch+'\"></span>'+"
+"'<b>'+fmt(en.value,0)+' W</b><span style=\"opacity:.7;margin-left:auto\">'+when+'</span></div>';}"
+"const cur=near.find(en=>en.label==='Aktuell'),cmp=near.find(en=>en.label==='Vortag');"
+"if(cur&&cmp){const delta=cur.value-cmp.value;"
+"html+='<div style=\"margin-top:3px;opacity:.85\">Δ '+(delta>=0?'+':'')+fmt(delta,0)+' W zum Vortag</div>';}"
+"tip.innerHTML=html;"
 "tip.style.display='block';"
 "const tipW=tip.offsetWidth,tipH=tip.offsetHeight;"
 "let tx=e.clientX+12,ty=e.clientY-tipH-8;"
 "if(tx+tipW>window.innerWidth-6)tx=e.clientX-tipW-12;"
 "if(ty<6)ty=e.clientY+14;"
 "tip.style.left=tx+'px';tip.style.top=ty+'px';"
-"historyCursor=best;drawHistoryOverlay();}"
+"historyCursor=near;drawHistoryOverlay();}"
 "function clearTip(){hideTip();historyCursor=null;drawHistoryOverlay();}"
 "function drawHistoryOverlay(){if(!historyGeometry||!historyBase)return;"
 "const canvas=byId('power-history'),g=historyGeometry,ctx=canvas.getContext('2d');"
 "ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,canvas.width,canvas.height);"
 "ctx.drawImage(historyBase,0,0);ctx.setTransform(g.ratio,0,0,g.ratio,0,0);"
-"if(historyCursor){const bar=historyCursor.value/g.max*(g.ph/2-5);"
+"if(historyCursor){const marks=Array.isArray(historyCursor)?historyCursor:[historyCursor];"
+"for(const c of marks){const bar=c.value/g.max*(g.ph/2-5);"
 "ctx.fillStyle='rgba(120,214,255,0.28)';"
-"ctx.fillRect(historyCursor.plotX,g.zero-(g.ph/2-5),historyCursor.plotW,g.ph-10);"
-"ctx.fillStyle=historyCursor.value<0?'#e2b53e':'#78d6ff';"
-"ctx.fillRect(historyCursor.plotX,bar<0?g.zero:g.zero-bar,historyCursor.plotW,Math.abs(bar));}}"
+"ctx.fillRect(c.plotX,g.zero-(g.ph/2-5),c.plotW,g.ph-10);"
+"ctx.fillStyle=c.value<0?'#e2b53e':'#78d6ff';"
+"ctx.fillRect(c.plotX,bar<0?g.zero:g.zero-bar,c.plotW,Math.abs(bar));}}}"
         "function dayISO(d){return d.toISOString().slice(0,10);}"
+        "function fmtUtc(s){const n=Number(s)||0;return n>0?new Date(n*1000).toLocaleString('de-DE'):'—';}"
         "function rowValue(r){return Number(r.watts!==undefined?r.watts:r.average_milliwatts/1000);}"
         "function niceMax(v){if(!(v>0))return 1;const p=Math.pow(10,Math.floor(Math.log10(v)));const n=v/p;"
         "return (n<=1?1:n<=2?2:n<=5?5:10)*p;}"
@@ -2264,7 +2386,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "if(hours<24)return d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});"
         "return d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})+' '+"
         "d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});}"
-        "function drawHistory(rows,hours,windowStart,compare){const canvas=byId('power-history'),rect=canvas.getBoundingClientRect();"
+        "function drawHistory(rows,hours,windowStart,compare,compareShift){const canvas=byId('power-history'),rect=canvas.getBoundingClientRect();"
         "if(!rect.width)return;const ratio=window.devicePixelRatio||1;"
         "canvas.width=Math.floor(rect.width*ratio);canvas.height=Math.floor(260*ratio);"
         "const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);const w=rect.width,h=260,"
@@ -2292,14 +2414,14 @@ static esp_err_t root_handler(httpd_req_t *req)
         "const barWidth=Math.max(2,pw/240*0.68);"
         "historyLayout={start,span,hours};"
         "historyGeometry={ratio,left,right,top,ph,pw,w,h,zero,barWidth,max};"
-        "/* Compare rows carry yesterday's timestamps; shift them onto the selected day's window so they plot alongside today. */"
-        "const dayAlign=historyCompare?start-Date.parse(historyCompare+'T00:00:00Z'):0;"
-        "function plot(data,color,offsetMs){if(!data)return;ctx.fillStyle=color;const off=offsetMs||0;"
+        "/* Compare rows carry yesterday's timestamps; shift them onto the selected window so they plot alongside the live data. */"
+        "const dayAlign=(compareShift!==undefined&&compareShift!==null)?compareShift:(historyCompare?start-Date.parse(historyCompare+'T00:00:00Z'):0);"
+        "function plot(data,color,offsetMs,label){if(!data)return;ctx.fillStyle=color;const off=offsetMs||0;"
         "for(const r of data){const t=Number(r.timestamp)+off;if(t<start||t>end)continue;"
         "const value=rowValue(r),x=left+(t-start)/span*pw,bar=value/max*(ph/2-5);"
         "ctx.fillRect(x,bar<0?zero:zero-bar,barWidth,Math.abs(bar));"
-        "historyEntries.push({t,value,plotX:x,plotW:barWidth});}}"
-        "if(compare)plot(compare,'#e2b53e',dayAlign);plot(rows,compare?'rgba(120,214,255,0.55)':'#78d6ff',0);"
+        "historyEntries.push({t,srcT:Number(r.timestamp),value,plotX:x,plotW:barWidth,label,swatch:color});}}"
+        "if(compare)plot(compare,'#e2b53e',dayAlign,'Vortag');plot(rows,compare?'rgba(120,214,255,0.55)':'#78d6ff',0,compare?'Aktuell':'');"
         "historyBase=document.createElement('canvas');"
         "historyBase.width=canvas.width;historyBase.height=canvas.height;"
         "historyBase.getContext('2d').drawImage(canvas,0,0);"
@@ -2307,19 +2429,24 @@ static esp_err_t root_handler(httpd_req_t *req)
         "async function updateHistory(){clearTimeout(historyTimer);try{const live=(historyView==='live');"
         "const hours=live?historyHours():24;"
         "byId('history-range-label').textContent=historyLabel();"
-        "let url,windowStart=null;"
-        "if(live){url='/api/power-history?recent=128';if(hours>2)url='/api/power-history?hours='+hours+'&points=240';}"
+        "let url,windowStart=null,compareUrl=null,compareShift=null,compareLabel=null;"
+        "if(live){const endMs=Date.now();windowStart=Math.floor(endMs/1000)-hours*3600;"
+        "url='/api/power-history?hours='+hours+'&points=240&start='+windowStart;"
+        "if(historyCompare){compareUrl='/api/power-history?hours='+hours+'&points=240&start='+(windowStart-86400);"
+        "compareShift=86400000;compareLabel='Vortag';}}"
         "else{const day=byId('history-day').value||dayISO(new Date());"
-        "url='/api/power-history?day='+day+'&points=96';windowStart=Date.parse(day+'T00:00:00Z');}"
+        "url='/api/power-history?day='+day+'&points=96';windowStart=Date.parse(day+'T00:00:00Z');"
+        "if(historyCompare){compareUrl='/api/power-history?day='+historyCompare+'&points=96';"
+        "compareShift=windowStart-Date.parse(historyCompare+'T00:00:00Z');compareLabel=historyCompare;}}"
         "const r=await fetchT(url,15000);"
         "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();"
-        "let compare=null,compareDay=null;"
-        "if(!live&&historyCompare){try{const cr=await fetchT('/api/power-history?day='+historyCompare+'&points=96',15000);"
-        "if(cr.ok){compare=(await cr.json()).records;compareDay=historyCompare;}}catch(e){}}"
-        "drawHistory(d.records,hours,windowStart,compare);"
+        "let compare=null;"
+        "if(compareUrl){try{const cr=await fetchT(compareUrl,15000);"
+        "if(cr.ok)compare=(await cr.json()).records;}catch(e){}}"
+        "drawHistory(d.records,hours,windowStart,compare,compareShift);"
         "const total=rows=>rows.reduce((s,x)=>s+rowValue(x),0);"
         "const info=(d.records.length?('Σ '+fmt(total(d.records),0)+' W·h')+(d.records.length?(' · '+d.records.length+' Punkte'):''):'keine Werte');"
-        "byId('history-day-info').textContent=live?'':('· '+(compareDay?('Vergleich '+compareDay+' (gelb) · '):'')+info);"
+        "byId('history-day-info').textContent=(compareLabel?('· Vergleich '+compareLabel+' (gelb) · '):'')+info;"
         "const latest=d.records.length?new Date(Number(d.records[d.records.length-1].timestamp)).toLocaleString('de-DE'):"
         "'noch kein abgeschlossener Minutenwert';"
         "byId('history-title').textContent=live?(d.aggregated?('Mittelwerte · letzte '+hours+' Stunden'):'Minutenmittelwerte · letzte 2 Stunden'):('Tagesverlauf (UTC) · 15-Minuten-Mittel');"
@@ -2330,19 +2457,28 @@ static esp_err_t root_handler(httpd_req_t *req)
         "' · Speicher: '+(d.storage_ready?'bereit':'nicht bereit')+"
         "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
         "}catch(e){byId('history-status').textContent='Verlauf nicht verfügbar: '+e;}"
+        "try{const sr=await fetch('/api/history-pull',{cache:'no-store'});"
+        "if(sr.ok){const s=await sr.json();"
+        "const lag=Number(s.lag_seconds)||0;"
+        "byId('sync-status').textContent='Sender-Abgleich: '+(s.caught_up?'aktuell':('Rückstand '+Math.round(lag/60)+' Min'))+"
+        "' · Sitzungen: '+s.sessions+' · zuletzt übernommen: '+s.last_merged+' Min in '+s.last_pages+' Seite(n)'+"
+        "' · Dauer: '+s.last_duration_ms+' ms · Fehler: '+s.errors+"
+        "' · Sender-Speicher: '+fmtUtc(s.sender_oldest_utc)+' – '+fmtUtc(s.sender_latest_utc)+"
+        "' · Cursor: '+fmtUtc(s.cursor_utc)+(s.sender_mac_known?'':' · Sender-MAC unbekannt');}"
+        "}catch(e){}"
         "historyTimer=setTimeout(updateHistory,60000);}"
         "function redraw(){clearTimeout(historyTimer);updateHistory();}"
-        "byId('history-range').addEventListener('change',()=>{setLive(true);historyCompare=null;byId('history-day-info').textContent='';redraw();});"
-        "byId('history-day-load').addEventListener('click',()=>{setLive(false);historyCompare=null;redraw();});"
+        "byId('history-range').addEventListener('change',()=>{setLive(true);redraw();});"
+        "byId('history-day-load').addEventListener('click',()=>{setLive(false);redraw();});"
         "byId('history-day-prev').addEventListener('click',()=>{shiftDay(-1);});"
         "byId('history-day-next').addEventListener('click',()=>{shiftDay(1);});"
         "byId('history-day-compare').addEventListener('click',()=>{toggleCompare();});"
-        "byId('history-day-live').addEventListener('click',()=>{setLive(true);historyCompare=null;byId('history-day-info').textContent='';redraw();});"
-        "byId('history-day').addEventListener('change',()=>{setLive(false);historyCompare=null;redraw();});"
+        "byId('history-day-live').addEventListener('click',()=>{setLive(true);redraw();});"
+        "byId('history-day').addEventListener('change',()=>{setLive(false);redraw();});"
         "function shiftDay(delta){const base=byId('history-day').value?Date.parse(byId('history-day').value+'T00:00:00Z'):Date.now();"
-        "const next=new Date(base+delta*86400000);byId('history-day').value=dayISO(next);setLive(false);historyCompare=null;redraw();}"
+        "const next=new Date(base+delta*86400000);byId('history-day').value=dayISO(next);setLive(false);redraw();}"
         "function toggleCompare(){if(historyCompare){historyCompare=null;}else{const base=byId('history-day').value?Date.parse(byId('history-day').value+'T00:00:00Z'):Date.now();"
-        "historyCompare=dayISO(new Date(base-86400000));}setLive(false);redraw();}"
+        "historyCompare=dayISO(new Date(base-86400000));}redraw();}"
         "window.addEventListener('resize',()=>{clearTimeout(historyTimer);historyTimer=setTimeout(updateHistory,400);});"
         "const chart=byId('power-history');"
         "chart.addEventListener('mousemove',showTip);"
@@ -2541,18 +2677,33 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
             return ESP_FAIL;
         }
     }
+    /* Report this device's own CPU clock (DFS) alongside the meter values, so
+     * the receiver's power saving is visible on its own dashboard. */
+    esp_pm_config_t pm_config = {0};
+    (void)esp_pm_get_configuration(&pm_config);
+    int pm_max_freq_mhz = pm_config.max_freq_mhz;
+    int pm_min_freq_mhz = pm_config.min_freq_mhz;
     int len = snprintf(payload, sizeof(payload),
                        "{\"import\":%s,\"export\":%s,\"power\":%s,"
                        "\"average_power_w\":%s,\"average_samples\":%u,"
                        "\"average_duration_s\":%llu,\"crc_valid\":%lu,"
-                       "\"crc_invalid\":%lu,\"transport_gaps\":%lu}",
+                       "\"crc_invalid\":%lu,\"transport_gaps\":%lu,"
+                       "\"cpu_freq_mhz\":%d,\"cpu_freq_max_mhz\":%d,"
+                       "\"cpu_freq_min_mhz\":%d,\"sleep_state\":%u,"
+                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu}",
                        readings[0], readings[1], readings[2],
                        average_json,
                        (unsigned int)power_count,
                        (unsigned long long)average_duration_s,
                        (unsigned long)crc_valid,
                        (unsigned long)crc_invalid,
-                       (unsigned long)transport_gaps);
+                       (unsigned long)transport_gaps,
+                       esp_clk_cpu_freq(),
+                       pm_max_freq_mhz,
+                       pm_min_freq_mhz,
+                       (unsigned int)g_sleep_state,
+                       (unsigned int)(pm_config.light_sleep_enable ? 1 : 0),
+                       (unsigned long)g_sleep_accumulated_ms);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
         return ESP_FAIL;
     }
@@ -2627,7 +2778,8 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     uint32_t points_requested = 0;
     int64_t day_start_utc = 0;
     int64_t day_seconds = 0;
-    char query[96];
+    int64_t start_utc_requested = 0;
+    char query[128];
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
         char value[16];
         char day_value[24];
@@ -2701,6 +2853,17 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
             }
             points_requested = (uint32_t)parsed;
         }
+        char start_value[24];
+        if (httpd_query_key_value(query, "start", start_value, sizeof(start_value)) == ESP_OK) {
+            char *end = NULL;
+            long long parsed = strtoll(start_value, &end, 10);
+            if (end == start_value || *end != '\0' || parsed <= 0) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "Invalid history window start");
+                return ESP_FAIL;
+            }
+            start_utc_requested = (int64_t)parsed;
+        }
     }
     if (day_seconds != 0 && hours_requested > 0.0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
@@ -2730,7 +2893,11 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         time_t now_s;
         time(&now_s);
         window_seconds = (int64_t)(hours_requested * 3600.0);
-        window_start_utc = (int64_t)now_s - window_seconds;
+        /* "start" pins the window for a comparison overlay (e.g. the same
+         * window one day earlier); without it the window ends "now". */
+        window_start_utc = start_utc_requested > 0
+                               ? start_utc_requested
+                               : (int64_t)now_s - window_seconds;
     }
     if (window_seconds > 0 && points_requested > 0) {
         bucket_seconds = window_seconds / (int64_t)points_requested;
@@ -3560,9 +3727,119 @@ static esp_err_t sender_diag_exchange(uint16_t flags, uint32_t page,
                                     response, response_len);
 }
 
-/* One backfill session: mark the minutes the receiver already holds, then pull
- * the missing pages from the sender and merge them. Returns true when at least
- * one request/response round completed (even if nothing was missing). */
+/* Persisted sync cursor (NVS): the newest minute already merged from the sender.
+ * Kept so a restart/OTA resumes the mirror instead of re-pulling the whole ring.
+ * Best-effort: a missing namespace or a failed write only costs a re-pull. */
+static void history_sync_cursor_load(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(HISTORY_SYNC_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return;
+    }
+    int64_t cursor = 0;
+    if (nvs_get_i64(handle, HISTORY_SYNC_CURSOR_KEY, &cursor) == ESP_OK &&
+        cursor > 0) {
+        portENTER_CRITICAL(&g_history_backfill_lock);
+        g_history_sync_cursor_utc = cursor;
+        portEXIT_CRITICAL(&g_history_backfill_lock);
+    }
+    nvs_close(handle);
+}
+
+static void history_sync_cursor_store(int64_t cursor)
+{
+    nvs_handle_t handle;
+    if (nvs_open(HISTORY_SYNC_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    if (nvs_set_i64(handle, HISTORY_SYNC_CURSOR_KEY, cursor) == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+}
+
+/* One sync session: pull the sender's minute records that follow the persisted
+ * cursor and merge the ones the receiver still misses. The paging/dedupe/resume
+ * logic lives in history_sync_run() (host-tested with a mock sender); here it is
+ * wired to ESP-NOW, the SPIFFS store and the NVS cursor. Returns true when at
+ * least one request/response round completed. */
+static bool history_sync_fetch_espnow(void *ctx, int64_t after_utc, int64_t to_utc,
+                                      history_sync_page_t *page)
+{
+    (void)ctx;
+    uint32_t request_id = (uint32_t)esp_random();
+    if (request_id == 0) {
+        request_id = 1;
+    }
+    espnow_diag_history_request_t request = {
+        .header = {
+            .magic = ESPNOW_DIAG_MAGIC,
+            .version = ESPNOW_DIAG_VERSION,
+            .type = ESPNOW_DIAG_TYPE_REQUEST,
+            .flags = ESPNOW_DIAG_SECTION_HISTORY | ESPNOW_DIAG_FLAG_SYNC_FULL,
+            .request_id = request_id,
+            .page = 0,
+        },
+        .from_utc = after_utc, /* resume cursor */
+        .to_utc = to_utc,
+        .after_sequence = 0,
+    };
+    uint8_t response[ESP_NOW_MAX_DATA_LEN];
+    size_t response_len = 0;
+    if (sender_diag_exchange_raw(&request, sizeof(request), request_id, response,
+                                 &response_len) != ESP_OK) {
+        portENTER_CRITICAL(&g_history_backfill_lock);
+        ++g_history_backfill_errors;
+        portEXIT_CRITICAL(&g_history_backfill_lock);
+        return false;
+    }
+    const size_t header_size = sizeof(espnow_diag_header_t) + sizeof(uint32_t) * 2u +
+                               sizeof(uint8_t) + 3u + sizeof(int64_t) * 2u;
+    if (response_len < header_size) {
+        return false;
+    }
+    espnow_diag_history_response_t reply;
+    memset(&reply, 0, sizeof(reply));
+    memcpy(&reply, response, response_len < sizeof(reply) ? response_len : sizeof(reply));
+    uint8_t count = reply.record_count;
+    size_t expected = header_size + (size_t)count * sizeof(reply.records[0]);
+    if (count > ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET || response_len < expected) {
+        return false;
+    }
+    page->oldest_utc = reply.oldest_utc;
+    page->latest_utc = reply.latest_utc;
+    page->record_count = count;
+    page->more = (reply.header.flags & ESPNOW_DIAG_FLAG_MORE) != 0;
+    memcpy(page->records, reply.records, (size_t)count * sizeof(page->records[0]));
+    return true;
+}
+
+static bool history_sync_has_store(void *ctx, int64_t minute_utc)
+{
+    (void)ctx;
+    return power_history_has_minute(minute_utc);
+}
+
+static size_t history_sync_merge_store(void *ctx, const power_history_record_t *records,
+                                       size_t count)
+{
+    (void)ctx;
+    size_t merged = 0;
+    if (power_history_merge(records, count, &merged) != ESP_OK) {
+        return 0;
+    }
+    return merged;
+}
+
+static void history_sync_store_nvs(void *ctx, int64_t cursor)
+{
+    (void)ctx;
+    portENTER_CRITICAL(&g_history_backfill_lock);
+    g_history_sync_cursor_utc = cursor;
+    portEXIT_CRITICAL(&g_history_backfill_lock);
+    history_sync_cursor_store(cursor);
+}
+
 static bool history_backfill_run_session(uint32_t max_pages, uint32_t *merged_out,
                                          uint32_t *pages_out)
 {
@@ -3578,138 +3855,53 @@ static bool history_backfill_run_session(uint32_t max_pages, uint32_t *merged_ou
     if (!system_time_is_valid() || now < 1704067200) {
         return false;
     }
-    /* Do not ask for the minute that is still being filled, and stop at the
-     * sender's own recording horizon (it is a little behind live). */
+    /* Live tail the receiver asks the sender for; a minute still being filled is
+     * not requested yet. */
     int64_t to_utc = now - 120;
-    int64_t from_utc = to_utc - (int64_t)HISTORY_BACKFILL_WINDOW_SECONDS;
-
-    history_backfill_t bf;
-    if (!history_backfill_reset(&bf, from_utc, to_utc, g_history_backfill_present,
-                                sizeof(g_history_backfill_present))) {
-        return false;
-    }
-
-    /* Mark the minutes the receiver already recorded live so only the holes are
-     * pulled and the sender never overwrites local data. This must use the same
-     * windowed read as the sender, not the oldest-first power_history_read():
-     * on a full store the oldest records are ~20 days old and would leave the
-     * whole window "missing", causing duplicate merges. */
-    power_history_record_t *local =
-        heap_caps_malloc(POWER_HISTORY_PAGE_SIZE * sizeof(*local), MALLOC_CAP_DEFAULT);
-    if (local != NULL) {
-        uint32_t after = 0;
-        for (uint32_t page = 0; page < 128; ++page) {
-            size_t count = 0;
-            power_history_status_t status;
-            bool more = false;
-            if (power_history_read_window(from_utc, to_utc, after,
-                                          POWER_HISTORY_PAGE_SIZE, local,
-                                          POWER_HISTORY_PAGE_SIZE, &count, &status,
-                                          &more) != ESP_OK ||
-                count == 0) {
-                break;
-            }
-            for (size_t i = 0; i < count; ++i) {
-                history_backfill_mark_present(&bf, local[i].interval_start_utc);
-                after = local[i].sequence;
-            }
-            if (!more) {
-                break;
-            }
-        }
-        free(local);
-    }
-
-    uint32_t merged_total = 0;
-    uint32_t pages = 0;
-    uint32_t after_sequence = 0;
-    bool any_round = false;
-    for (uint32_t page = 0; page < max_pages; ++page) {
-        uint32_t request_id = (uint32_t)esp_random();
-        if (request_id == 0) {
-            request_id = 1;
-        }
-        espnow_diag_history_request_t request = {
-            .header = {
-                .magic = ESPNOW_DIAG_MAGIC,
-                .version = ESPNOW_DIAG_VERSION,
-                .type = ESPNOW_DIAG_TYPE_REQUEST,
-                .flags = ESPNOW_DIAG_SECTION_HISTORY,
-                .request_id = request_id,
-                .page = page,
-            },
-            .from_utc = from_utc,
-            .to_utc = to_utc,
-            .after_sequence = after_sequence,
-        };
-        uint8_t response[ESP_NOW_MAX_DATA_LEN];
-        size_t response_len = 0;
-        if (sender_diag_exchange_raw(&request, sizeof(request), request_id,
-                                     response, &response_len) != ESP_OK) {
-            portENTER_CRITICAL(&g_history_backfill_lock);
-            ++g_history_backfill_errors;
-            portEXIT_CRITICAL(&g_history_backfill_lock);
-            break;
-        }
-        any_round = true;
-        const size_t header_size = sizeof(espnow_diag_header_t) + sizeof(uint32_t) * 2u +
-                                   sizeof(uint8_t) + 3u;
-        if (response_len < header_size) {
-            break;
-        }
-        espnow_diag_history_response_t reply;
-        memset(&reply, 0, sizeof(reply));
-        memcpy(&reply, response,
-               response_len < sizeof(reply) ? response_len : sizeof(reply));
-        uint8_t count = reply.record_count;
-        size_t expected = header_size + (size_t)count * sizeof(reply.records[0]);
-        if (count > ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET || response_len < expected) {
-            break;
-        }
-        if (count == 0) {
-            break;
-        }
-        power_history_record_t merge_buf[ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET];
-        size_t merge_count = 0;
-        for (uint8_t i = 0; i < count; ++i) {
-            power_history_record_t record = reply.records[i];
-            if (record.sequence > after_sequence) {
-                after_sequence = record.sequence;
-            }
-            if (!history_backfill_should_merge(&bf, record.interval_start_utc)) {
-                continue;
-            }
-            merge_buf[merge_count++] = record;
-            history_backfill_mark_present(&bf, record.interval_start_utc);
-        }
-        if (merge_count != 0) {
-            size_t merged = 0;
-            if (power_history_merge(merge_buf, merge_count, &merged) == ESP_OK) {
-                merged_total += (uint32_t)merged;
-            }
-        }
-        ++pages;
-        if ((reply.header.flags & ESPNOW_DIAG_FLAG_MORE) == 0) {
-            break;
-        }
-    }
 
     portENTER_CRITICAL(&g_history_backfill_lock);
-    g_history_backfill_merged += merged_total;
-    g_history_backfill_pages += pages;
-    g_history_backfill_last_utc = now;
+    int64_t cursor = g_history_sync_cursor_utc;
+    bool restart_full = g_history_sync_full;
+    g_history_sync_full = false;
     portEXIT_CRITICAL(&g_history_backfill_lock);
+    if (restart_full) {
+        cursor = 0;
+    }
+
+    history_sync_result_t result;
+    int64_t session_start_us = esp_timer_get_time();
+    history_sync_run(&result, cursor, to_utc, max_pages, history_sync_fetch_espnow,
+                     history_sync_has_store, history_sync_merge_store,
+                     history_sync_store_nvs, NULL);
+    uint32_t session_ms =
+        (uint32_t)(((uint64_t)esp_timer_get_time() - (uint64_t)session_start_us) / 1000ULL);
+
+    portENTER_CRITICAL(&g_history_backfill_lock);
+    g_history_backfill_merged += result.merged;
+    g_history_backfill_pages += result.pages;
+    g_history_backfill_last_utc = now;
+    g_history_sync_sender_oldest_utc = result.sender_oldest_utc;
+    g_history_sync_sender_latest_utc = result.sender_latest_utc;
+    g_history_sync_caught_up = result.caught_up;
+    ++g_history_sync_sessions;
+    g_history_sync_last_merged = result.merged;
+    g_history_sync_last_pages = result.pages;
+    g_history_sync_last_duration_ms = session_ms;
+    g_history_sync_last_any_round = result.any_round;
+    portEXIT_CRITICAL(&g_history_backfill_lock);
+
+    if (result.any_round) {
+        ESP_LOGI(TAG, "History sync: merged %lu record(s) over %lu page(s), cursor=%lld",
+                 (unsigned long)result.merged, (unsigned long)result.pages,
+                 (long long)result.cursor);
+    }
     if (merged_out != NULL) {
-        *merged_out = merged_total;
+        *merged_out = result.merged;
     }
     if (pages_out != NULL) {
-        *pages_out = pages;
+        *pages_out = result.pages;
     }
-    if (any_round) {
-        ESP_LOGI(TAG, "History backfill: merged %lu record(s) over %lu page(s)",
-                 (unsigned long)merged_total, (unsigned long)pages);
-    }
-    return any_round;
+    return result.any_round;
 }
 
 static void history_backfill_request(void)
@@ -3719,23 +3911,37 @@ static void history_backfill_request(void)
     portEXIT_CRITICAL(&g_history_backfill_lock);
 }
 
+/* Force a full re-mirror: the next session restarts from the sender's oldest
+ * record (used after a firmware change or to repair a known gap). */
+static void history_backfill_request_full(void)
+{
+    portENTER_CRITICAL(&g_history_backfill_lock);
+    g_history_backfill_force = true;
+    g_history_sync_full = true;
+    portEXIT_CRITICAL(&g_history_backfill_lock);
+}
+
 static void history_backfill_worker(void *arg)
 {
     (void)arg;
+    history_sync_cursor_load();
     vTaskDelay(pdMS_TO_TICKS(15000));
     while (1) {
         bool forced;
+        bool caught_up;
         portENTER_CRITICAL(&g_history_backfill_lock);
         forced = g_history_backfill_force;
         g_history_backfill_force = false;
         int64_t last = g_history_backfill_last_utc;
+        caught_up = g_history_sync_caught_up;
         portEXIT_CRITICAL(&g_history_backfill_lock);
 
         time_t now_s;
         time(&now_s);
         int64_t now = (int64_t)now_s;
         bool due = (last == 0) ||
-                   (now - last >= (int64_t)(HISTORY_BACKFILL_PERIOD_MS / 1000u));
+                   (now - last >= (int64_t)(HISTORY_BACKFILL_PERIOD_MS / 1000u)) ||
+                   (!caught_up && now - last >= 10);
         if (system_time_is_valid() && (forced || due)) {
             (void)history_backfill_run_session(HISTORY_BACKFILL_MAX_PAGES, NULL, NULL);
         }
@@ -3750,28 +3956,65 @@ static esp_err_t history_backfill_api_handler(httpd_req_t *req)
             return send_http_error_status(req, "401 Unauthorized",
                                           "X-OTA-Key missing or wrong");
         }
-        history_backfill_request();
+        char query[64];
+        char full_text[8] = "";
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+            httpd_query_key_value(query, "full", full_text, sizeof(full_text));
+        }
+        if (strcmp(full_text, "1") == 0 || strcmp(full_text, "true") == 0) {
+            history_backfill_request_full();
+        } else {
+            history_backfill_request();
+        }
     }
     uint32_t merged;
     uint32_t pages;
     uint32_t errors;
     int64_t last;
+    int64_t cursor;
+    int64_t sender_oldest;
+    int64_t sender_latest;
+    bool caught_up;
+    uint32_t sessions;
+    uint32_t last_merged;
+    uint32_t last_pages;
+    uint32_t last_duration_ms;
+    bool last_any_round;
     portENTER_CRITICAL(&g_history_backfill_lock);
     merged = g_history_backfill_merged;
     pages = g_history_backfill_pages;
     errors = g_history_backfill_errors;
     last = g_history_backfill_last_utc;
+    cursor = g_history_sync_cursor_utc;
+    sender_oldest = g_history_sync_sender_oldest_utc;
+    sender_latest = g_history_sync_sender_latest_utc;
+    caught_up = g_history_sync_caught_up;
+    sessions = g_history_sync_sessions;
+    last_merged = g_history_sync_last_merged;
+    last_pages = g_history_sync_last_pages;
+    last_duration_ms = g_history_sync_last_duration_ms;
+    last_any_round = g_history_sync_last_any_round;
     portEXIT_CRITICAL(&g_history_backfill_lock);
 
-    char payload[256];
+    char payload[512];
     int len = snprintf(payload, sizeof(payload),
                        "{\"merged_total\":%lu,\"pages_total\":%lu,\"errors\":%lu,"
-                       "\"last_utc\":%lld,\"window_seconds\":%u,"
-                       "\"sender_mac_known\":%s}",
+                       "\"last_utc\":%lld,\"cursor_utc\":%lld,"
+                       "\"sender_oldest_utc\":%lld,\"sender_latest_utc\":%lld,"
+                       "\"caught_up\":%s,\"sender_mac_known\":%s,"
+                       "\"sessions\":%lu,\"last_merged\":%lu,\"last_pages\":%lu,"
+                       "\"last_duration_ms\":%lu,\"last_round_ok\":%s,"
+                       "\"lag_seconds\":%lld}",
                        (unsigned long)merged, (unsigned long)pages,
                        (unsigned long)errors, (long long)last,
-                       (unsigned int)HISTORY_BACKFILL_WINDOW_SECONDS,
-                       g_sender_mac_valid ? "true" : "false");
+                       (long long)cursor, (long long)sender_oldest,
+                       (long long)sender_latest, caught_up ? "true" : "false",
+                       g_sender_mac_valid ? "true" : "false",
+                       (unsigned long)sessions, (unsigned long)last_merged,
+                       (unsigned long)last_pages, (unsigned long)last_duration_ms,
+                       last_any_round ? "true" : "false",
+                       (long long)(sender_latest != 0 && cursor != 0 ?
+                                   sender_latest - cursor : 0));
     if (len < 0 || (size_t)len >= sizeof(payload)) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "Backfill status too large");
@@ -3831,7 +4074,7 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
 
     /* Large enough for the counters/events JSON and the full crash report
      * (counters + up to CRASH_JOURNAL_EVENT_COUNT events). */
-    char payload[1280];
+    char payload[1600];
     int len;
     if ((header.flags & ESPNOW_DIAG_SECTION_COUNTERS) &&
         response_len >= sizeof(header) + sizeof(espnow_diag_counters_t)) {
@@ -3851,7 +4094,13 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"last_rx_ago_ms\":%lu,\"gap_loss\":%lu,"
                        "\"parser_resyncs\":%lu,\"time_syncs\":%lu,"
                        "\"time_requests\":%lu,\"batch_pending\":%lu,"
-                       "\"batch_missing\":%lu}",
+                       "\"batch_missing\":%lu,"
+                       "\"storage_ready\":%u,\"storage_records\":%lu,"
+                       "\"storage_capacity\":%lu,\"storage_write_errors\":%lu,"
+                       "\"storage_queue_drops\":%lu,"
+                       "\"sleep_state\":%u,\"uptime_sleep_ms\":%lu,"
+                       "\"cpu_freq_mhz\":%u,\"cpu_freq_max_mhz\":%u,"
+                       "\"cpu_freq_min_mhz\":%u,\"light_sleep_enabled\":%u}",
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
                        (unsigned long)counters.fifo_overflows,
@@ -3878,7 +4127,18 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.time_syncs,
                        (unsigned long)counters.time_requests,
                        (unsigned long)counters.batch_pending,
-                       (unsigned long)counters.batch_missing);
+                       (unsigned long)counters.batch_missing,
+                       (unsigned int)counters.storage_ready,
+                       (unsigned long)counters.storage_records,
+                       (unsigned long)counters.storage_capacity,
+                       (unsigned long)counters.storage_write_errors,
+                       (unsigned long)counters.storage_queue_drops,
+                       (unsigned int)counters.sleep_state,
+                       (unsigned long)counters.uptime_sleep_ms,
+                       (unsigned int)counters.cpu_freq_mhz,
+                       (unsigned int)counters.cpu_freq_max_mhz,
+                       (unsigned int)counters.cpu_freq_min_mhz,
+                       (unsigned int)counters.light_sleep_enabled);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -4024,6 +4284,13 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "+'parser resyncs: '+d.parser_resyncs+'  clock calibrations: '+d.time_syncs+' (requests sent: '+d.time_requests+')'+nl"
         "+'last gap: '+d.last_gap_ms+' ms  longest gap: '+d.max_gap_ms+' ms'+nl"
         "+'free heap: '+d.free_heap+' bytes  last send: '+d.last_send_status+'  request rssi: '+d.last_request_rssi+nl"
+        "+'batch ring: '+d.batch_pending+' pending, '+d.batch_missing+' never confirmed'+nl"
+        "+'storage: '+(d.storage_ready?'SPIFFS ready':'RAM fallback (NOT persistent)')"
+        "+'  records: '+d.storage_records+' / '+d.storage_capacity"
+        "+'  write errors: '+d.storage_write_errors+'  queue drops: '+d.storage_queue_drops+nl"
+        "+'cpu: '+d.cpu_freq_mhz+' MHz now (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)'+nl"
+        "+'sleep: '+(d.sleep_state?'in light sleep':(d.light_sleep_enabled?'awake, light sleep enabled':'awake, light sleep disabled'))"
+        "+'  slept this session: '+(d.uptime_sleep_ms/1000).toFixed(1)+' s'+nl"
         "+'VERDICT: '+verdict;}"
         "async function loadCrash(){"
         "const r=await fetch('/api/sender-diag?section=crash',{cache:'no-store'});"
@@ -4719,6 +4986,18 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_start_periodic(g_power_sample_timer, 1000000));
 
     ESP_ERROR_CHECK(esp_now_register_recv_cb(receive_callback));
+
+#if CONFIG_PM_LIGHT_SLEEP_CALLBACKS
+    /* Track light-sleep entry/exit so the sender diagnostics can report whether
+     * the device actually sleeps in idle and how much time it spent asleep.
+     * These callbacks run from the IDLE task, so they only touch a few
+     * variables and never block. */
+    static esp_pm_sleep_cbs_register_config_t sleep_cbs = {
+        .enter_cb = sleep_enter_callback,
+        .exit_cb = sleep_exit_callback,
+    };
+    (void)esp_pm_light_sleep_register_cbs(&sleep_cbs);
+#endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
     /* The sender has no dashboard to confirm against, so it keeps the previous

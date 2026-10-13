@@ -115,6 +115,31 @@ static void test_missing_count_and_idempotence(void)
     CHECK(history_backfill_missing_count(&bf) == before - 1, "double mark is idempotent");
 }
 
+static void test_sync_cursor(void)
+{
+    history_backfill_cursor_t cursor;
+    history_backfill_cursor_init(&cursor);
+    CHECK(cursor.after_utc == 0, "fresh cursor starts at 0");
+
+    /* Monotonic: a page that arrives out of order never rewinds the resume point. */
+    history_backfill_cursor_advance(&cursor, 600000);
+    CHECK(cursor.after_utc == 600000, "advance moves forward");
+    history_backfill_cursor_advance(&cursor, 599940);
+    CHECK(cursor.after_utc == 600000, "older minute does not rewind");
+    history_backfill_cursor_advance(&cursor, 600060);
+    CHECK(cursor.after_utc == 600060, "later minute advances again");
+
+    /* Caught up once the cursor reaches the sender's newest minute. */
+    CHECK(history_backfill_caught_up(&cursor, 600060), "equal to latest is caught up");
+    CHECK(history_backfill_caught_up(&cursor, 599940), "past latest is caught up");
+    CHECK(!history_backfill_caught_up(&cursor, 600120), "behind latest is not caught up");
+
+    /* NULL safety. */
+    history_backfill_cursor_init(NULL);
+    history_backfill_cursor_advance(NULL, 5);
+    CHECK(!history_backfill_caught_up(NULL, 5), "NULL cursor is never caught up");
+}
+
 int main(void)
 {
     test_reset_validation();
@@ -122,6 +147,7 @@ int main(void)
     test_alignment();
     test_merge_dedupe();
     test_missing_count_and_idempotence();
+    test_sync_cursor();
     printf("test_history_backfill: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

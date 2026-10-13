@@ -25,5 +25,8 @@ CONFIG_PM_SLP_IRAM_OPT=y
 CONFIG_PM_RTOS_IDLE_OPT=y
 # Automatic light sleep ("tickless idle") in FreeRTOS.
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+# Let the firmware register entry/exit callbacks so the on-demand diagnostics can
+# report whether the device actually sleeps in idle (and for how long).
+CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
 # Wi-Fi sleep-related code in IRAM (lower power-save wake latency).
 CONFIG_ESP_WIFI_SLP_IRAM_OPT=y

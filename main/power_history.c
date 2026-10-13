@@ -139,10 +139,52 @@ static bool write_header_copy(uint8_t copy,
            fsync(fileno(g_history_file)) == 0;
 }
 
+static bool minute_is_stored(const power_history_header_t *header, int64_t ts)
+{
+    if (header->record_count == 0 || g_history_file == NULL) {
+        return false;
+    }
+    uint32_t oldest_slot =
+        (header->next_slot + POWER_HISTORY_CAPACITY - header->record_count) %
+        POWER_HISTORY_CAPACITY;
+    uint32_t lo = 0;
+    uint32_t hi = header->record_count;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+        uint32_t slot = (oldest_slot + mid) % POWER_HISTORY_CAPACITY;
+        long offset = (long)(2u * sizeof(power_history_header_t) +
+                             slot * sizeof(power_history_record_t));
+        power_history_record_t record = {0};
+        if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
+            fread(&record, sizeof(record), 1, g_history_file) != 1 ||
+            !record_is_valid(&record)) {
+            /* Unreadable probe: treat as "not before ts" and keep searching. */
+            hi = mid;
+            continue;
+        }
+        if (record.interval_start_utc < ts) {
+            lo = mid + 1u;
+        } else if (record.interval_start_utc > ts) {
+            hi = mid;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool write_records(power_history_record_t *records, size_t record_count)
 {
     power_history_header_t updated = g_history_header;
     for (size_t i = 0; i < record_count; ++i) {
+        /* Dedupe by minute against what is already on disk: the live recorder and
+         * the backfill sync both enqueue here, and a minute must exist only once.
+         * Reusing the slot would corrupt the time ordering, so a duplicate is
+         * simply dropped. */
+        if (updated.record_count != 0 &&
+            minute_is_stored(&updated, records[i].interval_start_utc)) {
+            continue;
+        }
         records[i].sequence = updated.next_sequence;
         records[i].format_version = POWER_HISTORY_VERSION;
         records[i].reserved = 0;
@@ -697,6 +739,129 @@ esp_err_t power_history_read_window(int64_t from_utc, int64_t to_utc,
     }
     xSemaphoreGive(g_history_mutex);
     return result;
+}
+
+esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
+                                   power_history_record_t *records, size_t capacity,
+                                   size_t *record_count, power_history_status_t *status,
+                                   bool *more)
+{
+    if (records == NULL || capacity == 0 || record_count == NULL ||
+        status == NULL || more == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *record_count = 0;
+    *more = false;
+    if (max_records == 0 || max_records > capacity) {
+        max_records = (uint32_t)capacity;
+    }
+    power_history_get_status(status);
+    if (!status->ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(g_history_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    status->record_count = g_history_header.record_count;
+    status->latest_sequence = g_history_header.next_sequence - 1u;
+    status->oldest_sequence = status->record_count == 0 ? 0 :
+                              g_history_header.next_sequence - status->record_count;
+    if (status->oldest_sequence == 0 && status->record_count != 0) {
+        status->oldest_sequence = 1;
+    }
+
+    esp_err_t result = ESP_OK;
+    if (g_history_file == NULL) {
+        for (size_t i = 0; i < g_history_ram_count; ++i) {
+            const power_history_record_t *record = &g_history_ram_records[i];
+            if (record->interval_start_utc <= after_utc ||
+                !record_is_valid(record)) {
+                continue;
+            }
+            if (*record_count == max_records) {
+                *more = true;
+                break;
+            }
+            records[(*record_count)++] = *record;
+        }
+        xSemaphoreGive(g_history_mutex);
+        return result;
+    }
+    if (g_history_header.record_count == 0) {
+        xSemaphoreGive(g_history_mutex);
+        return ESP_OK;
+    }
+
+    uint32_t oldest_slot =
+        (g_history_header.next_slot + POWER_HISTORY_CAPACITY -
+         g_history_header.record_count) % POWER_HISTORY_CAPACITY;
+    /* The ring, walked from the oldest slot, is time-ordered, so skip straight to
+     * the first record after the cursor. This also reaches the very oldest record
+     * (binary search returns index 0 when after_utc is before it), which a
+     * window read with from_utc=0 cannot. */
+    uint32_t index = find_first_index_at_or_after(oldest_slot,
+                                                  g_history_header.record_count,
+                                                  after_utc + 1);
+    power_history_record_t block[64];
+    uint32_t remaining = g_history_header.record_count - index;
+    while (remaining != 0) {
+        uint32_t slot = (oldest_slot + index) % POWER_HISTORY_CAPACITY;
+        uint32_t chunk = remaining < 64 ? remaining : 64;
+        if (slot + chunk > POWER_HISTORY_CAPACITY) {
+            chunk = POWER_HISTORY_CAPACITY - slot;
+        }
+        long offset = (long)(2u * sizeof(power_history_header_t) +
+                             slot * sizeof(power_history_record_t));
+        if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
+            fread(block, sizeof(block[0]), chunk, g_history_file) != chunk) {
+            xSemaphoreGive(g_history_mutex);
+            ESP_LOGE(TAG, "Could not read history page at slot %lu",
+                     (unsigned long)slot);
+            return ESP_FAIL;
+        }
+        for (uint32_t i = 0; i < chunk; ++i) {
+            if (!record_is_valid(&block[i])) {
+                continue;
+            }
+            power_history_record_t record = block[i];
+            (void)power_history_migrate_record(&record);
+            if (record.interval_start_utc <= after_utc) {
+                continue;
+            }
+            if (*record_count == max_records) {
+                *more = true;
+                xSemaphoreGive(g_history_mutex);
+                return result;
+            }
+            records[(*record_count)++] = record;
+        }
+        remaining -= chunk;
+        index += chunk;
+    }
+    xSemaphoreGive(g_history_mutex);
+    return result;
+}
+
+bool power_history_has_minute(int64_t interval_start_utc)
+{
+    if (!g_history_ready ||
+        xSemaphoreTake(g_history_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    bool found = false;
+    if (g_history_file == NULL) {
+        for (size_t i = 0; i < g_history_ram_count; ++i) {
+            if (g_history_ram_records[i].interval_start_utc == interval_start_utc) {
+                found = true;
+                break;
+            }
+        }
+    } else {
+        found = minute_is_stored(&g_history_header, interval_start_utc);
+    }
+    xSemaphoreGive(g_history_mutex);
+    return found;
 }
 
 void power_history_aggregate_init(int64_t window_start_utc, int64_t bucket_seconds,
