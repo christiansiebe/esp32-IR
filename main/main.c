@@ -769,6 +769,7 @@ static void espnow_ota_worker(void *arg)
 
 #if CONFIG_ESPNOW_ROLE_SENDER
 static void crash_journal_persist(uint8_t level);
+static void crash_journal_mark_clean_restart(void);
 static void time_sync_worker(void *arg);
 
 /* Current wall-clock time as Unix ms. Before the first calibration the sender
