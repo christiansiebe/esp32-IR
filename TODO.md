@@ -497,6 +497,10 @@ offen (s. u.) — **vor** dem Kopieren fremden Codes entscheiden.
 
 
 ## Erledigt (in dieser Session)
+- **Receiver-Build nach `2536550` wieder grün** (`fee4c43`): `console_cmd_pull()` rief
+  `history_backfill_run_session()` vor der Definition auf; ohne Vorwärtsdeklaration
+  scheiterte der Receiver-Build an `-Werror=implicit-function-declaration`
+  (Sender + Host-Tests waren grün). Prototyp ergänzt, CI wieder success.
 - **SML-Golden-Fixture + CRC-Hinweis** (`3427bd2`): echtes eHZ-Telegramm als Fixture,
   Golden-Decode-Test (8 Checks, ASan+UBSan), Standard-CRC/Kermit-Caveat dokumentiert.
 - **MQTT-Topic-/Discovery-Builder** (`ee8ea13`): `main/mqtt_topics.{c,h}`, host-getestet
