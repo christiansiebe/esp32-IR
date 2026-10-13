@@ -615,6 +615,10 @@ static esp_err_t add_espnow_peer(const uint8_t *mac, wifi_interface_t interface)
 }
 
 #if CONFIG_ESPNOW_ROLE_SENDER
+/* Defined with the crash journal further down; the OTA restart path below uses
+ * it to mark a deliberate reboot as clean before esp_restart(). */
+static void crash_journal_mark_clean_restart(void);
+
 static void send_sender_ota_ack(const uint8_t *destination,
                                 const espnow_ota_packet_t *request,
                                 esp_err_t status)
@@ -769,7 +773,6 @@ static void espnow_ota_worker(void *arg)
 
 #if CONFIG_ESPNOW_ROLE_SENDER
 static void crash_journal_persist(uint8_t level);
-static void crash_journal_mark_clean_restart(void);
 static void time_sync_worker(void *arg);
 
 /* Current wall-clock time as Unix ms. Before the first calibration the sender
