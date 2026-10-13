@@ -2448,6 +2448,7 @@ static esp_err_t root_handler(httpd_req_t *req)
     if (len < 0 || (size_t)len >= sizeof(html)) {
         return ESP_FAIL;
     }
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     esp_err_t err = httpd_resp_send_chunk(req, html, len);
     if (err != ESP_OK) {
@@ -3576,6 +3577,7 @@ static esp_err_t log_page_handler(httpd_req_t *req)
         "button.textContent='Start RSSI capture';rssiStatus.textContent='Capture stopped; '+"
         "rssiCaptured.length+' samples recorded.';}catch(e){rssiStatus.textContent='Could not stop RSSI capture: '+e;}}};"
         "pollSml();</script><p><a href=\"/\">Back</a></p></body></html>";
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req, page);
 }
@@ -3602,6 +3604,7 @@ static esp_err_t ota_page_handler(httpd_req_t *req)
         "s.textContent=await r.text();if(!r.ok)throw new Error('HTTP '+r.status);}"
         "catch(e){s.textContent='Update failed: '+e;}}</script><p><a href=\"/\">Back</a></p>"
         "</body></html>";
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req, page);
 }
@@ -3871,6 +3874,7 @@ static esp_err_t console_page_handler(httpd_req_t *req)
         "cmd.addEventListener('keydown',e=>{if(e.key==='Enter')send();});"
         "cmd.focus();</script></body></html>";
 
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req, page);
 }
@@ -4586,6 +4590,7 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "byId('auto').addEventListener('click',()=>{setAuto(autoTimer===null);});"
         "byId('load').addEventListener('click',load);"
         "</script><p><a href=\"/\">Back</a></p></body></html>";
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req, page);
 }
@@ -4874,6 +4879,7 @@ static esp_err_t config_handler(httpd_req_t *req)
         "<label>Wi-Fi password</label><input name=\"password\" type=\"password\" maxlength=\"64\">"
         "<button type=\"submit\">Save and connect</button></form>"
         "<p><a href=\"/\">Back to meter</a></p></body></html>";
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req, page);
 }
@@ -4959,6 +4965,7 @@ static esp_err_t save_wifi_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req,
                               "<!doctype html><html><body><p>Settings saved. "
