@@ -285,6 +285,28 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   absent in the window are requested and merged, and the store renumbers pulled
   records, so the two independent sequence counters never have to line up.
 
+## Gap semantics (drei verschiedene "Gaps", nicht verwechseln)
+1. Sender UART `rx gap` (Sender-Diag): Stille auf der UART-Leitung >= 50 ms.
+   Wird per Ursache attribuiert (`gap_cause_{meter,sleep,stall,buffer}`). Ein
+   `mid-telegram`-Gap ist nur dann Verlust, wenn das Telegramm danach die
+   Prüfsumme verliert (`gap_loss`); der Zähler-Pause-Gap ist normal und tritt
+   **auch ohne CPU-Sleep** auf.
+2. Empfänger `transport gaps` (ESP-NOW, `g_sml_transport_gaps`): Sequenzsprung
+   pro Paket. Die Sequenz wird im Sender **pro Paket** vergeben und ein noch
+   nicht gesendetes Paket kann per `sml_tx_batch_requeue_front` mit **alter**
+   Sequenz erneut vorne landen (Retry). Daher: Rückwärts/Duplikat
+   (`sequence <= last`) = `transport_reorders` (rückgewonnen, **kein** Verlust,
+   **kein** Reset der 60-s-Sammlung); Vorwärtssprung (`sequence > last+1`) =
+   `transport_losses` (echtes über die Luft verlorenes Broadcast-Paket, kein
+   ACK) und nur dann wird die 60-s-Leistungssammlung zurückgesetzt. Diese Gaps
+   existieren **auch ohne CPU-Sleep**; der 5-s-Burst (`SML_TX_CYCLE_MS 5000`,
+   `SML_TX_BURST 32`) erhöht nur die Verlustrate (~0,65 %), ist aber nicht die
+   Ursache der Zählung.
+3. Dashboard `overflow` (`/api/sml`, `SML_VALUE_HISTORY_COUNT`): reines
+   **Anzeige-Artefakt** — der Browser-Cursor liegt mehr als einen RAM-Ring
+   zurück. Kein Messverlust. Der Ring ist jetzt 256 groß; die Meldung heißt
+   „DISPLAY GAP", nicht mehr „VALUE GAP".
+
 ## Managed components (IDF v6)
 - ESP-IDF v6 moved ESP-MQTT and cJSON out of the core. They come from the ESP
   Component Registry (`espressif/mqtt`, `espressif/cjson`) via
