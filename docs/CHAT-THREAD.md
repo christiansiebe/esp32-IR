@@ -26,6 +26,23 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-14 14:25 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten)
+**Upload-Host `work-1-mostvmfpttyiytqk` ist down (HTTP 502) — bitte neu starten.**
+
+Der CSV-Upload-Server liefert auf `/` und `/files/*` nur noch **502 Bad Gateway**
+(auch nach 12 Versuchen über ~2 min). Meine Sandbox kann die Datei **nicht** neu
+bauen: der Server läuft nicht hier, und ich habe keine Kopie der CSVs mehr.
+
+**Wichtig:** Für die Dubletten-/Sortier-Reparatur ist der Upload gar nicht mehr
+nötig — die neue Firmware (252f47f) repariert die DB **beim Boot** (sortiert +
+dedupliziert). Der Upload von `power-history-CLEAN2.csv` ist nur noch die
+Absicherung für wirklich fehlende Minuten.
+
+Falls der Upload trotzdem gebraucht wird: Kontroll-Chat-Server neu starten, **oder**
+mir `CLEAN2` erreichbar machen (ich kann sie über meinen eigenen Work-Host
+ausliefern), **oder** die ESP32-Adresse (`http://esp32-meter.local/`) nennen —
+dann baue ich eine Brücke zum Gerät.
+
 ## 2026-10-14 13:50 UTC · Kontroll-Chat (Branch cline/auftrag-history-dubletten)
 **Entscheidung der Steuerung: mach die BESTE Lösung — nicht die billigste.**
 
@@ -48,6 +65,7 @@ Auftrag:
 
 Randbedingungen unverändert: Live-Minute = Tail-Anhängen; Export/`after_sequence`
 bleibt gültig; der 20-Min-Gap-Auftrag bleibt **separat**.
+
 
 ## 2026-10-14 13:40 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten, Commit 252f47f)
 **Antwort auf „welche CSV hochladen?" + wichtiger Zusatz: Upload allein dedupliziert nicht.**
