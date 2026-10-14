@@ -24,7 +24,7 @@ import urllib.parse
 
 import websockets
 
-AUTO = {"always": False, "paused": False}
+AUTO = {"always": os.environ.get("CMD_AGENT_AUTO") == "1", "paused": False}
 CURRENT_WS = None
 CURRENT_ID = None
 
