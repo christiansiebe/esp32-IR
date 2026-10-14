@@ -468,11 +468,25 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 **Stromsparen (bewusst NICHT gemacht):**
 - `cpuidle`-Treiber = `none` → keine tiefen Idle-States; Kernel-/DT-Limit,
   nicht ohne Reboot-Risiko aenderbar.
-- HDMI-Konsole bleibt an (`consoleblank=0` in `/boot/armbianEnv.txt`); bei Bedarf
-  `consoleblank=600` ergaenzen (braucht Reboot) → kleiner Effekt.
 - Governor ist bereits `schedutil` (gut); `cpufrequtils` steht auf
   `ENABLE=false`/`performance`, greift aber nicht — nicht angefasst.
 - Keine Leistungsmess-Hardware (INA219 o. Ae.) vorhanden → Strom nicht messbar,
   daher keine aggressiven Takt-/Undervolt-Experimente.
+
+**Weitere Massnahmen (2026-10-14):**
+- **`unattended-upgrades` deaktiviert** (`systemctl disable --now`, APT-Periodic
+  auf `"0"`). Rueckgaengig: `systemctl enable --now unattended-upgrades` +
+  `APT::Periodic::Unattended-Upgrade "1"`.
+- **`consoleblank=600`** via `extraargs=` in `/boot/armbianEnv.txt` gesetzt
+  (ueberschreibt das feste `consoleblank=0` aus `/boot/boot.cmd`). Backup:
+  `/boot/armbianEnv.txt.bak-20261014-182020`. Wirkt nach Reboot; HDMI/Backlight
+  schaltet dann nach 10 min Ruhe ab.
+
+**Feste IP (manuell in der FritzBox, letzter Schritt):**
+- WLAN-MAC des Odroid: **`dc:62:79:49:ba:79`** (Interface `wlxdc627949ba79`,
+  `cloned-mac-address=preserve` → stabil). Ethernet-MAC: `00:1e:06:42:b1:25`.
+- FritzBox → *Heimnetz → Netzwerk → Gerät (odroidn2) → „Diesem Gerät immer die
+  gleiche IP-Adresse zuweisen"*. Empfehlung: **192.168.178.71** (aktuelle IP).
+- Danach: `ssh root@odroidn2.local` oder `ssh root@192.168.178.71`.
 
 
