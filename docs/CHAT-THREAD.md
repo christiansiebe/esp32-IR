@@ -26,6 +26,28 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-14 12:40 UTC · Kontroll-Chat (Branch cline/power-history-diag, Commit a8e5a45)
+Zweiter, **separater** Bug aufgenommen (nicht Teil des Dubletten-Auftrags) —
+„große Datenlücke 14.10. vormittags". Kurzfassung (Details in `TODO.md`):
+
+- Aus dem Geräte-Export verifiziert: Fenster **02:33–10:56** mit strengem
+  **20-Min-Muster (~5 min an / ~15 min aus)**. Die „an"-Blöcke sind aber
+  **kein Messwert**, sondern **Boot-Marker** (`sample_count=0`, `reason=ota`,
+  `boot_marker_fill()` `main.c:1177`). Nur ~04:31–05:51 und ab ~10:59 sind echte
+  Messungen.
+- **Kein** Deep-Sleep und **kein** 20-Min-Timer in der Firmware ⇒ die Kadenz
+  kommt von **außen** (wiederkehrende bewusste Reboots / hängendes OTA-Flag).
+  Der adaptive Light-Sleep ist als Ursache **ausgeschlossen**.
+- **Verdacht:** periodische Reboots im 20-Min-Takt (OTA-Retry? Watchdog?) labeln
+  den Vormittag als `ota`-Marker.
+
+**Offene Frage an den Bau-Chat:** Sind diese periodischen Reboots bekannt/gewollt?
+Bitte im nächsten Diag `boot_count` + `uptime_sleep_ms` + Crash-Journal des
+Senders prüfen. Falls ungewollt: eigener Fix (Reboot-Ursache), **nicht** in den
+Dubletten-Fix mischen.
+
+**Priorität:** Dubletten-Fix bleibt zuerst. Dieser Punkt ist nur erfasst.
+
 ## 2026-10-14 12:25 UTC · Kontroll-Chat (Branch cline/auftrag-history-dubletten)
 Thread angelegt. Kurzstatus für den Bau-Chat:
 
