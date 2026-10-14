@@ -393,6 +393,9 @@ static esp_err_t power_history_api_handler(httpd_req_t *req);
 static esp_err_t power_history_csv_handler(httpd_req_t *req);
 static esp_err_t db_refresh_handler(httpd_req_t *req);
 static esp_err_t power_history_upload_handler(httpd_req_t *req);
+static void history_backfill_request_full(void);
+static esp_err_t send_http_error_status(httpd_req_t *req, const char *status,
+                                        const char *message);
 #endif
 
 static esp_err_t load_wifi_credentials(void)

@@ -66,6 +66,20 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_boot_policy"
 
+# The trigger half: the real boot_confirm.c glue (with test hooks) must actually
+# perform the rollback for every failure scenario — the link that was missing.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -DBOOT_CONFIRM_TEST_HOOKS \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/boot_policy.c" \
+    "$repo/main/boot_confirm.c" \
+    "$here/test_boot_confirm_trigger.c" \
+    -o "$out/test_boot_confirm_trigger"
+
+"$out/test_boot_confirm_trigger"
+
 # JSON string escaper: the sender-diagnostics JSON interpolates free-form event
 # texts, so a stray control character must not break the payload the browser
 # parses ("bad control character in string literal").

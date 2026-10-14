@@ -208,6 +208,23 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 `time_requests` grows but `time_syncs` stays 0, the receiver has no NTP fix
 (check `clock_synced` on the receiver) or still runs old firmware.
 
+## Post-OTA rollback confirmation (receiver)
+- A freshly flashed image starts in `ESP_OTA_IMG_PENDING_VERIFY`
+  (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`). Until it is confirmed, any reset
+  rolls back to the previous slot.
+- `boot_policy.c` holds the pure decision (`boot_evaluate`, `boot_action_effect`,
+  host-tested) and `boot_confirm.c` is the glue: confirm after 45 s up with the
+  dashboard reachable, roll back if the dashboard is still down after the 30 s
+  grace window. `boot_confirm_poll()` maps the decided action through
+  `boot_action_effect()` to the effect, so a failure scenario actually performs
+  the rollback (previously `BOOT_TAKE_ROLLBACK` was computed but dropped, and
+  `boot_confirm_fail()` had no caller).
+- Failure cases are covered twice on the host: `test/test_boot_policy.c` (the
+  decision) and `test/test_boot_confirm_trigger.c` (the real glue performs the
+  rollback exactly once, and a confirmed image only reboots, never rolls back).
+- Health failures after confirmation cannot roll back (that slot is gone); they
+  only reboot. A post-confirmation health watchdog is still open (see TODO.md).
+
 ## Watchdog (reviewed, not enabled)
 - No `esp_task_wdt_*` usage anywhere; the task watchdog (TWDT) and interrupt
   watchdog are left at the IDF defaults (enabled, panic on timeout). So a hang

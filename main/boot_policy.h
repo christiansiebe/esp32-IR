@@ -43,9 +43,22 @@ typedef struct {
     bool decided; /* a confirm/rollback decision has been made (final) */
 } boot_state_t;
 
+/* The device action a decided boot_action_t must trigger. Kept pure so the
+ * failure paths can be checked end to end on the host: boot_confirm_poll() only
+ * *performs* the effect, it does not decide it. This is exactly where the
+ * rollback was previously dropped (BOOT_TAKE_ROLLBACK mapped to nothing). */
+typedef enum {
+    BOOT_EFFECT_NONE = 0,
+    BOOT_EFFECT_CONFIRM = 1,  /* esp_ota_mark_app_valid_cancel_rollback() */
+    BOOT_EFFECT_ROLLBACK = 2, /* boot_confirm_fail() -> rollback + reboot */
+} boot_effect_t;
+
 void boot_policy_defaults(boot_policy_t *policy);
 
 void boot_state_reset(boot_state_t *state);
+
+/* Map a decided action to the side effect the glue must perform. */
+boot_effect_t boot_action_effect(boot_action_t action);
 
 /* Evaluate once. `uptime_ms` is the time since boot. Returns the action to
  * take. BOOT_TAKE_ROLLBACK fires once the grace window passed and the

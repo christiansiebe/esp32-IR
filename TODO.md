@@ -132,7 +132,13 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       `boot_confirm_fail()` hatte **null Aufrufer**. Ein Image, das zwar hochkommt, aber das
       Dashboard nicht innerhalb der 30 s Grace bereitstellt, blieb damit hängen. Jetzt ruft
       `boot_confirm_poll()` bei `BOOT_TAKE_ROLLBACK` `boot_confirm_fail("dashboard did not come up")`
-      auf → `esp_ota_mark_app_invalid_rollback_and_reboot()`.
+      auf → `esp_ota_mark_app_invalid_rollback_and_reboot()`. Die Abbildung
+      Aktion→Wirkung liegt jetzt rein in `boot_policy.c` (`boot_action_effect`).
+      Fehlerfälle doppelt host-getestet: `test_boot_policy.c` (Entscheidung, 53 Checks,
+      tabellengetrieben: nie oben / früh gestorben / spät gestorben / Flattern / zu spät oben
+      → Rollback; gesund + exakt zur Grace → Confirm) und `test_boot_confirm_trigger.c`
+      (echter `boot_confirm.c`-Kleber löst für jeden Fall genau **einen** Rollback aus;
+      bestätigtes Image rebootet nur, rollt nie zurück — 39 Checks).
 - [x] **CSV-Restore + Sofort-Refresh (Dashboard):** Buttons „Datenbank jetzt aktualisieren"
       (`POST /api/db-refresh` → `history_backfill_request_full()`) und „CSV hochladen"
       (`POST /api/power-history-upload`). Der Upload streamt zeilenweise (ein volles Backup

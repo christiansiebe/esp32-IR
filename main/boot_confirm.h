@@ -36,3 +36,17 @@ void boot_confirm_poll(void);
 /* Handle a health failure: roll back if the image is still unconfirmed,
  * otherwise a plain reboot (the image was already accepted). Does not return. */
 void boot_confirm_fail(const char *reason_name);
+
+#ifdef BOOT_CONFIRM_TEST_HOOKS
+/* Test-only: drive a virtual uptime and observe the side effects, so the host
+ * can assert that a failure scenario really triggers the rollback (the firmware
+ * never calls these). */
+#include "boot_policy.h"
+
+void boot_confirm_test_reset(void);
+void boot_confirm_test_set_uptime(uint32_t uptime_ms);
+boot_effect_t boot_confirm_test_last_effect(void);
+unsigned boot_confirm_test_fail_count(void);
+const char *boot_confirm_test_fail_reason(void);
+bool boot_confirm_test_confirmed(void);
+#endif
