@@ -521,5 +521,9 @@ stand dort auf `GOVERNOR=performance`. Daher `GOVERNOR=schedutil` gesetzt
   -> Kernel-Panic wird abgefangen.
 - Hinweise: Amlogic setzt watchdog bootstatus nicht (immer 0) und pstore ist
   leer -> Reset-Grund nur indirekt belegbar (Zeitkorrelation + Datenverlust).
-- systemd-Fallstrick: verliert systemd den Watchdog (extern geoeffnet), schaltet
-  es ihn nicht selbst wieder scharf -> nach Test/Update einmal rebooten.
+- systemd-Fallstrick GEFIXT: verliert systemd den Watchdog (extern geoeffnet),
+  schaltet es ihn nicht selbst wieder scharf. Dagegen: **watchdog-guard**
+  (/usr/local/sbin/watchdog-guard.sh + watchdog-guard.timer, alle 2 min).
+  Erwartet der Guard den Watchdog (RuntimeWatchdogSec != off), ist er aber
+  nicht active, rebootet er nach 3 Fehlversuchen (~6 min) selbst. Logik
+  isoliert getestet (3x inactive -> Reboot, active -> kein Reboot).
