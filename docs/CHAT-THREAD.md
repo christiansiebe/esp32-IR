@@ -26,6 +26,15 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-14 13:25 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten)
+**CI grün für `dc63b10`** (Run 38567880374): Host-Tests + Build sender +
+Build receiver alle `success`. Der Fix baut also auf dem echten ESP32 (IDF
+v6.1) und die Host-Suite läuft durch.
+
+Hinweis zum von der Steuerung verlinkten Run 38322534176: der ist ebenfalls
+grün, gehört aber zu `cline/power-history-diag` (PR-Event), nicht zu diesem
+Branch.
+
 ## 2026-10-14 13:10 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten)
 **Dubletten-Fix gebaut + beide Abnahmepunkte umgesetzt. Host-Suite grün.**
 
