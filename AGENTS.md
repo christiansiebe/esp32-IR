@@ -389,3 +389,37 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 - The IDF build compiles with `-Werror`: unused vars and `-Wformat-truncation`
   (e.g. a `snprintf` whose buffer is smaller than the topic could be) fail CI.
   Size buffers for the full topic length.
+
+## Infrastruktur Odroid (Kontroll-Chat, Session 2026-10-14)
+
+**Kommando-Kanal (Sandbox -> Odroid):**
+- Sandbox: `tools/remote-shell/sandbox_term_server.py` (Port 12001, Token-Auth),
+  Datei-Queue `/tmp/cmdchannel/{queue,results,live}`. `cmd_send.sh` zeigt die
+  Ausgabe jetzt **live** (Agent streamt `{"type":"progress"}`).
+- Odroid: `cmd_agent.py` laeuft als **systemd-Dienst** `odroid-cmd-agent.service`
+  (`Restart=always`, `enabled`, `CMD_AGENT_AUTO=1` = unbeaufsichtigt). Token in
+  der Unit. Faellt der Agent aus oder rebootet der Odroid, verbindet er sich
+  selbst wieder. Nach einem **Sandbox-Reset** Server mit **demselben Token**
+  neu starten -> Agent kommt von allein zurueck.
+- **Nie** `pkill -f cmd_agent.py` aus dem Kanal heraus (toetet die eigene Shell);
+  Agent per `kill <pid>` beenden.
+
+**SSD / Docker (erledigt):**
+- RTL9210B-Adapter (`0bda:9210`) haengt an `uas` -> UAS-Quirk in
+  `/boot/armbianEnv.txt` (`usbstoragequirks=...0x0bda:0x9210:u`), danach stabil.
+- SSD (`/dev/sda1`, 238G btrfs) jetzt **dauerhaft** an `/mnt/ssd` (fstab,
+  `nofail`). Docker-`data-root` = `/mnt/ssd/@docker` (HA laeuft von der SSD).
+- Alter Rootfs-`@docker` (auf SD) entfernt -> SD von 87% auf 74%.
+- Snapshot des alten Juni-Stands: `snapshots/docker/pre-migration-2026-10-14-1602`.
+
+**VNC / XFCE (repariert):**
+- Armbian bookworm, XFCE + TigerVNC. `dbus-x11` installiert; `dbus-launch` unter
+  `/usr/bin/dbus-launch`.
+- `/root/.vnc/xstartup` startet XFCE **mit Session-D-Bus**:
+  `exec dbus-launch --exit-with-session startxfce4`.
+- systemd-Dienst `xfce-vnc.service` (`enabled`) -> `vncserver :1 -geometry
+  1920x1080 -depth 24 -localhost no`, Port **5901** (0.0.0.0).
+- VNC-Passwort in `/root/.vnc/PASSWORT.txt`.
+- **Reparatur-CSV:** `power-history-REPAIRED.csv` (3518 min) war nur in der alten
+  Sandbox (`/tmp/csv_uploads`) und ist mit dem Reset verloren; nicht in Git.
+
