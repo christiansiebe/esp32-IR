@@ -493,3 +493,19 @@ stand dort auf `GOVERNOR=performance`. Daher `GOVERNOR=schedutil` gesetzt
 - Danach: `ssh root@odroidn2.local` oder `ssh root@192.168.178.71`.
 
 
+
+
+**Selbstheilung bei Hängern (2026-10-14):**
+- Vorher: `RuntimeWatchdogUSec=0` (Watchdog aus) und `kernel.panic=0` -> ein echter
+  System-Hang oder eine Kernel-Panic hätte den Odroid **dauerhaft tot** gelassen
+  (bis zum physischen Steckerziehen).
+- Jetzt: **systemd-Hardware-Watchdog aktiv** — `RuntimeWatchdogSec=60` in
+  `/etc/systemd/system.conf` (Backup `system.conf.bak-*`). Der Meson-Watchdog
+  (`/dev/watchdog0`, 30-s-HW-Timeout, `nowayout=0`) wird gefüttert; bei Freeze
+  rebootet das Board selbst.
+- **`panic=10`** via `extraargs=` in `/boot/armbianEnv.txt` -> Kernel-Panic
+  rebootet nach 10 s automatisch.
+- Verifiziert nach Reboot: `RuntimeWatchdogUSec=1min`, `watchdog0 state=active`,
+  cmdline `panic=10`.
+- Reboot-Watchdog (`RebootWatchdogSec=10min`, Default) deckt bereits den
+  Reboot-Fall ab.
