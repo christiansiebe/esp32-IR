@@ -389,3 +389,64 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 - The IDF build compiles with `-Werror`: unused vars and `-Wformat-truncation`
   (e.g. a `snprintf` whose buffer is smaller than the topic could be) fail CI.
   Size buffers for the full topic length.
+
+## 🔨 BAUAUFTRAG (2026-10-14): History-Dubletten nach Backfill
+**Status: Auftrag erteilt, noch NICHT gebaut.** Auftraggeber: Kontroll-Chat
+(`cline/power-history-diag`). Dieser Abschnitt ist der verbindliche Auftrag.
+
+### Symptom (aus echten Backups belegt)
+`GET /api/power-history.csv` liefert **doppelte Minuten**. Empfänger-Export 14.10.:
+4828 Zeilen / 3557 eindeutige Minuten → **1271 überzählige Zeilen**; ein früherer Export
+615 doppelte Minuten / 1047 Zeilen. Die Dubletten-Paare liegen im `sequence` weit
+auseinander (= zwei Zähler: Empfänger-Ring vs. Sender-Verlauf) → sie entstehen im
+**Backfill-Merge**, nicht im CSV-Upload.
+
+### Root Cause (im Host-Test reproduziert, 2026-10-14)
+`main/power_history.c`:
+- `minute_is_stored()` und der `power_history_read*`-Pfad nehmen an, der Ring sei
+  **zeitlich sortiert** (`minute_is_stored` = **Binärsuche** über `oldest_slot..next_slot`).
+- Der Backfill fügt **ältere** Minuten an (Sender-Verlauf) → Ring wird **unsortiert**.
+- Folge: `minute_is_stored()` / `power_history_has_minute()` finden **vorhandene** Minuten
+  nicht mehr (Binärsuche bricht ab) → `write_records()` hält sie für neu → **dieselbe
+  Minute wird erneut geschrieben** → Dubletten. Auch der Export (`power_history_read`)
+  überspringt beim Blocklesen unsortierte Einträge.
+- Reproduktion (Host, `main/power_history.c` + eigener Treiber): 10 Live-Minuten enqueuen,
+  dann 10 **ältere** Minuten mergen → `has_minute(T0)` = **0** (soll 1); dieselben
+  Live-Minuten erneut mergen → `record_count` 20 → 30.
+
+### Fix-Richtung (empfohlen: Option A)
+**A) Ring zeit-sortiert halten (bevorzugt).** Beim Einfügen älterer Backfill-Minuten die
+korrekte Slot-Position bestimmen und den Ring so umschaufeln, dass
+`oldest_slot..next_slot` **aufsteigend** bleibt. Dann funktionieren Binärsuche (Dedup,
+`read_window`) wieder. Betroffen: `write_records()` in `main/power_history.c` (gemeinsamer
+Pfad für Live-Recorder **und** Merge). Achtung: Header (`record_count`/`next_slot`) und
+beide Header-Kopien konsistent halten; O(n)-Umschreiben bei 29000 Records ist teuer → wenn
+möglich Slots per `memmove`/Ringrotation verschieben.
+**B) Alternative:** `minute_is_stored` + `read*` auf unsortierten Ring auslegen (lineare
+Suche bzw. Sortierindex) — teurer im Betrieb, aber einfacher zu ändern.
+
+### Mitnehmen
+- **Dedup innerhalb eines Backfill-/Import-Batches**: `history_sync_run` filtert nur gegen
+  `has()`; dieselbe Minute kann innerhalb einer Session doppelt ankommen (Retry/überlappende
+  Seiten). Vor `merge()` im Batch deduplizieren.
+- **Backfill-`errors` („Fehler: 2")**: bei `fetch()`-Fehlschlag (`sender_diag_exchange_raw`)
+  bricht die Seite ab, Cursor retryt später. Prüfen, ob Fehler gezählt/erneut versucht werden.
+
+### Regressionstest (muss mit)
+Host-Test in `test/` (analog `test_history_backfill_merge.c`):
+1. Live-Minuten T0..T9 enqueuen, dann ältere T-100..T-91 mergen.
+2. Assert: `power_history_has_minute(T0) == true`, Ring zeit-sortiert.
+3. Dieselben Live-Minuten erneut mergen → `record_count` **unverändert**.
+4. CSV-Export (`power_history_read*`) liefert **keine** doppelten Minuten.
+`test/run_host_tests.sh` muss grün bleiben; neuen Test dort einhängen.
+
+### Constraints
+- OTA-sicher (reine App-Änderung, keine `partitions.csv`/Bootloader/`sdkconfig.defaults`).
+- CI grün. Nach dem Build: **Commit-SHA** an den Kontroll-Chat zurückmelden.
+
+### Separater Wunsch des Nutzers (NICHT dieser Fix)
+„Nach dem CSV-Upload bleibt das Interface minutenlang offline." Der Handler
+`power_history_upload_handler` rebootet **nicht**; er streamt den Body. Vermutete Ursache:
+die große Upload-Transaktion blockiert den HTTPD-Task; zusätzlich belastet die
+Dashboard-Auto-Aktualisierung (`updateHistory` alle 1,5 s) den Server. Eigener Task: Upload
+in den Backfill-Worker verlagern bzw. HTTPD während des Imports nicht blockieren.
