@@ -3,6 +3,7 @@ set(main_requires
     esp_partition
     esp_driver_uart
     esp_event
+    esp_http_client
     esp_http_server
     esp_netif
     esp_pm
@@ -25,7 +26,7 @@ set(main_srcs "main.c" "power_history.c" "web_console.c"
               "history_csv_import.c"
               "json_escape.c" "version.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
-    list(APPEND main_srcs "mqtt_bridge.c")
+    list(APPEND main_srcs "mqtt_bridge.c" "web_guard.c")
 endif()
 if(CONFIG_ESPNOW_ROLE_SENDER)
     list(APPEND main_srcs "tx_batch.c" "uart_sleep_window.c")

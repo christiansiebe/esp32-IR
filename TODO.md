@@ -18,18 +18,32 @@ flashen (ab `f16cdc8`).
 ## ⏰ Arbeitsweise: Chat-Heartbeat (von jedem Folge-Chat zu übernehmen!)
 Diese Session läuft in einer Sandbox mit **Inaktivitäts-Timeout (~20 Min)**. Wird der Chat
 nicht benutzt, wird die Sandbox zurückgesetzt und nicht committete Arbeit ist weg (siehe
-„Geborgene Arbeit" unten). Deshalb gibt es einen automatischen Ping:
+„Geborgene Arbeit" unten).
 
-- Automation **`chat-heartbeat`** (OpenHands Cloud), Cron **`*/15 * * * *`**, Status ACTIVE.
-  Jeder Lauf weckt die Session und setzt den Idle-Timer zurück (15 Min < 20 Min ⇒ 5 Min Puffer).
+**Gemessen (2026-10-14, Memory-Sync `989f21c`):** Der `[heartbeat]`-Ping ist selbst ein
+**User-Message-Post**. Obwohl er mit `run:false` kommt, definiert die Agent-Server-API `run`
+als „agent loop automatisch starten **falls nicht laufend**" — ein **idler** Chat wird also
+trotzdem geweckt: **77/104** Heartbeats kippten `idle -> running`, **27/104** lösten eine
+echte Agent-Aktion aus (voller LLM-Turn, ~60k–200k Prompt-Tokens). Zusätzlich blockieren
+lange `sleep N`-Polls im Terminal den Agent-Loop (gemessene Heartbeat→Aktion-Latenz bis
+**1505 s**), echte User-Nachrichten warten genauso lange. **Der Ping macht den Chat träge.**
+
+- **Neue Regel (verbindlich):**
+  1. Die Sandbox **nur** mit `POST /api/v1/sandboxes/{id}/resume` warm halten — **keinen**
+     `[heartbeat]`-Post mehr, der einen Run startet. Ein sichtbares Lebenszeichen darf
+     keinen Agent-Turn auslösen.
+  2. Nicht mit langem `sleep N` im Chat pollen — kurze Polls, damit der Chat für echte
+     Nachrichten antwortet.
+  3. Bei sehr langen Chats aggressiver verdichten (oder forken/neu starten); ein
+     ~60k–200k-Token-Prompt macht jeden Turn langsam, unabhängig vom Heartbeat.
 - **Was Folge-Chats tun sollen:**
-  1. Beim ersten eigenen Schritt prüfen, dass `chat-heartbeat` noch ACTIVE ist (Liste der
-     Automations). Falls nicht: neu anlegen (Cron `*/15 * * * *`, Nachricht enthält den
-     Hinweis `[heartbeat]`), damit die Sandbox nicht wieder einschläft.
+  1. Beim ersten Schritt prüfen, dass die Keep-alive-Automation noch ACTIVE ist (Liste der
+     Automations). Falls nicht: neu anlegen — aber als **resume-only** (`POST …/resume`),
+     ohne Message-Post, damit kein Turn gestartet wird.
   2. Nach jedem bedeutenden Schritt **sofort committen + pushen** (kleine Commits) — der
      Heartbeat schützt nur den Chat, nicht die Arbeit. Nichts Wichtiges in `/tmp` halten.
-  3. Bei einem eingehenden `[heartbeat] … keine Aktion noetig`-Ping: keine Aktion nötig,
-     aber offene Arbeit aus diesem TODO weiterführen, falls vorhanden.
+  3. Ein eingehender `[heartbeat] … keine Aktion noetig`-Ping braucht **keine Aktion**; nur
+     offene Arbeit aus diesem TODO weiterführen, falls vorhanden.
 - Ein einzelner transienter `FAILED`-Lauf („Failed to get execution context") ist Infra,
   nicht der Script-Fehler — nur bei mehreren Fehlschlägen eingreifen.
 
@@ -855,6 +869,15 @@ offen (s. u.) — **vor** dem Kopieren fremden Codes entscheiden.
 
 
 ## Erledigt (in dieser Session)
+- **Web-Health-Guard (2026-10-14, gegen „Web offline, kein Rollback").** Neues,
+  host-getestetes Modul `main/web_guard.{c,h}` (`test/test_web_guard.c`, in
+  `run_host_tests.sh`): Receiver-only Task pingt alle 5 s `/healthz` per
+  Loopback; nach 30 s Stille `httpd_stop`+`httpd_start`+Handler-Neuregistrierung,
+  nach 90 s ohne Erholung `esp_restart()` (→ Boot-Policy greift wieder). Guard
+  bleibt **passiv**, bis der Selbst-Probe einmal klappt (`probe_works`) — kein
+  Reboot eines gesunden Geräts ohne funktionierenden Loopback. `status` zeigt
+  `web health: guarded/passive, restarts N`. `max_open_sockets=10`.
+  **Hardware-Verifikation offen** (Loopback-Probe + Restart am Gerät prüfen).
 - **Versionsnummern (2026-10-14, `cline/auftrag-history-dubletten`).** Root-CMake
   löst die Version aus `$FIRMWARE_VERSION` (CI) bzw. `git describe` auf und
   schreibt die `main/build_version.h` (`FIRMWARE_VERSION`); `main/version.c`

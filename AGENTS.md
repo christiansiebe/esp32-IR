@@ -457,6 +457,21 @@ alle host-getestet:
   Dauer eines Reads (bis 64 Records). Bei ~1,3 ms/Record auf SPIFFS bleibt das
   unter dem 800 ms-Budget. Ein Seqlock/Snapshot-Umbau war nicht nötig, weil der
   Writer zwischen den Chunks yielded.
+- **Web-Health-Guard (2026-10-14, gegen „Web offline, kein Rollback").** Der
+  OTA-Rollback (`boot_confirm.c`) deckt nur das **Boot-Fenster** ab: ein Image,
+  das hochkommt und das Stabilitätsfenster überlebt, ist **confirmed** — danach
+  prüft **niemand** mehr, ob der HTTPD noch antwortet. Genau das ist die Lücke
+  (per USB geflasht gibt es ohnehin nichts zum Zurückrollen). Neuer Guard
+  `main/web_guard.{c,h}` (Receiver-only, host-getestet `test/test_web_guard.c`):
+  ein Task pingt alle 5 s die eigene `/healthz`-Route (Loopback `127.0.0.1`).
+  Bleibt sie länger als `threshold_ms` (30 s) stumm, wird der Server neu
+  gestartet (`httpd_stop`+`httpd_start`+Handler neu registrieren); hilft das
+  binnen `reboot_timeout_ms` (90 s ab erstem Versuch) nicht, `esp_restart()` —
+  dann greift wieder die Boot-Policy. **Sicherheitsnetz:** der Guard bleibt
+  **passiv**, bis der Selbst-Probe **einmal** geklappt hat (`probe_works`); ein
+  Build ohne funktionierenden Loopback rebootet kein gesundes Gerät. Status im
+  Console-Kommando `status` (`web health: guarded/passive, last activity … ms,
+  restarts …`). `max_open_sockets` auf 10 erhöht (Headroom für die Probe).
 
 
 ## 🔨 BAUAUFTRAG (2026-10-14): History-Dubletten nach Backfill

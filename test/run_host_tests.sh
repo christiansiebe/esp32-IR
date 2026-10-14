@@ -276,6 +276,18 @@ python3 "$here/check_dashboard_js.py"
 
 "$out/test_version"
 
+# Web-health guard policy: restart-on-silence escalation and, crucially, that
+# the guard stays passive until the self-probe has proven itself once (a build
+# without the loopback path must not reboot a healthy device).
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/web_guard.c" \
+    "$here/test_web_guard.c" \
+    -o "$out/test_web_guard"
+
+"$out/test_web_guard"
+
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.
 cxx="${CXX:-g++}"

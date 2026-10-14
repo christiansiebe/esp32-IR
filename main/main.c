@@ -34,6 +34,7 @@
 #include "power_history.h"
 #include "version.h"
 #include "web_console.h"
+#include "web_guard.h"
 #if !CONFIG_ESPNOW_ROLE_SENDER
 #include "mqtt_bridge.h"
 #endif
@@ -427,6 +428,8 @@ static void history_backfill_request_full(void);
 static esp_err_t send_http_error_status(httpd_req_t *req, const char *status,
                                         const char *message);
 #endif
+
+static void register_webserver_handlers(httpd_handle_t server);
 
 static esp_err_t load_wifi_credentials(void)
 {
@@ -4204,7 +4207,19 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
         (unsigned int)esp_get_free_heap_size());
     if (written < 0 || (size_t)written >= out_size) {
         snprintf(out, out_size, "status: output truncated\n");
+        return;
     }
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    int extra = snprintf(
+        out + written, out_size - (size_t)written,
+        "web health: %s, last activity %u ms ago, restarts %u\n",
+        web_guard_active() ? "guarded" : "passive",
+        (unsigned int)web_guard_last_activity_age_ms(),
+        (unsigned int)web_guard_restart_count());
+    if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+    }
+#endif
 }
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -5894,8 +5909,14 @@ static void start_webserver(void)
      * the whole HTTP server. */
     config.stack_size = 8192;
     config.lru_purge_enable = true;
+    /* Headroom for the web-health self-probe plus normal browsers; with
+     * lru_purge_enable a stalled client cannot starve the guard's connection. */
+    config.max_open_sockets = 10;
 
-    httpd_handle_t server = NULL;
+    /* Static: the web-health guard keeps this pointer across restarts, so it
+     * must outlive start_webserver()'s stack frame. */
+    static httpd_handle_t server;
+    server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &config));
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -5905,6 +5926,20 @@ static void start_webserver(void)
     boot_confirm_note_dashboard(true);
 #endif
 
+    register_webserver_handlers(server);
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Health endpoint + guard: if the dashboard stops answering later (the
+     * confirmed-image blind spot), restart the server and, as a last resort,
+     * reboot so the boot_confirm policy runs again. */
+    ESP_ERROR_CHECK(web_guard_register_healthz(server));
+    web_guard_start(&server, &config, register_webserver_handlers);
+#endif
+    ESP_LOGI(TAG, "Webserver available through the setup AP at http://192.168.4.1/");
+}
+
+static void register_webserver_handlers(httpd_handle_t server)
+{
     httpd_uri_t root = {
         .uri = "/",
         .method = HTTP_GET,
@@ -6066,7 +6101,6 @@ static void start_webserver(void)
 #if !CONFIG_ESPNOW_ROLE_SENDER
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update_sender));
 #endif
-    ESP_LOGI(TAG, "Webserver available through the setup AP at http://192.168.4.1/");
 }
 
 #if CONFIG_ESPNOW_ROLE_SENDER
