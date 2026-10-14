@@ -469,3 +469,10 @@ hierzu). Zwei Ergänzungen:
 
 Beides ist Teil der Abnahme; der Regressionstest sollte (1) einen vorab unsortierten Ring und
 (2) die Export-Monotonie abdecken.
+
+### 📬 Austausch: `docs/CHAT-THREAD.md`
+Zwischen Kontroll- und Bau-Chat gibt es keinen direkten Chat-Kanal (jeder Runtime sieht nur
+die eigene Konversation). Der verbindliche, persistente Austausch läuft über
+**`docs/CHAT-THREAD.md`** (nur anhängen, ein Commit pro Nachricht, sofort pushen). Bitte
+Status/Fragen/SHA **dort** melden und vor der Arbeit einmal pullen, um die neuesten
+Nachrichten zu sehen.
