@@ -1,23 +1,19 @@
-# Cap the CPU at 80 MHz instead of the IDF default of 160 MHz, but let power
-# management scale the clock down (to the 40 MHz XTAL) when the CPU is idle.
+# Keep the 240 MHz ESP32 ceiling available and let power management scale the
+# clock down (to the 40 MHz XTAL) when the CPU is idle. The device is
+# mains-powered; the Wi-Fi dashboard and the minute-history backfill are
+# CPU/SPIFFS bound, so the top clock keeps the web UI responsive while a full
+# re-sync runs. The ESP-NOW send burst also gets the 240 MHz ceiling and drops
+# to 40 MHz between cycles. Keep this in step with CONFIG_ESPNOW_CPU_MAX_MHZ
+# (main/Kconfig.projbuild), which drives the runtime DFS ceiling for both roles.
 #
-# The device is network-/UART-bound and the SML UART runs at only 9600 baud, so
-# the top clock buys almost nothing while roughly doubling dynamic current. A
-# *variable* clock keeps the 80 MHz ceiling for the ESP-NOW send burst and drops
-# to 40 MHz between cycles; automatic light sleep (tickless idle) then parks the
-# CPU while the tasks block.
-#
-# Trade-off: on the ESP32 the Wi-Fi driver holds an APB_MAX lock while the
-# interfaces are up, and light sleep can make the receiver miss the sender's
-# connectionless ESP-NOW broadcasts. The minute-history backfill exists exactly
-# for that case: anything missed over the air is pulled from the sender's own
-# SPIFFS history afterwards, so enabling sleep does not lose data. If ESP-NOW
-# ever proves unreliable on the bench, disable CONFIG_PM_ENABLE (and with it DFS
-# and tickless idle) to fall back to the fixed 80 MHz behaviour. Hardware
-# verification of ESP-NOW under light sleep is still open (see TODO.md).
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
+# The receiver never enters light sleep (it has to answer HTTP and receive
+# ESP-NOW broadcasts), so it only scales the clock. The sender may park in
+# light sleep inside its verified quiet window (see CONFIG_ESPNOW_SENDER_LIGHT_SLEEP).
+# If a board shows brownout resets or instability at 240 MHz, lower this (and
+# CONFIG_ESPNOW_CPU_MAX_MHZ) to 160 or 80.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_PM_ENABLE=y
-# DFS at startup: max = DEFAULT_CPU_FREQ_MHZ (80), min = XTAL (40).
+# DFS at startup: max = DEFAULT_CPU_FREQ_MHZ (240), min = XTAL (40).
 CONFIG_PM_DFS_INIT_AUTO=y
 # Keep the light-sleep and idle paths in IRAM / optimised so the wake overhead
 # (and therefore the average current) is lower.

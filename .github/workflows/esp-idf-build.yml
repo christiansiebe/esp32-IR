@@ -24,6 +24,7 @@ jobs:
           # rot silently. IDF headers are stubbed, so this checks C syntax only.
           gcc -std=c11 -fsyntax-only \
             -DCONFIG_ESPNOW_SENDER_LIGHT_SLEEP=1 \
+            -DCONFIG_ESPNOW_CPU_MAX_MHZ=240 \
             -DSOC_LIGHT_SLEEP_SUPPORTED=1 \
             -I test/host/include \
             main/uart_sleep_window.c
@@ -99,8 +100,9 @@ jobs:
         run: |
           set -euo pipefail
           conf="sdkconfig"
-          # 80 MHz ceiling, scaled down by dynamic frequency scaling (DFS), with
-          # automatic light sleep. assert() so all mismatches are reported.
+          # 240 MHz ceiling, scaled down by dynamic frequency scaling (DFS),
+          # with automatic light sleep on the sender. assert() so all mismatches
+          # are reported.
           fail=0
           assert() {
             if ! grep -q "^$1$" "$conf"; then
@@ -109,12 +111,12 @@ jobs:
               fail=1
             fi
           }
-          assert 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80'
+          assert 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240'
           assert 'CONFIG_PM_ENABLE=y'
           assert 'CONFIG_PM_DFS_INIT_AUTO=y'
           assert 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y'
           [ "$fail" -eq 0 ]
-          echo "CPU clock: 80 MHz ceiling with DFS + tickless idle"
+          echo "CPU clock: 240 MHz ceiling with DFS + tickless idle"
 
       - name: Verify adaptive sleep config (sender)
         if: matrix.role == 'sender'

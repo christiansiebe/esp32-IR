@@ -46,9 +46,10 @@ bool uart_sleep_init_idf(void)
     }
 
     /* Variable CPU clock (DFS) plus light sleep in the idle path. Without this
-     * call light_sleep_enable stays 0 and the chip never sleeps. */
+     * call light_sleep_enable stays 0 and the chip never sleeps. The ceiling is
+     * shared with the receiver (CONFIG_ESPNOW_CPU_MAX_MHZ). */
     esp_pm_config_t pm = {
-        .max_freq_mhz = 80,
+        .max_freq_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ,
         .min_freq_mhz = 40,
         .light_sleep_enable = true,
     };

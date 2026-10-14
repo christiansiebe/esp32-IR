@@ -3481,6 +3481,13 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         record_count = 0;
         status.ready = false;
         ESP_LOGW(TAG, "Power history backend not ready; serving empty dataset");
+    } else if (err == ESP_ERR_TIMEOUT) {
+        /* Writer/import holds the lock for a long in-place ring insert. Serve an
+         * empty snapshot instead of blocking the HTTP task until the browser's
+         * request timeout fires; the dashboard retries on its next poll. */
+        record_count = 0;
+        status.ready = false;
+        ESP_LOGW(TAG, "Power history busy; serving empty dataset");
     } else if (err != ESP_OK) {
         free(records);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
@@ -3518,9 +3525,16 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         esp_err_t agg_err = power_history_aggregate(window_start_utc, bucket_seconds,
                                                     sum_w, count, bucket_start_ms,
                                                     point_count, &status);
+        bool agg_busy = (agg_err == ESP_ERR_TIMEOUT);
+        if (agg_busy) {
+            /* Writer/import holds the lock: emit an empty (but valid) aggregated
+             * window instead of blocking the HTTP task. The dashboard retries. */
+            status.ready = false;
+            ESP_LOGW(TAG, "Power history busy; serving empty aggregation");
+        }
         char agg_header[384];
         int agg_header_len = -1;
-        if (agg_err == ESP_OK) {
+        if (agg_err == ESP_OK || agg_busy) {
             agg_header_len = snprintf(
                 agg_header, sizeof(agg_header),
                 "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
@@ -3543,7 +3557,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 (long long)window_start_utc,
                 (unsigned int)POWER_HISTORY_CAPACITY);
         }
-        if (agg_err != ESP_OK ||
+        if ((!agg_busy && agg_err != ESP_OK) ||
             agg_header_len < 0 || (size_t)agg_header_len >= sizeof(agg_header)) {
             free(sum_w);
             free(count);
@@ -3676,6 +3690,12 @@ static esp_err_t power_history_csv_handler(httpd_req_t *req)
         record_count = 0;
         status.ready = false;
         ESP_LOGW(TAG, "Power history backend not ready; serving empty CSV");
+    } else if (err == ESP_ERR_TIMEOUT) {
+        /* Writer/import holds the lock: serve an empty export instead of
+         * blocking the HTTP task. The client can retry the download. */
+        record_count = 0;
+        status.ready = false;
+        ESP_LOGW(TAG, "Power history busy; serving empty CSV");
     } else if (err != ESP_OK) {
         free(records);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
@@ -6137,9 +6157,37 @@ static void run_sender(void)
 }
 #endif
 
+/* DFS ceiling for both roles. The receiver keeps light sleep off (it must stay
+ * responsive for HTTP and ESP-NOW); the sender enables it so its adaptive
+ * window can park the CPU (uart_sleep_window.c re-applies its own config with
+ * light sleep on, so this is not overwritten for the sender). */
+static void apply_power_management(void)
+{
+    uint32_t max_mhz = (uint32_t)CONFIG_ESPNOW_CPU_MAX_MHZ;
+    if (max_mhz < 80) {
+        max_mhz = 80;
+    } else if (max_mhz > 240) {
+        max_mhz = 240;
+    }
+    esp_pm_config_t pm = {
+        .max_freq_mhz = (int)max_mhz,
+        .min_freq_mhz = 40,
+        .light_sleep_enable = false,
+    };
+    esp_err_t err = esp_pm_configure(&pm);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not apply DFS ceiling (%u MHz): %s",
+                 (unsigned)max_mhz, esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "CPU clock ceiling %u MHz with DFS (min 40 MHz)",
+             (unsigned)max_mhz);
+}
+
 void app_main(void)
 {
     initialize_wifi_and_espnow();
+    apply_power_management();
 #if CONFIG_ESPNOW_ROLE_SENDER
     g_espnow_ota_rx_queue = xQueueCreate(4, sizeof(espnow_ota_rx_item_t));
     if (g_espnow_ota_rx_queue == NULL) {
