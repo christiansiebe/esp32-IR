@@ -4,24 +4,33 @@
 #   tools/remote-shell/cmd_send.sh "uname -a"
 #   tools/remote-shell/cmd_send.sh "btrfs subvolume list /" 60
 #
-# Der Server (sandbox_term_server.py) legt den Befehl in die Queue; der Agent
-# auf dem Odroid zeigt ihn an und fuehrt ihn nach lokaler Bestaetigung aus.
-# Ergebnis: /tmp/cmdchannel/results/<id>.out (+ .json)
+# Der Server legt den Befehl in die Queue; der Agent auf dem Odroid zeigt ihn
+# an und fuehrt ihn nach lokaler Bestaetigung aus. Die Ausgabe wird LIVE
+# angezeigt (Zeilen/Fortschrittsbalken), das Endergebnis kommt aus results/.
 set -euo pipefail
 
 CMD="${1:?Befehl fehlt}"
-TIMEOUT="${2:-120}"
+TIMEOUT="${2:-1800}"
 BASE="${CMD_BASE:-/tmp/cmdchannel}"
 QDIR="$BASE/queue"
 RDIR="$BASE/results"
-mkdir -p "$QDIR" "$RDIR"
+LDIR="$BASE/live"
+mkdir -p "$QDIR" "$RDIR" "$LDIR"
 
 ID="$(date +%s)-$$"
 printf '%s' "$CMD" > "$QDIR/$ID.cmd"
 echo "gesendet: id=$ID  (warte auf Bestaetigung am Odroid ...)"
 
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
+SHOWN=0
 while [ ! -f "$RDIR/$ID.json" ]; do
+  if [ -f "$LDIR/$ID.log" ]; then
+    SIZE=$(wc -c < "$LDIR/$ID.log")
+    if [ "$SIZE" -gt "$SHOWN" ]; then
+      tail -c +$((SHOWN + 1)) "$LDIR/$ID.log"
+      SHOWN=$SIZE
+    fi
+  fi
   if [ "$(date +%s)" -ge "$DEADLINE" ]; then
     echo "TIMEOUT: keine Antwort innerhalb ${TIMEOUT}s"
     exit 2
@@ -29,8 +38,15 @@ while [ ! -f "$RDIR/$ID.json" ]; do
   sleep 1
 done
 
+# Rest der Live-Ausgabe (falls nach dem letzten Poll noch etwas kam)
+if [ -f "$LDIR/$ID.log" ]; then
+  SIZE=$(wc -c < "$LDIR/$ID.log")
+  [ "$SIZE" -gt "$SHOWN" ] && tail -c +$((SHOWN + 1)) "$LDIR/$ID.log"
+fi
+
+echo
 echo "--- exit code ---"
 cat "$RDIR/$ID.code" 2>/dev/null || true
 echo
-echo "--- ausgabe ---"
+echo "--- ausgabe (vollstaendig) ---"
 cat "$RDIR/$ID.out" 2>/dev/null || true

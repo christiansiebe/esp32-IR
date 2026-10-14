@@ -25,6 +25,8 @@ import urllib.parse
 import websockets
 
 AUTO = {"always": False, "paused": False}
+CURRENT_WS = None
+CURRENT_ID = None
 
 
 def tty_prompt(text):
@@ -54,19 +56,49 @@ async def ask(cmd):
     return ans in ("y", "yes", "j", "ja")
 
 
-async def run_cmd(cmd, timeout=600):
+async def run_cmd(cmd, timeout=1800):
+    """Fuehrt den Befehl aus und schickt die Ausgabe LIVE zurueck (Fortschritt)."""
     try:
         p = await asyncio.create_subprocess_shell(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
-        try:
-            out, _ = await asyncio.wait_for(p.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            p.kill()
-            return {"code": None, "out": "TIMEOUT"}
-        return {"code": p.returncode, "out": out.decode(errors="replace")}
     except Exception as exc:  # noqa: BLE001
         return {"code": None, "out": f"AUSFUEHRUNGSFEHLER: {exc}"}
+
+    acc = []
+    buf = b""
+    async def pump():
+        nonlocal buf
+        while True:
+            chunk = await p.stdout.read(4096)
+            if not chunk:
+                break
+            acc.append(chunk.decode(errors="replace"))
+            buf += chunk
+            # Zeilen live senden (auch \r fuer Fortschrittsbalken)
+            while True:
+                i = min([x for x in (buf.find(b"\n"), buf.find(b"\r")) if x >= 0] or [-1])
+                if i < 0:
+                    break
+                line, buf = buf[:i + 1], buf[i + 1:]
+                await stream(line.decode(errors="replace"))
+        if buf:
+            await stream(buf.decode(errors="replace"))
+
+    async def stream(text):
+        try:
+            await CURRENT_WS.send(json.dumps({"type": "progress", "id": CURRENT_ID, "chunk": text}))
+        except Exception:
+            pass
+
+    try:
+        await asyncio.wait_for(pump(), timeout=timeout)
+    except asyncio.TimeoutError:
+        p.kill()
+        await stream("\n[TIMEOUT]\n")
+        return {"code": None, "out": "".join(acc) + "TIMEOUT"}
+    await p.wait()
+    return {"code": p.returncode, "out": "".join(acc)}
 
 
 def on_sigint(_sig, _frm):
@@ -82,6 +114,8 @@ async def session(url, token):
     query["token"] = [token]
     full = q._replace(path=path, query=urllib.parse.urlencode(query, doseq=True)).geturl()
     async with websockets.connect(full, max_size=None, open_timeout=15) as ws:
+        global CURRENT_WS, CURRENT_ID
+        CURRENT_WS = ws
         print(f"verbunden: {full.split('?')[0]}  (warte auf Befehle ...)")
         await ws.send(json.dumps({"type": "ready"}))
         async for message in ws:
@@ -92,6 +126,7 @@ async def session(url, token):
             if msg.get("type") != "cmd":
                 continue
             cid, cmd = msg.get("id"), msg.get("cmd", "")
+            CURRENT_ID = cid
             if await ask(cmd):
                 res = await run_cmd(cmd)
             else:
@@ -99,6 +134,7 @@ async def session(url, token):
                 res = {"code": -1, "out": "ABGELEHNT (keine Bestaetigung)"}
             res.update({"type": "result", "id": cid})
             await ws.send(json.dumps(res))
+            CURRENT_ID = None
 
 
 async def main():

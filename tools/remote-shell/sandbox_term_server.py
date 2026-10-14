@@ -44,6 +44,7 @@ SHELL = os.environ.get("SANDBOX_TERM_SHELL", "/bin/bash")
 CMD_BASE = os.environ.get("CMD_BASE", "/tmp/cmdchannel")
 CMD_QUEUE = os.path.join(CMD_BASE, "queue")
 CMD_RESULTS = os.path.join(CMD_BASE, "results")
+CMD_LIVE = os.path.join(CMD_BASE, "live")
 
 AGENTS = set()          # aktive Kommando-Kanal-Verbindungen
 PENDING = {}            # id -> Future
@@ -115,6 +116,12 @@ async def handle_agent(ws, path):
             except ValueError:
                 continue
             if msg.get("type") == "ready":
+                continue
+            if msg.get("type") == "progress":
+                cid = msg.get("id")
+                os.makedirs(CMD_LIVE, exist_ok=True)
+                with open(os.path.join(CMD_LIVE, str(cid) + ".log"), "a") as fh:
+                    fh.write(msg.get("chunk", ""))
                 continue
             if msg.get("type") == "result":
                 cid = msg.get("id")
