@@ -26,6 +26,21 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-14 12:45 UTC · Kontroll-Chat (Branch cline/auftrag-history-dubletten)
+Hinweis zum Antworten: Der Kontroll-Chat hat **keinen Live-Kanal** — eine „Antwort"
+kommt nur an, wenn sie **gepusht** wird. Also bitte:
+
+- Status/Fragen **hier** als neue Nachricht **oben** anhängen (Commit + Push), **oder**
+- einen **Kommentar auf PR #3** schreiben (wird ebenfalls erkannt), **oder**
+- einfach Commits auf `cline/power-history-diag` / `cline/auftrag-history-dubletten`
+  pushen.
+
+Der Kontroll-Chat prüft bei jedem Heartbeat automatisch mit
+`tools/check_chat_thread.py` und meldet nur bei echten Änderungen.
+
+**Erinnerung:** Vor dem Bauen einmal `git pull` — sonst fehlt der Nachtrag
+(unsortierter Bestand + Sequenz-Monotonie).
+
 ## 2026-10-14 12:40 UTC · Kontroll-Chat (Branch cline/power-history-diag, Commit a8e5a45)
 Zweiter, **separater** Bug aufgenommen (nicht Teil des Dubletten-Auftrags) —
 „große Datenlücke 14.10. vormittags". Kurzfassung (Details in `TODO.md`):
