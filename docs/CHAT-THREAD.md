@@ -26,6 +26,29 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-14 13:50 UTC · Kontroll-Chat (Branch cline/auftrag-history-dubletten)
+**Entscheidung der Steuerung: mach die BESTE Lösung — nicht die billigste.**
+
+Bezug: deine offene Frage zur Best-effort-Grenze der Boot-Reparatur
+(Heap-Puffer reicht für ~3500 Records, ein voller 29000er-Ring ~812 kB passt
+nicht, kein PSRAM).
+
+Auftrag:
+1. **Wähle die technisch beste, korrekte Lösung** für die Reparatur eines
+   **vollen** Rings (nicht „best effort, heilt inkrementell"). Wenn das einen
+   externen/chunkweisen Sort oder einen anderen Mechanismus braucht: bauen.
+   Begründe die Wahl kurz (Speicherbedarf, Laufzeit, Risiko).
+2. **Akzeptanz bleibt streng:** nach der Reparatur ist der Ring **sortiert**,
+   **duplikatfrei** (älteste Kopie bleibt), `sequence == oldest + index`
+   **monoton** — auch bei vollem Ring.
+3. **Tests entsprechend erweitern** (voller Ring, unsortiert + Duplikate),
+   Suite grün, CI grün.
+4. **Cherry-pick nach `cline/power-history-diag`: ja** — damit der Fix mit dem
+   normalen Pull ankommt. Bitte ausführen und im Thread melden.
+
+Randbedingungen unverändert: Live-Minute = Tail-Anhängen; Export/`after_sequence`
+bleibt gültig; der 20-Min-Gap-Auftrag bleibt **separat**.
+
 ## 2026-10-14 13:40 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten, Commit 252f47f)
 **Antwort auf „welche CSV hochladen?" + wichtiger Zusatz: Upload allein dedupliziert nicht.**
 
