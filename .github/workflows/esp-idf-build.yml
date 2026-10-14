@@ -216,6 +216,22 @@ jobs:
           print("flash_project_args written for direct esptool use")
           PYEOF
 
+          # Record the firmware version (from main/build_version.h, written by
+          # CMake via git describe) next to the image so a flash bundle is
+          # identifiable without booting the device.
+          version="$(sed -n 's/^#define FIRMWARE_VERSION "\(.*\)"$/\1/p' main/build_version.h)"
+          if [[ -z "$version" ]]; then
+            echo "::error::main/build_version.h has no FIRMWARE_VERSION"
+            exit 1
+          fi
+          printf '%s\n' "$version" > "$out_dir/firmware-version.txt"
+          printf 'firmware version: %s (%s)\n' "$version" "${{ matrix.role }}"
+          if ! grep -a -q "$version" "$build_dir/esp32-IR.bin"; then
+            echo "::error::version '$version' not found in the built image"
+            exit 1
+          fi
+          echo "### Firmware version: \`$version\` (${{ matrix.role }})" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:

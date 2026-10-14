@@ -23,7 +23,7 @@ set(main_srcs "main.c" "power_history.c" "web_console.c"
               "crash_journal.c" "crash_journal_store.c"
               "mqtt_topics.c" "history_backfill.c" "history_sync.c"
               "history_csv_import.c"
-              "json_escape.c")
+              "json_escape.c" "version.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
     list(APPEND main_srcs "mqtt_bridge.c")
 endif()

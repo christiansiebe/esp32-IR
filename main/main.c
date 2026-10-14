@@ -32,6 +32,7 @@
 #include "history_csv_import.h"
 #include "json_escape.h"
 #include "power_history.h"
+#include "version.h"
 #include "web_console.h"
 #if !CONFIG_ESPNOW_ROLE_SENDER
 #include "mqtt_bridge.h"
@@ -2832,7 +2833,8 @@ static esp_err_t root_handler(httpd_req_t *req)
         "' · CRC fehlerhaft: '+d.crc_invalid+"
         "' · Funkpakete verloren: '+d.transport_losses+' (rückgewonnen/Reorder: '+d.transport_reorders+')'+"
         "' · CPU: '+d.cpu_freq_mhz+' MHz (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)'+"
-        "' · Sleep: '+(d.sleep_state?'leicht':'wach')+(d.light_sleep_enabled?' (aktiv)':' (aus)');"
+        "' · Sleep: '+(d.sleep_state?'leicht':'wach')+(d.light_sleep_enabled?' (aktiv)':' (aus)')+"
+        "' · FW: '+(d.version||'?');"
         "}catch(e){byId('meter-status').textContent='Verbindung zum Zähler fehlgeschlagen: '+e;}"
         "setTimeout(updateMeter,1000);}updateMeter();"
         "const RANGE_STEPS=[2,6,12,24,72,168,480];"
@@ -3046,10 +3048,10 @@ static esp_err_t root_handler(httpd_req_t *req)
 
 static esp_err_t json_handler(httpd_req_t *req)
 {
-    char payload[64];
+    char payload[96];
     int len = snprintf(payload, sizeof(payload),
-                       "{\"fritzbox_connected\":%s}",
-                       g_wifi_connected ? "true" : "false");
+                       "{\"fritzbox_connected\":%s,\"version\":\"%s\"}",
+                       g_wifi_connected ? "true" : "false", fw_version());
     if (len < 0 || (size_t)len >= sizeof(payload)) {
         return ESP_FAIL;
     }
@@ -3214,7 +3216,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
         }
     }
 
-    char payload[768];
+    char payload[896];
     char average_json[48] = "null";
     if (power_count != 0) {
         int average_len = snprintf(average_json, sizeof(average_json),
@@ -3231,7 +3233,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     int pm_min_freq_mhz = pm_config.min_freq_mhz;
     int pm_current_freq_mhz = esp_clk_cpu_freq() / 1000000;
     int len = snprintf(payload, sizeof(payload),
-                       "{\"import\":%s,\"export\":%s,\"power\":%s,"
+                       "{\"version\":\"%s\",\"import\":%s,\"export\":%s,\"power\":%s,"
                        "\"average_power_w\":%s,\"average_samples\":%u,"
                        "\"average_duration_s\":%llu,\"crc_valid\":%lu,"
                        "\"crc_invalid\":%lu,\"transport_gaps\":%lu,"
@@ -3239,6 +3241,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        "\"cpu_freq_mhz\":%d,\"cpu_freq_max_mhz\":%d,"
                        "\"cpu_freq_min_mhz\":%d,\"sleep_state\":%u,"
                        "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu}",
+                       fw_version(),
                        readings[0], readings[1], readings[2],
                        average_json,
                        (unsigned int)power_count,
@@ -4893,7 +4896,7 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
         espnow_diag_counters_t counters;
         memcpy(&counters, response + sizeof(header), sizeof(counters));
         len = snprintf(payload, sizeof(payload),
-                       "{\"section\":\"counters\",\"uptime_ms\":%llu,"
+                       "{\"section\":\"counters\",\"version\":\"%s\",\"uptime_ms\":%llu,"
                        "\"uart_rx_bytes\":%llu,\"fifo_overflows\":%lu,"
                        "\"rx_buffer_full\":%lu,\"frame_errors\":%lu,"
                        "\"parity_errors\":%lu,\"tx_queue_drops\":%lu,"
@@ -4922,6 +4925,7 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"gap_cause_buffer\":%lu,"
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
                        "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u}",
+                       fw_version(),
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
                        (unsigned long)counters.fifo_overflows,
@@ -5151,7 +5155,7 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "+'cpu: '+d.cpu_freq_mhz+' MHz now (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)  session clock: min '+d.cpu_freq_hist_min_mhz+' / avg '+d.cpu_freq_avg_mhz+' / max '+d.cpu_freq_hist_max_mhz+' MHz, '+d.cpu_freq_changes+' steps'+nl"
         "+'sleep: '+(d.sleep_state?'in light sleep':(d.light_sleep_enabled?'awake, light sleep enabled':'awake, light sleep disabled'))"
         "+'  slept this session: '+(d.uptime_sleep_ms/1000).toFixed(1)+' s'+nl"
-        "+'build profile: '+(d.build_profile===1?'sender-sleep (light sleep compiled in)':'plain sender (light sleep NOT compiled in)')"
+        "+'fw: '+(d.version||'?')+'   build profile: '+(d.build_profile===1?'sender-sleep (light sleep compiled in)':'plain sender (light sleep NOT compiled in)')"
         "+'  boot markers: '+d.boot_marker_count+' ('+d.boot_marker_reason+')'+nl"
         "+'adaptive sleep window: '+(d.sleep_window_ms||0)+' ms (shortest gap seen: '+(d.sleep_min_gap_ms||0)+' ms)'"
         "+(d.sleep_hold_active?'  HELD AWAKE (data / OTA request active)':'')+nl"
@@ -5292,7 +5296,7 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
     char payload[2048];
     int len = snprintf(payload, sizeof(payload),
                        "{\"sender_mac_known\":%s,\"sender_rssi\":%d,\"sender_rssi_valid\":%s,"
-                       "\"counters\":{\"uptime_ms\":%llu,\"channel\":%u,"
+                       "\"counters\":{\"version\":\"%s\",\"uptime_ms\":%llu,\"channel\":%u,"
                        "\"uart_rx_bytes\":%llu,\"fifo_overflows\":%lu,"
                        "\"rx_buffer_full\":%lu,\"frame_errors\":%lu,\"parity_errors\":%lu,"
                        "\"tx_queue_drops\":%lu,\"sml_sent_ok\":%lu,\"sml_send_fail\":%lu,"
@@ -5318,6 +5322,7 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        mac_known ? "true" : "false",
                        (int)sender_rssi,
                        sender_rssi_valid ? "true" : "false",
+                       fw_version(),
                        (unsigned long long)counters.uptime_ms,
                        (unsigned int)counters.channel,
                        (unsigned long long)counters.uart_rx_bytes,
@@ -5449,7 +5454,7 @@ static esp_err_t sender_page_handler(httpd_req_t *req)
         "function fmtInfo(d){const c=d.counters||{};"
         "return 'rssi (sender->receiver): '+(d.sender_rssi_valid?d.sender_rssi+' dBm':'n/a')+nl"
         "+'uptime: '+(c.uptime_ms/1000).toFixed(1)+' s   esp-now channel: '+c.channel+nl"
-        "+'build profile: '+(c.build_profile===1?'sender-sleep (light sleep compiled in)':'plain sender')+nl"
+        "+'fw: '+(c.version||'?')+'   build profile: '+(c.build_profile===1?'sender-sleep (light sleep compiled in)':'plain sender')+nl"
         "+'sleep: '+(c.sleep_state?'in light sleep':(c.light_sleep_enabled?'awake, light sleep enabled':'awake, light sleep disabled'))"
         "+'   slept: '+(c.uptime_sleep_ms/1000).toFixed(1)+' s   window: '+(c.sleep_window_ms||0)+' ms'+nl"
         "+'cpu: '+c.cpu_freq_mhz+' MHz now (DFS '+c.cpu_freq_min_mhz+'-'+c.cpu_freq_max_mhz+'), avg '+c.cpu_freq_avg_mhz+' MHz, '+c.cpu_freq_changes+' steps'+nl"
