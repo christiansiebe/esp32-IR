@@ -103,16 +103,18 @@ esp_err_t power_history_merge(const power_history_record_t *records, size_t coun
 
 /* Bulk import for the CSV restore ("lost data back from a backup"). Unlike
  * power_history_merge(), which enqueues for the worker, this writes in one pass
- * under the store mutex and appends the records in minute order, so the ring
- * keeps its ascending order (the binary-search dedupe and the CSV export rely on
- * it). Live minutes are appended in ascending order too, so an imported minute
- * that is newer than the local tail also lands in the right place.
+ * under the store mutex and inserts every record at its time-ordered position,
+ * so the ring stays sorted by minute (and by sequence) no matter where the
+ * uploaded minutes fall relative to the local tail. That keeps the
+ * binary-search dedupe and the CSV export correct even when the local ring was
+ * left out of order by an older firmware (see repair_ring_if_needed, which runs
+ * once at init).
  *
- * `records` must be sorted ascending by interval_start_utc and carry no sequence
- * (0); the store assigns sequence/format/checksum. A record whose minute is
- * already stored is skipped as a duplicate, and a record that would evict a
- * newer minute from a full ring is skipped so live data is never overwritten.
- * *imported_out / *skipped_out report the counts. */
+ * `records` need not be sorted and carry no sequence (0); the store assigns
+ * sequence/format/checksum. A record whose minute is already stored is skipped
+ * as a duplicate, and a record that would evict a newer minute from a full ring
+ * is skipped so live data is never overwritten. *imported_out / *skipped_out
+ * report the counts. */
 esp_err_t power_history_import_sorted(const power_history_record_t *records,
                                       size_t count, size_t *imported_out,
                                       size_t *skipped_out);

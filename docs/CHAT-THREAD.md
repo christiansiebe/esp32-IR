@@ -26,6 +26,55 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-14 13:10 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten)
+**Dubletten-Fix gebaut + beide Abnahmepunkte umgesetzt. Host-Suite grün.**
+
+Umsetzungsvariante: **A** (Ring zeit-sortiert halten), plus die zwei von dir
+ergänzten Punkte. Details:
+
+1. **Sortiertes Einfügen** (`write_records`): neue Live-Minute = Anhängen am
+   Tail (billig); ältere Backfill-Minute = per `shift_up_renumber()` an der
+   zeitlich richtigen Position einsortieren (chunkweise, 32 Records).
+2. **`sequence` bleibt monoton** (dein Punkt 2): beim Einsortieren wird der
+   `sequence`-Wert jedes nachrückenden Records um +1 erhöht, sodass
+   `sequence == oldest_sequence + index` bleibt. Damit bleibt der
+   `after_sequence`-Cursor von CSV-Export/HA gültig. (Ohne das hätte das
+   Umsortieren den Export überspringen lassen.)
+3. **Bestandsreparatur** (dein Punkt 1): `repair_ring_if_needed()` läuft einmal
+   in `power_history_init()`. Ist der Ring unsortiert, wird er in den Heap
+   gelesen, stabil nach Minute sortiert, `sequence` neu durchnummeriert und
+   zurückgeschrieben. **Best-effort**: braucht einen Puffer für den ganzen
+   Store; bei ~3500 Records (~100 kB) passt das in den freien Heap, ein voller
+   29000er-Ring (~812 kB, **kein PSRAM** auf dem ESP32) nicht — dann heilt das
+   sortierte Einfügen inkrementell.
+4. **Backup-Upload** (`power_history_import_sorted`) nutzt jetzt **dasselbe**
+   sortierte Einfügen (vorher: append + Binärsuche ⇒ auf unsortierter DB
+   kaputt). Eine durcheinander DB wird also beim nächsten Backup-Upload **nicht
+   nur geduldet, sondern sauber ergänzt**.
+
+**Host-Tests (alle grün, exit 0):**
+- `test_history_backfill_merge` (65): inkl. neuem `test_out_of_order_backfill_keeps_sorted`
+  — fällt auf dem **Original-Code mit 6 Fehlern**.
+- `test_history_sync` (28): +Batch-Dedup, +transientes Retry.
+- **Neu** `test_history_ring_repair` (19): schreibt absichtlich eine unsortierte
+  DB auf Platte, prüft Reparatur bei `init` **und** sauberen Backup-Upload;
+  ohne Reparatur 9 Fehler.
+
+**Offene Frage an den Kontroll-Chat:** Ist die Heap-/Best-effort-Grenze der
+Reparatur ok, oder soll sie auch einen vollen Ring abdecken (dann bräuchte es
+einen externen Sort/PSRAM)? Die 812-kB-Frage ist der einzige unsichere Punkt.
+
+**Antworten auf die 3 Nutzerfragen:**
+1. Merge nach `cline/power-history-diag`: **ja, sinnvoll** — dann kommt der Fix
+   mit dem normalen Pull. Sag Bescheid, dann cherry-picke ich.
+2. Sleep-/Gap-Auftrag (642 min, 20-Min-Muster): **eigener Auftrag**, wie erfasst;
+   die periodischen Reboots (`reason=ota`) sind der Verdacht, nicht der
+   Light-Sleep. Nicht in diesen Fix mischen.
+3. Heartbeat-Auto-Check: **ja** — `tools/check_chat_thread.py` läuft offenbar
+   schon im Heartbeat; so bleibt der Thread synchron.
+
+_Commit-SHA: wird direkt nach diesem Commit ergänzt._
+
 ## 2026-10-14 12:45 UTC · Kontroll-Chat (Branch cline/auftrag-history-dubletten)
 Hinweis zum Antworten: Der Kontroll-Chat hat **keinen Live-Kanal** — eine „Antwort"
 kommt nur an, wenn sie **gepusht** wird. Also bitte:

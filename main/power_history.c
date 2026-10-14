@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_partition.h"
 #include "esp_spiffs.h"
 #include "freertos/FreeRTOS.h"
@@ -237,10 +238,13 @@ static bool minute_is_stored_geom(uint32_t next_slot, uint32_t count, int64_t ts
 }
 
 /* Shift indices [at, count) up by one slot (index i -> i+1) so a new record can
- * be written at `at`. Chunked so the working set stays bounded; the topmost write
- * (index `count`) lands in the slot the oldest record occupied, evicting it when
- * the ring is full. */
-static bool shift_up(uint32_t oldest_slot, uint32_t count, uint32_t at)
+ * be written at `at`, and bump each moved record's sequence by one. Sequences
+ * are kept contiguous (sequence == oldest_sequence + index) and therefore
+ * monotonic in ring order, which the after_sequence paging (CSV/dashboard)
+ * relies on. Chunked so the working set stays bounded; the topmost write (index
+ * `count`) lands in the slot the oldest record occupied, evicting it when the
+ * ring is full. */
+static bool shift_up_renumber(uint32_t oldest_slot, uint32_t count, uint32_t at)
 {
     power_history_record_t buf[POWER_HISTORY_SHIFT_CHUNK];
     uint32_t index = count;
@@ -256,6 +260,11 @@ static bool shift_up(uint32_t oldest_slot, uint32_t count, uint32_t at)
             }
         }
         for (uint32_t i = 0; i < chunk; ++i) {
+            ++buf[i].sequence;
+            if (buf[i].sequence == 0) {
+                buf[i].sequence = 1;
+            }
+            buf[i].checksum = record_checksum(&buf[i]);
             if (!write_record_idx(oldest_slot, start + i + 1u, &buf[i])) {
                 return false;
             }
@@ -328,16 +337,25 @@ static bool write_records(power_history_record_t *records, size_t record_count)
                                   records[i].interval_start_utc)) {
             continue;
         }
-        records[i].sequence = updated.next_sequence;
+        uint32_t oldest_slot = oldest_slot_of(updated.next_slot, updated.record_count);
+        /* Contiguous sequence numbering: the oldest stored record is
+         * next_sequence - record_count, so index `at` gets that plus `at`. */
+        uint32_t oldest_sequence = updated.next_sequence - updated.record_count;
+        uint32_t at = find_first_at_or_after_time(oldest_slot, updated.record_count,
+                                                  records[i].interval_start_utc);
+        records[i].sequence = oldest_sequence + at;
+        if (records[i].sequence == 0) {
+            records[i].sequence = 1;
+        }
         records[i].format_version = POWER_HISTORY_VERSION;
         records[i].reserved = 0;
         records[i].checksum = record_checksum(&records[i]);
 
-        uint32_t oldest_slot = oldest_slot_of(updated.next_slot, updated.record_count);
-        uint32_t at = find_first_at_or_after_time(oldest_slot, updated.record_count,
-                                                  records[i].interval_start_utc);
         if (at < updated.record_count) {
-            if (!shift_up(oldest_slot, updated.record_count, at)) {
+            /* Splice in: shift the newer records up and renumber them, so the
+             * ring stays sorted by minute AND by sequence (the after_sequence
+             * cursor needs the latter). */
+            if (!shift_up_renumber(oldest_slot, updated.record_count, at)) {
                 return false;
             }
             if (!write_record_idx(oldest_slot, at, &records[i])) {
@@ -432,6 +450,87 @@ static void power_history_worker(void *arg)
         }
         xSemaphoreGive(g_history_mutex);
     }
+}
+
+/* Repair a ring that an older firmware left time-unsorted (backfill merges used
+ * to append out of order). Reads all valid records into RAM, sorts by minute,
+ * renumbers sequence contiguously (so the after_sequence cursor stays monotonic)
+ * and writes the ring back. Best-effort: needs a temporary buffer of the whole
+ * store, so it only runs when that fits in the free heap (the reported messy
+ * store is a few thousand records; a full 29000-record ring on a no-PSRAM part
+ * cannot be sorted in one buffer and is left for the incremental inserts to
+ * heal). Returns true when the ring is sorted afterwards. */
+static bool repair_ring_if_needed(void)
+{
+    if (g_history_file == NULL || g_history_header.record_count < 2) {
+        return true;
+    }
+    uint32_t count = g_history_header.record_count;
+    power_history_record_t *records =
+        heap_caps_malloc((size_t)count * sizeof(*records), MALLOC_CAP_8BIT);
+    if (records == NULL) {
+        return false; /* too big to sort at once; leave it to the inserts */
+    }
+    uint32_t oldest_slot = oldest_slot_of(g_history_header.next_slot, count);
+    size_t valid = 0;
+    bool ordered = true;
+    int64_t prev = INT64_MIN;
+    for (uint32_t i = 0; i < count; ++i) {
+        power_history_record_t record = {0};
+        if (!read_record_idx(oldest_slot, i, &record) || !record_is_valid(&record)) {
+            continue;
+        }
+        (void)power_history_migrate_record(&record);
+        if (record.interval_start_utc < prev) {
+            ordered = false;
+        }
+        prev = record.interval_start_utc;
+        records[valid++] = record;
+    }
+    if (ordered) {
+        heap_caps_free(records);
+        return true; /* already sorted (or too few valid records) */
+    }
+    /* Stable insertion sort by minute; the store is already "almost sorted"
+     * (live minutes in order, a few backfill blocks inserted), so this is fast. */
+    for (size_t i = 1; i < valid; ++i) {
+        power_history_record_t key = records[i];
+        size_t j = i;
+        while (j > 0 && records[j - 1].interval_start_utc > key.interval_start_utc) {
+            records[j] = records[j - 1];
+            --j;
+        }
+        records[j] = key;
+    }
+    /* Renumber contiguously and rewrite the ring in time order. */
+    uint32_t oldest_sequence = g_history_header.next_sequence - count;
+    if (oldest_sequence == 0) {
+        oldest_sequence = 1;
+    }
+    for (size_t i = 0; i < valid; ++i) {
+        records[i].sequence = oldest_sequence + (uint32_t)i;
+        records[i].checksum = record_checksum(&records[i]);
+        if (!write_record_idx(oldest_slot, (uint32_t)i, &records[i])) {
+            heap_caps_free(records);
+            return false;
+        }
+    }
+    heap_caps_free(records);
+    if (fflush(g_history_file) != 0 || fsync(fileno(g_history_file)) != 0) {
+        return false;
+    }
+    power_history_header_t updated = g_history_header;
+    ++updated.generation;
+    updated.checksum = header_checksum(&updated);
+    uint8_t next_copy = (uint8_t)(1u - g_active_header_copy);
+    if (!write_header_copy(next_copy, &updated)) {
+        return false;
+    }
+    g_history_header = updated;
+    g_active_header_copy = next_copy;
+    ESP_LOGW(TAG, "Repaired out-of-order history ring (%u records re-sorted)",
+             (unsigned)valid);
+    return true;
 }
 
 esp_err_t power_history_init(void)
@@ -531,6 +630,11 @@ esp_err_t power_history_init(void)
             g_history_header = headers[g_active_header_copy];
         }
     }
+
+    /* An older firmware could leave the ring time-unsorted after backfill
+     * merges; sort it once at startup so dedupe and the CSV paging are correct
+     * from the first request. Best-effort (see repair_ring_if_needed). */
+    (void)repair_ring_if_needed();
 
     g_history_queue = xQueueCreate(POWER_HISTORY_QUEUE_LENGTH,
                                    sizeof(power_history_record_t));
@@ -664,27 +768,61 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
             ++skipped;
             continue;
         }
-        if (updated.record_count != 0 &&
-            minute_is_stored(&updated, record.interval_start_utc)) {
+        if (minute_is_stored_geom(updated.next_slot, updated.record_count,
+                                  record.interval_start_utc)) {
             ++skipped;
             continue;
         }
-        record.sequence = updated.next_sequence;
+        /* Insert at the time-ordered position like the live/merge path, so a
+         * restore also keeps the ring sorted (and therefore dedupe and the CSV
+         * paging correct) even when the uploaded minutes are older than the
+         * local tail or the local ring is already out of order. */
+        uint32_t oldest_slot = oldest_slot_of(updated.next_slot, updated.record_count);
+        uint32_t oldest_sequence = updated.next_sequence - updated.record_count;
+        uint32_t at = find_first_at_or_after_time(oldest_slot, updated.record_count,
+                                                  record.interval_start_utc);
+        record.sequence = oldest_sequence + at;
+        if (record.sequence == 0) {
+            record.sequence = 1;
+        }
         record.format_version = POWER_HISTORY_VERSION;
         record.reserved = 0;
         record.checksum = record_checksum(&record);
-        long offset = (long)(2u * sizeof(power_history_header_t) +
-                             updated.next_slot * sizeof(record));
-        if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
-            fwrite(&record, sizeof(record), 1, g_history_file) != 1) {
-            xSemaphoreGive(g_history_mutex);
-            if (imported_out != NULL) {
-                *imported_out = imported;
+        if (at < updated.record_count) {
+            if (!shift_up_renumber(oldest_slot, updated.record_count, at)) {
+                xSemaphoreGive(g_history_mutex);
+                if (imported_out != NULL) {
+                    *imported_out = imported;
+                }
+                if (skipped_out != NULL) {
+                    *skipped_out = skipped;
+                }
+                return ESP_FAIL;
             }
-            if (skipped_out != NULL) {
-                *skipped_out = skipped;
+            if (!write_record_idx(oldest_slot, at, &record)) {
+                xSemaphoreGive(g_history_mutex);
+                if (imported_out != NULL) {
+                    *imported_out = imported;
+                }
+                if (skipped_out != NULL) {
+                    *skipped_out = skipped;
+                }
+                return ESP_FAIL;
             }
-            return ESP_FAIL;
+        } else {
+            long offset = (long)(2u * sizeof(power_history_header_t) +
+                                 updated.next_slot * sizeof(record));
+            if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
+                fwrite(&record, sizeof(record), 1, g_history_file) != 1) {
+                xSemaphoreGive(g_history_mutex);
+                if (imported_out != NULL) {
+                    *imported_out = imported;
+                }
+                if (skipped_out != NULL) {
+                    *skipped_out = skipped;
+                }
+                return ESP_FAIL;
+            }
         }
         ++updated.next_sequence;
         if (updated.next_sequence == 0) {
