@@ -28,6 +28,7 @@ typedef struct {
     int count;
     int pages_served;
     int fail_after_pages; /* -1 = never fail */
+    int transient_failures; /* consecutive fetch misses before succeeding */
 } mock_sender_t;
 
 typedef struct {
@@ -58,6 +59,10 @@ static bool mock_fetch(void *ctx, int64_t after_utc, int64_t to_utc,
     (void)to_utc;
     mock_ctx_t *c = ctx;
     mock_sender_t *s = c->sender;
+    if (s->transient_failures > 0) {
+        s->transient_failures--;
+        return false; /* one lost frame; the next attempt succeeds */
+    }
     if (s->fail_after_pages >= 0 && s->pages_served >= s->fail_after_pages) {
         return false; /* simulate a radio drop */
     }
@@ -130,6 +135,44 @@ static void fill_sender(mock_sender_t *s, int64_t base, int n)
     for (int i = 0; i < n; ++i) {
         s->minutes[i] = base + i * 60;
     }
+}
+
+/* A retried/overlapping page: the middle minute arrives twice in one page. */
+static bool mock_fetch_with_dup(void *ctx, int64_t after_utc, int64_t to_utc,
+                                history_sync_page_t *page)
+{
+    (void)to_utc;
+    mock_ctx_t *c = ctx;
+    mock_sender_t *s = c->sender;
+    page->oldest_utc = s->count ? s->minutes[0] : 0;
+    page->latest_utc = s->count ? s->minutes[s->count - 1] : 0;
+    page->record_count = 0;
+    page->more = false;
+    for (int i = 0; i < s->count; ++i) {
+        if (s->minutes[i] <= after_utc) {
+            continue;
+        }
+        power_history_record_t *r = &page->records[page->record_count++];
+        memset(r, 0, sizeof(*r));
+        r->interval_start_utc = s->minutes[i];
+        r->sequence = (uint32_t)(i + 1);
+        if (i == 1 && page->record_count < HISTORY_SYNC_PAGE_RECORDS) {
+            page->records[page->record_count++] = *r; /* duplicate minute */
+        }
+    }
+    return true;
+}
+
+/* Merge that appends everything it is handed (no store-level dedupe), so a
+ * duplicate reaching it would land in the store. */
+static size_t mock_merge_raw(void *ctx, const power_history_record_t *records,
+                             size_t count)
+{
+    mock_ctx_t *c = ctx;
+    for (size_t i = 0; i < count; ++i) {
+        c->store->minutes[c->store->count++] = records[i].interval_start_utc;
+    }
+    return count;
 }
 
 static bool store_matches(const mock_store_t *store, const mock_sender_t *sender)
@@ -253,6 +296,50 @@ static void test_drop_before_first_page(void)
     CHECK(store.count == 0, "nothing merged");
 }
 
+static void test_dedupe_within_page(void)
+{
+    printf("test_dedupe_within_page\n");
+    const int64_t base = 7500000000LL;
+    mock_sender_t sender;
+    fill_sender(&sender, base, 5);
+    mock_store_t store = {0};
+    mock_ctx_t ctx = {.sender = &sender, .store = &store};
+    history_sync_result_t result;
+    /* The page carries six records: five distinct minutes plus minute base+60 a
+     * second time. Only the five distinct minutes may be merged (has() cannot
+     * see the not-yet-merged batch). */
+    history_sync_run(&result, 0, base + 5 * 60, 64, mock_fetch_with_dup, mock_has,
+                     mock_merge_raw, mock_store_cursor, &ctx);
+    CHECK(result.merged == 5, "duplicate minute within the page merged once");
+    CHECK(store.count == 5, "store holds five distinct minutes");
+    bool dup = false;
+    for (int i = 0; i < store.count; ++i) {
+        for (int j = i + 1; j < store.count; ++j) {
+            if (store.minutes[i] == store.minutes[j]) {
+                dup = true;
+            }
+        }
+    }
+    CHECK(!dup, "no duplicate minute reached the store");
+}
+
+static void test_transient_fetch_retry(void)
+{
+    printf("test_transient_fetch_retry\n");
+    const int64_t base = 7600000000LL;
+    mock_sender_t sender;
+    fill_sender(&sender, base, 10);
+    sender.transient_failures = 1; /* one lost frame before the first page */
+    mock_store_t store = {0};
+    mock_ctx_t ctx = {.sender = &sender, .store = &store};
+    history_sync_result_t result;
+    history_sync_run(&result, 0, base + 10 * 60, 64, mock_fetch, mock_has, mock_merge,
+                     mock_store_cursor, &ctx);
+    CHECK(result.any_round, "a transient miss does not end the session");
+    CHECK(result.merged == 10, "the retried page still mirrors the sender");
+    CHECK(store_matches(&store, &sender), "no page skipped by the retry");
+}
+
 int main(void)
 {
     test_full_mirror_from_empty();
@@ -260,6 +347,8 @@ int main(void)
     test_dedupe_against_local_data();
     test_already_caught_up();
     test_drop_before_first_page();
+    test_dedupe_within_page();
+    test_transient_fetch_retry();
     printf("test_history_sync: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

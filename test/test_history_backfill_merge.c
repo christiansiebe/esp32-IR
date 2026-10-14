@@ -174,6 +174,91 @@ static void test_store_dedupe_by_minute(void)
     CHECK(kept, "the original minute value is kept");
 }
 
+/* Regression: a backfill merge inserts OLDER minutes than the live tail. The
+ * ring must stay time-sorted so the binary-search dedupe keeps working - the
+ * previous append-only code left it unsorted, so an already-stored minute was no
+ * longer found and got written again (the reported CSV duplicates). */
+static void test_out_of_order_backfill_keeps_sorted(void)
+{
+    printf("test_out_of_order_backfill_keeps_sorted\n");
+    const int64_t base = 8200000000LL;
+    power_history_status_t st;
+    power_history_get_status(&st);
+    uint32_t before = st.record_count;
+
+    /* Ten live minutes: base+0 .. base+9 (newest = the local tail). */
+    int64_t live[10];
+    int32_t live_mw[10];
+    for (int i = 0; i < 10; ++i) {
+        live[i] = base + i * 60;
+        live_mw[i] = 5000 + i;
+    }
+    enqueue_batch(live, live_mw, 10, before + 10);
+    CHECK(power_history_has_minute(base), "live minute base present");
+    CHECK(power_history_has_minute(base + 9 * 60), "live minute base+9 present");
+
+    /* The sender offers ten OLDER minutes (base-100 .. base-91): every one is a
+     * genuinely missing minute the receiver should merge. */
+    power_history_record_t older[10];
+    for (int i = 0; i < 10; ++i) {
+        older[i] = make_record((uint32_t)(100 + i), base - (100 - i) * 60, 3000 + i);
+    }
+    size_t merged = 0;
+    CHECK(power_history_merge(older, 10, &merged) == ESP_OK, "older merge returns OK");
+    CHECK(merged == 10, "all ten older minutes merged");
+    wait_for_count(before + 20);
+    power_history_get_status(&st);
+    CHECK(st.record_count == before + 20, "store grew by the older minutes");
+
+    /* The existing live minutes must STILL be found (binary search works on a
+     * sorted ring), otherwise a re-merge would duplicate them. */
+    CHECK(power_history_has_minute(base), "live minute still present after merge");
+    CHECK(power_history_has_minute(base + 4 * 60), "live minute base+4 still present");
+
+    /* Re-merge the very same live minutes: nothing may be added. */
+    CHECK(power_history_merge(older, 10, &merged) == ESP_OK, "re-merge returns OK");
+    usleep(200000);
+    power_history_get_status(&st);
+    CHECK(st.record_count == before + 20, "re-merge does not duplicate minutes");
+
+    /* Re-enqueue the live minutes too: also a no-op. */
+    enqueue_batch(live, live_mw, 10, before + 20);
+    usleep(200000);
+    power_history_get_status(&st);
+    CHECK(st.record_count == before + 20, "re-enqueue of live minutes does not duplicate");
+
+    /* The whole store must come back time-sorted and without a duplicate minute
+     * when read via the CSV path (power_history_read pages by sequence). */
+    power_history_record_t page[POWER_HISTORY_PAGE_SIZE];
+    size_t count = 0;
+    bool overflow = false;
+    CHECK(power_history_read(0, 0, page, POWER_HISTORY_PAGE_SIZE, &count, &st,
+                             &overflow) == ESP_OK,
+          "read full store");
+    int sorted = 1;
+    int dup = 0;
+    for (size_t i = 1; i < count; ++i) {
+        if (page[i].interval_start_utc < page[i - 1].interval_start_utc) {
+            sorted = 0;
+        }
+        if (page[i].interval_start_utc == page[i - 1].interval_start_utc) {
+            dup = 1;
+        }
+    }
+    CHECK(sorted, "store stays time-sorted after an out-of-order merge");
+    CHECK(!dup, "no duplicate minute in the full read");
+
+    /* The older minutes are in the window read (the sender's paging path) too. */
+    size_t wcount = 0;
+    bool more = false;
+    CHECK(power_history_read_window(base - 100 * 60, base - 90 * 60, 0, 8, page, 8,
+                                    &wcount, &st, &more) == ESP_OK,
+          "window read of the older block ok");
+    CHECK(wcount == 8 && more, "older block pages in time order");
+    CHECK(page[0].interval_start_utc == base - 100 * 60,
+          "window read starts at the oldest older minute");
+}
+
 static void cleanup(void)
 {
     remove(POWER_HISTORY_FILE);
@@ -302,6 +387,9 @@ int main(void)
     /* The writer must also dedupe by minute, so a minute the live recorder and
      * the sync both enqueue is stored exactly once. */
     test_store_dedupe_by_minute();
+
+    /* Regression: a backfill merge of older minutes must not unsort the ring. */
+    test_out_of_order_backfill_keeps_sorted();
 
     printf("  history-backfill-merge: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
