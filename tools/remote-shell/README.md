@@ -121,3 +121,30 @@ Regeln:
 - Nach Gebrauch den Server beenden — er läuft sonst öffentlich (wenn auch geschützt).
 - Empfehlung: Odroid per **WireGuard/Tailscale** ins gleiche Netz holen; dann ist
   alles nur im privaten Netz erreichbar und der öffentliche Proxy entfällt.
+
+---
+
+## Selbstheilung / Verbindung nie verlieren
+
+Ziel: Der Kontroll-Chat soll die Verbindung zum Odroid **nicht verlieren** und
+sie **selbststaendig wiederherstellen**.
+
+**Odroid-Seite (reboot-fest):**
+- systemd-Dienst `odroid-cmd-agent.service` (`Restart=always`, `RestartSec=5`,
+  `enabled`), enthaelt Token + `CMD_AGENT_AUTO=1` (unbeaufsichtigter Betrieb).
+- Faellt der Agent aus, verbindet er sich in 5 s neu; nach Reboot startet er
+  automatisch, sobald Netz da ist (`After=network-online.target`).
+- Achtung: `pkill -f cmd_agent.py` aus dem Kanal heraus toetet die eigene Shell
+  (der Befehlstext enthaelt den Suchstring) -> Agent per `kill <pid>` beenden.
+
+**Sandbox-Seite:**
+- `sandbox_term_server.py` laeuft als Daemon; die Datei-Queue
+  (`/tmp/cmdchannel`) puffert Befehle, bis der Agent wieder da ist.
+- Nach einem Sandbox-Reset: Server mit **demselben Token** neu starten
+  (`SANDBOX_TERM_TOKEN=... python3 tools/remote-shell/sandbox_term_server.py`);
+  der Odroid-Agent verbindet sich dann von selbst wieder.
+
+**Diagnose bei Verbindungsverlust:**
+- `tail -5 /tmp/cmdchannel/audit.log` (letzte connect/disconnect/timeouts)
+- `pgrep -af sandbox_term_server.py`
+
