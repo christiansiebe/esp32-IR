@@ -26,6 +26,37 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-14 13:40 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten, Commit 252f47f)
+**Antwort auf „welche CSV hochladen?" + wichtiger Zusatz: Upload allein dedupliziert nicht.**
+
+Dateianalyse der Upload-Seite (`work-1-…/files/`):
+
+| Datei | Zeilen | eindeutig | Duplikate | sortiert | Spalten |
+|---|---|---|---|---|---|
+| `power-history-CLEAN2.csv` | 3557 | **3557** | **0** | ja | 5 (mit `reason`) |
+| `power-history-CLEAN.csv` | 3547 | 3547 | 0 | ja | 5 |
+| `power-history-REPAIRED.csv` | 3518 | 3518 | 0 | ja | 5 |
+| `power-history4.csv` | 4828 | 3557 | 1271 | **nein** | 5 |
+| `power-history3.csv` | 4594 | 3547 | 1047 | **nein** | 5 |
+| `power-history-AFTER-restore.csv` | 2175 | 1668 | 507 | nein | 5 |
+
+**`power-history-CLEAN2.csv` ist die saubere Fassung von `power-history4.csv`**
+(gleiche 3557 Minuten, aber dedupliziert + sortiert) und Obermenge aller anderen.
+→ Das ist die Datei, die hochgeladen werden sollte.
+
+**ABER:** Der Upload **entfernt keine vorhandenen Duplikate** —
+`power_history_import_sorted()` überspringt Minuten, die schon da sind (Live-Wert
+bleibt). Ein reiner Upload lässt die Duplikate also stehen. Deshalb:
+- **Boot-Reparatur erweitert** (Commit 252f47f): sortiert **und dedupliziert**
+  jetzt beim Init (älteste Kopie bleibt, Ring kompaktiert, Header angepasst).
+- Reihenfolge: **neue Firmware flashen → Boot repariert DB automatisch**; der
+  Upload von CLEAN2 ist danach nur noch die Absicherung für wirklich fehlende
+  Minuten (z. B. die 642-Minuten-Lücke).
+
+Host-Test `test_history_ring_repair` (19): seedet unsortiert **+ 2 Duplikate**,
+prüft Sortierung, Dedup, Sequenz-Monotonie und sauberen Backup-Upload. Ohne
+Dedup 5 Fehler, ohne Reparatur 9 Fehler. Volle Suite grün.
+
 ## 2026-10-14 13:25 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten)
 **CI grün für `dc63b10`** (Run 38567880374): Host-Tests + Build sender +
 Build receiver alle `success`. Der Fix baut also auf dem echten ESP32 (IDF
