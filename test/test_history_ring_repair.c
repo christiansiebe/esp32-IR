@@ -75,7 +75,7 @@ static bool write_scrambled_store(const int64_t *minutes, size_t count)
     header.generation = 5;
     header.next_sequence = (uint32_t)count + 1u;
     header.record_count = (uint32_t)count;
-    header.next_slot = (uint32_t)count; /* oldest_slot = 0 */
+    header.next_slot = (uint32_t)(count % POWER_HISTORY_CAPACITY); /* oldest_slot = 0 */
     header.checksum = crc_bytes(&header, offsetof(power_history_header_t, checksum));
 
     bool ok = fwrite(&header, sizeof(header), 1, f) == 1;
@@ -198,13 +198,91 @@ static void test_repair_and_backup_upload(void)
     CHECK(live_kept, "backup did not overwrite live values");
 }
 
+/* Full ring (29000 records) left unsorted with duplicate minutes. count is far
+ * above POWER_HISTORY_REPAIR_RAM_LIMIT, so the startup repair must use the
+ * in-place disk sort. Verifies it sorts, dedupes and keeps sequence monotonic. */
+static void test_full_ring_repair(void)
+{
+    printf("test_full_ring_repair\n");
+    const uint32_t total = POWER_HISTORY_CAPACITY; /* 29000 */
+    /* A full ring may hold at most `total` records (the header rejects more), so
+     * the duplicates come out of the ring itself: 26363 distinct minutes + 2637
+     * duplicates (every 10th minute, m % 10 == 0) = 29000, deduping to 26363. */
+    const uint32_t distinct = 26363u;
+    const uint32_t count = total;
+    const int64_t base = 9400000000LL;
+
+    FILE *f = fopen(POWER_HISTORY_FILE, "w+b");
+    CHECK(f != NULL, "full-ring store opened");
+    if (f == NULL) {
+        return;
+    }
+    power_history_header_t header = {0};
+    header.magic = 0x50484C31u;
+    header.version = POWER_HISTORY_VERSION;
+    header.generation = 7;
+    header.next_sequence = count + 1u;
+    header.record_count = count;
+    header.next_slot = count % POWER_HISTORY_CAPACITY; /* oldest_slot = 0 */
+    header.checksum = crc_bytes(&header, offsetof(power_history_header_t, checksum));
+    bool ok = fwrite(&header, sizeof(header), 1, f) == 1;
+    power_history_header_t zero = {0};
+    ok = ok && fwrite(&zero, sizeof(zero), 1, f) == 1;
+
+    /* Write the minutes in descending order -> definitely unsorted. */
+    uint32_t seq = 1;
+    uint32_t written = 0;
+    for (uint32_t m = distinct; m > 0 && ok; --m) {
+        uint32_t minute = m - 1u;
+        power_history_record_t r =
+            make_record(seq++, base + (int64_t)minute * 60, (int32_t)(minute % 1000));
+        ok = fwrite(&r, sizeof(r), 1, f) == 1;
+        ++written;
+        if (ok && (minute % 10u) == 0u) {
+            power_history_record_t d =
+                make_record(seq++, base + (int64_t)minute * 60, -1);
+            ok = fwrite(&d, sizeof(d), 1, f) == 1;
+            ++written;
+        }
+    }
+    ok = ok && fflush(f) == 0;
+    fclose(f);
+    CHECK(ok && written == total, "full-ring store written (29000 records)");
+    if (!ok) {
+        return;
+    }
+
+    CHECK(power_history_init() == ESP_OK, "init on full ring ok");
+    power_history_status_t st;
+    power_history_get_status(&st);
+    CHECK(st.record_count == distinct, "full ring deduped to distinct minutes");
+
+    power_history_record_t page[64];
+    size_t n = 0;
+    bool more = false;
+    CHECK(power_history_read_after(base - 60, 64, page, 64, &n, &st, &more) == ESP_OK,
+          "read_after on full ring ok");
+    bool asc = n > 1;
+    for (size_t i = 1; i < n; ++i) {
+        if (page[i].interval_start_utc <= page[i - 1].interval_start_utc) {
+            asc = false;
+        }
+    }
+    CHECK(asc, "full ring sorted after in-place repair");
+    CHECK(page[0].interval_start_utc == base, "oldest minute first after repair");
+    CHECK(page[0].sequence + 1u == page[1].sequence, "sequence contiguous after repair");
+    CHECK(page[0].sequence == total + 1u - distinct, "oldest sequence anchored");
+    CHECK(power_history_has_minute(base + (int64_t)(distinct - 1u) * 60),
+          "newest minute reachable after repair");
+}
+
 static void cleanup(void)
 {
     remove(POWER_HISTORY_FILE);
     rmdir(POWER_HISTORY_MOUNT_PATH);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (mkdir(POWER_HISTORY_MOUNT_PATH, 0700) != 0 && errno != EEXIST) {
@@ -215,7 +293,11 @@ int main(void)
     atexit(cleanup);
 
     printf("test_history_ring_repair\n");
-    test_repair_and_backup_upload();
+    if (argc > 1 && strcmp(argv[1], "full") == 0) {
+        test_full_ring_repair();
+    } else {
+        test_repair_and_backup_upload();
+    }
 
     printf("history_ring_repair: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

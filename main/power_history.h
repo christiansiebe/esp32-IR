@@ -15,6 +15,13 @@
  * (~20 days) leaves comfortable headroom. If this grows, re-check it against
  * the partition size with components/spiffs/spiffsgen.py. */
 #define POWER_HISTORY_CAPACITY 29000u
+
+/* Largest store the startup repair sorts in one RAM buffer (count * 28 B). A
+ * bigger store is sorted in place on disk with O(1) RAM, so a full ring is
+ * repaired too. Kept low enough that the buffer fits the free heap next to the
+ * Wi-Fi stack on a no-PSRAM ESP32. */
+#define POWER_HISTORY_REPAIR_RAM_LIMIT 4096u
+
 #define POWER_HISTORY_PAGE_SIZE 128u
 
 /* SPIFFS mount point and history file. Overridable so the reboot-persistence
