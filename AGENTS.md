@@ -18,12 +18,17 @@ Two firmware roles are built from one source tree.
 
 ## Roles
 - **Sender**: UART SML decoder (9600 baud 8N1 on UART1, RX GPIO16) and ESP-NOW
-  value transport. No web server.
+  value transport. No web server, no WLAN/IP of its own. Its page is hosted by
+  the receiver and tunnelled over ESP-NOW (see "Sender site" below).
 - **Receiver**: ESP-NOW value transport, SPIFFS power history, and the Wi-Fi
-  dashboard (AP `ESP32-IR-Meter` + optional STA to the FRITZ!Box).
+  dashboard (AP `ESP32-IR-Meter` + optional STA to the home WLAN). Advertises
+  `esp32-meter.local` via mDNS.
 - Role selection is a Kconfig `choice` in `main/Kconfig.projbuild`
   (`CONFIG_ESPNOW_ROLE_SENDER` / `_RECEIVER`).
 - **Non-negotiable / must-not-break**: ESP-NOW, OTA, roles.
+- **ESP-NOW is a link-layer protocol with no IP** (max 250 B per frame). A
+  browser cannot open a page "over ESP-NOW"; the sender therefore stays
+  WLAN-free and the receiver hosts + tunnels its page.
 - **Partition layout**: the `factory` slot was removed to give both OTA slots
   more room (see `partitions.csv` and "Flash layout" below). Keep `storage` at
   its current offset/size so existing SPIFFS history survives a re-flash.
@@ -207,6 +212,32 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 (successful calibrations) next to `time_requests` (requests sent). If
 `time_requests` grows but `time_syncs` stays 0, the receiver has no NTP fix
 (check `clock_synced` on the receiver) or still runs old firmware.
+
+## Sender site (receiver-hosted, tunnelled over ESP-NOW)
+- ESP-NOW is not IP, so the sender has no addressable page. The receiver hosts
+  the sender UI and tunnels every request over the existing diagnostic channel
+  (`sender_diag_exchange` / `sender_cmd_exchange` in `main.c`), exactly like
+  `/api/sender-diag`.
+- Pages/endpoints (receiver only, all guarded by `#if !CONFIG_ESPNOW_ROLE_SENDER`):
+  - `GET /sender` (`sender_page_handler`): landing page with status, previous
+    session / last crash, recent events, sender->receiver RSSI and the console.
+  - `GET /api/sender` (`sender_status_api_handler`): one JSON object built from a
+    counters pull plus a best-effort crash pull; events are paged separately via
+    `/api/sender-diag?section=events`.
+  - `POST /api/sender-console` (`sender_console_api_handler`, `X-OTA-Key`): sends
+    one command line to the sender; HTTP 422 when the command is unknown.
+- Command channel: new section flag `ESPNOW_DIAG_SECTION_CMD` with wire structs
+  `espnow_diag_cmd_request_t` / `espnow_diag_cmd_response_t` (declared in
+  `main.c`, both `_Static_assert`ed to fit one ESP-NOW payload). The sender runs
+  the line through the same `web_console_run()` used by its local console
+  (`status`, `time`, `wifi`, `reboot`, ...) and returns the captured text
+  (truncated to `ESPNOW_DIAG_CMD_OUTPUT_LEN`).
+- Sender->receiver RSSI: the receiver stores the last `info->rx_ctrl->rssi` from
+  an SML packet in `g_sender_rssi_dbm` and reports it as `sender_rssi`. The
+  sender cannot measure this direction itself (it only transmits).
+- mDNS (`espressif/mdns` in `main/idf_component.yml`): `start_mdns()` sets
+  `esp32-meter.local` and advertises `_http._tcp`, started on `WIFI_EVENT_AP_START`
+  and `IP_EVENT_STA_GOT_IP` (idempotent). Only the receiver advertises a name.
 
 ## Post-OTA rollback confirmation (receiver)
 - A freshly flashed image starts in `ESP_OTA_IMG_PENDING_VERIFY`

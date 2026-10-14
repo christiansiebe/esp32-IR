@@ -39,6 +39,14 @@
  * (250); 8 records would need 252 and not fit a single ESP-NOW payload. */
 #define ESPNOW_DIAG_HISTORY_RECORDS_PER_PACKET 7u
 
+/* Sender command/response channel (the receiver-hosted sender web console). The
+ * request carries one command line; the sender runs it locally and answers with
+ * the captured output. The wire structs live next to the console command table
+ * in main.c. */
+#define ESPNOW_DIAG_SECTION_CMD 0x0020u
+#define ESPNOW_DIAG_CMD_LINE_LEN 96u
+#define ESPNOW_DIAG_CMD_OUTPUT_LEN 192u
+
 /* Response flag: at least one more event page follows for this request. */
 #define ESPNOW_DIAG_FLAG_MORE 0x8000u
 /* Request flag (OR'd with SECTION_HISTORY): full-store sync. The sender ignores

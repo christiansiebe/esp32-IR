@@ -24,6 +24,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mdns.h"
 #include "nvs_flash.h"
 #include "boot_confirm.h"
 #include "history_backfill.h"
@@ -46,6 +47,10 @@
 static const char *TAG = "espnow_meter";
 
 #define ESPNOW_CHANNEL       1
+/* mDNS name of the receiver dashboard (http://esp32-meter.local/). ESP-NOW is a
+ * link-layer protocol with no IP, so the sender has no network identity and only
+ * the receiver advertises a name. */
+#define MDNS_HOSTNAME        "esp32-meter"
 #define UART_PORT_NUM        UART_NUM_1
 #define UART_RX_GPIO         16
 #define UART_BAUD_RATE       9600
@@ -174,6 +179,8 @@ typedef struct {
     int64_t from_utc;
     int64_t to_utc;
     uint32_t after_sequence;
+    /* Only meaningful for ESPNOW_DIAG_SECTION_CMD (the tunnelled web console). */
+    char cmd_line[ESPNOW_DIAG_CMD_LINE_LEN];
 } espnow_diag_request_item_t;
 
 static const uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = {
@@ -230,6 +237,24 @@ typedef struct __attribute__((packed)) {
 } espnow_diag_history_response_t;
 _Static_assert(sizeof(espnow_diag_history_response_t) <= ESP_NOW_MAX_DATA_LEN,
                "history diagnostic response must fit one ESP-NOW payload");
+
+/* Wire layout for the sender command/response channel (the receiver-hosted
+ * sender web console). Declared here because the request/response embed the
+ * section constant and fixed-size text buffers. */
+typedef struct __attribute__((packed)) {
+    espnow_diag_header_t header;
+    char line[ESPNOW_DIAG_CMD_LINE_LEN]; /* request: NUL-terminated command */
+} espnow_diag_cmd_request_t;
+
+typedef struct __attribute__((packed)) {
+    espnow_diag_header_t header;
+    uint8_t ok;                           /* 1 = command executed */
+    char output[ESPNOW_DIAG_CMD_OUTPUT_LEN]; /* response: captured text */
+} espnow_diag_cmd_response_t;
+_Static_assert(sizeof(espnow_diag_cmd_request_t) <= ESP_NOW_MAX_DATA_LEN,
+               "command request must fit one ESP-NOW payload");
+_Static_assert(sizeof(espnow_diag_cmd_response_t) <= ESP_NOW_MAX_DATA_LEN,
+               "command response must fit one ESP-NOW payload");
 
 /* Minute-history sampling state. Used by BOTH roles: the receiver records the
  * telemetry it receives, the sender records the values it decodes from UART. */
@@ -360,6 +385,10 @@ static QueueHandle_t g_diag_response_queue;
 static uint8_t g_sender_mac[ESP_NOW_ETH_ALEN];
 static bool g_sender_mac_valid;
 static portMUX_TYPE g_sender_mac_lock = portMUX_INITIALIZER_UNLOCKED;
+/* RSSI of the most recent SML packet received from the sender (link quality of
+ * the sender->receiver ESP-NOW hop, shown on the tunnelled sender page). */
+static int8_t g_sender_rssi_dbm;
+static bool g_sender_rssi_valid;
 /* History sync: the receiver mirrors the sender's whole minute ring. A session
  * pulls time-ordered pages with a resume cursor persisted in NVS, so a restart
  * continues where it stopped instead of re-pulling; per-minute dedupe keeps the
@@ -468,6 +497,29 @@ static void time_sync_notification(struct timeval *tv)
     ESP_LOGI(TAG, "System clock synchronized; minute history enabled");
 }
 
+/* Start mDNS once we have an address, so both devices are reachable by name
+ * (http://esp32-meter.local/ on the receiver, http://esp32-sender.local/ on the
+ * sender) instead of having to hunt for the DHCP address. Idempotent. */
+static bool g_mdns_started;
+
+static void start_mdns(void)
+{
+    if (g_mdns_started) {
+        return;
+    }
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mDNS init failed: %s", esp_err_to_name(err));
+        return;
+    }
+    mdns_hostname_set(MDNS_HOSTNAME);
+    mdns_instance_name_set("ESP32 IR meter");
+    /* Advertise the dashboard so it shows up in mDNS/Bonjour browsers. */
+    mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+    g_mdns_started = true;
+    ESP_LOGI(TAG, "mDNS ready: http://%s.local/", MDNS_HOSTNAME);
+}
+
 static bool system_time_is_valid(void)
 {
     return time(NULL) >= 1704067200;
@@ -494,9 +546,17 @@ static void wifi_event_handler(void *arg,
                 ESP_LOGE(TAG, "Wi-Fi reconnect failed: %s", esp_err_to_name(err));
             }
         }
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
+        /* AP-only fallback (no home WLAN configured): the dashboard is reachable
+         * at http://192.168.4.1/, and mDNS works here too. */
+        ESP_LOGI(TAG, "Setup AP started: http://192.168.4.1/  ->  http://%s.local/",
+                 MDNS_HOSTNAME);
+        start_mdns();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *event = event_data;
-        ESP_LOGI(TAG, "FRITZ!Box network address: " IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(TAG, "Home network address: " IPSTR "  ->  http://%s.local/",
+                 IP2STR(&event->ip_info.ip), MDNS_HOSTNAME);
+        start_mdns();
         if (!g_sntp_started) {
             esp_sntp_config_t sntp_config =
                 ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
@@ -1526,6 +1586,29 @@ static void build_diag_crash_response(const espnow_diag_request_item_t *request,
     *frame_len = sizeof(*response);
 }
 
+#if CONFIG_ESPNOW_ROLE_SENDER
+/* Run one command from the receiver-hosted sender web console and capture its
+ * text output. The command table is the same web_console used by the receiver's
+ * local console, so the sender exposes exactly its local command set (status,
+ * time, wifi, reboot, ...) over ESP-NOW. Output is truncated to the payload. */
+static void build_diag_cmd_response(const espnow_diag_request_item_t *request,
+                                    uint8_t *frame, size_t *frame_len)
+{
+    espnow_diag_cmd_response_t *response = (espnow_diag_cmd_response_t *)frame;
+    response->header = (espnow_diag_header_t) {
+        .magic = ESPNOW_DIAG_MAGIC,
+        .version = ESPNOW_DIAG_VERSION,
+        .type = ESPNOW_DIAG_TYPE_RESPONSE,
+        .flags = ESPNOW_DIAG_SECTION_CMD,
+        .request_id = request->request_id,
+        .page = 0,
+    };
+    response->ok = web_console_run(request->cmd_line, response->output,
+                                   sizeof(response->output)) ? 1 : 0;
+    *frame_len = sizeof(*response);
+}
+#endif
+
 static void espnow_diag_worker(void *arg)
 {
     (void)arg;
@@ -1546,6 +1629,10 @@ static void espnow_diag_worker(void *arg)
             build_diag_crash_response(&request, frame, &frame_len);
         } else if (request.flags & ESPNOW_DIAG_SECTION_HISTORY) {
             build_diag_history_response(&request, frame, &frame_len);
+#if CONFIG_ESPNOW_ROLE_SENDER
+        } else if (request.flags & ESPNOW_DIAG_SECTION_CMD) {
+            build_diag_cmd_response(&request, frame, &frame_len);
+#endif
         } else {
             continue;
         }
@@ -1788,6 +1875,12 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             request.from_utc = history_request.from_utc;
             request.to_utc = history_request.to_utc;
             request.after_sequence = history_request.after_sequence;
+        } else if ((diag_header.flags & ESPNOW_DIAG_SECTION_CMD) &&
+                   data_len >= (int)sizeof(espnow_diag_cmd_request_t)) {
+            espnow_diag_cmd_request_t cmd_request;
+            memcpy(&cmd_request, data, sizeof(cmd_request));
+            cmd_request.line[ESPNOW_DIAG_CMD_LINE_LEN - 1] = '\0';
+            strlcpy(request.cmd_line, cmd_request.line, sizeof(request.cmd_line));
         }
         memcpy(request.source, info->src_addr, ESP_NOW_ETH_ALEN);
         /* The receiver polling diagnostics is an early source of its MAC, so a
@@ -1920,6 +2013,10 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
     memcpy(g_sender_mac, info->src_addr, ESP_NOW_ETH_ALEN);
     g_sender_mac_valid = true;
     portEXIT_CRITICAL(&g_sender_mac_lock);
+    if (info->rx_ctrl != NULL) {
+        g_sender_rssi_dbm = info->rx_ctrl->rssi;
+        g_sender_rssi_valid = true;
+    }
 
     if (packet.header.sequence == 0) {
         ESP_LOGW(TAG, "Dropped SML transport packet with sequence zero");
@@ -2936,6 +3033,7 @@ static esp_err_t root_handler(httpd_req_t *req)
     static const char page_footer[] =
         "<nav class=\"nav\"><a href=\"/log\">SML logger</a>"
         "<a href=\"/api\">JSON API</a><a href=\"/config\">Wi-Fi settings</a>"
+        "<a href=\"/sender\">Sender (tunnelled)</a>"
         "<a href=\"/diag\">Sender diagnostics</a>"
         "<a href=\"/console\">Debug console</a>"
         "<a href=\"/update\">Firmware update</a></nav>" METER_HTML_FOOTER;
@@ -4378,6 +4476,49 @@ static esp_err_t sender_diag_exchange(uint16_t flags, uint32_t page,
                                     response, response_len);
 }
 
+/* Send one command line to the sender over ESP-NOW and return its captured
+ * output. This is the transport behind the receiver-hosted sender web console:
+ * the receiver has the IP/HTTP side, the sender runs the command locally and
+ * answers on the link-layer channel (ESP-NOW has no IP of its own). */
+static esp_err_t sender_cmd_exchange(const char *line, char *out, size_t out_size,
+                                     bool *ok)
+{
+    uint32_t request_id = (uint32_t)esp_random();
+    if (request_id == 0) {
+        request_id = 1;
+    }
+    espnow_diag_cmd_request_t request = {
+        .header = {
+            .magic = ESPNOW_DIAG_MAGIC,
+            .version = ESPNOW_DIAG_VERSION,
+            .type = ESPNOW_DIAG_TYPE_REQUEST,
+            .flags = ESPNOW_DIAG_SECTION_CMD,
+            .request_id = request_id,
+            .page = 0,
+        },
+    };
+    strlcpy(request.line, line != NULL ? line : "", sizeof(request.line));
+
+    uint8_t response[ESP_NOW_MAX_DATA_LEN];
+    size_t response_len = 0;
+    esp_err_t err = sender_diag_exchange_raw(&request, sizeof(request), request_id,
+                                             response, &response_len);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (response_len < sizeof(espnow_diag_cmd_response_t)) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    espnow_diag_cmd_response_t cmd;
+    memcpy(&cmd, response, sizeof(cmd));
+    cmd.output[sizeof(cmd.output) - 1] = '\0';
+    strlcpy(out, cmd.output, out_size);
+    if (ok != NULL) {
+        *ok = cmd.ok != 0;
+    }
+    return ESP_OK;
+}
+
 /* Persisted sync cursor (NVS): the newest minute already merged from the sender.
  * Kept so a restart/OTA resumes the mirror instead of re-pulling the whole ring.
  * Best-effort: a missing namespace or a failed write only costs a re-pull. */
@@ -5038,6 +5179,310 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
 #endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
+/* Combined sender status for the tunnelled /sender page: one JSON object built
+ * from three ESP-NOW pulls (counters, crash, events). Kept as a single handler
+ * so the page needs one round trip; each section is still fetched on demand, so
+ * no diagnostics traffic flows during normal operation. */
+static esp_err_t sender_status_api_handler(httpd_req_t *req)
+{
+    uint8_t response[ESP_NOW_MAX_DATA_LEN];
+    size_t response_len = 0;
+
+    esp_err_t err = sender_diag_exchange(ESPNOW_DIAG_SECTION_COUNTERS, 0,
+                                         response, &response_len);
+    if (err == ESP_ERR_INVALID_STATE) {
+        return send_http_error_status(req, "503 Service Unavailable",
+                                      "No sender MAC known yet; waiting for SML telemetry");
+    }
+    if (err != ESP_OK) {
+        return send_http_error_status(req, "504 Gateway Timeout",
+                                      "Sender did not answer the status request");
+    }
+
+    espnow_diag_header_t header;
+    memcpy(&header, response, sizeof(header));
+    if (!(header.flags & ESPNOW_DIAG_SECTION_COUNTERS) ||
+        response_len < sizeof(header) + sizeof(espnow_diag_counters_t)) {
+        return send_http_error_status(req, "502 Bad Gateway",
+                                      "Unexpected sender status response");
+    }
+    espnow_diag_counters_t counters;
+    memcpy(&counters, response + sizeof(header), sizeof(counters));
+
+    int8_t sender_rssi;
+    bool sender_rssi_valid;
+    portENTER_CRITICAL(&g_sender_mac_lock);
+    bool mac_known = g_sender_mac_valid;
+    sender_rssi = g_sender_rssi_dbm;
+    sender_rssi_valid = g_sender_rssi_valid;
+    portEXIT_CRITICAL(&g_sender_mac_lock);
+
+    /* Previous-session crash summary (best effort: the page still renders when
+     * the sender is too busy to answer the second request). */
+    char crash_json[768];
+    crash_json[0] = '\0';
+    response_len = 0;
+    if (sender_diag_exchange(ESPNOW_DIAG_SECTION_CRASH, 0, response, &response_len) == ESP_OK &&
+        response_len >= sizeof(espnow_diag_crash_response_t)) {
+        espnow_diag_crash_response_t crash;
+        memcpy(&crash, response, sizeof(crash));
+        const crash_journal_t *j = &crash.journal;
+        snprintf(crash_json, sizeof(crash_json),
+                 "\"crash\":{\"valid\":%s,\"boot_count\":%lu,"
+                 "\"reset_reason\":%d,\"reset_reason_name\":\"%s\","
+                 "\"current_reset_reason\":%d,\"current_reset_reason_name\":\"%s\","
+                 "\"clean_shutdown\":%s,\"deliberate_restart\":%s,"
+                 "\"session_uptime_ms\":%llu,\"free_heap\":%lu,"
+                 "\"sml_sent_ok\":%lu,\"sml_send_fail\":%lu,"
+                 "\"uart_rx_bytes\":%lu,\"fifo_overflows\":%lu,"
+                 "\"frame_errors\":%lu,\"parity_errors\":%lu,"
+                 "\"tx_queue_drops\":%lu,\"diag_requests\":%lu,"
+                 "\"cpu_freq_min_mhz\":%u,\"cpu_freq_avg_mhz\":%u,"
+                 "\"cpu_freq_max_mhz\":%u,\"cpu_freq_changes\":%lu,"
+                 "\"gap_cause_meter\":%lu,\"gap_cause_sleep\":%lu,"
+                 "\"gap_cause_stall\":%lu,\"gap_cause_buffer\":%lu}",
+                 crash_journal_is_valid(j) ? "true" : "false",
+                 (unsigned long)j->boot_count,
+                 (int)j->reset_reason,
+                 crash_journal_reset_reason_name((int)j->reset_reason),
+                 (int)crash.current_reset_reason,
+                 crash_journal_reset_reason_name((int)crash.current_reset_reason),
+                 j->clean_shutdown ? "true" : "false",
+                 crash_journal_reset_is_deliberate((int)j->reset_reason) ? "true" : "false",
+                 (unsigned long long)j->session_uptime_ms,
+                 (unsigned long)j->free_heap,
+                 (unsigned long)j->sml_sent_ok,
+                 (unsigned long)j->sml_send_fail,
+                 (unsigned long)j->uart_rx_bytes,
+                 (unsigned long)j->fifo_overflows,
+                 (unsigned long)j->frame_errors,
+                 (unsigned long)j->parity_errors,
+                 (unsigned long)j->tx_queue_drops,
+                 (unsigned long)j->diag_requests,
+                 (unsigned)j->cpu_freq_min_mhz,
+                 (unsigned)j->cpu_freq_avg_mhz,
+                 (unsigned)j->cpu_freq_max_mhz,
+                 (unsigned long)j->cpu_freq_changes,
+                 (unsigned long)j->gap_cause_meter,
+                 (unsigned long)j->gap_cause_sleep,
+                 (unsigned long)j->gap_cause_stall,
+                 (unsigned long)j->gap_cause_buffer);
+    }
+
+    char payload[2048];
+    int len = snprintf(payload, sizeof(payload),
+                       "{\"sender_mac_known\":%s,\"sender_rssi\":%d,\"sender_rssi_valid\":%s,"
+                       "\"counters\":{\"uptime_ms\":%llu,\"channel\":%u,"
+                       "\"uart_rx_bytes\":%llu,\"fifo_overflows\":%lu,"
+                       "\"rx_buffer_full\":%lu,\"frame_errors\":%lu,\"parity_errors\":%lu,"
+                       "\"tx_queue_drops\":%lu,\"sml_sent_ok\":%lu,\"sml_send_fail\":%lu,"
+                       "\"last_sequence\":%lu,\"free_heap\":%lu,"
+                       "\"last_send_status\":%d,\"last_request_rssi\":%d,"
+                       "\"gap_count\":%lu,\"gap_quiet\":%lu,\"gap_mid\":%lu,"
+                       "\"last_gap_ms\":%lu,\"max_gap_ms\":%lu,\"last_rx_ago_ms\":%lu,"
+                       "\"gap_loss\":%lu,\"parser_resyncs\":%lu,"
+                       "\"time_syncs\":%lu,\"time_requests\":%lu,"
+                       "\"batch_pending\":%lu,\"batch_missing\":%lu,"
+                       "\"storage_ready\":%u,\"storage_records\":%lu,\"storage_capacity\":%lu,"
+                       "\"storage_write_errors\":%lu,\"storage_queue_drops\":%lu,"
+                       "\"sleep_state\":%u,\"uptime_sleep_ms\":%lu,\"sleep_window_ms\":%lu,"
+                       "\"sleep_min_gap_ms\":%lu,\"sleep_hold_active\":%u,"
+                       "\"cpu_freq_mhz\":%u,\"cpu_freq_max_mhz\":%u,\"cpu_freq_min_mhz\":%u,"
+                       "\"light_sleep_enabled\":%u,\"cpu_freq_avg_mhz\":%u,"
+                       "\"cpu_freq_hist_min_mhz\":%u,\"cpu_freq_hist_max_mhz\":%u,"
+                       "\"cpu_freq_changes\":%lu,\"gap_last_cause\":%u,"
+                       "\"gap_cause_meter\":%lu,\"gap_cause_sleep\":%lu,"
+                       "\"gap_cause_stall\":%lu,\"gap_cause_buffer\":%lu,"
+                       "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
+                       "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u}%s%s}",
+                       mac_known ? "true" : "false",
+                       (int)sender_rssi,
+                       sender_rssi_valid ? "true" : "false",
+                       (unsigned long long)counters.uptime_ms,
+                       (unsigned int)counters.channel,
+                       (unsigned long long)counters.uart_rx_bytes,
+                       (unsigned long)counters.fifo_overflows,
+                       (unsigned long)counters.rx_buffer_full,
+                       (unsigned long)counters.frame_errors,
+                       (unsigned long)counters.parity_errors,
+                       (unsigned long)counters.tx_queue_drops,
+                       (unsigned long)counters.sml_sent_ok,
+                       (unsigned long)counters.sml_send_fail,
+                       (unsigned long)counters.last_sequence,
+                       (unsigned long)counters.free_heap,
+                       (int)counters.last_send_status,
+                       (int)counters.last_request_rssi,
+                       (unsigned long)counters.gap_count,
+                       (unsigned long)counters.gap_quiet,
+                       (unsigned long)counters.gap_mid,
+                       (unsigned long)counters.last_gap_ms,
+                       (unsigned long)counters.max_gap_ms,
+                       (unsigned long)counters.last_rx_ago_ms,
+                       (unsigned long)counters.gap_loss,
+                       (unsigned long)counters.parser_resyncs,
+                       (unsigned long)counters.time_syncs,
+                       (unsigned long)counters.time_requests,
+                       (unsigned long)counters.batch_pending,
+                       (unsigned long)counters.batch_missing,
+                       (unsigned int)counters.storage_ready,
+                       (unsigned long)counters.storage_records,
+                       (unsigned long)counters.storage_capacity,
+                       (unsigned long)counters.storage_write_errors,
+                       (unsigned long)counters.storage_queue_drops,
+                       (unsigned int)counters.sleep_state,
+                       (unsigned long)counters.uptime_sleep_ms,
+                       (unsigned long)counters.sleep_window_ms,
+                       (unsigned long)counters.sleep_min_gap_ms,
+                       (unsigned int)counters.sleep_hold_active,
+                       (unsigned int)counters.cpu_freq_mhz,
+                       (unsigned int)counters.cpu_freq_max_mhz,
+                       (unsigned int)counters.cpu_freq_min_mhz,
+                       (unsigned int)counters.light_sleep_enabled,
+                       (unsigned int)counters.cpu_freq_avg_mhz,
+                       (unsigned int)counters.cpu_freq_hist_min_mhz,
+                       (unsigned int)counters.cpu_freq_hist_max_mhz,
+                       (unsigned long)counters.cpu_freq_changes,
+                       (unsigned int)counters.gap_last_cause,
+                       (unsigned long)counters.gap_cause_meter,
+                       (unsigned long)counters.gap_cause_sleep,
+                       (unsigned long)counters.gap_cause_stall,
+                       (unsigned long)counters.gap_cause_buffer,
+                       (unsigned int)counters.wifi_ps_mode,
+                       (unsigned int)counters.build_profile,
+                       (unsigned long)counters.boot_marker_count,
+                       (unsigned int)counters.boot_marker_reason,
+                       crash_json[0] != '\0' ? "," : "",
+                       crash_json);
+    if (len < 0 || (size_t)len >= sizeof(payload)) {
+        return send_http_error_status(req, "500 Internal Server Error",
+                                      "Sender status response too large");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, payload, len);
+}
+
+/* POST one command line to the sender (the tunnelled sender web console). The
+ * key check matches the receiver's own console so a single key guards both. */
+static esp_err_t sender_console_api_handler(httpd_req_t *req)
+{
+    if (!ota_key_is_valid(req)) {
+        return send_http_error_status(req, "401 Unauthorized",
+                                      "X-OTA-Key missing or wrong");
+    }
+    char line[ESPNOW_DIAG_CMD_LINE_LEN];
+    if (req->content_len <= 0 || req->content_len >= (int)sizeof(line)) {
+        return send_http_error_status(req, "400 Bad Request",
+                                      "Command line is empty or too long");
+    }
+    int received = httpd_req_recv(req, line, req->content_len);
+    if (received <= 0) {
+        return send_http_error_status(req, "400 Bad Request",
+                                      "Could not read command line");
+    }
+    line[received] = '\0';
+
+    char output[ESPNOW_DIAG_CMD_OUTPUT_LEN];
+    output[0] = '\0';
+    bool ok = false;
+    esp_err_t err = sender_cmd_exchange(line, output, sizeof(output), &ok);
+    if (err == ESP_ERR_INVALID_STATE) {
+        return send_http_error_status(req, "503 Service Unavailable",
+                                      "No sender MAC known yet; waiting for SML telemetry");
+    }
+    if (err != ESP_OK) {
+        return send_http_error_status(req, "504 Gateway Timeout",
+                                      "Sender did not answer the command");
+    }
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_status(req, ok ? "200 OK" : "422 Unprocessable Entity");
+    return httpd_resp_send(req, output, strlen(output));
+}
+
+static esp_err_t sender_page_handler(httpd_req_t *req)
+{
+    static const char page[] =
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<title>Sender (tunnelled over ESP-NOW)</title>"
+        "<style>body{font-family:monospace;margin:20px;background:#10151f;color:#e5edf7}"
+        "pre{white-space:pre-wrap;word-break:break-word}"
+        "button,input{margin:4px;padding:8px 12px;font-family:monospace}"
+        "a{color:#78d6ff}.note{color:#9fb3c8}</style></head><body>"
+        "<h1>Sender status (hosted by the receiver)</h1>"
+        "<p class=\"note\">The sender has no WLAN/IP of its own: ESP-NOW is a "
+        "link-layer protocol. This page lives on the receiver, which tunnels "
+        "every request to the sender over ESP-NOW and shows the answer here.</p>"
+        "<button id=\"load\" type=\"button\">Refresh</button>"
+        "<button id=\"auto\" type=\"button\">Auto-refresh: off</button>"
+        "<p id=\"status\">Idle.</p>"
+        "<h2>Status</h2><pre id=\"info\"></pre>"
+        "<h2>Previous session / last crash</h2><pre id=\"crash\"></pre>"
+        "<h2>Recent events</h2><pre id=\"events\"></pre>"
+        "<h2>Sender console (tunnelled)</h2>"
+        "<input id=\"key\" type=\"password\" placeholder=\"Wi-Fi / OTA key\">"
+        "<br><input id=\"cmd\" placeholder=\"command\" autocomplete=\"off\">"
+        "<button id=\"send\" type=\"button\">Send</button>"
+        "<pre id=\"out\"></pre><script>"
+        "const byId=id=>document.getElementById(id),nl=String.fromCharCode(10);"
+        "function fmtTs(ms,base){if(ms>1e12)return new Date(ms).toISOString();"
+        "if(base===null||base===undefined)return 'uptime '+ms+'ms';"
+        "return 'T-'+Math.round((base-ms)/1000)+'s';}"
+        "function fmtInfo(d){const c=d.counters||{};"
+        "return 'rssi (sender->receiver): '+(d.sender_rssi_valid?d.sender_rssi+' dBm':'n/a')+nl"
+        "+'uptime: '+(c.uptime_ms/1000).toFixed(1)+' s   esp-now channel: '+c.channel+nl"
+        "+'build profile: '+(c.build_profile===1?'sender-sleep (light sleep compiled in)':'plain sender')+nl"
+        "+'sleep: '+(c.sleep_state?'in light sleep':(c.light_sleep_enabled?'awake, light sleep enabled':'awake, light sleep disabled'))"
+        "+'   slept: '+(c.uptime_sleep_ms/1000).toFixed(1)+' s   window: '+(c.sleep_window_ms||0)+' ms'+nl"
+        "+'cpu: '+c.cpu_freq_mhz+' MHz now (DFS '+c.cpu_freq_min_mhz+'-'+c.cpu_freq_max_mhz+'), avg '+c.cpu_freq_avg_mhz+' MHz, '+c.cpu_freq_changes+' steps'+nl"
+        "+'uart rx bytes: '+c.uart_rx_bytes+'   last byte '+c.last_rx_ago_ms+' ms ago'+nl"
+        "+'frame err: '+c.frame_errors+'  parity err: '+c.parity_errors+'  fifo: '+c.fifo_overflows+nl"
+        "+'sml ok/fail: '+c.sml_sent_ok+'/'+c.sml_send_fail+'  last seq: '+c.last_sequence+nl"
+        "+'gaps: '+c.gap_count+'  cost a telegram: '+c.gap_loss+'  parser resyncs: '+c.parser_resyncs+nl"
+        "+'storage: '+(c.storage_ready?'SPIFFS ready':'RAM fallback')+'  records: '+c.storage_records+' / '+c.storage_capacity+nl"
+        "+'batch ring: '+c.batch_pending+' waiting, '+c.batch_missing+' unconfirmed'+nl"
+        "+'free heap: '+c.free_heap+' bytes';}"
+        "function fmtCrash(c){if(!c)return 'No crash data (sender did not answer).';"
+        "return 'Previous session: '+(c.clean_shutdown?'ended cleanly':(c.deliberate_restart?'restarted on purpose':'DID NOT END CLEANLY'))+nl"
+        "+'  reset reason: '+c.reset_reason_name+' ('+c.reset_reason+')'+nl"
+        "+'  uptime: '+(c.session_uptime_ms/1000).toFixed(1)+' s   boot count: '+c.boot_count+nl"
+        "+'  sml ok/fail: '+c.sml_sent_ok+'/'+c.sml_send_fail+'   free heap: '+c.free_heap+nl"
+        "+'  gap sources: meter '+c.gap_cause_meter+', sleep '+c.gap_cause_sleep+', stall '+c.gap_cause_stall+', buffer '+c.gap_cause_buffer+nl"
+        "+'This boot started with: '+c.current_reset_reason_name+' ('+c.current_reset_reason+')';}"
+        "async function loadEvents(){let page=0,all=[];for(;;){"
+        "const r=await fetch('/api/sender-diag?section=events&page='+page,{cache:'no-store'});"
+        "if(!r.ok)break;const d=await r.json();all=all.concat(d.events);"
+        "if(!d.more)break;page++;if(page>64)break;}"
+        "byId('events').textContent=all.length?all.map(e=>fmtTs(e.timestamp_ms)+' ['+e.level+'] '+e.text).join(nl):'No events recorded.';}"
+        "async function load(){byId('status').textContent='Requesting over ESP-NOW...';"
+        "try{const r=await fetch('/api/sender',{cache:'no-store'});"
+        "if(!r.ok)throw new Error(await r.text());const d=await r.json();"
+        "byId('info').textContent=fmtInfo(d);byId('crash').textContent=fmtCrash(d.crash);"
+        "await loadEvents();byId('status').textContent='Sender answered.';}"
+        "catch(e){byId('status').textContent='Request failed: '+e;}}"
+        "const out=byId('out'),cmd=byId('cmd'),key=byId('key');"
+        "try{key.value=sessionStorage.getItem('senderConsoleKey')||'';}catch(e){}"
+        "function append(t){out.textContent+=t;out.scrollTop=out.scrollHeight;}"
+        "async function send(){const line=cmd.value;if(!line.trim())return;"
+        "try{sessionStorage.setItem('senderConsoleKey',key.value);}catch(e){}"
+        "append('> '+line+nl);cmd.value='';"
+        "try{const r=await fetch('/api/sender-console',{method:'POST',"
+        "headers:{'X-OTA-Key':key.value},body:line});const t=await r.text();"
+        "append((r.ok?'':('['+r.status+'] '))+t);if(!t.endsWith(nl))append(nl);}"
+        "catch(e){append('request failed: '+e+nl);}}"
+        "let autoTimer=null;"
+        "function setAuto(on){byId('auto').textContent='Auto-refresh: '+(on?'on (5 s)':'off');"
+        "if(autoTimer){clearInterval(autoTimer);autoTimer=null;}"
+        "if(on)autoTimer=setInterval(()=>{load();},5000);}"
+        "byId('auto').addEventListener('click',()=>{setAuto(autoTimer===null);});"
+        "byId('load').addEventListener('click',load);"
+        "byId('send').addEventListener('click',send);"
+        "cmd.addEventListener('keydown',e=>{if(e.key==='Enter')send();});"
+        "load();</script><p><a href=\"/\">Back</a> · <a href=\"/diag\">Full diagnostics</a></p>"
+        "</body></html>";
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_sendstr(req, page);
+}
+
 static esp_err_t send_sender_ota_command(espnow_ota_packet_t *command,
                                          const uint8_t *payload,
                                          bool broadcast)
@@ -5418,7 +5863,7 @@ static void start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 28;
+    config.max_uri_handlers = 31;
     /* Handlers that keep a full history page (128 records) on their stack run
      * on this task; keep headroom so a large page cannot overflow it and abort
      * the whole HTTP server. */
@@ -5497,6 +5942,21 @@ static void start_webserver(void)
         .method = HTTP_GET,
         .handler = diag_page_handler,
     };
+    httpd_uri_t sender_status_api = {
+        .uri = "/api/sender",
+        .method = HTTP_GET,
+        .handler = sender_status_api_handler,
+    };
+    httpd_uri_t sender_console_api = {
+        .uri = "/api/sender-console",
+        .method = HTTP_POST,
+        .handler = sender_console_api_handler,
+    };
+    httpd_uri_t sender_page = {
+        .uri = "/sender",
+        .method = HTTP_GET,
+        .handler = sender_page_handler,
+    };
     httpd_uri_t db_refresh = {
         .uri = "/api/db-refresh",
         .method = HTTP_POST,
@@ -5564,6 +6024,9 @@ static void start_webserver(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &history_backfill_api));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &history_backfill_trigger));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &diag_page));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sender_status_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sender_console_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sender_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &db_refresh));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_history_upload));
 #endif
@@ -5768,7 +6231,7 @@ void app_main(void)
     if (backfill_result != pdPASS) {
         ESP_LOGW(TAG, "Could not start the history-backfill worker");
     }
-    ESP_LOGI(TAG, "Receiver ready: http://192.168.4.1/ | /log | /config | /update");
+    ESP_LOGI(TAG, "Receiver ready: http://192.168.4.1/ | /sender | /diag | /log | /config | /update");
     while (1) {
         /* Confirm the running OTA image once it has been stable for the policy
          * window; a no-op on a normal (already accepted) boot. */

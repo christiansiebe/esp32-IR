@@ -8,6 +8,7 @@ set(main_requires
     esp_pm
     esp_timer
     esp_wifi
+    mdns
     nvs_flash
     spiffs
     sml_transport

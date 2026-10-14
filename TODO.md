@@ -531,9 +531,41 @@ läuft 2026-11-11 ab). `origin`-URL trägt den Write-Token, `git push` funktioni
       Grund: Der Sender hat keine Netzwerkzeit (SNTP laeuft nur im Empfaenger);
       `timestamp_ms` ist `esp_timer_get_time()/1000`.
       Betroffen: `main/main.c` -> `diag_page_handler` (JS rendert `new Date(e.timestamp_ms).toISOString()`).
-- [ ] **Sender->Empfaenger-RSSI im Diagnose-Report ausweisen** (Funkqualitaet der Nutztelemetrie).
-      Quelle: Der Empfaenger kennt sie bereits im `receive_callback` (`info->rx_ctrl->rssi`);
-      bisher wird nur die Richtung Empfaenger->Sender als `last_request_rssi` uebertragen.
+- [x] **Sender->Empfaenger-RSSI im Diagnose-Report ausweisen** — erledigt: der Empfaenger
+      merkt sich im `receive_callback` das letzte `info->rx_ctrl->rssi` (`g_sender_rssi_dbm`)
+      und zeigt es im neuen `/api/sender` (`sender_rssi`, `sender_rssi_valid`) sowie auf der
+      `/sender`-Seite an. Der Sender selbst kann die Gegenrichtung nicht messen (er sendet nur).
+- [ ] **Event-Zeitstempel als Uptime darstellen** statt als 1970-Datum.
+      Grund: Der Sender hat keine Netzwerkzeit (SNTP laeuft nur im Empfaenger);
+      `timestamp_ms` ist `esp_timer_get_time()/1000`.
+      Betroffen: `main/main.c` -> `diag_page_handler` (JS rendert `new Date(e.timestamp_ms).toISOString()`).
+
+### Sender-Site (Variante A: vom Empfaenger gehostet, ESP-NOW getunnelt)
+Entscheidung 2026-10-14: **ESP-NOW ist kein IP** (Link-Layer, max. 250 B/Frame). Ein Browser
+kann keine Seite "ueber ESP-NOW" oeffnen, und der Sender bleibt deshalb **WLAN-frei**
+(kein STA, kein eigener Webserver). Stattdessen hostet der **Empfaenger** die Sender-Seite
+und tunnelt jede Anfrage ueber den bestehenden Diag-Kanal (`sender_diag_exchange`) zum Sender.
+- [x] **`/sender`-Landingseite** (`sender_page_handler`) — kombiniert Counters, letzter
+      Crash/vorige Session, letzte Events, Sender->Empfaenger-RSSI, `build_profile` und
+      Sleep-Status. Datenquelle: `GET /api/sender` (`sender_status_api_handler`, ein JSON aus
+      Counters- + Crash-Pull; Events paged per `/api/sender-diag?section=events`).
+- [x] **Web-Konsole fuer den Sender** (`POST /api/sender-console`, `X-OTA-Key`-geschuetzt):
+      neuer Diag-Request-Typ `ESPNOW_DIAG_SECTION_CMD` (Wire-Structs
+      `espnow_diag_cmd_{request,response}_t`). Der Sender fuehrt die Zeile lokal ueber den
+      vorhandenen `web_console_run()` aus (status, time, wifi, reboot, …) und schickt die
+      Ausgabe ueber ESP-NOW zurueck. `ok=0` -> HTTP 422.
+- [x] **`max_uri_handlers`** 28 -> 31 (drei neue Endpunkte).
+- [ ] **Bench-Test**: `/sender` gegen einen laufenden Sender pruefen (Counters/Crash/Events,
+      RSSI-Vorzeichen, Konsolen-Kommandos inkl. `reboot`).
+- [ ] **Konsolen-Ausgabe > 192 B** kuerzen oder paginieren (aktuell hart auf
+      `ESPNOW_DIAG_CMD_OUTPUT_LEN` begrenzt).
+
+### mDNS (Empfaenger)
+- [x] **Empfaenger per Name erreichbar**: `espressif/mdns` (v1.14.0) in `main/idf_component.yml`,
+      `start_mdns()` setzt `esp32-meter.local` und advertiset `_http._tcp`. Start bei
+      `WIFI_EVENT_AP_START` und `IP_EVENT_STA_GOT_IP` (idempotent), Hostname
+      `MDNS_HOSTNAME="esp32-meter"`. **Nur der Empfaenger** hat eine Netzwerkidentitaet.
+- [ ] **Bench-Test**: `esp32-meter.local` aufloesbar (Avahi/Bonjour) und STA-IP im Log sichtbar.
 
 ### CI / Build
 - [x] **`storage.bin` in das CI-Flash-Artefakt aufnehmen** — erledigt (`71f5ea8`), CI-Staging

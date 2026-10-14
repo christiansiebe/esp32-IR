@@ -257,6 +257,17 @@ def extract_diag_script(source: str) -> str:
     return match.group(1)
 
 
+def extract_sender_script(source: str) -> str:
+    start = source.index("static esp_err_t sender_page_handler")
+    marker = "</body></html>\";"
+    end = source.index(marker, start) + len(marker)
+    page = c_string_contents(source[start:end])
+    match = re.search(r"<script>(.*)</script>", page, re.S)
+    if not match:
+        raise SystemExit("no <script> block found in the sender page")
+    return match.group(1)
+
+
 def main() -> int:
     node = shutil.which("node")
     if node is None:
@@ -267,6 +278,7 @@ def main() -> int:
         source = handle.read()
     script = extract_script(source)
     diag_script = extract_diag_script(source)
+    sender_script = extract_sender_script(source)
 
     workdir = tempfile.mkdtemp()
     try:
@@ -282,6 +294,16 @@ def main() -> int:
         if diag_check.returncode != 0:
             print("diagnostics page JS syntax error:")
             print(diag_check.stderr)
+            return 1
+
+        sender_path = os.path.join(workdir, "sender.js")
+        with open(sender_path, "w", encoding="utf-8") as handle:
+            handle.write(sender_script)
+        sender_check = subprocess.run([node, "--check", sender_path],
+                                      capture_output=True, text=True)
+        if sender_check.returncode != 0:
+            print("sender page JS syntax error:")
+            print(sender_check.stderr)
             return 1
 
         check = subprocess.run([node, "--check", script_path],
@@ -310,6 +332,7 @@ def main() -> int:
 
     print("dashboard JS syntax ok (%d bytes)" % len(script))
     print("diagnostics page JS syntax ok (%d bytes)" % len(diag_script))
+    print("sender page JS syntax ok (%d bytes)" % len(sender_script))
     return 0
 
 
