@@ -95,43 +95,51 @@ static void test_repair_and_backup_upload(void)
 {
     printf("test_repair_and_backup_upload\n");
     const int64_t base = 9300000000LL;
-    /* Live minutes in order, then an older backfill block appended -> the ring
-     * as stored is out of time order (base+240, then base-300 ...). */
-    int64_t scrambled[10] = {
+    /* Live minutes in order, an older backfill block appended (ring unsorted),
+     * and two minutes present twice (duplicates) - the exact damage an older
+     * firmware produced. */
+    int64_t scrambled[12] = {
         base, base + 60, base + 120, base + 180, base + 240,
         base - 300, base - 240, base - 180, base - 120, base - 60,
+        base + 120, base - 60,
     };
-    CHECK(write_scrambled_store(scrambled, 10), "scrambled store written");
+    CHECK(write_scrambled_store(scrambled, 12), "scrambled store written");
 
-    /* Init must repair the ring (sort by minute, renumber sequence). */
+    /* Init must repair the ring (sort by minute, drop duplicates, renumber). */
     CHECK(power_history_init() == ESP_OK, "init ok");
 
     power_history_status_t st;
     power_history_get_status(&st);
-    CHECK(st.record_count == 10, "all ten scrambled records kept");
+    CHECK(st.record_count == 10, "repair dropped the two duplicate minutes");
 
-    /* Every minute is present, and a time-ordered read walks them ascending. */
+    /* Every distinct minute is present. */
     bool all_present = true;
+    int64_t distinct[10] = {base - 300, base - 240, base - 180, base - 120, base - 60,
+                            base, base + 60, base + 120, base + 180, base + 240};
     for (int i = 0; i < 10; ++i) {
-        if (!power_history_has_minute(scrambled[i])) {
+        if (!power_history_has_minute(distinct[i])) {
             all_present = false;
         }
     }
-    CHECK(all_present, "repair kept every minute searchable");
+    CHECK(all_present, "repair kept every distinct minute searchable");
 
     power_history_record_t page[16];
     size_t count = 0;
     bool more = false;
     CHECK(power_history_read_after(base - 1000, 16, page, 16, &count, &st, &more) == ESP_OK,
           "read_after ok");
-    CHECK(count == 10, "ten records read back");
+    CHECK(count == 10, "ten distinct records read back");
     bool ascending = true;
+    bool dup = false;
     for (size_t i = 1; i < count; ++i) {
         if (page[i].interval_start_utc <= page[i - 1].interval_start_utc) {
             ascending = false;
+            if (page[i].interval_start_utc == page[i - 1].interval_start_utc) {
+                dup = true;
+            }
         }
     }
-    CHECK(ascending, "ring is time-sorted after repair");
+    CHECK(ascending && !dup, "ring is sorted and duplicate-free after repair");
     bool seq_monotonic = true;
     for (size_t i = 1; i < count; ++i) {
         if (page[i].sequence <= page[i - 1].sequence) {
@@ -165,16 +173,16 @@ static void test_repair_and_backup_upload(void)
           "read_after after import ok");
     CHECK(count == 13, "thirteen records read back");
     bool sorted_after = true;
-    bool dup = false;
+    bool dup_after = false;
     for (size_t i = 1; i < count; ++i) {
         if (page[i].interval_start_utc <= page[i - 1].interval_start_utc) {
             sorted_after = false;
             if (page[i].interval_start_utc == page[i - 1].interval_start_utc) {
-                dup = true;
+                dup_after = true;
             }
         }
     }
-    CHECK(sorted_after && !dup, "no duplicates, still time-sorted");
+    CHECK(sorted_after && !dup_after, "no duplicates, still time-sorted");
     CHECK(page[0].interval_start_utc == base - 360, "imported older minute landed first");
     CHECK(page[count - 1].interval_start_utc == base + 360, "imported newer minute landed last");
 
