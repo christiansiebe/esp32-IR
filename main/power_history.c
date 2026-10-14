@@ -452,14 +452,16 @@ static void power_history_worker(void *arg)
     }
 }
 
-/* Repair a ring that an older firmware left time-unsorted (backfill merges used
- * to append out of order). Reads all valid records into RAM, sorts by minute,
- * renumbers sequence contiguously (so the after_sequence cursor stays monotonic)
- * and writes the ring back. Best-effort: needs a temporary buffer of the whole
+/* Repair a ring that an older firmware left time-unsorted and/or holding
+ * duplicate minutes (backfill merges used to append out of order, and the
+ * binary-search dedupe then failed to see the minutes already stored). Reads all
+ * valid records into RAM, sorts by minute, drops duplicate minutes, renumbers
+ * sequence contiguously (so the after_sequence cursor stays monotonic) and
+ * writes the ring back. Best-effort: needs a temporary buffer of the whole
  * store, so it only runs when that fits in the free heap (the reported messy
  * store is a few thousand records; a full 29000-record ring on a no-PSRAM part
  * cannot be sorted in one buffer and is left for the incremental inserts to
- * heal). Returns true when the ring is sorted afterwards. */
+ * heal). Returns true when the ring is sorted and duplicate-free afterwards. */
 static bool repair_ring_if_needed(void)
 {
     if (g_history_file == NULL || g_history_header.record_count < 2) {
@@ -487,10 +489,6 @@ static bool repair_ring_if_needed(void)
         prev = record.interval_start_utc;
         records[valid++] = record;
     }
-    if (ordered) {
-        heap_caps_free(records);
-        return true; /* already sorted (or too few valid records) */
-    }
     /* Stable insertion sort by minute; the store is already "almost sorted"
      * (live minutes in order, a few backfill blocks inserted), so this is fast. */
     for (size_t i = 1; i < valid; ++i) {
@@ -502,12 +500,26 @@ static bool repair_ring_if_needed(void)
         }
         records[j] = key;
     }
+    /* Drop duplicate minutes (same minute twice); keep the first, which after a
+     * stable sort is the oldest copy. */
+    size_t unique = 0;
+    for (size_t i = 0; i < valid; ++i) {
+        if (unique != 0 &&
+            records[i].interval_start_utc == records[unique - 1].interval_start_utc) {
+            continue;
+        }
+        records[unique++] = records[i];
+    }
+    if (ordered && unique == valid) {
+        heap_caps_free(records);
+        return true; /* already sorted and duplicate-free */
+    }
     /* Renumber contiguously and rewrite the ring in time order. */
     uint32_t oldest_sequence = g_history_header.next_sequence - count;
     if (oldest_sequence == 0) {
         oldest_sequence = 1;
     }
-    for (size_t i = 0; i < valid; ++i) {
+    for (size_t i = 0; i < unique; ++i) {
         records[i].sequence = oldest_sequence + (uint32_t)i;
         records[i].checksum = record_checksum(&records[i]);
         if (!write_record_idx(oldest_slot, (uint32_t)i, &records[i])) {
@@ -520,6 +532,12 @@ static bool repair_ring_if_needed(void)
         return false;
     }
     power_history_header_t updated = g_history_header;
+    updated.record_count = (uint32_t)unique;
+    updated.next_sequence = oldest_sequence + (uint32_t)unique;
+    if (updated.next_sequence == 0) {
+        updated.next_sequence = 1;
+    }
+    updated.next_slot = (oldest_slot + (uint32_t)unique) % POWER_HISTORY_CAPACITY;
     ++updated.generation;
     updated.checksum = header_checksum(&updated);
     uint8_t next_copy = (uint8_t)(1u - g_active_header_copy);
@@ -528,8 +546,8 @@ static bool repair_ring_if_needed(void)
     }
     g_history_header = updated;
     g_active_header_copy = next_copy;
-    ESP_LOGW(TAG, "Repaired out-of-order history ring (%u records re-sorted)",
-             (unsigned)valid);
+    ESP_LOGW(TAG, "Repaired history ring: %u records, %u duplicate minute(s) dropped",
+             (unsigned)unique, (unsigned)(valid - unique));
     return true;
 }
 
