@@ -509,3 +509,17 @@ stand dort auf `GOVERNOR=performance`. Daher `GOVERNOR=schedutil` gesetzt
   cmdline `panic=10`.
 - Reboot-Watchdog (`RebootWatchdogSec=10min`, Default) deckt bereits den
   Reboot-Fall ab.
+
+**Selbstheilungs-Tests (2026-10-14, real durchgefuehrt):**
+- **Watchdog-Test:** systemd-Watchdog kurz abgegeben, /dev/watchdog von Hand
+  geoeffnet (60 s) und nicht gefuettert -> Board rebootete nach ~56 s von selbst
+  (Boot 19:11 CEST). wdtest.log verschwand (harter Reset ohne Sync). Agent kam
+  von allein zurueck. -> Vollsystem-Hang wird abgefangen.
+- **Panic-Test:** echo c > /proc/sysrq-trigger -> Kernel-Panic; mit panic=10
+  rebootete das Board automatisch (Boot 19:19 CEST), Journal des Vor-Boots
+  abgeschnitten (kein Sync), alle Dienste + Agent wieder aktiv.
+  -> Kernel-Panic wird abgefangen.
+- Hinweise: Amlogic setzt watchdog bootstatus nicht (immer 0) und pstore ist
+  leer -> Reset-Grund nur indirekt belegbar (Zeitkorrelation + Datenverlust).
+- systemd-Fallstrick: verliert systemd den Watchdog (extern geoeffnet), schaltet
+  es ihn nicht selbst wieder scharf -> nach Test/Update einmal rebooten.
