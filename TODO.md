@@ -443,6 +443,60 @@ in seiner eigenen SPIFFS-Historie (siehe oben).
 nur die Lücken und überschreibt nie eigene Werte — so umgesetzt. Die Minutenhistorie wird
 auf **beiden** Rollen lokal geschrieben (SPIFFS), der Sender speichert also alles selbst.
 
+### 🐛 Bug: doppelte Minuten in der History nach Backfill (NEU, 2026-10-14)
+Symptom: `GET /api/power-history.csv` liefert **doppelte Minuten**. Empfänger-Export
+14.10.: 4828 Zeilen / 3557 eindeutige Minuten → **1271 überzählige Zeilen**; ein früherer
+Export 615 doppelte Minuten / 1047 Zeilen. Die Dubletten-Paare liegen im `sequence` weit
+auseinander (= zwei Zähler: Empfänger-Ring vs. Sender-Verlauf) ⇒ sie entstehen im
+**Backfill-Merge**, **nicht** im CSV-Upload.
+
+**Root Cause (host-reproduziert, 2026-10-14):** `main/power_history.c` nimmt an, der Ring
+sei **zeitlich sortiert** — `minute_is_stored()` = **Binärsuche** über `oldest_slot..next_slot`,
+ebenso der `power_history_read*`-Pfad. Der Backfill fügt **ältere** Minuten an ⇒ Ring wird
+**unsortiert** ⇒ `minute_is_stored()` / `power_history_has_minute()` finden **vorhandene**
+Minuten nicht mehr ⇒ `write_records()` hält sie für neu ⇒ **dieselbe Minute wird erneut
+geschrieben**. Reproduktion: 10 Live-Minuten enqueuen, dann 10 **ältere** mergen →
+`has_minute(T0)` = **0** (soll 1); dieselben Live-Minuten erneut mergen → `record_count`
+20 → 30.
+
+Fix (empfohlen **Option A**): Ring **zeit-sortiert halten** — beim Einfügen älterer
+Backfill-Minuten die korrekte Slot-Position bestimmen und den Ring umschaufeln, sodass
+`oldest_slot..next_slot` aufsteigend bleibt. Betroffen: `write_records()` (gemeinsamer Pfad
+für Live-Recorder **und** Merge). Alternative B: `minute_is_stored` + `read*` auf
+unsortierten Ring auslegen.
+
+**Zwei zusätzliche Abnahmepunkte:**
+- [ ] **Bereits unsortierten Bestand mitreparieren.** Nicht nur neue Inserts sortiert
+      einfügen — der Ring ist am Gerät **schon** zerschossen. Vorhandene Daten einmalig in
+      sortierte Ordnung überführen (z. B. Normalisierung beim Start), sonst bleiben
+      `has_minute`/Export für die Alt-Daten kaputt.
+- [ ] **`sequence` beim Umsortieren monoton halten.** Export/HA blättern über `sequence`
+      (`power_history_read(after_sequence=…)`). Neu-Nummerierung macht alte Cursor
+      ungültig ⇒ Export/HA verlieren Zeilen. `sequence` als Identität erhalten.
+
+**Mitnehmen:**
+- [ ] **Batch-Dedup im Backfill:** `history_sync_run` filtert nur gegen `has()`
+      (schon gespeichert); dieselbe Minute kann **innerhalb** einer Session doppelt
+      ankommen (Retry/überlappende Seiten) → vor `merge()` im Batch deduplizieren.
+- [ ] **Backfill-`errors` („Fehler: 2")** im Sender-Abgleich: bei `fetch()`-Fehlschlag
+      (`sender_diag_exchange_raw`) bricht die Seite ab, Cursor retryt später. Prüfen, ob
+      Fehler gezählt/erneut versucht werden sollen.
+
+**Regressionstest (Pflicht):** Host-Test in `test/` (analog `test_history_backfill_merge.c`):
+(1) Live-Minuten enqueuen, ältere mergen; (2) `power_history_has_minute(T0) == true`, Ring
+sortiert; (3) dieselben Minuten erneut mergen → `record_count` unverändert; (4) CSV-Export
+liefert **keine** doppelten Minuten; (5) vorab unsortierter Ring + Export-Monotonie.
+`test/run_host_tests.sh` grün; neuer Test eingehängt. OTA-sicher (reine App-Änderung).
+
+### 🐛 UX: Interface minutenlang offline nach CSV-Upload (NEU, 2026-10-14)
+Nach dem Re-Import einer großen CSV (`POST /api/power-history-upload`) ist die Weboberfläche
+des Empfängers **minutenlang nicht erreichbar**. Der Handler rebootet **nicht** (kein
+`esp_restart()`), sondern streamt den Body und reiht die Minuten ein. Vermutete Ursache: die
+große Upload-Transaktion blockiert den HTTPD-Task; zusätzlich belastet die Dashboard-
+Auto-Aktualisierung (`updateHistory` alle 1,5 s) den Server.
+- [ ] Ursache eingrenzen (HTTPD-Task blockiert vs. Heap/SPIFFS-Druck vs. Watchdog).
+- [ ] Upload in den Backfill-Worker verlagern bzw. HTTPD während des Imports nicht blockieren.
+
 ## Partitionstabelle (geändert, `c3d3420`) — Flash-Reihenfolge & Auswirkungen
 Ziel: zwei echte OTA-Slots à 1,5 MB; `storage` bleibt an exakt derselben Adresse, damit
 die SPIFFS-Minutenhistorie einen COM-Re-Flash überlebt.
