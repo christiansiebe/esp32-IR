@@ -452,3 +452,27 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 - **Offen (optional):** `unattended-upgrades` laeuft dauerhaft; wenn keine
   Auto-Updates gewuenscht, deaktivieren.
 
+**Stromsparen (erledigt 2026-10-14):**
+- **WLAN-Powersave an** — dauerhaft via NetworkManager
+  (`802-11-wireless.powersave=3`) **und** in `rc.local`. Messung danach:
+  Gateway avg 1,9 ms / 0 % Verlust, HA 0,09 ms → **kein Lag**. Rueckgaengig:
+  `iw dev <iface> set power_save off` bzw. `nmcli ... wifi.powersave 2`.
+- Reste entfernt: `/opt/ai-agent`, `/opt/ai-agent-backup`, `/root/workspace`.
+- **zeroclaw entfernt** (war „open claw"): User-Dienst gestoppt+disabled,
+  Binaries `/root/.cargo/bin/{zeroclaw,zerocode}` (70 M) und Daten
+  `/root/.zeroclaw` + `/root/.local/share/zeroclaw` geloescht. Backup:
+  `/mnt/ssd/backups/zeroclaw-backup-20261014-175742.tar.gz` (24 M).
+- Laufende Verbraucher (gewollt): HA/Supervisor ~900 M, XFCE/VNC ~250 M,
+  Agent nur 26 M. Temperaturen idle 34/36 °C.
+
+**Stromsparen (bewusst NICHT gemacht):**
+- `cpuidle`-Treiber = `none` → keine tiefen Idle-States; Kernel-/DT-Limit,
+  nicht ohne Reboot-Risiko aenderbar.
+- HDMI-Konsole bleibt an (`consoleblank=0` in `/boot/armbianEnv.txt`); bei Bedarf
+  `consoleblank=600` ergaenzen (braucht Reboot) → kleiner Effekt.
+- Governor ist bereits `schedutil` (gut); `cpufrequtils` steht auf
+  `ENABLE=false`/`performance`, greift aber nicht — nicht angefasst.
+- Keine Leistungsmess-Hardware (INA219 o. Ae.) vorhanden → Strom nicht messbar,
+  daher keine aggressiven Takt-/Undervolt-Experimente.
+
+
