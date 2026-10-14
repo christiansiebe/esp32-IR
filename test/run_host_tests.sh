@@ -228,6 +228,21 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_history_csv_import_store"
 
+# Ring repair + backup upload: an already-scrambled store (older firmware left
+# the ring out of order) is repaired at init, and a CSV-restore upload inserts
+# the missing minutes in time order without duplicating live ones.
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog-repair\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_history_ring_repair.c" \
+    -lm -o "$out/test_history_ring_repair"
+
+"$out/test_history_ring_repair"
+
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"
