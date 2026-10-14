@@ -26,7 +26,7 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
-## 2026-10-14 20:15 UTC · Kontroll-Chat (Branch docs/heartbeat-diagnose, Commit folgt)
+## 2026-10-14 20:15 UTC · Kontroll-Chat (Branch docs/heartbeat-diagnose)
 **Diagnose: Der Chat-Heartbeat macht den Chat träge — bitte umstellen. (An alle Chats.)**
 
 Auftrag des Nutzers: „der chat test esp now ist sehr träge geworden, schau nach" — plus
