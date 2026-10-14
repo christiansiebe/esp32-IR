@@ -52,9 +52,12 @@ void history_sync_run(history_sync_result_t *result, int64_t start_cursor,
 
         power_history_record_t merge_buf[HISTORY_SYNC_PAGE_RECORDS];
         size_t merge_count = 0;
+        int64_t page_last_minute = resume.after_utc;
         for (uint8_t i = 0; i < reply.record_count; ++i) {
             const power_history_record_t *record = &reply.records[i];
-            history_backfill_cursor_advance(&resume, record->interval_start_utc);
+            if (record->interval_start_utc > page_last_minute) {
+                page_last_minute = record->interval_start_utc;
+            }
             if (has(ctx, record->interval_start_utc)) {
                 continue; /* receiver already holds this minute */
             }
@@ -73,8 +76,36 @@ void history_sync_run(history_sync_result_t *result, int64_t start_cursor,
             }
             merge_buf[merge_count++] = *record;
         }
+        size_t merged = 0;
         if (merge_count != 0) {
-            result->merged += (uint32_t)merge(ctx, merge_buf, merge_count);
+            merged = merge(ctx, merge_buf, merge_count);
+            result->merged += (uint32_t)merged;
+        }
+        /* Advance the resume cursor only over minutes that are provably stored:
+         * records the store already held, plus the candidates the merge actually
+         * accepted. merge() enqueues from the front and stops at the first
+         * rejection, so a short merge means the tail of the page was dropped
+         * (queue full). Leaving the cursor before that minute makes the next
+         * session re-pull it instead of skipping data. */
+        if (merged == merge_count) {
+            history_backfill_cursor_advance(&resume, page_last_minute);
+        } else {
+            int64_t first_drop = merge_buf[merged].interval_start_utc;
+            for (uint8_t i = 0; i < reply.record_count; ++i) {
+                int64_t minute = reply.records[i].interval_start_utc;
+                if (minute >= first_drop) {
+                    break;
+                }
+                history_backfill_cursor_advance(&resume, minute);
+            }
+            result->pages++;
+            if (store != NULL) {
+                store(ctx, resume.after_utc);
+            }
+            /* Store pressure: stop this session and resume from the saved cursor
+             * later rather than racing ahead and dropping minutes. */
+            saw_more = true;
+            break;
         }
         result->pages++;
         if (store != NULL) {

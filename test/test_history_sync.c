@@ -41,6 +41,7 @@ typedef struct {
     mock_store_t *store;
     int64_t cursor_stored;
     int store_calls;
+    int merge_accept_limit; /* >0: accept only this many per merge call */
 } mock_ctx_t;
 
 static bool store_has(const mock_store_t *store, int64_t minute)
@@ -97,6 +98,9 @@ static bool mock_has(void *ctx, int64_t minute_utc)
 static size_t mock_merge(void *ctx, const power_history_record_t *records, size_t count)
 {
     mock_ctx_t *c = ctx;
+    if (c->merge_accept_limit > 0 && (size_t)c->merge_accept_limit < count) {
+        count = (size_t)c->merge_accept_limit; /* simulate a full store queue: tail dropped */
+    }
     size_t added = 0;
     for (size_t i = 0; i < count; ++i) {
         int64_t minute = records[i].interval_start_utc;
@@ -340,6 +344,37 @@ static void test_transient_fetch_retry(void)
     CHECK(store_matches(&store, &sender), "no page skipped by the retry");
 }
 
+/* A merge that drops the tail of every page (full store queue): the cursor must
+ * not advance past the dropped minutes, and a follow-up session must recover
+ * them, so no minute is silently lost. */
+static void test_no_loss_on_merge_drop(void)
+{
+    printf("test_no_loss_on_merge_drop\n");
+    const int64_t base = 7700000000LL;
+    mock_sender_t sender;
+    fill_sender(&sender, base, 30);
+    mock_store_t store = {0};
+    mock_ctx_t ctx = {.sender = &sender, .store = &store, .merge_accept_limit = 3};
+
+    history_sync_result_t first;
+    history_sync_run(&first, 0, base + 30 * 60, 64, mock_fetch, mock_has, mock_merge,
+                     mock_store_cursor, &ctx);
+    CHECK(first.merged == 3, "first session merges only what the store accepted");
+    CHECK(!first.caught_up, "a dropped tail is not caught up");
+    CHECK(first.cursor == base + 2 * 60,
+          "cursor stops before the first dropped minute");
+
+    /* Store pressure eases: the next session resumes from the cursor and must
+     * recover every remaining minute without a hole. */
+    ctx.merge_accept_limit = 0;
+    history_sync_result_t second;
+    history_sync_run(&second, first.cursor, base + 30 * 60, 64, mock_fetch, mock_has,
+                     mock_merge, mock_store_cursor, &ctx);
+    CHECK(second.caught_up, "recovery session catches up");
+    CHECK(store_matches(&store, &sender), "no minute lost after the drop + resume");
+    CHECK(store.count == 30, "store mirrors the sender exactly, no duplicates");
+}
+
 int main(void)
 {
     test_full_mirror_from_empty();
@@ -349,6 +384,7 @@ int main(void)
     test_drop_before_first_page();
     test_dedupe_within_page();
     test_transient_fetch_retry();
+    test_no_loss_on_merge_drop();
     printf("test_history_sync: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -253,3 +253,40 @@ _Vorlage für die nächste Nachricht:_
 ## <Datum/Zeit UTC> · <Absender> (Branch <branch>, Commit <kurz-SHA>)
 ...
 ```
+
+## 2026-10-14 21:35 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten)
+Zwei Aufträge umgesetzt, alle Host-Tests grün, **CI noch nicht gelaufen** (kein
+Docker im Sandbox, Build läuft über GitHub Actions nach dem Push).
+
+**1) CPU-Takt auf 240 MHz (DFS), beide Rollen.**
+- Neue Kconfig `CONFIG_ESPNOW_CPU_MAX_MHZ` (80..240, Default 240) in
+  `main/Kconfig.projbuild` — **einzige Quelle** für die DFS-Decke.
+- `apply_power_management()` in `main.c` wendet sie für **beide** Rollen an
+  (Empfänger: Light-Sleep aus, nur Clock-Skalierung; Sender: Sleep AN wie bisher).
+- `sdkconfig.defaults`: `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y`.
+- CI-Assert + Syntax-Check auf 240 MHz umgestellt (`-DCONFIG_ESPNOW_CPU_MAX_MHZ=240`).
+- **Achtung lokal:** die generierten `sdkconfig*` (git-ignored) pinnten noch 80 MHz
+  und überschreiben `sdkconfig.defaults` — lokal auf 240 gesetzt, aber nicht
+  committet. Vor dem Flashen `idf.py reconfigure`.
+
+**2) „Verlauf nicht verfügbar / AbortError" + kein Datenverlust.**
+- Lesepfade warten nur noch 800 ms auf `g_history_mutex` (statt `portMAX_DELAY`);
+  Writer/Import behalten `portMAX_DELAY`. `shift_up_renumber()` yielded alle
+  8 Chunks. Handler liefern bei `ESP_ERR_TIMEOUT` einen leeren, gültigen Datensatz.
+- **Kern-Fix:** `history_sync.c` schrieb die Resume-Cursor **vor** dem Merge fort
+  ⇒ bei vollem Store-Puffer (16) verlor ein Tail Minuten endgültig. Jetzt rückt
+  der Cursor nur über nachweislich gespeicherte Minuten vor; bei Drop endet die
+  Session vor der ersten fallengelassenen Minute.
+
+**Tests:** `test/test_history_sync.c` +`test_no_loss_on_merge_drop`; neue
+Stress-Simulation `test/test_stress_history_sync.c` (großer Ring, zufällige
+Link-Abbrüche + Store-Druck ⇒ muss exakt konvergieren). **Ergebnis: alle Suiten
+0 Fehler; Stresstest 330 Checks / 0 Fehler.**
+
+**Noch offen / Frage an den Kontroll-Chat:**
+- Upload-Import selbst in den Backfill-Worker verlagern (die Mutex-Timeouts sind
+  nur der Sicherheitsgurt). Eigener Task.
+- Der separate Sender-Reboot-Verdacht (20-Min-Takt, Crash-Journal) ist **nicht**
+  angefasst.
+- Bitte entscheiden, ob der CPU-Takt so in den Bench geht (Brownout-Risiko bei
+  240 MHz → Fallback 160/80 dokumentiert).

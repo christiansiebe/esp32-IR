@@ -30,6 +30,15 @@
  * inserted into the sorted ring. Keeps the shift bounded without a full-store
  * buffer (a 29000-record ring is ~812 kB, far past the free heap). */
 #define POWER_HISTORY_SHIFT_CHUNK 32u
+/* Yield to lower-priority tasks (and the IDLE task that feeds the watchdog)
+ * after this many shift chunks, so a long in-place ring insert cannot starve
+ * the system while it holds the mutex. */
+#define POWER_HISTORY_SHIFT_YIELD_CHUNKS 8u
+/* Reads take the mutex with a bounded wait instead of portMAX_DELAY: while the
+ * writer (or a CSV import) holds it for a long in-place ring insert, the HTTP
+ * task must be able to give up and answer quickly rather than stalling until
+ * the browser's own request timeout fires (the reported "AbortError"). */
+#define POWER_HISTORY_READ_LOCK_TIMEOUT_MS 800u
 
 static const char *TAG = "power_history";
 static FILE *g_history_file;
@@ -248,6 +257,7 @@ static bool shift_up_renumber(uint32_t oldest_slot, uint32_t count, uint32_t at)
 {
     power_history_record_t buf[POWER_HISTORY_SHIFT_CHUNK];
     uint32_t index = count;
+    uint32_t chunks_done = 0;
     while (index > at) {
         uint32_t chunk = index - at;
         if (chunk > POWER_HISTORY_SHIFT_CHUNK) {
@@ -270,6 +280,12 @@ static bool shift_up_renumber(uint32_t oldest_slot, uint32_t count, uint32_t at)
             }
         }
         index = start;
+        if (++chunks_done % POWER_HISTORY_SHIFT_YIELD_CHUNKS == 0) {
+            /* Let the IDLE task (watchdog) and any equal/higher-priority waiter
+             * run between file-I/O rounds. The mutex is still held, so a reader
+             * waits at most one chunk round before its bounded take succeeds. */
+            vTaskDelay(1);
+        }
     }
     return true;
 }
@@ -1056,7 +1072,7 @@ void power_history_get_status(power_history_status_t *status)
     }
     memset(status, 0, sizeof(*status));
     status->ready = g_history_ready;
-    if (g_history_ready && xSemaphoreTake(g_history_mutex, portMAX_DELAY) == pdTRUE) {
+    if (g_history_ready && xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) == pdTRUE) {
         status->record_count = g_history_header.record_count;
         status->latest_sequence = g_history_header.next_sequence - 1u;
         if (status->record_count != 0) {
@@ -1089,7 +1105,7 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (xSemaphoreTake(g_history_mutex, portMAX_DELAY) != pdTRUE) {
+    if (xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
 
@@ -1266,7 +1282,7 @@ esp_err_t power_history_read_window(int64_t from_utc, int64_t to_utc,
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (xSemaphoreTake(g_history_mutex, portMAX_DELAY) != pdTRUE) {
+    if (xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
 
@@ -1361,7 +1377,7 @@ esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (xSemaphoreTake(g_history_mutex, portMAX_DELAY) != pdTRUE) {
+    if (xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
 
@@ -1448,7 +1464,7 @@ esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
 bool power_history_has_minute(int64_t interval_start_utc)
 {
     if (!g_history_ready ||
-        xSemaphoreTake(g_history_mutex, portMAX_DELAY) != pdTRUE) {
+        xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) != pdTRUE) {
         return false;
     }
     bool found = false;
@@ -1628,7 +1644,7 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (xSemaphoreTake(g_history_mutex, portMAX_DELAY) != pdTRUE) {
+    if (xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
 

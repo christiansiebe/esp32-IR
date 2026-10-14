@@ -497,6 +497,29 @@ Auto-Aktualisierung (`updateHistory` alle 1,5 s) den Server.
 - [ ] Ursache eingrenzen (HTTPD-Task blockiert vs. Heap/SPIFFS-Druck vs. Watchdog).
 - [ ] Upload in den Backfill-Worker verlagern bzw. HTTPD während des Imports nicht blockieren.
 
+**2026-10-14 (Bau-Chat, Branch `cline/auftrag-history-dubletten`) — teilweise behoben:**
+Der `AbortError`/„minutenlang offline" hat zwei Ursachen, beide jetzt entschärft:
+- **HTTPD hing am Mutex.** Lesepfade (`power_history_read*`, `_aggregate`,
+  `_has_minute`, `_get_status`) warten nur noch 800 ms auf `g_history_mutex`
+  (`POWER_HISTORY_READ_LOCK_TIMEOUT_MS`) statt `portMAX_DELAY`; Writer/Import
+  behalten `portMAX_DELAY`. Zusätzlich yielded `shift_up_renumber()` alle 8 Chunks
+  (`vTaskDelay(1)`), damit Watchdog/Waiter laufen. Die Handler liefern bei
+  `ESP_ERR_TIMEOUT` einen **leeren, gültigen** Datensatz statt HTTP 500/Hängen.
+  Dateien: `main/power_history.c`, `main/main.c`.
+- **Noch offen:** den Upload selbst in den Backfill-Worker verlagern, damit der
+  Import den HTTPD-Task gar nicht erst lange belegt (die Mutex-Timeouts sind der
+  Sicherheitsgurt, nicht die Wurzel). Siehe `AGENTS.md` → „Web-Reachability +
+  'kein Datenverlust'".
+
+### ✅ Kein Datenverlust beim Backfill (BEHOBEN, 2026-10-14)
+In `history_sync.c` rückte der Resume-Cursor **vor** dem Merge vor: ließ der
+Store-Puffer (16) einen Tail fallen, übersprang der Cursor diese Minuten ⇒
+endgültig verloren. Jetzt rückt der Cursor nur über **nachweislich gespeicherte**
+Minuten vor; bei einem Drop endet die Session vor der ersten fallengelassenen
+Minute und die nächste zieht sie nach. Regressionstest
+`test/test_history_sync.c` + Stress-Simulation `test/test_stress_history_sync.c`
+(grün, 330 Checks). Details: `AGENTS.md`.
+
 ## Partitionstabelle (geändert, `c3d3420`) — Flash-Reihenfolge & Auswirkungen
 Ziel: zwei echte OTA-Slots à 1,5 MB; `storage` bleibt an exakt derselben Adresse, damit
 die SPIFFS-Minutenhistorie einen COM-Re-Flash überlebt.

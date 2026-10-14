@@ -89,14 +89,25 @@ Two firmware roles are built from one source tree.
   corruption). When bumping a version, add the migration step and a host test.
 
 ## CPU clock / power
-- CPU is capped at 80 MHz (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y` in
-  `sdkconfig.defaults`), not the IDF default 160 MHz, and the clock is
-  **variable**: `CONFIG_PM_ENABLE=y` + `CONFIG_PM_DFS_INIT_AUTO=y` scale it down
-  to the 40 MHz XTAL when idle, and `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y` adds
-  automatic light sleep between cycles (with `CONFIG_PM_SLP_IRAM_OPT`,
-  `CONFIG_PM_RTOS_IDLE_OPT`, `CONFIG_ESP_WIFI_SLP_IRAM_OPT` to cut wake cost,
-  and `CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y` so the firmware can report whether it
-  actually slept). The 80 MHz ceiling is kept for the ESP-NOW send burst.
+- CPU ceiling is **240 MHz** (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y` in
+  `sdkconfig.defaults`), scaled down by DFS to the 40 MHz XTAL when idle. The
+  ceiling is **single-sourced** in `CONFIG_ESPNOW_CPU_MAX_MHZ`
+  (`main/Kconfig.projbuild`, range 80..240, default 240): `apply_power_management()`
+  in `main.c` applies it for **both** roles (light sleep off for the receiver,
+  which must stay responsive for HTTP + ESP-NOW) and `uart_sleep_window.c`
+  re-applies it with light sleep on for the sender. Keep
+  `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ` in `sdkconfig.defaults` in step with it.
+  History: it was pinned at 80 MHz (commits `40baea3`/`fa24b5e`/`c53b028`); the
+  device is mains-powered and the dashboard/backfill are CPU/SPIFFS bound, so the
+  top clock buys responsiveness while a re-sync runs. If a board shows brownout
+  resets at 240 MHz, lower both knobs to 160 or 80.
+- **Generated `sdkconfig*` files are git-ignored** (only `sdkconfig.defaults` is
+  tracked). `sdkconfig`, `sdkconfig.receiver`, `sdkconfig.sender` are local
+  artefacts; an old local `sdkconfig.*` pins `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80`
+  and **overrides** `sdkconfig.defaults`, so after changing the ceiling re-run
+  `idf.py reconfigure` (or delete the local `sdkconfig.*`) or the build keeps
+  80 MHz. The CI matrix regenerates `sdkconfig` from `sdkconfig.defaults` + role
+  defaults, so CI is unaffected by stale local files.
 - The sender reports its live clock and sleep state in the `counters`
   diagnostic section: `cpu_freq_mhz` (from `esp_clk_cpu_freq()`, i.e. the DFS
   clock as it is right now), `cpu_freq_max_mhz`/`cpu_freq_min_mhz` (the
@@ -110,8 +121,8 @@ Two firmware roles are built from one source tree.
   **safe** because of the history backfill (below): any minute missed over the
   air is pulled from the sender's own SPIFFS history afterwards. If ESP-NOW ever
   proves unreliable on the bench, drop `CONFIG_PM_ENABLE` to get the old fixed
-  80 MHz behaviour; the CI job "Verify the variable CPU clock is in effect"
-  checks the four PM options and the 80 MHz ceiling.
+  behaviour; the CI job "Verify the variable CPU clock is in effect" checks the
+  four PM options and the 240 MHz ceiling.
 - Wi-Fi power save stays at the default `WIFI_PS_MIN_MODEM`; `WIFI_PS_NONE`
   would burn power and power save beyond the default hurts ESP-NOW reliability.
 - Adaptive sender light sleep (`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP`, default
@@ -389,6 +400,49 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 - The IDF build compiles with `-Werror`: unused vars and `-Wformat-truncation`
   (e.g. a `snprintf` whose buffer is smaller than the topic could be) fail CI.
   Size buffers for the full topic length.
+
+## Web-Reachability + "kein Datenverlust" (2026-10-14, Branch cline/auftrag-history-dubletten)
+Ausgangspunkt war der Report "Verlauf nicht verfügbar: `AbortError`" nach
+Sync/CSV-Download. Der `AbortError` ist **client-seitig** (`fetchT`-Helper,
+`main.c`, 15 s AbortController), aber die Ursache ist geräteseitig: der
+HTTPD-Task hing lange, weil der History-Writer (bzw. ein CSV-Import) den
+`g_history_mutex` bei einem langen In-Place-Ring-Insert hielt. Drei Änderungen,
+alle host-getestet:
+1. **Begrenzter Mutex-Wait in den Lesepfaden.** `power_history_read`,
+   `_read_window`, `_read_after`, `_aggregate`, `_has_minute` und
+   `_get_status` nehmen den Mutex mit
+   `pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)` (800 ms) statt
+   `portMAX_DELAY`. Der Writer und der Import behalten `portMAX_DELAY`.
+   Folge: der HTTP-Task gibt auf und antwortet **schnell** statt bis zum
+   Browser-Timeout zu hängen.
+2. **Yields im Writer.** `shift_up_renumber()` ruft alle
+   `POWER_HISTORY_SHIFT_YIELD_CHUNKS` (8) Chunks `vTaskDelay(1)`, damit der
+   IDLE-Task (Watchdog) und gleich-/höherpriore Waiter laufen. Der Mutex bleibt
+   gehalten, ein Leser wartet also höchstens eine Chunk-Runde.
+3. **Handler vertragen `ESP_ERR_TIMEOUT`.** `power_history_api_handler` (JSON),
+   `power_history_csv_handler` und der Aggregations-Zweig liefern bei
+   `ESP_ERR_TIMEOUT` einen **leeren, gültigen** Datensatz (`storage_ready:false`)
+   statt HTTP 500 / Hängen. Das Dashboard pollt weiter und erholt sich.
+- **Kein Datenverlust beim Backfill (Kern-Fix).** In `history_sync.c` wurden die
+  Resume-Cursor **vor** dem Merge fortgeschrieben. Ließ der Store-Puffer
+  (`POWER_HISTORY_QUEUE_LENGTH` = 16) einen Tail fallen, sprang der Cursor
+  darüber hinweg ⇒ Minuten waren endgültig verloren. Jetzt rückt der Cursor nur
+  über **nachweislich gespeicherte** Minuten vor (bereits vorhandene +
+  vom Merge akzeptierte). Bei einem Drop endet die Session, der Cursor bleibt vor
+  der ersten fallengelassenen Minute und die nächste Session zieht sie nach.
+- **Tests:** `test/test_history_sync.c` (+`test_no_loss_on_merge_drop`) und die
+  neue Stress-Simulation `test/test_stress_history_sync.c` (in
+  `run_host_tests.sh`): großer Sender-Ring, viele Sessions mit zufälligen
+  Link-Abbrüchen **und** Store-Druck. Muss zu einem exakten Spiegel konvergieren:
+  keine Minute verloren, keine Dublette, Cursor überspringt nie. Läuft grün
+  (330 Checks, 0 Fehler). Bewusste Abwägung: ein **einzelner** Session-Lauf bricht
+  bei Store-Druck ab (statt endlos zu retten); die Konvergenz passiert über die
+  wiederkehrenden Sessions (Backfill-Worker alle `HISTORY_BACKFILL_PERIOD_MS`).
+- **Nicht geändert** (bewusst): die Lesepfade halten den Mutex weiter für die
+  Dauer eines Reads (bis 64 Records). Bei ~1,3 ms/Record auf SPIFFS bleibt das
+  unter dem 800 ms-Budget. Ein Seqlock/Snapshot-Umbau war nicht nötig, weil der
+  Writer zwischen den Chunks yielded.
+
 
 ## 🔨 BAUAUFTRAG (2026-10-14): History-Dubletten nach Backfill
 **Status: Auftrag erteilt, noch NICHT gebaut.** Auftraggeber: Kontroll-Chat
