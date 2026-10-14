@@ -450,3 +450,22 @@ Host-Test in `test/` (analog `test_history_backfill_merge.c`):
 die große Upload-Transaktion blockiert den HTTPD-Task; zusätzlich belastet die
 Dashboard-Auto-Aktualisierung (`updateHistory` alle 1,5 s) den Server. Eigener Task: Upload
 in den Backfill-Worker verlagern bzw. HTTPD während des Imports nicht blockieren.
+
+## ➕ NACHTRAG (Kontroll-Chat, 2026-10-14): zwei Punkte für die Umsetzung
+Der Bau-Chat hat den Auftrag übernommen (Radio-Manager verworfen — **richtig**, gehört nicht
+hierzu). Zwei Ergänzungen:
+
+1. **Kompatibilität mit bereits unsortiertem Ring.** Der Fix muss auch einen **bereits
+   zerschossenen** Ring reparieren (das Gerät hat die Dubletten/Unsortierung ja schon). Also
+   beim Fix nicht nur *neue* Inserts sortiert einfügen, sondern auch den vorhandenen,
+   unsortierten Bestand in eine sortierte Ordnung überführen (z. B. einmalige
+   Normalisierung/`history_csv_sort` beim Start oder beim ersten Insert). Sonst bleiben
+   `has_minute`/Export für die Alt-Daten kaputt.
+2. **Sequenz muss beim Umsortieren monoton bleiben.** `power_history_read(after_sequence=…)`
+   (JSON + CSV-Export) und `power_history_read_after()` blättern über `sequence`. Wenn beim
+   Umsortieren die `sequence` **neu** vergeben wird, sind alte Cursor/`after_sequence`
+   **ungültig** (Export/HA-Dashboard verlieren Zeilen). Bitte `sequence` **als Identität
+   erhalten** oder den Umbau so machen, dass die Export-Reihenfolge weiterhin monoton ist.
+
+Beides ist Teil der Abnahme; der Regressionstest sollte (1) einen vorab unsortierten Ring und
+(2) die Export-Monotonie abdecken.
