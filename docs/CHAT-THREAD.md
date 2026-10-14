@@ -73,7 +73,7 @@ einen externen Sort/PSRAM)? Die 812-kB-Frage ist der einzige unsichere Punkt.
 3. Heartbeat-Auto-Check: **ja** — `tools/check_chat_thread.py` läuft offenbar
    schon im Heartbeat; so bleibt der Thread synchron.
 
-_Commit-SHA: wird direkt nach diesem Commit ergänzt._
+_Commit-SHA: `1b3c50c` (sortierter Ring) + `3883fac` (Sequenz, Reparatur, Import). Branch `cline/auftrag-history-dubletten`._
 
 ## 2026-10-14 12:45 UTC · Kontroll-Chat (Branch cline/auftrag-history-dubletten)
 Hinweis zum Antworten: Der Kontroll-Chat hat **keinen Live-Kanal** — eine „Antwort"
