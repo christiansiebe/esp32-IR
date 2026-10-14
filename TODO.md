@@ -497,6 +497,45 @@ Auto-Aktualisierung (`updateHistory` alle 1,5 s) den Server.
 - [ ] Ursache eingrenzen (HTTPD-Task blockiert vs. Heap/SPIFFS-Druck vs. Watchdog).
 - [ ] Upload in den Backfill-Worker verlagern bzw. HTTPD während des Imports nicht blockieren.
 
+### 🐛 Bug: „große Datenlücke" 14.10. vormittags — vermutlich Boot-Marker-Flut (NEU, 2026-10-14)
+Symptom (Nutzer): am Vormittag des 14.10. eine große Datenlücke. Aus dem Geräte-Export
+(`power-history4.csv`) verifiziert:
+
+- Im Fenster **02:33–10:56** gibt es ein **strenges 20-Minuten-Muster: ~5 min an, ~15 min
+  aus** (22 Lücken à 13–18 min). Die „an"-Blöcke sind **kein** echter Messwert, sondern
+  `sample_count=0` / `reason=ota` (**Boot-Marker**, `boot_marker_fill()` `main.c:1177`).
+  Nur ein echter Messblock (04:31–05:51) und ein Messbeginn ab ~10:59 liegen dazwischen.
+- Boot-Marker entstehen, wenn zwischen dem letzten **gemessenen** und dem aktuellen Boot
+  eine ganze Minute liegt. **`reason=ota`** setzt `power_history_reason_from_reset(..., deliberate_ota=true)`
+  — das OTA-Flag (NVS `BOOT_MARKER_OTA_FLAG_KEY`) wird **vor** `esp_restart()` gesetzt.
+  → Die Marker im 20-Min-Takt deuten auf **wiederkehrende bewusste Reboots** (oder ein
+  hängendes OTA-Flag) im Sender hin, die den ganzen Vormittag den Verlauf „vermarkern".
+
+**Nicht** die Ursache: Es gibt **keinen** Deep-Sleep und **keinen** 20-Min-Timer in der
+Firmware (`grep` leer); die Kadenz kommt also von **außen** (Reboot-Schleife/OTA-Versuch).
+Der adaptive Light-Sleep (`uart_sleep_window.c`) erzeugt **keine** Minuten-Lücken — der
+Backfill deckt ihn ab.
+
+Zu prüfen / zu tun:
+- [ ] **Warum 20-Min-Takt?** `uptime_sleep_ms`/`boot_count` im Sender-Diag + Crash-Journal
+      auslesen: rebootet der Sender alle ~20 min? Falls ja: OTA-Retry? Watchdog? Netz-Task?
+- [ ] **OTA-Flag-Hygiene:** `boot_marker_consume_ota_flag()` löscht das Flag **nur beim
+      Boot**; prüfen, ob ein **abgebrochenes** OTA (Flag gesetzt, Reboot aus anderem Grund)
+      einen echten Neustart fälschlich als `ota` labelt → dann stünden Marker „ota", obwohl
+      gar kein OTA war.
+- [ ] **Messblock-Lücke 10-13 20:40 → 10-13 22:11 (90 min)** und **10-11 16:42 → 19:50
+      (187 min)**: echte Messlücken — sind sie im Sender **und** Empfänger fehlend (dann
+      Backfill ohnmächtig) oder nur beim Empfänger (Backfill-Fenster 3 Tage sollte greifen)?
+- [ ] **Kein Datenverlust-Vorwurf ohne Beleg:** Marker (n=0/ota) sind bewusst **kein**
+      Messwert. Ziel ist, echte Messlücken von Reboot-Markern **sichtbar zu trennen**
+      (Dashboard/Export: „gemessen" vs. „Marker"), damit ein 20-Min-Reboot nicht wie
+      Datenverlust aussieht.
+- [ ] **Akzeptanz:** Sender läuft ohne periodische Reboots stabil (boot_count flach);
+      Export zeigt zusammenhängende echte Messminuten; Backfill füllt Empfänger-Lücken.
+
+Datenbasis für die Analyse: `/tmp/csv_uploads/power-history4.csv` (bzw. der bereinigte
+`power-history-CLEAN2.csv`), 4828 Zeilen / 3557 eindeutige Minuten.
+
 ## Partitionstabelle (geändert, `c3d3420`) — Flash-Reihenfolge & Auswirkungen
 Ziel: zwei echte OTA-Slots à 1,5 MB; `storage` bleibt an exakt derselben Adresse, damit
 die SPIFFS-Minutenhistorie einen COM-Re-Flash überlebt.
