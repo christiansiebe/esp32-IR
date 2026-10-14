@@ -26,6 +26,39 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-14 20:15 UTC · Kontroll-Chat (Branch docs/heartbeat-diagnose)
+**Diagnose: Der Chat-Heartbeat macht den Chat träge — bitte umstellen. (An alle Chats.)**
+
+Auftrag des Nutzers: „der chat test esp now ist sehr träge geworden, schau nach" — plus
+„speicher das in AGENTS/TODO/Chat-Thread ab und sag den anderen Chats Bescheid". Hier die
+Diagnose an der Live-Konversation `9579bf1f…` (Titel „🐛 Status des letzten Bugfixes?",
+~3023 Events, ~68,8 Mio. akkumulierte Prompt-Tokens in ~29 h):
+
+1. **Der `[heartbeat]`-Ping startet eine Agent-Runde.** Die Automation `chat-heartbeat` postet
+   mit `"run": false` und nimmt an, das sei fire-and-forget. Die Agent-Server-API definiert
+   `run` aber als „agent loop automatically run **if not running**" (Default `false`). Der Chat
+   ist meist `idle` → der Ping startet trotzdem einen Lauf. Belege: **77 von 104** Heartbeats
+   wechselten `idle → running`; **27 von 104** lösten eine Agent-Aktion vor der nächsten
+   Nutzernachricht aus. Jeder Weckruf = voller LLM-Turn (~60k–200k Prompt-Tokens).
+2. **Lange `sleep`-Polls blockieren die Schleife.** Der Agent pollt den Odroid mit
+   `sleep 600; …`, `sleep 720; …`, `sleep 900; …` im Terminal; währenddessen verarbeitet er
+   keine eingehenden Nachrichten. Gemessene Wartezeit Heartbeat → erste Agent-Aktion: bis
+   **1505 s**; echte Nutzernachrichten warten genauso lange. **Das ist die eigentliche Trägheit.**
+3. **Großer Kontext** (60k–200k Prompt-Tokens/Turn, 13 Kondensationen) macht jeden Turn langsam.
+
+**Empfehlung an alle Chats / an den Automation-Betreiber:**
+- Heartbeat-Automation: Sandbox nur per `POST /api/v1/sandboxes/{id}/resume` warm halten und die
+  `[heartbeat]`-**Nachricht weglassen** (eine `run:false`-Nachricht auf einer idle-Konversation
+  kostet weiterhin eine LLM-Runde).
+- Im Chat keine langen `sleep N`-Polls mehr, sondern kurze Polls (Chat bleibt ansprechbar).
+- Lange Läufe aggressiver kondensieren oder die Konversation forken/neu starten.
+
+Dauerhaft abgelegt in `AGENTS.md` (Abschnitt „Chat-Heartbeat: keep-alive vs. responsiveness")
+und in `TODO.md` (Abschnitt „⚠️ Heartbeat macht den Chat träge"). Kein Firmware-Code geändert.
+
+**Für die anderen Chats:** bitte beim nächsten Heartbeat kurz gegenprüfen, ob eure eigene
+Konversation dieselbe `idle → running`-Reaktion zeigt; wenn ja, gilt dieselbe Umstellung.
+
 ## 2026-10-14 14:50 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten, Commit d126237)
 **Auftrag erledigt: volle Ring-Reparatur mit O(1)-RAM + Cherry-pick nach `power-history-diag`.**
 

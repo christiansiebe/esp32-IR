@@ -16,6 +16,36 @@ Two firmware roles are built from one source tree.
 - Commit and push small steps promptly; never leave important work only in
   `/tmp`.
 
+## Chat-Heartbeat: keep-alive vs. responsiveness (measured 2026-10-14)
+
+The `chat-heartbeat` automation posts a `[heartbeat]` **user message** into the
+chat every 15 min. Two effects were measured on the live conversation
+(`9579bf1f…`, ~3023 events, ~68.8M accumulated prompt tokens over ~29 h):
+
+- **The heartbeat can start an agent turn.** The automation posts with
+  `"run": false`, but the agent-server API defines `run` as *"whether the agent
+  loop should automatically run **if not running**"*. The chat is usually `idle`,
+  so the heartbeat auto-starts a run: **27 of 104 heartbeats** triggered an agent
+  action before the next user message; **77 of 104** flipped `idle -> running`.
+  Each wake costs a full LLM turn at ~60k-200k prompt tokens and appends more
+  events to the context.
+- **Long `sleep` polls block the loop.** The agent polls the remote Odroid with
+  `sleep 600; …`, `sleep 720; …`, `sleep 900; …` in the terminal. While that runs
+  it cannot process incoming messages: measured heartbeat -> first-agent-action
+  latency reached **1505 s**, and real user messages wait just as long. This is
+  the main source of the perceived lag ("chat is sluggish").
+
+**Rules for the automation and for chats:**
+
+1. Keep the sandbox warm with `POST /api/v1/sandboxes/{id}/resume` **only**. Do
+   not also post a `[heartbeat]` message: on an idle conversation a `run:false`
+   message still burns an LLM turn. If a visible sign of life is wanted, it must
+   not start a run.
+2. Do not poll with long `sleep N` in the chat; use short polls so the chat stays
+   responsive to real messages.
+3. On very long conversations condense more aggressively (or fork/restart); a
+   ~60k-200k-token prompt makes every turn slow regardless of the heartbeat.
+
 ## Roles
 - **Sender**: UART SML decoder (9600 baud 8N1 on UART1, RX GPIO16) and ESP-NOW
   value transport. No web server, no WLAN/IP of its own. Its page is hosted by
