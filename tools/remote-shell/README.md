@@ -69,6 +69,44 @@ Danach auf dem Odroid: `python3 sandbox_term_client.py ws://127.0.0.1:2222/`
 
 ---
 
+## Option C — Kommando-Kanal: Agent führt auf dem Odroid aus, DU bestätigst
+
+Ziel: Der Agent kann Befehle **auf dem Odroid** ausführen (z. B. btrfs prüfen),
+aber **nur nach deiner Bestätigung** am Odroid-Terminal.
+
+```
+Agent (Sandbox)  --Befehl-->  Server  --WS-->  cmd_agent.py (Odroid)
+                                                   |
+                                            Anzeige + [y]/[a]/[N]
+                                                   |
+Agent (Sandbox)  <--Ergebnis--  Server  <--WS---  Ausführung
+```
+
+**Auf dem Odroid** (eigenes Terminal, als root):
+```bash
+export SANDBOX_TERM_TOKEN='<token>'
+python3 cmd_agent.py 'wss://work-2-<id>.prod-runtime.all-hands.dev/'
+```
+Optionen am Agenten:
+- **`y`** = einmal ausführen · **`a`** = immer (bis Ctrl-C) · **`N`** = ablehnen
+- **Ctrl-C** schaltet die Bestätigungspflicht um (Pause-Modus)
+
+**Auf der Sandbox** (hier) senden:
+```bash
+tools/remote-shell/cmd_send.sh "btrfs subvolume list /" 60
+```
+
+Regeln:
+- Bestätigungspflicht ist **Standard** und **serverseitig nicht abschaltbar**.
+- Jede Ausführung/Ablehnung wird in `$CMD_BASE/audit.log` protokolliert.
+- Ergebnis in `$CMD_BASE/results/<id>.out` / `.json`.
+
+> Hinweis: `a` (immer) ist bequem, aber dann läuft alles ohne Rückfrage — für
+> heikle Befehle besser einzeln bestätigen. `rm -rf` o. Ä. gehört **nicht** in
+> den Kanal.
+
+---
+
 ## Welche Option?
 - **Nur die Sandbox bedienen** → **A**.
 - **Deine Odroid-Konsole behalten und zusätzlich die Sandbox** → **B**.
