@@ -1,4 +1,4 @@
-# esp32-IR â€“ repository notes for agents
+# esp32-IR ├óŌé¼ŌĆ£ repository notes for agents
 
 ESP-IDF firmware for the ESP32-IR project (GitHub `christiansiebe/esp32-IR`).
 Two firmware roles are built from one source tree.
@@ -58,7 +58,7 @@ Two firmware roles are built from one source tree.
 
 - There is **no `factory` slot**: the app is flashed to `ota_0` (COM) and updated
   OTA between `ota_0`/`ota_1`. The two 1.5 MB slots replace the old 1 MB
-  factory+2Ã—1 MB OTA layout, giving each image +512 KB headroom.
+  factory+2├āŌĆö1 MB OTA layout, giving each image +512 KB headroom.
 - `storage` deliberately keeps its old offset **and** size, so upgrading from
   the factory layout preserves the SPIFFS minute history (data is only lost if
   `storage.bin` is flashed or the partition offset/size changes).
@@ -70,7 +70,7 @@ Two firmware roles are built from one source tree.
   (the sender persists the minutes it decodes from the UART, the receiver
   persists what it receives), so the per-role build emits its own
   `build/<role>/storage.bin`. A USB full flash should write the (empty)
-  `storage.bin` **only on the very first deployment** â€” afterwards leaving it out
+  `storage.bin` **only on the very first deployment** ├óŌé¼ŌĆØ afterwards leaving it out
   keeps the history. A missing/blank partition is auto-formatted at first boot
   (`format_if_mount_failed = true`), so omitting `storage.bin` is safe.
 - The ring buffer holds `POWER_HISTORY_CAPACITY` (29000) minute records; when it
@@ -134,7 +134,7 @@ Two firmware roles are built from one source tree.
   `#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP && SOC_LIGHT_SLEEP_SUPPORTED`. It must NOT
   be guarded on `SOC_PM_SUPPORT_LP_TIMER`/`SOC_PM_SUPPORT_EXT_WAKEUP`: the ESP32
   `soc_caps.h` does not define `SOC_PM_SUPPORT_LP_TIMER`, so such a guard is
-  silently false and the whole file compiles to the no-op stub — the device then
+  silently false and the whole file compiles to the no-op stub ŌĆö the device then
   reports `build_profile: sender-sleep` together with `window: 0 ms` and
   `light sleep disabled`. Any capability macro used in a `#if` guard must be
   confirmed to exist for the target. The CI grep must match a string that lives
@@ -300,7 +300,7 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   confirmed delivery, and `sml_tx_batch_missing()` counts sequences not yet
   confirmed (0 in normal operation). The ring is `SML_TX_BATCH_CAPACITY` (256),
   far more than one cycle, so a normal cycle never evicts; a long stall (>256
-  unconfirmed at ~1 telegram/s â‰ˆ 4â€“5 min) evicts the oldest and that value shows
+  unconfirmed at ~1 telegram/s ├óŌĆ░╦å 4├óŌé¼ŌĆ£5 min) evicts the oldest and that value shows
   up in `batch_missing`/`tx_queue_drops` on the sender diag page.
 - Light sleep between cycles: see "CPU clock / power" above. The radio stays on
   by default (`WIFI_PS_MIN_MODEM`).
@@ -334,7 +334,7 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   `GET /api/history-pull` shows `merged_total`/`pages_total`/`errors`, and the
   receiver console command `pull` runs one synchronously ("N record(s) merged").
   The dashboard also has a "Datenbank jetzt aktualisieren" button that
-  `POST /api/db-refresh` (no key, local action) → `history_backfill_request_full()`,
+  `POST /api/db-refresh` (no key, local action) ŌåÆ `history_backfill_request_full()`,
   i.e. it forces a full re-mirror now instead of waiting for the periodic session.
 - CSV restore (dashboard "CSV hochladen", `POST /api/power-history-upload`, no key):
   re-imports a backup downloaded from `/api/power-history.csv`. The body is streamed
@@ -362,23 +362,23 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 1. Sender UART `rx gap` (Sender-Diag): Stille auf der UART-Leitung >= 50 ms.
    Wird per Ursache attribuiert (`gap_cause_{meter,sleep,stall,buffer}`). Ein
    `mid-telegram`-Gap ist nur dann Verlust, wenn das Telegramm danach die
-   Prüfsumme verliert (`gap_loss`); der Zähler-Pause-Gap ist normal und tritt
+   Pr├╝fsumme verliert (`gap_loss`); der Z├żhler-Pause-Gap ist normal und tritt
    **auch ohne CPU-Sleep** auf.
-2. Empfänger `transport gaps` (ESP-NOW, `g_sml_transport_gaps`): Sequenzsprung
+2. Empf├żnger `transport gaps` (ESP-NOW, `g_sml_transport_gaps`): Sequenzsprung
    pro Paket. Die Sequenz wird im Sender **pro Paket** vergeben und ein noch
    nicht gesendetes Paket kann per `sml_tx_batch_requeue_front` mit **alter**
-   Sequenz erneut vorne landen (Retry). Daher: Rückwärts/Duplikat
-   (`sequence <= last`) = `transport_reorders` (rückgewonnen, **kein** Verlust,
-   **kein** Reset der 60-s-Sammlung); Vorwärtssprung (`sequence > last+1`) =
-   `transport_losses` (echtes über die Luft verlorenes Broadcast-Paket, kein
-   ACK) und nur dann wird die 60-s-Leistungssammlung zurückgesetzt. Diese Gaps
+   Sequenz erneut vorne landen (Retry). Daher: R├╝ckw├żrts/Duplikat
+   (`sequence <= last`) = `transport_reorders` (r├╝ckgewonnen, **kein** Verlust,
+   **kein** Reset der 60-s-Sammlung); Vorw├żrtssprung (`sequence > last+1`) =
+   `transport_losses` (echtes ├╝ber die Luft verlorenes Broadcast-Paket, kein
+   ACK) und nur dann wird die 60-s-Leistungssammlung zur├╝ckgesetzt. Diese Gaps
    existieren **auch ohne CPU-Sleep**; der 5-s-Burst (`SML_TX_CYCLE_MS 5000`,
-   `SML_TX_BURST 32`) erhöht nur die Verlustrate (~0,65 %), ist aber nicht die
-   Ursache der Zählung.
+   `SML_TX_BURST 32`) erh├Čht nur die Verlustrate (~0,65 %), ist aber nicht die
+   Ursache der Z├żhlung.
 3. Dashboard `overflow` (`/api/sml`, `SML_VALUE_HISTORY_COUNT`): reines
-   **Anzeige-Artefakt** — der Browser-Cursor liegt mehr als einen RAM-Ring
-   zurück. Kein Messverlust. Der Ring ist jetzt 256 groß; die Meldung heißt
-   „DISPLAY GAP", nicht mehr „VALUE GAP".
+   **Anzeige-Artefakt** ŌĆö der Browser-Cursor liegt mehr als einen RAM-Ring
+   zur├╝ck. Kein Messverlust. Der Ring ist jetzt 256 gro├¤; die Meldung hei├¤t
+   ŌĆ×DISPLAY GAP", nicht mehr ŌĆ×VALUE GAP".
 
 ## Managed components (IDF v6)
 - ESP-IDF v6 moved ESP-MQTT and cJSON out of the core. They come from the ESP
@@ -422,4 +422,33 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 - VNC-Passwort in `/root/.vnc/PASSWORT.txt`.
 - **Reparatur-CSV:** `power-history-REPAIRED.csv` (3518 min) war nur in der alten
   Sandbox (`/tmp/csv_uploads`) und ist mit dem Reset verloren; nicht in Git.
+
+
+**SSH-Zugang (repariert):**
+- Ursache des Ausfalls: Odroid **neu gebootet** -> DHCP vergab eine **neue IP**
+  (jetzt `192.168.178.71`, frueher `.4`). sshd war nie defekt
+  (`0.0.0.0:22`, `PermitRootLogin yes`, `PasswordAuthentication yes`).
+- **mDNS** ergaenzt: `avahi-daemon` + `libnss-mdns` installiert, Avahi auf
+  `wlxdc627949ba79` beschraenkt -> `odroidn2.local` loest stabil auf.
+  Zugang jetzt per Name: `ssh root@odroidn2.local` (Passwort) bzw.
+  `ssh chris@odroidn2.local`.
+- `PasswordAuthentication yes` in `/etc/ssh/sshd_config.d/99-passwordauth.conf`
+  explizit festgeschrieben.
+- **Empfehlung:** in der FritzBox eine **feste IP** (DHCP-Reservierung) fuer die
+  WLAN-MAC des Odroid setzen, damit sich die IP nicht mehr aendert.
+
+**Dienste-Audit (erledigt):**
+- `rc-local.service` repariert: schrieb in das nicht mehr existierende
+  `schedutil/{up,down}_rate_limit_us` -> mit `#!/bin/sh -e` brach der Dienst ab.
+  Jetzt pro Policy-Governor setzen + nur `schedutil/rate_limit_us`. Kein Failed
+  mehr.
+- **Deaktiviert** (unbenutzt): `bluetooth` (kein Controller), `rpcbind`
+  (keine NFS-Exports/Mounts, Port 111 zu), `openvpn` (keine Configs).
+- Bloat nur als **Bibliotheken** vorhanden (`libcups2`, `libavahi*`) — nicht
+  deinstallieren (Drucken/`cups-client` des Nutzers).
+- Weiter laufend und **noetig**: `docker`/`containerd` + `hassio-*` (Home
+  Assistant), `NetworkManager`/`wpa_supplicant`, `ssh`, `chrony`, `cron`,
+  `udisks2`, `systemd-resolved`, `armbian-*`.
+- **Offen (optional):** `unattended-upgrades` laeuft dauerhaft; wenn keine
+  Auto-Updates gewuenscht, deaktivieren.
 
