@@ -63,6 +63,11 @@ void boot_confirm_poll(void)
         } else {
             ESP_LOGW(TAG, "Could not confirm image: %s", esp_err_to_name(err));
         }
+    } else if (action == BOOT_TAKE_ROLLBACK) {
+        /* The image stayed up but never brought the dashboard up inside the
+         * grace window. The bootloader only rolls back on a reset, so an image
+         * that comes up but stays unusable must trigger the rollback itself. */
+        boot_confirm_fail("dashboard did not come up");
     }
 }
 

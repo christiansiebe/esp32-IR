@@ -127,6 +127,20 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
 - [ ] **Health-Reboot / Selbstheilung**: Reboot, wenn z. B. `last_rx_ago_ms` > N Minuten oder
       Wi-Fi down > N Minuten. Nutzt vorhandenes `last_rx_ago_ms`. (Im geretteten
       `health_*`-Modul angelegt, aber nicht integriert.)
+- [x] **Rollback-Pfad verdrahtet** (`boot_confirm_poll`): `BOOT_TAKE_ROLLBACK` wurde
+      berechnet, aber **nie ausgeführt** — nur `BOOT_TAKE_CONFIRM` wurde behandelt, und
+      `boot_confirm_fail()` hatte **null Aufrufer**. Ein Image, das zwar hochkommt, aber das
+      Dashboard nicht innerhalb der 30 s Grace bereitstellt, blieb damit hängen. Jetzt ruft
+      `boot_confirm_poll()` bei `BOOT_TAKE_ROLLBACK` `boot_confirm_fail("dashboard did not come up")`
+      auf → `esp_ota_mark_app_invalid_rollback_and_reboot()`.
+- [x] **CSV-Restore + Sofort-Refresh (Dashboard):** Buttons „Datenbank jetzt aktualisieren"
+      (`POST /api/db-refresh` → `history_backfill_request_full()`) und „CSV hochladen"
+      (`POST /api/power-history-upload`). Der Upload streamt zeilenweise (ein volles Backup
+      ~29000 Zeilen passt nicht in den Heap), parst mit `main/history_csv_import.c` (rein,
+      host-getestet) und hängt in 64er-Batches sortiert über
+      `power_history_import_sorted()` an. Dedupe pro Minute, **vorhandene Daten werden nie
+      überschrieben**, kein Evict im vollen Ring. Tests: `test/test_history_csv_import.c`
+      (28 Checks) + `test/test_history_csv_import_store.c` (23 Checks, echter Store).
 - [ ] **TWDT explizit**: Worker (`power_history_worker`, `uart_event_worker`) beim
       Task-Watchdog anmelden (`esp_task_wdt_init(120,true); esp_task_wdt_add(...)`) —
       statt IDF-Default. Aktuell **0 Treffer** für `esp_task_wdt`. (In `health_*` angelegt.)
@@ -134,7 +148,8 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       (reine, host-testbare Entscheidung) + `boot_confirm.c/.h` (Kleber) ersetzen das
       unbedingte `esp_ota_mark_app_valid_cancel_rollback()` im Empfänger. Bestätigung erst
       nach **45 s** stabil + Dashboard oben; kommt das Dashboard nach **30 s** Grace nicht
-      hoch → Rollback in den vorigen OTA-Slot. Sender bewusst unverändert (hat kein
+      hoch → Rollback in den vorigen OTA-Slot (der Rollback-Zweig ist jetzt verdrahtet,
+      siehe oben). Sender bewusst unverändert (hat kein
       Dashboard) — eigener Confirm-Pfad für den Sender ist offen. Tests:
       `test/test_boot_policy.c` (10 Checks, rot/grün verifiziert), im Runner aktiv.
       **⚠️ Hardware-Verifikation offen:** der echte OTA→bestätigt / OTA→Rollback-Pfad ist

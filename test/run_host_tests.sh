@@ -186,6 +186,34 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_boot_marker_exchange"
 
+# CSV restore parser (receiver "restore from backup" upload): must accept exactly
+# what /api/power-history.csv exports and reject what it cannot trust. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$repo/main/history_csv_import.c" \
+    "$here/test_history_csv_import.c" \
+    -lm -o "$out/test_history_csv_import"
+
+"$out/test_history_csv_import"
+
+# The store-side half of the CSV restore: power_history_import_sorted() appends
+# a backup, dedupes existing minutes (keeping live values) and stays readable.
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog-csv\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_history_csv_import_store.c" \
+    -lm -o "$out/test_history_csv_import_store"
+
+"$out/test_history_csv_import_store"
+
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"

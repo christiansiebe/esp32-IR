@@ -28,6 +28,7 @@
 #include "boot_confirm.h"
 #include "history_backfill.h"
 #include "history_sync.h"
+#include "history_csv_import.h"
 #include "json_escape.h"
 #include "power_history.h"
 #include "web_console.h"
@@ -390,6 +391,8 @@ static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
 static esp_err_t power_samples_api_handler(httpd_req_t *req);
 static esp_err_t power_history_api_handler(httpd_req_t *req);
 static esp_err_t power_history_csv_handler(httpd_req_t *req);
+static esp_err_t db_refresh_handler(httpd_req_t *req);
+static esp_err_t power_history_upload_handler(httpd_req_t *req);
 #endif
 
 static esp_err_t load_wifi_credentials(void)
@@ -2689,6 +2692,17 @@ static esp_err_t root_handler(httpd_req_t *req)
 "<div id=\"history-tip\" role=\"status\"></div>"
         "<p id=\"history-status\">Warte auf synchronisierte Netzwerkzeit und gespeicherte Minutenwerte…</p>"
         "<p id=\"sync-status\">Sender-Abgleich: warte auf erste Sitzung…</p>"
+        "<h2>Datenbank &amp; Backup</h2>"
+        "<p><button type=\"button\" id=\"db-refresh\" class=\"action\">Datenbank jetzt aktualisieren</button> "
+        "fordert sofort einen vollständigen Abgleich vom Sender an (statt auf den nächsten "
+        "Zyklus zu warten) und übernimmt fehlende Minuten.</p>"
+        "<p><label for=\"csv-file\">CSV-Backup einspielen: </label>"
+        "<input type=\"file\" id=\"csv-file\" accept=\".csv,text/csv\"> "
+        "<button type=\"button\" id=\"csv-upload\" class=\"action\">CSV hochladen</button><br>"
+        "<small>Format wie der Download unter „Gesamten Verlauf als CSV“: "
+        "sequence,interval_start_ms,average_w,sample_count,reason. Fehlende Minuten werden "
+        "ergänzt, bereits vorhandene übersprungen; vorhandene Daten werden nicht überschrieben.</small></p>"
+        "<p id=\"db-status\" role=\"status\"></p>"
         "</section>"
         "<script>"
         "const byId=id=>document.getElementById(id);"
@@ -2872,6 +2886,28 @@ static esp_err_t root_handler(httpd_req_t *req)
         "byId('history-day-next').addEventListener('click',()=>{shiftDay(1);});"
         "byId('history-day-compare').addEventListener('click',()=>{toggleCompare();});"
         "byId('history-day-live').addEventListener('click',()=>{setLive(true);redraw();});"
+        "byId('db-refresh').addEventListener('click',async()=>{"
+        "const s=byId('db-status');s.textContent='Fordere vollständigen Abgleich an…';"
+        "try{const r=await fetch('/api/db-refresh',{method:'POST',cache:'no-store'});"
+        "const d=await r.json();"
+        "s.textContent='Abgleich angefordert. Übernommen bisher: '+d.merged_total+' Min, Sitzungen: '+"
+        "d.sessions+(d.caught_up?' · aktuell':' · Rückstand '+Math.round((d.lag_seconds||0)/60)+' Min')+"
+        "' (läuft im Hintergrund, Seite aktualisiert gleich).';"
+        "clearTimeout(historyTimer);historyTimer=setTimeout(updateHistory,3000);"
+        "}catch(e){s.textContent='Anforderung fehlgeschlagen: '+e;}});"
+        "byId('csv-upload').addEventListener('click',async()=>{"
+        "const s=byId('db-status');const f=byId('csv-file').files[0];"
+        "if(!f){s.textContent='Bitte zuerst eine CSV-Datei auswählen.';return;}"
+        "s.textContent='Lade '+f.name+' hoch…';"
+        "try{const r=await fetch('/api/power-history-upload',{method:'POST',cache:'no-store',"
+        "headers:{'Content-Type':'text/csv'},body:f});"
+        "if(!r.ok)throw new Error('HTTP '+r.status);"
+        "const d=await r.json();"
+        "s.textContent='CSV eingespielt: '+d.imported+' Minuten ergänzt, '+d.duplicates+"
+        "' bereits vorhanden übersprungen, '+d.malformed+' Zeilen ungültig. Gespeichert: '+"
+        "d.record_count+' / '+d.capacity+(d.unsorted?' (Hinweis: CSV war nicht chronologisch)':'')+'.';"
+        "clearTimeout(historyTimer);historyTimer=setTimeout(updateHistory,1500);"
+        "}catch(e){s.textContent='Upload fehlgeschlagen: '+e;}});"
         "byId('history-day').addEventListener('change',()=>{setLive(false);redraw();});"
         "function shiftDay(delta){const base=byId('history-day').value?Date.parse(byId('history-day').value+'T00:00:00Z'):Date.now();"
         "const next=new Date(base+delta*86400000);byId('history-day').value=dayISO(next);setLive(false);redraw();}"
@@ -3591,6 +3627,200 @@ static esp_err_t power_history_csv_handler(httpd_req_t *req)
     }
     free(records);
     return err;
+}
+
+/* Immediate database refresh: kick a full backfill pull now instead of waiting
+ * for the periodic session, then report the sync state. The ESP-NOW exchange
+ * runs in the backfill worker; this handler only flags the request. */
+static esp_err_t db_refresh_handler(httpd_req_t *req)
+{
+    bool requested = false;
+    if (req->method == HTTP_POST) {
+        history_backfill_request_full();
+        requested = true;
+    }
+
+    int64_t cursor;
+    int64_t sender_latest;
+    bool caught_up;
+    uint32_t merged;
+    uint32_t sessions;
+    portENTER_CRITICAL(&g_history_backfill_lock);
+    cursor = g_history_sync_cursor_utc;
+    sender_latest = g_history_sync_sender_latest_utc;
+    caught_up = g_history_sync_caught_up;
+    merged = g_history_backfill_merged;
+    sessions = g_history_sync_sessions;
+    portEXIT_CRITICAL(&g_history_backfill_lock);
+
+    char payload[256];
+    int len = snprintf(payload, sizeof(payload),
+                       "{\"requested\":%s,\"caught_up\":%s,\"cursor_utc\":%lld,"
+                       "\"sender_latest_utc\":%lld,\"merged_total\":%lu,"
+                       "\"sessions\":%lu,\"lag_seconds\":%lld}",
+                       requested ? "true" : "false",
+                       caught_up ? "true" : "false",
+                       (long long)cursor, (long long)sender_latest,
+                       (unsigned long)merged, (unsigned long)sessions,
+                       (long long)(sender_latest != 0 && cursor != 0 ?
+                                   sender_latest - cursor : 0));
+    if (len < 0 || (size_t)len >= sizeof(payload)) {
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, payload, len);
+}
+
+/* CSV restore upload ("verlorene Minuten aus dem Backup einspielen"). The body
+ * is streamed line by line so a full-store backup (~29000 rows) never has to fit
+ * in the heap; rows are parsed and appended in small sorted batches through
+ * power_history_import_sorted(), which dedupes by minute and never evicts a live
+ * minute from a full ring. */
+#define POWER_HISTORY_UPLOAD_BATCH 64
+#define POWER_HISTORY_MAX_UPLOAD_BYTES (8u * 1024u * 1024u)
+
+typedef struct {
+    power_history_record_t batch[POWER_HISTORY_UPLOAD_BATCH];
+    size_t batch_count;
+    size_t parsed;
+    size_t imported;
+    size_t duplicates;
+    size_t malformed;
+    int64_t last_utc;
+    bool have_last;
+    bool unsorted;
+    bool first_line;
+} csv_upload_state_t;
+
+static void csv_upload_flush(csv_upload_state_t *state)
+{
+    if (state->batch_count == 0) {
+        return;
+    }
+    history_csv_sort(state->batch, state->batch_count);
+    size_t imported = 0;
+    size_t skipped = 0;
+    if (power_history_import_sorted(state->batch, state->batch_count,
+                                    &imported, &skipped) == ESP_OK) {
+        state->imported += imported;
+        state->duplicates += skipped;
+    }
+    state->batch_count = 0;
+}
+
+static void csv_upload_line(csv_upload_state_t *state, const char *line, size_t len)
+{
+    bool blank = true;
+    for (size_t k = 0; k < len; ++k) {
+        if (line[k] != ' ' && line[k] != '\t' && line[k] != '\r') {
+            blank = false;
+            break;
+        }
+    }
+    if (blank) {
+        return;
+    }
+    power_history_record_t record;
+    if (!history_csv_parse_line(line, len, &record)) {
+        /* The first non-blank line may be the column header; only later bad
+         * rows are counted as malformed. */
+        if (!state->first_line) {
+            ++state->malformed;
+        }
+        state->first_line = false;
+        return;
+    }
+    state->first_line = false;
+    ++state->parsed;
+    if (state->have_last && record.interval_start_utc < state->last_utc) {
+        state->unsorted = true;
+    }
+    state->last_utc = record.interval_start_utc;
+    state->have_last = true;
+    state->batch[state->batch_count++] = record;
+    if (state->batch_count == POWER_HISTORY_UPLOAD_BATCH) {
+        csv_upload_flush(state);
+    }
+}
+
+static esp_err_t power_history_upload_handler(httpd_req_t *req)
+{
+    if (req->method != HTTP_POST) {
+        return send_http_error_status(req, "405 Method Not Allowed",
+                                      "Use POST with the CSV body");
+    }
+    if (req->content_len <= 0) {
+        return send_http_error_status(req, "400 Bad Request", "Empty CSV upload");
+    }
+    if ((size_t)req->content_len > POWER_HISTORY_MAX_UPLOAD_BYTES) {
+        return send_http_error_status(req, "413 Payload Too Large",
+                                      "CSV exceeds the upload limit");
+    }
+
+    csv_upload_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.first_line = true;
+
+    char line[192];
+    size_t line_len = 0;
+    bool line_overflow = false;
+    char chunk[256];
+    size_t remaining = (size_t)req->content_len;
+
+    while (remaining > 0) {
+        size_t want = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        int got = httpd_req_recv(req, chunk, want);
+        if (got == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (got <= 0) {
+            return send_http_error_status(req, "400 Bad Request",
+                                          "Could not read CSV body");
+        }
+        remaining -= (size_t)got;
+        for (int i = 0; i < got; ++i) {
+            char c = chunk[i];
+            if (c == '\n') {
+                if (line_overflow) {
+                    ++state.malformed;
+                } else {
+                    csv_upload_line(&state, line, line_len);
+                }
+                line_len = 0;
+                line_overflow = false;
+            } else if (line_len < sizeof(line) - 1) {
+                line[line_len++] = c;
+            } else {
+                line_overflow = true;
+            }
+        }
+    }
+    if (line_overflow) {
+        ++state.malformed;
+    } else if (line_len != 0) {
+        csv_upload_line(&state, line, line_len);
+    }
+    csv_upload_flush(&state);
+
+    power_history_status_t status;
+    power_history_get_status(&status);
+
+    char payload[320];
+    int len = snprintf(payload, sizeof(payload),
+                       "{\"parsed\":%lu,\"imported\":%lu,\"duplicates\":%lu,"
+                       "\"malformed\":%lu,\"unsorted\":%s,\"record_count\":%lu,"
+                       "\"capacity\":%u}",
+                       (unsigned long)state.parsed, (unsigned long)state.imported,
+                       (unsigned long)state.duplicates, (unsigned long)state.malformed,
+                       state.unsorted ? "true" : "false",
+                       (unsigned long)status.record_count, POWER_HISTORY_CAPACITY);
+    if (len < 0 || (size_t)len >= sizeof(payload)) {
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, payload, len);
 }
 
 static esp_err_t rssi_api_handler(httpd_req_t *req)
@@ -5185,7 +5415,7 @@ static void start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 24;
+    config.max_uri_handlers = 28;
     /* Handlers that keep a full history page (128 records) on their stack run
      * on this task; keep headroom so a large page cannot overflow it and abort
      * the whole HTTP server. */
@@ -5264,6 +5494,16 @@ static void start_webserver(void)
         .method = HTTP_GET,
         .handler = diag_page_handler,
     };
+    httpd_uri_t db_refresh = {
+        .uri = "/api/db-refresh",
+        .method = HTTP_POST,
+        .handler = db_refresh_handler,
+    };
+    httpd_uri_t power_history_upload = {
+        .uri = "/api/power-history-upload",
+        .method = HTTP_POST,
+        .handler = power_history_upload_handler,
+    };
 #endif
     httpd_uri_t log_page = {
         .uri = "/log",
@@ -5321,6 +5561,8 @@ static void start_webserver(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &history_backfill_api));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &history_backfill_trigger));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &diag_page));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &db_refresh));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_history_upload));
 #endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config_uri));

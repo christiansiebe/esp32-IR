@@ -460,6 +460,124 @@ esp_err_t power_history_merge(const power_history_record_t *records, size_t coun
     return ESP_OK;
 }
 
+esp_err_t power_history_import_sorted(const power_history_record_t *records,
+                                      size_t count, size_t *imported_out,
+                                      size_t *skipped_out)
+{
+    if (imported_out != NULL) {
+        *imported_out = 0;
+    }
+    if (skipped_out != NULL) {
+        *skipped_out = 0;
+    }
+    if (records == NULL || count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!g_history_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(g_history_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    size_t imported = 0;
+    size_t skipped = 0;
+
+    if (g_history_file == NULL) {
+        /* RAM-only fallback: the ring holds one page and is append-ordered, so a
+         * restore is best-effort here; anything past the page is skipped. */
+        for (size_t i = 0; i < count; ++i) {
+            if (g_history_ram_count >= POWER_HISTORY_PAGE_SIZE) {
+                ++skipped;
+                continue;
+            }
+            power_history_record_t record = records[i];
+            record.sequence = g_history_header.next_sequence;
+            record.format_version = POWER_HISTORY_VERSION;
+            record.reserved = 0;
+            record.checksum = record_checksum(&record);
+            if (++g_history_header.next_sequence == 0) {
+                g_history_header.next_sequence = 1;
+            }
+            g_history_ram_records[g_history_ram_count++] = record;
+            ++imported;
+        }
+        xSemaphoreGive(g_history_mutex);
+        if (imported_out != NULL) {
+            *imported_out = imported;
+        }
+        if (skipped_out != NULL) {
+            *skipped_out = skipped;
+        }
+        return ESP_OK;
+    }
+
+    power_history_header_t updated = g_history_header;
+    for (size_t i = 0; i < count; ++i) {
+        power_history_record_t record = records[i];
+        /* A restore must never push a live minute out of a full ring: drop the
+         * imported record instead of the oldest stored one. */
+        if (updated.record_count >= POWER_HISTORY_CAPACITY) {
+            ++skipped;
+            continue;
+        }
+        if (updated.record_count != 0 &&
+            minute_is_stored(&updated, record.interval_start_utc)) {
+            ++skipped;
+            continue;
+        }
+        record.sequence = updated.next_sequence;
+        record.format_version = POWER_HISTORY_VERSION;
+        record.reserved = 0;
+        record.checksum = record_checksum(&record);
+        long offset = (long)(2u * sizeof(power_history_header_t) +
+                             updated.next_slot * sizeof(record));
+        if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
+            fwrite(&record, sizeof(record), 1, g_history_file) != 1) {
+            xSemaphoreGive(g_history_mutex);
+            if (imported_out != NULL) {
+                *imported_out = imported;
+            }
+            if (skipped_out != NULL) {
+                *skipped_out = skipped;
+            }
+            return ESP_FAIL;
+        }
+        ++updated.next_sequence;
+        if (updated.next_sequence == 0) {
+            updated.next_sequence = 1;
+        }
+        ++updated.record_count;
+        updated.next_slot = (updated.next_slot + 1u) % POWER_HISTORY_CAPACITY;
+        ++imported;
+    }
+
+    if (imported != 0) {
+        if (fflush(g_history_file) != 0 || fsync(fileno(g_history_file)) != 0) {
+            xSemaphoreGive(g_history_mutex);
+            return ESP_FAIL;
+        }
+        ++updated.generation;
+        updated.checksum = header_checksum(&updated);
+        uint8_t next_copy = (uint8_t)(1u - g_active_header_copy);
+        if (!write_header_copy(next_copy, &updated)) {
+            xSemaphoreGive(g_history_mutex);
+            return ESP_FAIL;
+        }
+        g_history_header = updated;
+        g_active_header_copy = next_copy;
+    }
+
+    xSemaphoreGive(g_history_mutex);
+    if (imported_out != NULL) {
+        *imported_out = imported;
+    }
+    if (skipped_out != NULL) {
+        *skipped_out = skipped;
+    }
+    return ESP_OK;
+}
+
 void power_history_get_status(power_history_status_t *status)
 {
     if (status == NULL) {
