@@ -856,16 +856,18 @@ offen (s. u.) — **vor** dem Kopieren fremden Codes entscheiden.
 
 ## Erledigt (in dieser Session)
 - **Versionsnummern (2026-10-14, `cline/auftrag-history-dubletten`).** Root-CMake
-  schreibt per `git describe` die `main/build_version.h` (`FIRMWARE_VERSION`);
-  `main/version.c` liefert sie als `fw_version()` (Fallback `PROJECT_VER`/
-  `"unknown"`). Gemeldet als JSON `version` in `/api`, `/api/dashboard`,
-  `/api/sender` und den Sender-Diag-`counters`, sichtbar auf der Dashboard-
-  Statuszeile (`· FW: …`) und in Console/Diag (`fw: …`). CI schreibt
-  `firmware-version.txt` ins Flash-Bundle, in die Step-Summary und prüft die
-  Versionszeichenkette im gebauten `.bin`. Host-Test `test/test_version.c`.
-  Damit ist ein geflashtes Image eindeutig identifizierbar (statt "irgendein
-  Receiver aus dem letzten Run"). Release-Tags (`vX.Y.Z`) liefern saubere
-  Versionen statt nackter SHAs.
+  löst die Version aus `$FIRMWARE_VERSION` (CI) bzw. `git describe` auf und
+  schreibt die `main/build_version.h` (`FIRMWARE_VERSION`); `main/version.c`
+  liefert sie als `fw_version()` (Fallback `PROJECT_VER`/`"unknown"`). Gemeldet
+  als JSON `version` in `/api`, `/api/dashboard`, `/api/sender` und den
+  Sender-Diag-`counters`, sichtbar auf der Dashboard-Statuszeile (`· FW: …`) und
+  in Console/Diag (`fw: …`). CI schreibt `firmware-version.txt` ins Flash-Bundle,
+  in die Step-Summary und prüft die Versionszeichenkette im gebauten `.bin`.
+  Host-Test `test/test_version.c`. **Gotcha:** der Container-Build läuft als root
+  gegen einen Checkout mit anderem Owner → `git` verweigert
+  („dubious ownership"), Version wäre `unknown`; der Workflow setzt daher
+  `safe.directory $GITHUB_WORKSPACE` und exportiert `FIRMWARE_VERSION`.
+  Release-Tags (`vX.Y.Z`) liefern saubere Versionen statt nackter SHAs.
 - **Diag-Sichtung (Sender/Receiver) + zwei Bugfixes**: „DID NOT END CLEANLY" bei bewusstem
   Reboot behoben (deliberate-restart-Klassifizierung, Sender-Diag), Live-Dashboard zeigte nur
   15-Min-Balken (Sekunden/ms-Einheitenfehler im Live-Fenster, Receiver) behoben; dazu der

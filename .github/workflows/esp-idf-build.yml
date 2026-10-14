@@ -77,6 +77,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP"
+          # The build runs in the IDF container as root while the checkout is
+          # owned by the runner user; without safe.directory git refuses to
+          # describe the repo ("dubious ownership") and the version is unknown.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          fw_ver="$(cd "$GITHUB_WORKSPACE" && git describe --tags --always --dirty 2>/dev/null || echo unknown)"
+          echo "FIRMWARE_VERSION=$fw_ver" >> "$GITHUB_ENV"
+          echo "Firmware version: $fw_ver"
           cat > "$RUNNER_TEMP/sdkconfig.defaults" <<EOF
           CONFIG_IDF_TARGET="esp32"
           CONFIG_PARTITION_TABLE_CUSTOM=y

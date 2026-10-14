@@ -45,17 +45,21 @@ Two firmware roles are built from one source tree.
 - Build image: `espressif/idf:v6.1`, target `esp32`, flash 4 MB.
 - Local builds: `tools/build.sh receiver|sender [--clean]` wraps the IDF
   container (host only needs Docker; works with `docker` or `sudo docker`).
-- **Firmware version (2026-10-14).** Root `CMakeLists.txt` runs
-  `git describe --tags --always --dirty` at configure time and writes
-  `main/build_version.h` (git-ignored) as `FIRMWARE_VERSION`. `main/version.c`
-  exposes it as `fw_version()`, with `PROJECT_VER` / `"unknown"` as fallback so
-  host builds still compile. The string is reported as the JSON field `version`
-  in `/api`, `/api/dashboard`, `/api/sender` and the sender-diag `counters`, and
-  shown on the dashboard status line (`· FW: …`) and in the console/diag views
-  (`fw: …`), so a flashed device is identifiable without guessing. CI writes the
-  version to `firmware-version.txt` in the flash bundle, into the step summary,
-  and asserts the string is present in the built `.bin`. Tag releases
-  (`git tag -a vX.Y.Z`) to get a clean version instead of a bare SHA.
+- **Firmware version (2026-10-14).** Root `CMakeLists.txt` resolves the version
+  from `$FIRMWARE_VERSION` (set by CI) or `git describe --tags --always --dirty`,
+  and writes `main/build_version.h` (git-ignored) as `FIRMWARE_VERSION`.
+  `main/version.c` exposes it as `fw_version()`, with `PROJECT_VER` / `"unknown"`
+  as fallback so host builds still compile. The string is reported as the JSON
+  field `version` in `/api`, `/api/dashboard`, `/api/sender` and the sender-diag
+  `counters`, and shown on the dashboard status line (`· FW: …`) and in the
+  console/diag views (`fw: …`), so a flashed device is identifiable without
+  guessing. CI writes the version to `firmware-version.txt` in the flash bundle,
+  into the step summary, and asserts the string is present in the built `.bin`.
+  Gotcha: the build runs in the IDF container as root while the checkout is
+  owned by the runner user, so `git` refuses with "dubious ownership" and the
+  version becomes `unknown`; the workflow therefore sets
+  `safe.directory $GITHUB_WORKSPACE` and exports `FIRMWARE_VERSION`. Tag releases
+  (`git tag -a vX.Y.Z`) give a clean version instead of a bare SHA.
 
 ## Flash layout (4 MB)
 | Partition | Offset | Size |
