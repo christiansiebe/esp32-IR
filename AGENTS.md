@@ -400,7 +400,7 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   (`Restart=always`, `enabled`, `CMD_AGENT_AUTO=1` = unbeaufsichtigt). Token in
   der Unit. Faellt der Agent aus oder rebootet der Odroid, verbindet er sich
   selbst wieder. Nach einem **Sandbox-Reset** Server mit **demselben Token**
-  neu starten -> Agent kommt von allein zurueck.
+  neu starten -> Agent kommt von allein zurück.
 - **Nie** `pkill -f cmd_agent.py` aus dem Kanal heraus (toetet die eigene Shell);
   Agent per `kill <pid>` beenden.
 
@@ -446,7 +446,7 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   (keine NFS-Exports/Mounts, Port 111 zu), `openvpn` (keine Configs).
 - Bloat nur als **Bibliotheken** vorhanden (`libcups2`, `libavahi*`) — nicht
   deinstallieren (Drucken/`cups-client` des Nutzers).
-- Weiter laufend und **noetig**: `docker`/`containerd` + `hassio-*` (Home
+- Weiter laufend und **nötig**: `docker`/`containerd` + `hassio-*` (Home
   Assistant), `NetworkManager`/`wpa_supplicant`, `ssh`, `chrony`, `cron`,
   `udisks2`, `systemd-resolved`, `armbian-*`.
 - **Offen (optional):** `unattended-upgrades` laeuft dauerhaft; wenn keine
@@ -455,12 +455,12 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 **Stromsparen (erledigt 2026-10-14):**
 - **WLAN-Powersave an** — dauerhaft via NetworkManager
   (`802-11-wireless.powersave=3`) **und** in `rc.local`. Messung danach:
-  Gateway avg 1,9 ms / 0 % Verlust, HA 0,09 ms → **kein Lag**. Rueckgaengig:
+  Gateway avg 1,9 ms / 0 % Verlust, HA 0,09 ms → **kein Lag**. Rückgängig:
   `iw dev <iface> set power_save off` bzw. `nmcli ... wifi.powersave 2`.
 - Reste entfernt: `/opt/ai-agent`, `/opt/ai-agent-backup`, `/root/workspace`.
 - **zeroclaw entfernt** (war „open claw"): User-Dienst gestoppt+disabled,
   Binaries `/root/.cargo/bin/{zeroclaw,zerocode}` (70 M) und Daten
-  `/root/.zeroclaw` + `/root/.local/share/zeroclaw` geloescht. Backup:
+  `/root/.zeroclaw` + `/root/.local/share/zeroclaw` gelöscht. Backup:
   `/mnt/ssd/backups/zeroclaw-backup-20261014-175742.tar.gz` (24 M).
 - Laufende Verbraucher (gewollt): HA/Supervisor ~900 M, XFCE/VNC ~250 M,
   Agent nur 26 M. Temperaturen idle 34/36 °C.
@@ -468,17 +468,20 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 **Stromsparen (bewusst NICHT gemacht):**
 - `cpuidle`-Treiber = `none` → keine tiefen Idle-States; Kernel-/DT-Limit,
   nicht ohne Reboot-Risiko aenderbar.
-- Governor ist bereits `schedutil` (gut); `cpufrequtils` steht auf
-  `ENABLE=false`/`performance`, greift aber nicht — nicht angefasst.
 - Keine Leistungsmess-Hardware (INA219 o. Ae.) vorhanden → Strom nicht messbar,
   daher keine aggressiven Takt-/Undervolt-Experimente.
 
-**Weitere Massnahmen (2026-10-14):**
+**Governor-Fix (wichtig):** `/usr/lib/armbian/armbian-hardware-optimization`
+liest `/etc/default/cpufrequtils` und setzt den Governor **nach** `rc.local` —
+stand dort auf `GOVERNOR=performance`. Daher `GOVERNOR=schedutil` gesetzt
+(Backup `cpufrequtils.bak-*`). Ergebnis nach Reboot: policy0+policy2 = schedutil.
+
+**Weitere Maßnahmen (2026-10-14):**
 - **`unattended-upgrades` deaktiviert** (`systemctl disable --now`, APT-Periodic
-  auf `"0"`). Rueckgaengig: `systemctl enable --now unattended-upgrades` +
+  auf `"0"`). Rückgängig: `systemctl enable --now unattended-upgrades` +
   `APT::Periodic::Unattended-Upgrade "1"`.
 - **`consoleblank=600`** via `extraargs=` in `/boot/armbianEnv.txt` gesetzt
-  (ueberschreibt das feste `consoleblank=0` aus `/boot/boot.cmd`). Backup:
+  (überschreibt das feste `consoleblank=0` aus `/boot/boot.cmd`). Backup:
   `/boot/armbianEnv.txt.bak-20261014-182020`. Wirkt nach Reboot; HDMI/Backlight
   schaltet dann nach 10 min Ruhe ab.
 
