@@ -33,6 +33,28 @@ nicht benutzt, wird die Sandbox zurückgesetzt und nicht committete Arbeit ist w
 - Ein einzelner transienter `FAILED`-Lauf („Failed to get execution context") ist Infra,
   nicht der Script-Fehler — nur bei mehreren Fehlschlägen eingreifen.
 
+### ⚠️ Heartbeat macht den Chat träge (gemessen 2026-10-14) — bitte umstellen
+Der Heartbeat hält die Sandbox warm, kostet aber Antwortzeit. Messung an der Live-Konversation
+`9579bf1f…` (Titel „🐛 Status des letzten Bugfixes?", ~3023 Events, ~68,8 Mio. Prompt-Tokens in ~29 h):
+- **Der `[heartbeat]`-Ping startet eine Agent-Runde.** Die Automation postet mit `run: false`,
+  aber die Agent-Server-API definiert `run` als „agent loop automatically run **if not running**".
+  Der Chat ist meist `idle` → der Ping startet trotzdem einen Lauf: **27 von 104** Heartbeats
+  lösten eine Agent-Aktion vor der nächsten Nutzernachricht aus, **77 von 104** wechselten
+  `idle → running`. Jeder Weckruf ist ein voller LLM-Turn (~60k–200k Prompt-Tokens) und hängt
+  weitere Events an den Kontext.
+- **Lange `sleep`-Polls blockieren die Schleife.** Der Agent pollt den Odroid mit
+  `sleep 600; …`, `sleep 720; …`, `sleep 900; …` im Terminal. Währenddessen verarbeitet er keine
+  eingehenden Nachrichten: gemessene Wartezeit Heartbeat → erste Agent-Aktion bis **1505 s**;
+  echte Nutzernachrichten warten genauso lange. **Das ist die eigentliche Trägheit.**
+
+**To-do (dauerhaft):**
+- [ ] Heartbeat-Automation umstellen: Sandbox nur per `POST /api/v1/sandboxes/{id}/resume` warm
+      halten; die `[heartbeat]`-Nachricht weglassen. Eine `run:false`-Nachricht auf einer
+      idle-Konversation kostet weiterhin eine LLM-Runde.
+- [ ] Im Chat keine langen `sleep N`-Polls mehr; kurze Polls, damit echte Nachrichten ankommen.
+- [ ] Bei langen Läufen aggressiver kondensieren oder die Konversation forken/neu starten
+      (60k–200k-Token-Prompt macht jeden Turn langsam).
+
 ## Offen
 
 ### ⚠️ Verbindliche Regel: SPIFFS-Historie muss erhalten bleiben (nicht verhandelbar)
