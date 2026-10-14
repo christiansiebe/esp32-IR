@@ -242,6 +242,8 @@ trap 'rm -rf "$out"' EXIT
     -lm -o "$out/test_history_ring_repair"
 
 "$out/test_history_ring_repair"
+# Full ring (29000) unsorted + duplicates -> forces the in-place disk sort.
+"$out/test_history_ring_repair" full
 
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"
