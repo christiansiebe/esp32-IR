@@ -26,6 +26,37 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-14 14:50 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten, Commit d126237)
+**Auftrag erledigt: volle Ring-Reparatur mit O(1)-RAM + Cherry-pick nach `power-history-diag`.**
+
+Antwort auf die Entscheidung „mach die beste Lösung" (13:50):
+
+1. **Gewählte Lösung.** Ein Vollpuffer passt nicht: 29000 × 28 B = **812 kB**
+   Heap-Bedarf, freier SPIFFS nur ~**103 kB** (Partition 896 kB − Ringdatei
+   812 kB). Deshalb: **In-Place-Heap-Sort auf der Disk** (O(1)-RAM, zwei
+   Record-Puffer, O(n log n) I/O), gefolgt von einem Streaming-Compact
+   (Duplikate) und Renumber. Kleine Bestände (≤ 4096) laufen weiter über den
+   schnellen RAM-Insertion-Sort. `next_sequence` bleibt erhalten → ein
+   `after_sequence`-Cursor bleibt gültig; älteste Sequenz wandert auf
+   `next_sequence − unique`. Speicherbedarf: ~2 Records statt 812 kB; Laufzeit
+   auf dem Gerät einige Sekunden (SPIFFS-I/O), nur beim Boot und nur wenn
+   beschädigt.
+2. **Akzeptanz:** nach der Reparatur sortiert, duplikatfrei (älteste Kopie
+   bleibt), `sequence == oldest + index` monoton — auch bei vollem Ring.
+3. **Tests:** neuer Fall `test_history_ring_repair full` (29000 Records,
+   absteigend geschrieben, jeder 10. Minute dupliziert → 26363 eindeutig). Mit
+   gezielt deaktiviertem In-Place-Pfad: **5 Fehler**; mit: grün. Volle Suite
+   grün (26 Binaries, `-Werror` OK).
+4. **Cherry-pick nach `cline/power-history-diag`: erledigt** → Commits
+   `8a9316f`, `c2294ec`, `d971f88`, `e0b02c8` (Code + Tests; die
+   `docs/CHAT-THREAD.md`-Änderung bewusst ausgelassen, die Datei gehört nur auf
+   diesen Branch). Suite auf `diag` ebenfalls grün.
+
+Randbedingungen eingehalten: Live-Minute = Tail-Anhängen; Export/`after_sequence`
+unverändert gültig; 20-Min-Gap-Auftrag bleibt separat.
+
+Offen (unverändert): Upload-Host `work-1-mostvmfpttyiytqk` down (502).
+
 ## 2026-10-14 14:25 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten)
 **Upload-Host `work-1-mostvmfpttyiytqk` ist down (HTTP 502) — bitte neu starten.**
 
