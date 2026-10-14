@@ -25,6 +25,10 @@
 #define POWER_HISTORY_TASK_STACK 4096u
 #define POWER_HISTORY_BATCH_RECORDS 5u
 #define POWER_HISTORY_BATCH_TIMEOUT_MS 60000u
+/* Records moved per file-I/O round when an out-of-order (backfill) minute is
+ * inserted into the sorted ring. Keeps the shift bounded without a full-store
+ * buffer (a 29000-record ring is ~812 kB, far past the free heap). */
+#define POWER_HISTORY_SHIFT_CHUNK 32u
 
 static const char *TAG = "power_history";
 static FILE *g_history_file;
@@ -152,6 +156,115 @@ static bool write_header_copy(uint8_t copy,
            fsync(fileno(g_history_file)) == 0;
 }
 
+/* File offset of ring index `index` (0 = oldest) for an explicit ring geometry.
+ * The store keeps the ring sorted by interval_start_utc, so index order is time
+ * order. */
+static long offset_for_slot(uint32_t oldest_slot, uint32_t index)
+{
+    uint32_t slot = (oldest_slot + index) % POWER_HISTORY_CAPACITY;
+    return (long)(2u * sizeof(power_history_header_t) +
+                  slot * sizeof(power_history_record_t));
+}
+
+static uint32_t oldest_slot_of(uint32_t next_slot, uint32_t count)
+{
+    return (next_slot + POWER_HISTORY_CAPACITY - count) % POWER_HISTORY_CAPACITY;
+}
+
+static bool read_record_idx(uint32_t oldest_slot, uint32_t index,
+                            power_history_record_t *record)
+{
+    return fseek(g_history_file, offset_for_slot(oldest_slot, index), SEEK_SET) == 0 &&
+           fread(record, sizeof(*record), 1, g_history_file) == 1;
+}
+
+static bool write_record_idx(uint32_t oldest_slot, uint32_t index,
+                             const power_history_record_t *record)
+{
+    return fseek(g_history_file, offset_for_slot(oldest_slot, index), SEEK_SET) == 0 &&
+           fwrite(record, sizeof(*record), 1, g_history_file) == 1;
+}
+
+/* First index in [0, count] whose minute is >= ts. The ring is time-sorted, so
+ * this is the insertion point for a record of that minute. */
+static uint32_t find_first_at_or_after_time(uint32_t oldest_slot, uint32_t count,
+                                            int64_t ts)
+{
+    uint32_t lo = 0;
+    uint32_t hi = count;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+        power_history_record_t record = {0};
+        if (!read_record_idx(oldest_slot, mid, &record) || !record_is_valid(&record)) {
+            hi = mid;
+            continue;
+        }
+        if (record.interval_start_utc < ts) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/* Same as minute_is_stored() but for an explicit geometry, so a batch insert can
+ * dedupe against the records it has already placed in this pass. */
+static bool minute_is_stored_geom(uint32_t next_slot, uint32_t count, int64_t ts)
+{
+    if (count == 0) {
+        return false;
+    }
+    uint32_t oldest_slot = oldest_slot_of(next_slot, count);
+    uint32_t lo = 0;
+    uint32_t hi = count;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+        power_history_record_t record = {0};
+        if (!read_record_idx(oldest_slot, mid, &record) || !record_is_valid(&record)) {
+            hi = mid;
+            continue;
+        }
+        if (record.interval_start_utc < ts) {
+            lo = mid + 1u;
+        } else if (record.interval_start_utc > ts) {
+            hi = mid;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Shift indices [at, count) up by one slot (index i -> i+1) so a new record can
+ * be written at `at`. Chunked so the working set stays bounded; the topmost write
+ * (index `count`) lands in the slot the oldest record occupied, evicting it when
+ * the ring is full. */
+static bool shift_up(uint32_t oldest_slot, uint32_t count, uint32_t at)
+{
+    power_history_record_t buf[POWER_HISTORY_SHIFT_CHUNK];
+    uint32_t index = count;
+    while (index > at) {
+        uint32_t chunk = index - at;
+        if (chunk > POWER_HISTORY_SHIFT_CHUNK) {
+            chunk = POWER_HISTORY_SHIFT_CHUNK;
+        }
+        uint32_t start = index - chunk; /* move [start, index) -> [start+1, index+1) */
+        for (uint32_t i = 0; i < chunk; ++i) {
+            if (!read_record_idx(oldest_slot, start + i, &buf[i])) {
+                return false;
+            }
+        }
+        for (uint32_t i = 0; i < chunk; ++i) {
+            if (!write_record_idx(oldest_slot, start + i + 1u, &buf[i])) {
+                return false;
+            }
+        }
+        index = start;
+    }
+    return true;
+}
+
 static bool minute_is_stored(const power_history_header_t *header, int64_t ts)
 {
     if (header->record_count == 0 || g_history_file == NULL) {
@@ -186,27 +299,57 @@ static bool minute_is_stored(const power_history_header_t *header, int64_t ts)
     return false;
 }
 
+/* Append/insert a batch of validated records into the ring, keeping it sorted by
+ * interval_start_utc. The live recorder appends (newest minute = tail) so that is
+ * a cheap write at next_slot; a backfill merge carries an OLDER minute and is
+ * spliced into its sorted position, shifting the newer records up. Keeping the
+ * ring time-sorted is what makes the binary-search dedupe (minute_is_stored) and
+ * the time-ordered window/CSV reads correct - the previous append-only code left
+ * the ring unsorted after a merge, so existing minutes were no longer found and
+ * got written again (the reported duplicates). */
 static bool write_records(power_history_record_t *records, size_t record_count)
 {
     power_history_header_t updated = g_history_header;
+    /* Sort the batch by minute so a mixed live+merge batch inserts in order. */
+    for (size_t i = 1; i < record_count; ++i) {
+        power_history_record_t key = records[i];
+        size_t j = i;
+        while (j > 0 && records[j - 1].interval_start_utc > key.interval_start_utc) {
+            records[j] = records[j - 1];
+            --j;
+        }
+        records[j] = key;
+    }
+
     for (size_t i = 0; i < record_count; ++i) {
-        /* Dedupe by minute against what is already on disk: the live recorder and
-         * the backfill sync both enqueue here, and a minute must exist only once.
-         * Reusing the slot would corrupt the time ordering, so a duplicate is
-         * simply dropped. */
-        if (updated.record_count != 0 &&
-            minute_is_stored(&updated, records[i].interval_start_utc)) {
+        /* Dedupe by minute against what is already stored (including records this
+         * batch has already placed): a minute must exist only once. */
+        if (minute_is_stored_geom(updated.next_slot, updated.record_count,
+                                  records[i].interval_start_utc)) {
             continue;
         }
         records[i].sequence = updated.next_sequence;
         records[i].format_version = POWER_HISTORY_VERSION;
         records[i].reserved = 0;
         records[i].checksum = record_checksum(&records[i]);
-        long offset = (long)(2u * sizeof(power_history_header_t) +
-                             updated.next_slot * sizeof(records[i]));
-        if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
-            fwrite(&records[i], sizeof(records[i]), 1, g_history_file) != 1) {
-            return false;
+
+        uint32_t oldest_slot = oldest_slot_of(updated.next_slot, updated.record_count);
+        uint32_t at = find_first_at_or_after_time(oldest_slot, updated.record_count,
+                                                  records[i].interval_start_utc);
+        if (at < updated.record_count) {
+            if (!shift_up(oldest_slot, updated.record_count, at)) {
+                return false;
+            }
+            if (!write_record_idx(oldest_slot, at, &records[i])) {
+                return false;
+            }
+        } else {
+            long offset = (long)(2u * sizeof(power_history_header_t) +
+                                 updated.next_slot * sizeof(records[i]));
+            if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
+                fwrite(&records[i], sizeof(records[i]), 1, g_history_file) != 1) {
+                return false;
+            }
         }
         ++updated.next_sequence;
         if (updated.next_sequence == 0) {

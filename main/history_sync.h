@@ -17,6 +17,10 @@
 
 #define HISTORY_SYNC_PAGE_RECORDS 7u
 
+/* Fetch attempts per page before a session gives up on the link. A single lost
+ * ESP-NOW frame (or a peer that is briefly not ready) must not abort the sync. */
+#define HISTORY_SYNC_FETCH_ATTEMPTS 3u
+
 typedef struct {
     int64_t oldest_utc;   /* sender's oldest minute (0 when empty) */
     int64_t latest_utc;   /* sender's newest minute (0 when empty) */

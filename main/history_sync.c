@@ -24,8 +24,18 @@ void history_sync_run(history_sync_result_t *result, int64_t start_cursor,
     bool saw_more = false;
     for (uint32_t page = 0; page < max_pages; ++page) {
         history_sync_page_t reply;
-        memset(&reply, 0, sizeof(reply));
-        if (!fetch(ctx, resume.after_utc, to_utc, &reply)) {
+        /* A transient ESP-NOW miss (peer not ready, one lost frame) must not end
+         * the session: retry the same cursor a few times before giving up. The
+         * cursor is unchanged across the retries, so a page is never skipped. */
+        bool fetched = false;
+        for (uint32_t attempt = 0; attempt < HISTORY_SYNC_FETCH_ATTEMPTS; ++attempt) {
+            memset(&reply, 0, sizeof(reply));
+            if (fetch(ctx, resume.after_utc, to_utc, &reply)) {
+                fetched = true;
+                break;
+            }
+        }
+        if (!fetched) {
             break; /* link drop: cursor already saved up to here */
         }
         result->any_round = true;
@@ -47,6 +57,19 @@ void history_sync_run(history_sync_result_t *result, int64_t start_cursor,
             history_backfill_cursor_advance(&resume, record->interval_start_utc);
             if (has(ctx, record->interval_start_utc)) {
                 continue; /* receiver already holds this minute */
+            }
+            /* Dedupe within the batch too: a retried/overlapping page can carry
+             * the same minute twice, and has() only knows the store, not the
+             * records this batch has not merged yet. */
+            bool dup_in_batch = false;
+            for (size_t j = 0; j < merge_count; ++j) {
+                if (merge_buf[j].interval_start_utc == record->interval_start_utc) {
+                    dup_in_batch = true;
+                    break;
+                }
+            }
+            if (dup_in_batch) {
+                continue;
             }
             merge_buf[merge_count++] = *record;
         }
