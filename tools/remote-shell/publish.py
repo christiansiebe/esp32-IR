@@ -16,6 +16,9 @@ import urllib.request
 OWNER = os.environ.get("MEM_OWNER", "christiansiebe")
 REPO = os.environ.get("MEM_REPO", "esp32-IR")
 BRANCH = os.environ.get("MEM_BRANCH", "main")
+# Zusaetzlich auf den Arbeitsbranch spiegeln, damit auch Chats, die dort
+# starten, AGENTS.md + .openhands/setup.sh automatisch bekommen.
+EXTRA_BRANCH = os.environ.get("MEM_EXTRA_BRANCH", "cline/power-history-diag")
 TOKEN = os.environ.get("GITHUB_WRITE_TOKEN", "")
 API = "https://api.github.com"
 
@@ -54,32 +57,37 @@ def api(method, path, body=None):
             return e.code, {}
 
 
-def push_one(repo_path, local_path):
+def push_one(repo_path, local_path, branch=None):
+    branch = branch or BRANCH
     if not os.path.exists(local_path):
         return f"SKIP (fehlt lokal): {repo_path}"
-    st, meta = api("GET", f"/repos/{OWNER}/{REPO}/contents/{repo_path}?ref={BRANCH}")
+    st, meta = api("GET", f"/repos/{OWNER}/{REPO}/contents/{repo_path}?ref={branch}")
     sha = meta.get("sha") if st == 200 else None
     content = base64.b64encode(open(local_path, "rb").read()).decode()
-    body = {"message": f"toolkit: publish {repo_path}", "content": content, "branch": BRANCH}
+    body = {"message": f"toolkit: publish {repo_path}", "content": content, "branch": branch}
     if sha:
         body["sha"] = sha
     st, resp = api("PUT", f"/repos/{OWNER}/{REPO}/contents/{repo_path}", body)
     if st in (200, 201):
-        return f"OK   {repo_path}"
-    return f"FAIL {repo_path}: {st} {resp.get('message', '')}"
+        return f"OK   {repo_path} [{branch}]"
+    return f"FAIL {repo_path} [{branch}]: {st} {resp.get('message', '')}"
 
 
 def main():
     if not TOKEN:
         print("GITHUB_WRITE_TOKEN fehlt.")
         return 2
-    fails = 0
-    for repo_path, local_path in FILES.items():
-        msg = push_one(repo_path, local_path)
-        print(" ", msg)
-        if msg.startswith("FAIL"):
-            fails += 1
-    print(f"fertig: {len(FILES) - fails}/{len(FILES)} ok")
+    branches = [BRANCH] + ([EXTRA_BRANCH] if EXTRA_BRANCH and EXTRA_BRANCH != BRANCH else [])
+    total = fails = 0
+    for branch in branches:
+        print(f"== Branch {branch} ==")
+        for repo_path, local_path in FILES.items():
+            msg = push_one(repo_path, local_path, branch)
+            print(" ", msg)
+            total += 1
+            if msg.startswith("FAIL"):
+                fails += 1
+    print(f"fertig: {total - fails}/{total} ok")
     return 1 if fails else 0
 
 
