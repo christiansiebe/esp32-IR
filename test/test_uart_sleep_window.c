@@ -79,14 +79,31 @@ static void test_clean_sleep_grows_but_respects_the_cap(void)
     uart_sleep_apply_cap(&s);
 
     uint32_t before = s.window_ms;
-    uart_sleep_note_clean(&s);
+    uart_sleep_note_clean(&s, 100);
     CHECK(s.window_ms == before + 25, "grows by grow_ms after a clean sleep");
 
     /* Growth must never exceed the min_gap cap. */
     for (int i = 0; i < 100; ++i) {
-        uart_sleep_note_clean(&s);
+        uart_sleep_note_clean(&s, 100);
     }
     CHECK(s.window_ms == 525, "growth stops at the min_gap cap (700*3/4)");
+}
+
+static void test_no_sleep_does_not_grow_the_window(void)
+{
+    /* A window skipped because a hold / full buffer kept the CPU awake must not
+     * count as a clean sleep: otherwise the controller grows a window it never
+     * actually tested (slept_ms == 0 is the "did not sleep" signal). */
+    uart_sleep_ctrl_t s;
+    uart_sleep_init(&s, uart_sleep_default_cfg());
+    s.last_min_gap_ms = 700;
+    uart_sleep_apply_cap(&s);
+    uint32_t before = s.window_ms;
+
+    for (int i = 0; i < 100; ++i) {
+        uart_sleep_note_clean(&s, 0);
+    }
+    CHECK(s.window_ms == before, "window does not grow when the CPU never slept");
 }
 
 static void test_short_sleep_halves_the_window(void)
@@ -135,6 +152,7 @@ int main(void)
     test_min_gap_caps_the_window();
     test_mid_telegram_gap_does_not_shrink_the_window();
     test_clean_sleep_grows_but_respects_the_cap();
+    test_no_sleep_does_not_grow_the_window();
     test_short_sleep_halves_the_window();
     test_burst_blocks_sleep();
     test_request_hold_blocks_sleep();

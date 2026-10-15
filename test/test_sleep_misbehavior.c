@@ -90,7 +90,7 @@ static loss_result_t simulate_losses(uint32_t period_a, uint32_t switch_after,
         bool clipped = false;
         if (sleeping) {
             if (wake_at <= next_burst) {
-                uart_sleep_note_clean(&ctrl);
+                uart_sleep_note_clean(&ctrl, 100);
             } else {
                 clipped = true;
                 uart_sleep_note_short_sleep(&ctrl);

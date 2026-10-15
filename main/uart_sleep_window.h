@@ -122,9 +122,15 @@ static inline uint32_t uart_sleep_window_us(const uart_sleep_ctrl_t *s)
     return s->window_ms * 1000u;
 }
 
-/* The CPU slept cleanly for the full window: let the window grow slowly. */
-static inline void uart_sleep_note_clean(uart_sleep_ctrl_t *s)
+/* The CPU slept cleanly for the full window: let the window grow slowly.
+ * Only called when the CPU actually slept (slept_ms != 0): a window skipped
+ * because a hold or a full UART buffer kept the CPU awake must NOT count as a
+ * clean sleep, or the controller grows a window it never tested. */
+static inline void uart_sleep_note_clean(uart_sleep_ctrl_t *s, uint32_t slept_ms)
 {
+    if (slept_ms == 0) {
+        return;
+    }
     uint32_t grown = s->window_ms + s->cfg.grow_ms;
     if (grown > s->cfg.max_ms) {
         grown = s->cfg.max_ms;
@@ -160,6 +166,10 @@ void uart_sleep_maybe_sleep_idf(void);
  * packet refreshes the hold, and it self-clears once traffic stops (no
  * acquire/release pairing to leak). */
 void uart_sleep_hold(uint32_t hold_ms);
+
+/* main.c feeds the accumulated light-sleep time (its sleep-exit callback owns
+ * the counter) so the controller only grows a window it actually slept. */
+void uart_sleep_set_slept_ms(uint32_t ms);
 
 /* True while a hold set with uart_sleep_hold() is still active. Pure so it is
  * host-tested. */

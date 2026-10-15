@@ -33,6 +33,7 @@ static uart_sleep_ctrl_t s_ctrl;
 static bool s_locked = true; /* NO_LIGHT_SLEEP is held by default */
 static esp_pm_lock_handle_t s_no_light_sleep;
 static volatile int64_t s_hold_until_us;
+static volatile uint32_t s_slept_ms; /* real light-sleep time, fed by main.c */
 
 bool uart_sleep_init_idf(void)
 {
@@ -127,6 +128,7 @@ void uart_sleep_maybe_sleep_idf(void)
 
     /* Release the lock for exactly the adaptive window. With light sleep
      * enabled and all tasks blocked, tickless idle parks the CPU for it. */
+    uint32_t before_ms = s_slept_ms;
     uart_sleep_lock(false);
     vTaskDelay(pdMS_TO_TICKS(window_ms));
     uart_sleep_lock(true);
@@ -138,12 +140,18 @@ void uart_sleep_maybe_sleep_idf(void)
     if (uart_get_buffered_data_len(UART_SLEEP_PORT_NUM, &pending) != ESP_OK) {
         pending = 0;
     }
+    uint32_t slept_ms = s_slept_ms - before_ms;
     if (pending == 0) {
-        uart_sleep_note_clean(&s_ctrl);
+        uart_sleep_note_clean(&s_ctrl, slept_ms);
     } else {
         uart_sleep_note_short_sleep(&s_ctrl);
     }
 }
+
+/* main.c feeds the real light-sleep time here (its sleep-exit callback owns the
+ * accumulation). Kept separate so the controller only grows a window it actually
+ * tested instead of assuming every vTaskDelay parked the CPU. */
+void uart_sleep_set_slept_ms(uint32_t ms) { s_slept_ms = ms; }
 
 uint32_t uart_sleep_window_ms(void) { return s_ctrl.window_ms; }
 uint32_t uart_sleep_min_gap_ms(void) { return s_ctrl.last_min_gap_ms; }
@@ -166,6 +174,7 @@ void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t 
 void uart_sleep_note_uart_idle(void) {}
 void uart_sleep_hold(uint32_t hold_ms) { (void)hold_ms; }
 void uart_sleep_maybe_sleep_idf(void) {}
+void uart_sleep_set_slept_ms(uint32_t ms) { (void)ms; }
 uint32_t uart_sleep_window_ms(void) { return 0; }
 uint32_t uart_sleep_min_gap_ms(void) { return 0; }
 bool uart_sleep_hold_is_active(void) { return false; }

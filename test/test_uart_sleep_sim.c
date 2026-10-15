@@ -83,7 +83,7 @@ static sim_result_t simulate(uint32_t period_a, uint32_t switch_after,
         /* Resolve a sleep against the imminent burst. */
         if (sleeping) {
             if (wake_at <= next_burst) {
-                uart_sleep_note_clean(&ctrl); /* woke in time: clean window */
+                uart_sleep_note_clean(&ctrl, 100); /* woke in time: clean window */
             } else {
                 r.overruns++;
                 r.clipped++;                  /* burst head lost to the APB stop */

@@ -257,6 +257,9 @@ _Static_assert(sizeof(espnow_diag_cmd_request_t) <= ESP_NOW_MAX_DATA_LEN,
                "command request must fit one ESP-NOW payload");
 _Static_assert(sizeof(espnow_diag_cmd_response_t) <= ESP_NOW_MAX_DATA_LEN,
                "command response must fit one ESP-NOW payload");
+_Static_assert(sizeof(espnow_diag_header_t) + sizeof(espnow_diag_counters_t) <=
+                   ESP_NOW_MAX_DATA_LEN,
+               "counters response (incl. firmware version) must fit one ESP-NOW payload");
 
 /* Minute-history sampling state. Used by BOTH roles: the receiver records the
  * telemetry it receives, the sender records the values it decodes from UART. */
@@ -1453,6 +1456,7 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .build_profile = BUILD_PROFILE_ID,
         .reserved4 = {0, 0},
     };
+    strlcpy(counters->fw_version, fw_version(), sizeof(counters->fw_version));
     *frame_len = sizeof(*header) + sizeof(*counters);
 }
 
@@ -1861,11 +1865,16 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             ESP_LOGE(TAG, "Sender diagnostic receiver is unavailable");
             return;
         }
-        /* A history pull is an on-demand data request: keep the CPU awake while
-         * the receiver is paginating, so the next page is not delayed by sleep. */
-        uart_sleep_hold(2000);
         espnow_diag_header_t diag_header;
         memcpy(&diag_header, data, sizeof(diag_header));
+        /* Only a genuine data request (history pull / console command) needs the
+         * CPU awake while the receiver paginates; a plain counters/events status
+         * poll must NOT hold it, or a dashboard that polls every few seconds
+         * keeps the sender awake forever and the adaptive sleep never runs. */
+        if (diag_header.flags & (ESPNOW_DIAG_SECTION_HISTORY |
+                                 ESPNOW_DIAG_SECTION_CMD)) {
+            uart_sleep_hold(2000);
+        }
         espnow_diag_request_item_t request = {
             .request_id = diag_header.request_id,
             .flags = diag_header.flags,
@@ -2148,6 +2157,9 @@ static esp_err_t sleep_exit_callback(int64_t sleep_time_us, void *arg)
         g_sleep_accumulated_ms += ((uint64_t)esp_timer_get_time() - g_sleep_entered_us) / 1000ULL;
         g_sleep_entered_us = 0;
     }
+    /* Feed the real accumulated sleep time to the adaptive window: it only grows
+     * after a window the CPU actually slept, not after one a hold skipped. */
+    uart_sleep_set_slept_ms((uint32_t)g_sleep_accumulated_ms);
     g_last_sleep_exit_us = (uint64_t)esp_timer_get_time();
     g_sleep_state = 0;
     return ESP_OK;
