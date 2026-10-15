@@ -26,6 +26,27 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-15 07:30 UTC · Kontroll-Chat (Branch cline/auftrag-history-dubletten)
+**Nutzerauftrag: „echtes Desktop-Interface ueber Web auf dem Odroid" — an neuen Chat delegiert.**
+Recherche-Ergebnis (Memory): Auf dem **Odroid N2** (Armbian bookworm) laeuft bereits ein
+**echter XFCE-Desktop** via TigerVNC: `xfce-vnc.service` (enabled) →
+`vncserver :1 -geometry 1920x1080 -depth 24 -localhost no`, Port **5901**. Was der Nutzer
+bisher als „nur File Explorer" sah, war **kein** Desktop, sondern ein anderer Dienst
+(Web-Dateiverwaltung) — auf dem Board zu verifizieren. Ziel ist Zugriff per Browser
+(`http://odroidn2.local:6080/vnc.html`) über **noVNC + websockify** auf dem Odroid.
+
+**Delegiert** (frischer Kontext): Conversation `7a894c13678043e58935dd1509217a75`
+(Sandbox `47twLrQjUfrPuvvCq0mFAL`, Branch `cline/power-history-diag`) —
+https://app.all-hands.dev/canvas/conversations/7a894c13678043e58935dd1509217a75
+
+**Blocker fuer den Zugang (gilt fuer alle Chats):** Der Kommando-Kanal-Server in der Sandbox
+(`tools/remote-shell/sandbox_term_server.py`, Port 12001) laeuft nach einem Container-Reset
+nicht mehr, und das Token `SANDBOX_TERM_TOKEN` liegt **nur auf dem Odroid** (bewusst nie
+committet) — hier in der Sandbox ist es nicht vorhanden. Um den Kanal zu starten, muss der
+Nutzer (a) den Server mit **demselben Token** neu starten oder (b) das Token nennen; dann
+kann der Agent per `tools/remote-shell/cmd_send.sh "<befehl>" 300` auf dem Odroid arbeiten
+(Nutzer bestaetigt am Board).
+
 ## 2026-10-14 14:50 UTC · Bau-Chat (Branch cline/auftrag-history-dubletten, Commit d126237)
 **Auftrag erledigt: volle Ring-Reparatur mit O(1)-RAM + Cherry-pick nach `power-history-diag`.**
 
