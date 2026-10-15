@@ -76,15 +76,40 @@ try { inst.setConfig({ title: 'T', entities: [{ entity: 'sensor.x', name: 'X' }]
 catch (e) { fail('setConfig: ' + e.message); }
 if (inst.getCardSize() < 1) fail('getCardSize too small');
 
-// The modal drag clamps to the viewport; the helper must enforce min/max.
-if (typeof sandbox.clampModalSize !== 'function') fail('clampModalSize not exposed');
-const b = { minW: 420, minH: 320, maxW: 1920, maxH: 1080 };
-let s = sandbox.clampModalSize({ w: 5000, h: 5000 }, b);
-if (s.w !== 1920 || s.h !== 1080) fail('clamp max wrong: ' + JSON.stringify(s));
-s = sandbox.clampModalSize({ w: 10, h: 10 }, b);
-if (s.w !== 420 || s.h !== 320) fail('clamp min wrong: ' + JSON.stringify(s));
-s = sandbox.clampModalSize({ w: 800, h: 600 }, b);
-if (s.w !== 800 || s.h !== 600) fail('clamp passthrough wrong: ' + JSON.stringify(s));
+// The modal resize clamps to the viewport and honours the minimum size.
+if (typeof sandbox.resizeRect !== 'function') fail('resizeRect not exposed');
+const b = { minW: 420, minH: 320, vw: 1920, vh: 1080, pad: 8 };
+const base = { left: 260, top: 100, width: 1400, height: 880 };
+
+// Grow to the south-east: only the right/bottom edges move.
+let r = sandbox.resizeRect(base, 'se', 200, 80, b);
+if (r.left !== 260 || r.top !== 100) fail('se moved origin: ' + JSON.stringify(r));
+if (r.width !== 1600 || r.height !== 960) fail('se size wrong: ' + JSON.stringify(r));
+
+// Grow to the north-west: the origin moves, the opposite corner stays fixed.
+r = sandbox.resizeRect(base, 'nw', -100, -80, b);
+if (r.left !== 160 || r.top !== 20) fail('nw origin wrong: ' + JSON.stringify(r));
+if (r.width !== 1500 || r.height !== 960) fail('nw size wrong: ' + JSON.stringify(r));
+
+// Pure edge drags must not touch the perpendicular axis.
+r = sandbox.resizeRect(base, 'e', 120, 0, b);
+if (r.width !== 1520 || r.height !== 880 || r.top !== 100) fail('e wrong: ' + JSON.stringify(r));
+r = sandbox.resizeRect(base, 's', 0, 90, b);
+if (r.height !== 970 || r.width !== 1400 || r.left !== 260) fail('s wrong: ' + JSON.stringify(r));
+
+// Minimum size is never undershot.
+r = sandbox.resizeRect(base, 'se', -5000, -5000, b);
+if (r.width !== 420 || r.height !== 320) fail('min size not honoured: ' + JSON.stringify(r));
+r = sandbox.resizeRect(base, 'nw', 5000, 5000, b);
+if (r.width !== 420 || r.height !== 320) fail('nw min size not honoured: ' + JSON.stringify(r));
+
+// The box stays inside the viewport even on a huge drag.
+r = sandbox.resizeRect(base, 'se', 5000, 5000, b);
+if (r.left < 0 || r.top < 0 || r.left + r.width > 1920 || r.top + r.height > 1080)
+  fail('se escaped viewport: ' + JSON.stringify(r));
+r = sandbox.resizeRect(base, 'nw', -5000, -5000, b);
+if (r.left < 0 || r.top < 0 || r.left + r.width > 1920 || r.top + r.height > 1080)
+  fail('nw escaped viewport: ' + JSON.stringify(r));
 
 // Raw 7-day history (enough points that downsampling must kick in).
 const t0 = Date.now() - 7 * 86400 * 1000;

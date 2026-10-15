@@ -33,10 +33,30 @@ function downsample(points, buckets) {
   return out;
 }
 
-function clampModalSize(rect, bounds) {
-  const w = Math.max(bounds.minW, Math.min(rect.w, bounds.maxW));
-  const h = Math.max(bounds.minH, Math.min(rect.h, bounds.maxH));
-  return { w, h };
+// Pure geometry for the modal's 8-way resize. `dir` is one of
+// n/s/e/w/ne/nw/se/sw; dx/dy are the pointer deltas since the drag started.
+// Keeps the box fully inside the viewport and never below the minimum size.
+function resizeRect(rect, dir, dx, dy, b) {
+  let left = rect.left, top = rect.top;
+  let right = rect.left + rect.width, bottom = rect.top + rect.height;
+  if (dir.includes("e")) right += dx;
+  if (dir.includes("w")) left += dx;
+  if (dir.includes("s")) bottom += dy;
+  if (dir.includes("n")) top += dy;
+  const maxW = b.vw - 2 * b.pad, maxH = b.vh - 2 * b.pad;
+  if (dir.includes("e") && right - left < b.minW) right = left + b.minW;
+  if (dir.includes("w") && right - left < b.minW) left = right - b.minW;
+  if (dir.includes("s") && bottom - top < b.minH) bottom = top + b.minH;
+  if (dir.includes("n") && bottom - top < b.minH) top = bottom - b.minH;
+  if (dir.includes("e") && right - left > maxW) right = left + maxW;
+  if (dir.includes("w") && right - left > maxW) left = right - maxW;
+  if (dir.includes("s") && bottom - top > maxH) bottom = top + maxH;
+  if (dir.includes("n") && bottom - top > maxH) top = bottom - maxH;
+  if (left < b.pad) { right += b.pad - left; left = b.pad; }
+  if (right > b.vw - b.pad) { left -= right - (b.vw - b.pad); right = b.vw - b.pad; }
+  if (top < b.pad) { bottom += b.pad - top; top = b.pad; }
+  if (bottom > b.vh - b.pad) { top -= bottom - (b.vh - b.pad); bottom = b.vh - b.pad; }
+  return { left, top, width: right - left, height: bottom - top };
 }
 
 class WpZoomChart extends HTMLElement {
@@ -246,41 +266,43 @@ class WpZoomChart extends HTMLElement {
     const mbox = el("div", "wz-mchart");
     box.appendChild(mbox);
     box.appendChild(el("div", "wz-hint",
-      "Ecke unten rechts ziehen zum Vergroessern \u2013 die Aufloesung waechst mit."));
+      "Beliebige Kante oder Ecke ziehen zum Vergroessern \u2013 die Aufloesung waechst mit."));
 
-    // A real drag grip: the native CSS resize handle is a tiny, scrollbar-overlapped
-    // corner that is unusable on touch. Pointer events cover mouse + pen + touch.
-    const grip = el("div", "wz-grip");
-    grip.title = "Ziehen zum Vergroessern";
-    box.appendChild(grip);
-    grip.addEventListener("pointerdown", (ev) => {
-      ev.preventDefault();
-      grip.setPointerCapture(ev.pointerId);
-      const r = box.getBoundingClientRect();
-      // Pin the modal so the centering flex parent cannot fight the drag.
-      box.style.position = "fixed";
-      box.style.margin = "0";
-      box.style.left = r.left + "px";
-      box.style.top = r.top + "px";
-      box.style.width = r.width + "px";
-      box.style.height = r.height + "px";
-      const move = (e) => {
-        const b = { minW: 420, minH: 320,
-                    maxW: window.innerWidth - 16, maxH: window.innerHeight - 16 };
-        const s = clampModalSize(
-          { w: r.width + (e.clientX - ev.clientX), h: r.height + (e.clientY - ev.clientY) }, b);
-        box.style.width = s.w + "px";
-        box.style.height = s.h + "px";
-      };
-      const up = () => {
-        grip.removeEventListener("pointermove", move);
-        grip.removeEventListener("pointerup", up);
-        grip.removeEventListener("pointercancel", up);
-      };
-      grip.addEventListener("pointermove", move);
-      grip.addEventListener("pointerup", up);
-      grip.addEventListener("pointercancel", up);
-    });
+    // Real 8-way resize: the native CSS handle is a tiny, scrollbar-overlapped
+    // corner that is unusable on touch. Edge + corner zones with pointer events
+    // cover mouse, pen and touch.
+    const dirs = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
+    for (const dir of dirs) {
+      const h = el("div", "wz-rs wz-rs-" + dir);
+      h.addEventListener("pointerdown", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        h.setPointerCapture(ev.pointerId);
+        const r = box.getBoundingClientRect();
+        const start = { left: r.left, top: r.top, width: r.width, height: r.height };
+        // Pin the modal so the centering flex parent cannot fight the drag.
+        box.style.position = "fixed";
+        box.style.margin = "0";
+        const apply = (e) => {
+          const b = { minW: 420, minH: 320, vw: window.innerWidth, vh: window.innerHeight, pad: 8 };
+          const s = resizeRect(start, dir, e.clientX - ev.clientX, e.clientY - ev.clientY, b);
+          box.style.left = s.left + "px";
+          box.style.top = s.top + "px";
+          box.style.width = s.width + "px";
+          box.style.height = s.height + "px";
+        };
+        apply(ev);
+        const up = () => {
+          h.removeEventListener("pointermove", apply);
+          h.removeEventListener("pointerup", up);
+          h.removeEventListener("pointercancel", up);
+        };
+        h.addEventListener("pointermove", apply);
+        h.addEventListener("pointerup", up);
+        h.addEventListener("pointercancel", up);
+      });
+      box.appendChild(h);
+    }
 
     ov.appendChild(box);
     ov.onclick = (ev) => { if (ev.target === ov) this._closeModal(ov); };
@@ -351,11 +373,16 @@ style.textContent = `
 .wz-close{background:transparent;border:0;font-size:18px;cursor:pointer;color:var(--secondary-text-color,#666)}
 .wz-mchart{flex:1;min-height:240px;width:100%}
 .wz-hint{font-size:11px;color:var(--secondary-text-color,#888);padding:4px 2px 2px}
-.wz-grip{position:absolute;right:3px;bottom:3px;width:18px;height:18px;
-  cursor:nwse-resize;touch-action:none;opacity:.75;
-  background:
-    linear-gradient(135deg,transparent 0 50%,var(--secondary-text-color,#aaa) 50% 60%,transparent 60%),
-    linear-gradient(135deg,transparent 0 70%,var(--secondary-text-color,#aaa) 70% 80%,transparent 80%)}
-.wz-grip:hover{opacity:1}
+.wz-rs{position:absolute;z-index:3;touch-action:none}
+.wz-rs-n{left:12px;right:12px;top:0;height:7px;cursor:ns-resize}
+.wz-rs-s{left:12px;right:12px;bottom:0;height:7px;cursor:ns-resize}
+.wz-rs-w{top:12px;bottom:12px;left:0;width:7px;cursor:ew-resize}
+.wz-rs-e{top:12px;bottom:12px;right:0;width:7px;cursor:ew-resize}
+.wz-rs-nw{left:0;top:0;width:16px;height:16px;cursor:nwse-resize}
+.wz-rs-ne{right:0;top:0;width:16px;height:16px;cursor:nesw-resize}
+.wz-rs-sw{left:0;bottom:0;width:16px;height:16px;cursor:nesw-resize}
+.wz-rs-se{right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize}
+.wz-rs-se::after{content:"";position:absolute;right:3px;bottom:3px;width:7px;height:7px;
+  border-right:2px solid var(--secondary-text-color,#aaa);border-bottom:2px solid var(--secondary-text-color,#aaa)}
 `;
 document.head.appendChild(style);
