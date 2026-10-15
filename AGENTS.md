@@ -114,6 +114,33 @@ Two firmware roles are built from one source tree.
   checks the four PM options and the 80 MHz ceiling.
 - Wi-Fi power save stays at the default `WIFI_PS_MIN_MODEM`; `WIFI_PS_NONE`
   would burn power and power save beyond the default hurts ESP-NOW reliability.
+  (On the ESP32 the SoftAP has no power save at all - power save applies to the
+  station role - so the receiver's AP radio is on regardless.)
+- **Sender UART RX clock must not follow DFS** (`main/power_tuning.{h,c}`): the
+  SML read head runs on UART1 and used `UART_SCLK_DEFAULT`, which on the ESP32
+  is the **APB** clock. The IDF UART driver programs the baud-rate divider once
+  from that clock and does **not** reprogram it when DFS changes the APB
+  frequency (its `ESP_PM_APB_FREQ_MAX` lock is only held in the TX path), so a
+  DFS step 80->40 MHz would sample the line at half the baud rate and the
+  telegram checksum would fail. `uart_pick_rx_source_clk()` therefore selects
+  `UART_SCLK_REF_TICK` (a fixed 1 MHz clock, DFS-independent - the same trick
+  the IDF's own UART console uses in `uart_vfs.c`) whenever `CONFIG_PM_ENABLE`
+  is set, and keeps the APB default otherwise. Host test:
+  `test/test_power_tuning.c`.
+- **Receiver SoftAP beacon interval** is a Kconfig knob
+  (`CONFIG_ESPNOW_AP_BEACON_INTERVAL`, default 100 TU = the Wi-Fi API default,
+  so unchanged) and is passed through `ap_beacon_interval_clamp()` to satisfy
+  the API's range/multiple-of-100 contract. Beacons are the receiver's largest
+  continuous radio cost; raising it saves a little power at the price of slower
+  client discovery.
+- **Optional ESP-NOW RX power save** (`CONFIG_ESPNOW_RX_POWER_SAVE`, sender
+  only, default **off**): `esp_wifi_connectionless_module_set_wake_interval()` +
+  `esp_now_set_wake_window()` let the connectionless module listen only for a
+  window out of every interval instead of continuously. ESP-NOW has no time
+  synchronisation, so packets outside the window are lost; off by default
+  because it trades receive reliability for power. `power_tuning.c` clamps the
+  window below the interval (window >= interval means "listen continuously").
+  Both branches are syntax-checked in CI.
 - Adaptive sender light sleep (`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP`, default
   **on**, sender ships as a single image): `main/uart_sleep_window.{h,c}` parks
   the CPU only in the quiet gap between SML telegram bursts. The window starts at
