@@ -32,6 +32,7 @@
 #include "history_csv_import.h"
 #include "json_escape.h"
 #include "power_history.h"
+#include "power_tuning.h"
 #include "web_console.h"
 #if !CONFIG_ESPNOW_ROLE_SENDER
 #include "mqtt_bridge.h"
@@ -654,6 +655,10 @@ static void initialize_wifi_and_espnow(void)
     ap_config.ap.max_connection = 4;
     ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
     ap_config.ap.ssid_hidden = 0;
+    /* Beacons are the receiver's largest continuous radio cost; the interval is
+     * a Kconfig knob (default 100 TU = the Wi-Fi API default, so unchanged). */
+    ap_config.ap.beacon_interval =
+        ap_beacon_interval_clamp(CONFIG_ESPNOW_AP_BEACON_INTERVAL);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     wifi_config_t sta_config;
     fill_station_config(&sta_config);
@@ -703,6 +708,12 @@ static void initialize_wifi_and_espnow(void)
     peer.ifidx = espnow_interface;
     peer.encrypt = false;
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));
+
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* Optional ESP-NOW RX power save (sender only, default off). Off by default
+     * because it trades receive reliability for power; see Kconfig. */
+    (void)espnow_ps_apply(CONFIG_ESPNOW_PS_INTERVAL_MS, CONFIG_ESPNOW_PS_WINDOW_MS);
+#endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
     ESP_LOGI(TAG, "AP started: SSID=ESP32-IR-Meter, channel=%u, IP=192.168.4.1",
@@ -6057,7 +6068,9 @@ static void run_sender(void)
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
+        /* REF_TICK when power management is on: the APB-sourced default would
+         * sample at the wrong baud rate after a DFS step (see power_tuning.h). */
+        .source_clk = uart_pick_rx_source_clk(UART_RX_PM_ENABLED),
     };
 
     ESP_ERROR_CHECK(uart_driver_install(UART_PORT_NUM, UART_BUFFER_SIZE, 0,

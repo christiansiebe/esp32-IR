@@ -9,3 +9,4 @@ typedef enum {
 } wifi_ps_type_t;
 
 esp_err_t esp_wifi_set_ps(wifi_ps_type_t type);
+esp_err_t esp_wifi_connectionless_module_set_wake_interval(uint16_t wake_interval);

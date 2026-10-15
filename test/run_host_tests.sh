@@ -102,6 +102,17 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_mqtt_topics"
 
+# Pure power/robustness decisions (main/power_tuning.h): the UART RX clock must
+# be REF_TICK whenever DFS can move the APB clock, and the ESP-NOW wake window /
+# beacon interval must satisfy the Wi-Fi API contracts.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$here/host/include" -I"$repo/main" \
+    "$here/test_power_tuning.c" \
+    -o "$out/test_power_tuning"
+
+"$out/test_power_tuning"
+
 # Sender-side batching ring + backfill arithmetic (no radio): batching,
 # oldest-eviction and the gap count the receiver reconciles against.
 "$cc" -std=c11 -Wall -Wextra -O2 \

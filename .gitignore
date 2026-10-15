@@ -82,3 +82,6 @@ sdkconfig.*
 # remote-shell channel state (token must never be committed)
 .remote-shell/
 *.token
+
+# OpenHands agent memory (local, not part of the firmware)
+.openhands/

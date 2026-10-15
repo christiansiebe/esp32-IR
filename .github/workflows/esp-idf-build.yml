@@ -28,6 +28,18 @@ jobs:
             -I test/host/include \
             main/uart_sleep_window.c
 
+      - name: Compile the ESP-NOW power-save path
+        shell: bash
+        run: |
+          # The ESP-NOW RX power save is opt-in (default n), so its real branch
+          # of power_tuning.c is only compiled when the flag is set. Syntax-check
+          # both the disabled and the enabled branch so neither can rot.
+          gcc -std=c11 -fsyntax-only -I test/host/include main/power_tuning.c
+          gcc -std=c11 -fsyntax-only \
+            -DCONFIG_ESPNOW_RX_POWER_SAVE=1 \
+            -I test/host/include \
+            main/power_tuning.c
+
       - name: Run aggregation / data-gap / day-boundary tests
         shell: bash
         run: ./test/run_host_tests.sh
