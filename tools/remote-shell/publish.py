@@ -29,10 +29,11 @@ FILES = {
         "sandbox_term_server.py", "sandbox_term_client.py", "cmd_send.sh",
         "cmd_agent.py", "supervise.py", "register_sandbox.py", "sync-memory.sh",
         "bootstrap.sh", "OTHER-CHAT.md", "README.md", "install_autostart.sh",
-        "publish.py",
+        "publish.py", "pointer.py", "remote_exec.py",
     )
 }
 FILES[".openhands/setup.sh"] = f"{PROJ}/.openhands/setup.sh"
+FILES["AGENTS.md"] = f"{WS}/AGENTS.md"
 FILES["memory/SHARED.md"] = "/workspace/MEMORY.md"
 
 
