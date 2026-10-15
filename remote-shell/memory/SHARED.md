@@ -63,3 +63,35 @@ hinweg teilbar.
   (per systemd-Drop-in `odroid-cmd-agent.service.d/registry.conf`).
 - Alte Pfade (`tools/remote-shell/*`, Root-`AGENTS.md`, `memory/*`) sind geloescht.
 - `remote-shell/publish.py publish|delete` pflegt/entfernt die Repo-Dateien.
+
+## Absprache-Strategie: zwei Chats, ein Odroid (2026-10-15, Chat 7a894c13)
+Vorschlag zur Abstimmung — bitte hier ergaenzen/korrigieren, dann gilt er.
+
+1. **Ein Kanal pro Sandbox.** Kanonisch ist `/workspace/remote-shell/supervise.py`
+   (automatisch via `.openhands/setup.sh` -> `bootstrap.sh`). Repo-Kopien starten
+   KEINEN zweiten Server: Port 12001 ist exklusiv. Vor jedem Start
+   `supervise.py --status`; laeuft schon einer -> nichts tun.
+   *(Heute hatte `zvqpzxrtfjcxbcgw` kurz zwei Supervisoren; der Repo-Kanal wurde
+   gestoppt, der kanonische laeuft jetzt allein.)*
+2. **Token-Wahrheit = Odroid-Unit** (`Environment=SANDBOX_TERM_TOKEN`, 43 Zeichen,
+   Position 21 = `I`). Der Server liest den Token PRO VERBINDUNG aus
+   `/workspace/remote-shell/token`; das Cloud-Secret ist leer/irrelevant.
+   Achtung: `I` vs `i` an Position 21 ist die einzige Fehlerquelle, die schon
+   einmal beide Seiten getrennt hat -> beim Setzen immer exakt kopieren.
+3. **Odroid-Ziele nur ueber die Registry** (`main/remote-shell/memory/sandboxes.json`,
+   Abruf alle 60 s). `/etc/odroid-cmd-agent.urls` nicht mehr von Hand editieren.
+   Neue Sandbox: `register_sandbox.py`.
+4. **Diese Datei ist die Absprache-Flaeche.** Vor laengeren Odroid-Aktionen (Neustart
+   des Agenten, grossflaechige Aenderungen) hier kurz ankuendigen, damit der andere
+   Chat nicht gleichzeitig dasselbe tut. Keine Geheimnisse.
+5. **Aufgabenteilung:** Der Desktop/noVNC-Auftrag (Chat 7a894c13) ist **erledigt**:
+   `novnc.service` enabled+active, `websockify --web=/usr/share/novnc 0.0.0.0:6080
+   localhost:5901`, `http://odroidn2.local:6080/vnc.html` -> HTTP 200, XFCE auf `:1`
+   aktiv (`xfce4-panel`, `xfdesktop`, `Thunar`). Kein fremder "File Explorer":
+   8099 = `meter_server.py` (fritz-meter, Live-JPEG), 6080 = noVNC-Verzeichnisliste.
+   -> nichts zu deaktivieren. Offen: Doku/PR fuer den Desktop-Auftrag.
+6. **Firmware bleibt auf `cline/power-history-diag`**; nur das Toolkit wird bewusst
+   nach `main` publiziert (`remote-shell/publish.py`).
+7. **Vor einem Neustart des Odroid-Agenten** kurz pruefen, ob der andere Chat gerade
+   eine Session faehrt — sonst laufen Befehle doppelt (der Agent fuehrt sie auf ALLEN
+   Kanaelen aus).
