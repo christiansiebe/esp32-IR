@@ -17,6 +17,14 @@ RDIR="$BASE/results"
 LDIR="$BASE/live"
 mkdir -p "$QDIR" "$RDIR" "$LDIR"
 
+# Server selbstheilend sicherstellen: laeuft er nicht (z.B. nach einem
+# Sandbox-Reset), startet ihn der Supervisor. Idempotent und billig, damit
+# JEDER Chat in dieser Sandbox den Kanal ohne Vorkenntnisse nutzen kann.
+SUPERVISE="$(dirname "$0")/supervise.py"
+if [ -f "$SUPERVISE" ]; then
+  python3 "$SUPERVISE" --status >/dev/null 2>&1 || python3 "$SUPERVISE" >/dev/null 2>&1 || true
+fi
+
 ID="$(date +%s)-$$"
 printf '%s' "$CMD" > "$QDIR/$ID.cmd"
 echo "gesendet: id=$ID  (warte auf Bestaetigung am Odroid ...)"
