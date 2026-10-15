@@ -63,12 +63,15 @@ def next_id():
 
 
 def load_token():
-    tok = os.environ.get("SANDBOX_TERM_TOKEN", "")
-    if not tok:
-        path = os.environ.get("SANDBOX_TERM_TOKEN_FILE", "")
-        if path and os.path.exists(path):
-            tok = open(path).read().strip()
-    return tok
+    """Token pro Verbindung frisch lesen. Datei hat Vorrang vor der Umgebung:
+    so laesst sich der Token live rotieren (Datei ueberschreiben), ohne dass ein
+    veraltetes Cloud-Secret in der Umgebung den Kanal blockiert."""
+    path = os.environ.get("SANDBOX_TERM_TOKEN_FILE", "")
+    if path and os.path.exists(path):
+        tok = open(path).read().strip()
+        if tok:
+            return tok
+    return os.environ.get("SANDBOX_TERM_TOKEN", "").strip()
 
 
 def set_winsize(fd, rows, cols):
@@ -133,10 +136,20 @@ async def handle_agent(ws, path):
     finally:
         AGENTS.discard(ws)
         audit("agent disconnected")
+        # Offene Befehle sofort fehlschlagen lassen, sonst blockiert der
+        # single-threaded queue_worker bis zum vollen Timeout (Ergebnis ist
+        # mit der Verbindung ohnehin verloren).
+        for cid, fut in list(PENDING.items()):
+            if not fut.done():
+                fut.set_result({"code": None, "out": "",
+                                "error": "agent disconnected"})
+        PENDING.clear()
 
 
-async def run_remote_command(cmd, timeout=120):
+async def run_remote_command(cmd, timeout=None):
     """Befehl an einen Agenten senden und auf das Ergebnis warten."""
+    if timeout is None:
+        timeout = float(os.environ.get("SANDBOX_TERM_CMD_TIMEOUT", "300"))
     if not AGENTS:
         return {"code": None, "out": "", "error": "kein Agent verbunden"}
     cid = next_id()
@@ -218,10 +231,20 @@ async def router(ws, path=None):
     p = path if path is not None else (
         ws.request.path if getattr(ws, "request", None) is not None else ""
     )
+    ppath = urllib.parse.urlparse(p).path.rstrip("/") or "/"
+    peer = getattr(ws, "remote_address", "?")
+    given = (urllib.parse.parse_qs(urllib.parse.urlparse(p).query).get("token") or [""])[0]
+    try:
+        with open("/tmp/cmdchannel/last_token", "w") as fh:
+            fh.write(given)
+    except OSError:
+        pass
     if not authorized(p, token):
+        audit(f"VERWORFEN (Token) pfad={ppath} von {peer}")
         await ws.close(code=1008, reason="unauthorized")
         return
-    if urllib.parse.urlparse(p).path.rstrip("/") == "/agent":
+    audit(f"verbunden pfad={ppath} von {peer}")
+    if ppath == "/agent":
         await handle_agent(ws, p)
     else:
         await handle_root(ws)
