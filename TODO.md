@@ -681,9 +681,38 @@ und tunnelt jede Anfrage ueber den bestehenden Diag-Kanal (`sender_diag_exchange
 - [~] **Debug-Konsole mit Eingabe** — **teilweise erledigt:** Web-Konsole existiert
       (`/api/console`, `web_console.c`) mit Befehlen `help`, `status`, `history`,
       `time`, `wifi`, `power`, `reboot` (Registrierung `web_console_register_commands`).
-      Offen: weitere Befehle (`nvs dump`, `sntp resync`, `espnow diag`) und/oder eine
-      **serielle** Eingabe (UART ist durch SML-Eingang belegt). Beruehrt keine
+      Offen: weitere Befehle (`nvs dump`, `sntp resync`, `espnow diag`). Beruehrt keine
       geschuetzten Bereiche.
+      **Korrektur (2026-10-16):** Hier stand früher „und/oder eine **serielle** Eingabe
+      (UART ist durch SML-Eingang belegt)". Das war **falsch** — es wurden zwei UARTs
+      vermischt. Der SML-Eingang belegt **UART1/GPIO16** (`UART_PORT_NUM = UART_NUM_1`),
+      die **Konsole ist UART0** und ist frei. Der serielle Monitor ist damit verfügbar;
+      er ist aber **keine Firmware-Aufgabe**, sondern ein Host-Thema (Odroid) — siehe
+      eigener Punkt „Serieller IDF-Monitor im Browser" unten. Diese Web-Konsole ist
+      **kein Ersatz** für den Monitor (Boot-/ROM-/Panic-Ausgaben vor WLAN/HTTP fehlen).
+
+- [ ] **Serieller IDF-Monitor im Browser (Host-Aufgabe, Odroid — NICHT Firmware)**
+      Ziel: `esp-idf-monitor` über eine Web-Oberfläche bedienbar machen. Der serielle
+      Port hängt am **Odroid** (`/dev/ttyUSB*`/`/dev/ttyACM*`), nicht am ESP32; die
+      Firmware bleibt unverändert. **Gehört nach `remote-shell/idf-monitor-web/`**
+      (CI ignoriert `remote-shell/**`), nicht in den Firmware-Baum.
+      Architektur: `Browser (xterm.js) <-> WS <-> Web-Terminal <-> PTY <-> esp-idf-monitor <-> /dev/ttyUSB0`.
+      - [ ] **PTY ist Pflicht** (sonst `[Errno 25] Inappropriate ioctl for device`):
+            `esp-idf-monitor` braucht `isatty()`/Raw-Mode und setzt DTR/RTS per `ioctl`
+            (Chip-Reset). Mit PTY funktionieren alle Monitor-Tasten nativ.
+      - [ ] **Port-Autodetect nur USB-Adapter** (`/dev/serial/by-id/*`, `ttyUSB*`,
+            `ttyACM*`); **niemals** `ttyAML0`/`ttyS*` (Odroid-Konsole).
+      - [ ] **Tastenkonflikte lösen:** Browser fängt Ctrl+T/R/P/F/L/I/Y/H ab (nur Ctrl+]
+            ist frei) -> Umbelegung über `esp-idf-monitor.cfg` (`ESP_IDF_MONITOR_CFGFILE`).
+      - [ ] **Genau EIN Prozess pro Port** (auch jeder Browser-Tab zählt); dauerhafte
+            Instanz (z. B. `tmux`), Browser hängt sich an.
+      - [ ] **Auth davor** (Basic-Auth/Reverse-Proxy) — der Monitor hat keine eigene.
+      - [ ] **Abhängigkeiten auf dem Odroid:** `esp-idf-monitor` (PyPI 1.10.0) in eigenes
+            Venv (`/opt/idf-monitor`); `ttyd` hat kein Debian-arm64-Paket -> statisches
+            Binary von GitHub-Releases (oder eigener WS<->PTY-Server).
+      - [ ] **Abnahmetest am Gerät** mit angestecktem ESP32: Log sichtbar,
+            Adress-Dekodierung greift, Reset via DTR/RTS löst die Karte aus.
+      Siehe `remote-shell/memory/SHARED.md`, Abschnitt „KORREKTUR: UART … war falsch".
 
 ### Persistenz / Zeit
 - [ ] **Minutenwerte erst nach NTP-Sync** (`wall_clock >= 1704067200`): Vor der

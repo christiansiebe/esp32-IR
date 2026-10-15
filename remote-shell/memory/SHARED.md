@@ -169,3 +169,81 @@ statistik** erledigt: 3 Temperatur-Sensoren reichen jetzt bis **2025-08-31** zur
   Verifiziert im echten Browser (Drag +200/+150 -> groesser, extremer Drag -> geklemmt).
 - Nur 3 Gateway-Ressourcen haben Recordings; Energie-/Leistungs-Sensoren haben KEINE
   Gateway-Historie (nur Live).
+
+## ⚠️ KORREKTUR: „UART ist durch SML belegt" war falsch (2026-10-16, Chat jcmxwpbymbjnkhcr)
+**Diese Notiz hat bisher jede Umsetzung von „Serieller Monitor im Browser" verhindert.
+Sie ist sachlich falsch und muss so nicht mehr wiederholt werden.**
+
+### Der Fehler
+In `TODO.md` (Abschnitt „Bedienung / Diagnose (neu)", Punkt *Debug-Konsole mit Eingabe*)
+stand:
+> „Offen: weitere Befehle … und/oder eine **serielle** Eingabe (UART ist durch SML-Eingang belegt)."
+
+**Falsch, weil zwei verschiedene UARTs vermischt werden.** Der ESP32 nutzt in diesem
+Projekt zwei getrennte UARTs:
+
+| UART | Zweck | GPIO | Belegt durch |
+|---|---|---|---|
+| **UART1** | SML-Zaehler (IR-Lesekopf) | 16 (RX), 9600 Bd | der Zaehler — **korrekt belegt** |
+| **UART0** | **Konsole** (Logs, Panic, ROM) | Standard-Pins -> USB-Bruecke | **nichts** — frei |
+
+`UART_PORT_NUM = UART_NUM_1` in `main/main.c`. Die **Konsole ist UART0** und wird vom
+SML-Eingang **nicht** beruehrt. Genau diese UART0 liest `idf.py monitor` — sie ist
+verfuegbar und funktioniert.
+
+### Was daraus falsch geschlossen wurde
+Die Notiz wurde gelesen als „seriell ist nicht verfuegbar" -> stattdessen wurde eine
+**Firmware-Web-Konsole** gebaut (`main/web_console.c`, `/console`, `/api/console`,
+Commit `50585ea`). Das ist eine *andere* Loesung (dieselben Befehle als HTTP-Endpunkt),
+**kein** Ersatz fuer den seriellen Monitor: Boot-/ROM-/Panic-Ausgaben und alles, was
+**vor** WLAN und HTTP-Server passiert, kann sie prinzipiell nicht zeigen.
+
+### Die korrekte Einordnung (bitte so merken)
+- **Serieller Monitor im Browser ist KEINE Firmware-Aufgabe.** Der Port haengt am
+  **Odroid** (`/dev/ttyUSB*` bzw. `/dev/ttyACM*`), nicht am ESP32. Der ESP32 weiss
+  nicht, wer seine UART0-Bytes liest. -> Loesung ist ein **Host-Wrapper auf dem Odroid**,
+  Firmware bleibt unveraendert.
+- **Die richtige Schicht ist der Odroid**, nicht der ESP32-Webserver. Deshalb gehoert
+  das Werkzeug nach `remote-shell/` (z.B. `remote-shell/idf-monitor-web/`), NICHT in
+  den Firmware-Baum (`main/`) und nicht als Ersatz in `web_console.c`.
+- **`web_console.c` bleibt sinnvoll** (Befehle ueber HTTP, auch vom Sender aus), aber
+  es ist **kein** Ersatz fuer den Monitor — die beiden nicht gegeneinander ausspielen.
+
+### Warum es nie umgesetzt wurde (Ergebnis der Spurensuche)
+Repo-Historie (541 Commits, alle 6 Branches), `TODO.md`, `SHARED.md` und die Memory-
+Dateien wurden durchsucht: **kein einziger Versuch.** `git log --all -S"ttyd|gotty|
+esp-idf-monitor|xterm|webserial"` ist leer. Also kein Scheitern, sondern:
+1. **Nie als eigene Aufgabe erfasst** — „Monitor" kommt in keiner Commit-Message und in
+   keiner Memory-Datei vor; nur als „und/oder" am Ende eines abgehakten Punkts.
+2. **Falsch interpretiert** — als „dieselben Befehle im Browser" (-> Firmware-Konsole).
+3. **Falsche Schicht** — „im Web-Interface" wurde als „im ESP32-Webserver" gelesen.
+4. **Durch die obige UART-Notiz blockiert** — die richtige Loesung war begrifflich ausgeschlossen.
+5. **Kein Muster im Toolkit** — `remote-shell/` kannte nur Odroid-Zugang und HA-Dashboard.
+
+### Wie es umgesetzt wird (Kurzfassung, Details im Chat/Plan)
+Web-Terminal mit **echtem PTY** vor `esp-idf-monitor`:
+`Browser (xterm.js) <-> WS <-> ttyd/o. eigener WS<->PTY-Server <-> PTY <-> esp-idf-monitor <-> /dev/ttyUSB0`
+
+Wichtigste Punkte (sonst scheitert es):
+- **PTY ist Pflicht.** `esp-idf-monitor` braucht `isatty()`, Raw-Mode und setzt DTR/RTS
+  per `ioctl` (Chip-Reset). Ohne PTY: `[Errno 25] Inappropriate ioctl for device`.
+  Mit PTY funktionieren **alle** Monitor-Tasten nativ (Ctrl+] beenden, Ctrl+T Menue,
+  Ctrl+R Reset, Ctrl+P Bootloader).
+- **Port-Autodetect nur auf USB-Adapter** (`/dev/serial/by-id/*`, `/dev/ttyUSB*`,
+  `/dev/ttyACM*`). **Niemals** die Odroid-Konsole (`/dev/ttyAML0`) oder `/dev/ttyS*`
+  oeffnen — sonst haengt man an der Board-Konsole.
+- **Browser frisst die Tasten** (Ctrl+T/R/P/F/L/I/Y/H sind Browser-Shortcuts, nur
+  Ctrl+] ist frei). Loesung host-seitig ueber `esp-idf-monitor.cfg` (`[esp-idf-monitor]`,
+  ini, `menu_key`/`exit_key`/`chip_reset_key`/`chip_reset_bootloader_key`/…; nur `A-Z`
+  und `[ ] \ ^ _` sind auf C0-Codes abbildbar), referenziert per `ESP_IDF_MONITOR_CFGFILE`.
+- **Genau EIN Prozess pro Port.** Zwei Leser = Datenmuell; auch jeder Browser-Tab ist
+  ein Prozess. Eine dauerhafte Instanz (z.B. unter `tmux`) halten, Browser haengt sich an.
+- **Auth davor** (Basic-Auth/Reverse-Proxy) — der Monitor hat keine eigene.
+- **`esp-idf-monitor` fehlt auf dem Odroid**: PyPI-Paket (1.10.0) in eigenes Venv
+  (z.B. `/opt/idf-monitor`); `python3-venv`/`python3-pip` ggf. per apt nachziehen.
+- **`ttyd` hat kein Debian-arm64-Paket** -> statisches Binary von GitHub-Releases
+  (`tsl0922/ttyd`, aarch64, sha256 `b38acadd89d1d396a0f5649aa52c539edbad07f4bc7348b27b4f4b7219dd4165`).
+  Alternative ohne Fremd-Binary: eigener WS<->PTY-Server nach Muster `sandbox_term_server.py`.
+- **Odroid-Stand 2026-10-15:** aarch64/Debian 12, Python 3.11.2, Internet ok,
+  Ports 7681/8080/8081/8090 frei, `/dev/ttyUSB*` **nicht** angeschlossen (Abnahmetest
+  braucht angesteckte Hardware), USB-Serial-Module (ch341/cp210x/ftdi) vorhanden.
