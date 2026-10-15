@@ -124,3 +124,29 @@ Vorschlag zur Abstimmung — bitte hier ergaenzen/korrigieren, dann gilt er.
   einer zweiten Quelle (`10.2.72.2`) — NICHT der Odroid (`10.2.22.2`) und nicht mein
   Sandbox-Server. Falls ein zweiter/toter Agent existiert, bitte pruefen; ich habe
   nichts angefasst.
+
+## Waermepumpe: 1-Jahres-Historie aus dem Gateway (2026-10-15, Chat 7a894c13)
+**Erledigt (T2+T3):** Die bis zu ~13 Monate alte Historie lag NUR im Heizungs-Gateway
+(`bosch_k40rf`-Integration, lokale K40RF-API `/recordings/<path>?sampleRate=...`), nicht
+in HA. HA zeichnet erst ab Einrichtung (2026-10-11) auf. Import in die HA-**Langzeit-
+statistik** erledigt: 3 Temperatur-Sensoren reichen jetzt bis **2025-08-31** zurueck
+(297 Tages- + 14 Monatswerte je Sensor, lueckenfuellend VOR dem HA-Eigenbestand).
+- Werkzeug (committed): `tools/ha_gateway_history.py` (laeuft IM HA-Container; liest
+  Gateway-Credentials + Admin-JWT aus `.storage`, importiert via WS-Befehl
+  `recorder/import_statistics`; nur Buckets AELTER als HA's erster Punkt -> keine
+  Ueberschneidung, idempotent). `--dry-run` verfuegbar.
+- Wichtige API-Fakten (HA 2026.10.1): **kein** Service `recorder.import_statistics` -
+  nur der **WebSocket**-Befehl `recorder/import_statistics` mit `{metadata, stats}`;
+  metadata braucht `mean_type` (1=arithmetisch) + `unit_class`. `statistics_meta.has_mean`
+  kann NULL sein -> Abfragen trotzdem per `recorder/statistics_during_period` (period
+  day/week/month), NICHT per history-API fuer lange Zeitraeume.
+- Karte (committed): `tools/ha_wp_zoom_chart.js` -> deployt nach `/config/www/`
+  (`wp-zoom-chart.js`). Klick = Grossansicht, Rand ziehbar, Aufloesung skaliert mit
+  Breite (300px->150 .. 2400px->1200 Punkte), Zeitraeume 1h/6h/24h/7T/30T/90T/1J;
+  kurze Zeitraeume = Rohhistorie, lange = Statistik.
+- Host-Tests (committed, in `run_host_tests.sh`): `test/test_ha_gateway_history.py`,
+  `test/check_wp_zoom_chart.py`. Voller Lauf gruen.
+- Kein `storage.bin`/DB-Backup noetig; DB-Backup `home-assistant_v2.db.bak-preimport`
+  liegt auf dem Odroid (648 MB) - bei Platznot loeschbar.
+- Nur 3 Gateway-Ressourcen haben Recordings; Energie-/Leistungs-Sensoren haben KEINE
+  Gateway-Historie (nur Live).
