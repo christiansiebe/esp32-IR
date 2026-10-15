@@ -129,22 +129,51 @@ Regeln:
 Ziel: Der Kontroll-Chat soll die Verbindung zum Odroid **nicht verlieren** und
 sie **selbststaendig wiederherstellen**.
 
+**Sandbox-Seite (Autostart, ueberlebt Resets):**
+- `tools/remote-shell/supervise.py` startet `sandbox_term_server.py` und haelt
+  ihn am Leben (Neustart bei Absturz). Idempotent, mit `--status` / `--stop`.
+  ```bash
+  python3 tools/remote-shell/supervise.py            # starten (im Hintergrund)
+  python3 tools/remote-shell/supervise.py --status
+  ```
+- Token kommt aus `$SANDBOX_TERM_TOKEN_FILE` (Default:
+  `<workspace>/.remote-shell/token`, **ausserhalb** des Git-Baums). Fehlt die
+  Datei, wird ein Token erzeugt. Token-Rotation = Datei ueberschreiben, **kein**
+  Neustart noetig (wird pro Verbindung gelesen).
+- Die **oeffentliche URL** wird aus `$RUNTIME_ID` abgeleitet:
+  `wss://work-2-<id>.prod-runtime.all-hands.dev/`. Aendert sich mit jeder neuen
+  Sandbox-Session -> danach den Odroid-Agenten neu ausrichten (siehe unten).
+
 **Odroid-Seite (reboot-fest):**
 - systemd-Dienst `odroid-cmd-agent.service` (`Restart=always`, `RestartSec=5`,
   `enabled`), enthaelt Token + `CMD_AGENT_AUTO=1` (unbeaufsichtigter Betrieb).
 - Faellt der Agent aus, verbindet er sich in 5 s neu; nach Reboot startet er
   automatisch, sobald Netz da ist (`After=network-online.target`).
+- **Neue Sandbox (ID/Token geaendert):** Unit neu ausrichten mit
+  `tools/remote-shell/odroid-bootstrap.sh <wss-url> <token>` (aendert nur die
+  `SANDBOX_TERM_TOKEN=`- und `ExecStart=`-Zeile, legt ein Backup an).
 - Achtung: `pkill -f cmd_agent.py` aus dem Kanal heraus toetet die eigene Shell
   (der Befehlstext enthaelt den Suchstring) -> Agent per `kill <pid>` beenden.
 
-**Sandbox-Seite:**
-- `sandbox_term_server.py` laeuft als Daemon; die Datei-Queue
-  (`/tmp/cmdchannel`) puffert Befehle, bis der Agent wieder da ist.
-- Nach einem Sandbox-Reset: Server mit **demselben Token** neu starten
-  (`SANDBOX_TERM_TOKEN=... python3 tools/remote-shell/sandbox_term_server.py`);
-  der Odroid-Agent verbindet sich dann von selbst wieder.
-
 **Diagnose bei Verbindungsverlust:**
 - `tail -5 /tmp/cmdchannel/audit.log` (letzte connect/disconnect/timeouts)
-- `pgrep -af sandbox_term_server.py`
+- `python3 tools/remote-shell/supervise.py --status`
+
+## noVNC: den echten XFCE-Desktop im Browser
+
+Der Odroid hat bereits einen echten Desktop (XFCE + TigerVNC auf Port 5901).
+`tools/remote-shell/odroid-novnc-setup.sh` installiert noVNC + websockify und
+legt den reboot-festen Dienst `novnc.service` an
+(`websockify --web=/usr/share/novnc/ 6080 localhost:5901`).
+Danach im Browser: `http://odroidn2.local:6080/vnc.html`.
+
+## Tests
+- `tools/remote-shell/test_agent.py` verbindet sich als Pseudo-Agent ueber die
+  **oeffentliche** Proxy-URL auf `/agent` und fuehrt Befehle lokal aus — damit
+  laesst sich die Sandbox-Seite ohne Odroid verifizieren:
+  ```bash
+  python3 tools/remote-shell/test_agent.py &      # lauscht auf Befehle
+  tools/remote-shell/cmd_send.sh "echo roundtrip" 20
+  ```
+
 
