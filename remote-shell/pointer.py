@@ -20,8 +20,8 @@ import urllib.request
 
 KEY = os.environ.get("OPENHANDS_API_KEY", "")
 BASE = "https://app.all-hands.dev"
-SHARED = "https://github.com/christiansiebe/esp32-IR/blob/main/memory/SHARED.md"
-TAG = "shared-memory:memory/SHARED.md"
+SHARED = "https://github.com/christiansiebe/esp32-IR/blob/main/remote-shell/memory/SHARED.md"
+TAG = "shared-memory:remote-shell/memory/SHARED.md"
 
 MESSAGE = (
     "[Automatischer Zeiger — gemeinsames Gedaechtnis]\n\n"
@@ -32,7 +32,7 @@ MESSAGE = (
     "  (Symlink: ~/.openhands/memory/MEMORY.md)\n\n"
     "Bitte vor der Arbeit lesen und am Ende ergaenzen. "
     "Odroid-Kanal (falls eingerichtet): bash /workspace/remote-shell/cmd_send.sh \"<befehl>\"\n"
-    "Anleitung: tools/remote-shell/OTHER-CHAT.md"
+    "Anleitung: remote-shell/OTHER-CHAT.md"
 )
 
 
