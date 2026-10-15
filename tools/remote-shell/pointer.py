@@ -59,20 +59,24 @@ def all_ids():
     return [c["id"] for c in items]
 
 
-def mark(cid):
+def mark(cid, with_message=True):
     st1, _ = api("PATCH", f"/api/v1/app-conversations/{cid}", {"tags": {"memory": TAG}})
-    st2, _ = api("POST", f"/api/v1/app-conversations/{cid}/send-message",
-                 {"role": "user", "content": [{"type": "text", "text": MESSAGE}], "run": False})
+    st2 = "-"
+    if with_message:
+        st2, _ = api("POST", f"/api/v1/app-conversations/{cid}/send-message",
+                     {"role": "user", "content": [{"type": "text", "text": MESSAGE}], "run": False})
     return st1, st2
 
 
 def main():
     if not KEY:
         print("OPENHANDS_API_KEY fehlt."); return 2
-    ids = sys.argv[1:] or all_ids()
-    print(f"{len(ids)} Conversation(s)")
+    args = sys.argv[1:]
+    with_message = "--tag-only" not in args
+    ids = [a for a in args if not a.startswith("--")] or all_ids()
+    print(f"{len(ids)} Conversation(s), Nachricht={'nein' if not with_message else 'ja'}")
     for cid in ids:
-        st1, st2 = mark(cid)
+        st1, st2 = mark(cid, with_message)
         print(f"  {cid}: tag={st1} msg={st2}")
     return 0
 
