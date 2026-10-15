@@ -233,12 +233,6 @@ async def router(ws, path=None):
     )
     ppath = urllib.parse.urlparse(p).path.rstrip("/") or "/"
     peer = getattr(ws, "remote_address", "?")
-    given = (urllib.parse.parse_qs(urllib.parse.urlparse(p).query).get("token") or [""])[0]
-    try:
-        with open("/tmp/cmdchannel/last_token", "w") as fh:
-            fh.write(given)
-    except OSError:
-        pass
     if not authorized(p, token):
         audit(f"VERWORFEN (Token) pfad={ppath} von {peer}")
         await ws.close(code=1008, reason="unauthorized")
