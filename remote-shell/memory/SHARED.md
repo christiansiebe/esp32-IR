@@ -155,6 +155,11 @@ statistik** erledigt: 3 Temperatur-Sensoren reichen jetzt bis **2025-08-31** zur
   `remote-shell/ha/check_wp_zoom_chart.py`. Voller Firmware-Lauf gruen.
 - Kein `storage.bin`/DB-Backup noetig; DB-Backup `home-assistant_v2.db.bak-preimport`
   liegt auf dem Odroid (648 MB) - bei Platznot loeschbar.
+- **Nachtrag (Theme):** ApexCharts defaultet auf LIGHT-Theme -> in HAs Dark-Mode
+  schwarze Schrift auf schwarzem Grund. Fix: `chartTheme(mode)` + `_dark()`
+  (hass.themes.darkMode, Fallback Luminanz des Karten-Hintergrunds) + Farben aus
+  HA-CSS-Variablen; in `_chartOptions()` theme.mode/foreColor/Label-/Grid-Farben
+  setzen. Mit echtem ApexCharts verifiziert. Commit f455a8c.
 - **Nachtrag (Fenster-Groesse):** Die Karte war nicht ziehbar, weil das Modal nur das
   native CSS `resize:both` nutzte (winzige, von der Scrollbar ueberdeckte Ecke, auf
   Touch unbrauchbar). Behoben: echter Zieh-Griff mit Pointer-Events (Maus+Touch),
