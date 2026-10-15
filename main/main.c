@@ -5407,9 +5407,9 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        (unsigned long)counters.gap_cause_buffer,
                        (unsigned int)counters.wifi_ps_mode,
                        (unsigned int)counters.build_profile,
+                       counters.fw_version,
                        (unsigned long)counters.boot_marker_count,
                        (unsigned int)counters.boot_marker_reason,
-                       counters.fw_version,
                        crash_json[0] != '\0' ? "," : "",
                        crash_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
