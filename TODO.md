@@ -332,6 +332,13 @@ UART-Puffer lag — auch wenn der `vTaskDelay` wegen des Holds gar nicht geschla
       Frame bleibt in einem ESP-NOW-Payload (16 + 204 = 220 ≤ 250, `_Static_assert`).
 - [x] Commit-Konvention: je Commit nur die Dateien der weiterentwickelten Seite; `feat(both):`
       wenn beide (z. B. Wire-Format). `main/main.c` trägt beide Rollen → Diff hunk-genau teilen.
+- [x] **Regression behoben (2026-10-15):** Der Sprung auf `ESPNOW_DIAG_VERSION 2` ließ den
+      Sender **jede** Anfrage eines nicht neu geflashten Receivers verwerfen (`is_diag_request`
+      verlangte exakt `== 2`) → der Receiver sah den Sender als tot. Jetzt akzeptiert
+      `is_diag_request`/`is_diag_response` `ESPNOW_DIAG_VERSION_MIN..ESPNOW_DIAG_VERSION`, und
+      **jede** Antwort spiegelt die Version der Anfrage zurück (counters/events/history/crash/
+      cmd/time-sync), damit auch ein alter Receiver die Antworten annimmt. Header-Layout
+      unverändert, Counters-Payload nur am Ende gewachsen → kompatibel.
 
 ### 🐛 Sender-Diagnose: „DID NOT END CLEANLY" bei bewusstem Reboot (BEHOBEN)
 Symptom: Nach OTA/Console-Reboot meldete der Sender beim nächsten Boot

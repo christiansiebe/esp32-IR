@@ -69,6 +69,14 @@ Two firmware roles are built from one source tree.
   receiver's files, and `feat(both):` when a change touches both (e.g. the wire
   format in `espnow_diag.h`). `main/main.c` carries both roles, so split its diff
   per hunk (`git add -p`) when only one side changed.
+- **Diag wire version: never require an exact match.** `is_diag_request` /
+  `is_diag_response` accept `ESPNOW_DIAG_VERSION_MIN..ESPNOW_DIAG_VERSION`, and
+  every response echoes the request's version. Both devices are usually not
+  reflashed together, so a strict `version == ESPNOW_DIAG_VERSION` silently drops
+  the peer's packets (2026-10-15: bumping to 2 made an un-reflashed receiver look
+  like a dead sender). The header layout is unchanged and the counters payload
+  only grew at the tail, so old and new versions interoperate. Bump MAJOR of the
+  *firmware* only if the header layout or an existing field's meaning changes.
 
 ## Flash layout (4 MB)
 | Partition | Offset | Size |
