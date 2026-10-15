@@ -13,6 +13,7 @@ mint an admin JWT:
 The JS source is expected at ``/config/wp-zoom-chart.js`` (copy it there first).
 """
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -21,20 +22,33 @@ import time
 import jwt
 import websockets
 
+
+def resource_url(path):
+    """Append a content hash so the browser cannot serve a stale copy.
+
+    HA serves ``/local/*`` with ``Cache-Control: max-age=2678400`` (31 days),
+    and a resource URL without a query string is cached forever. Without this
+    the deployed card changes never reach the browser.
+    """
+    with open(path, "rb") as fh:
+        ver = hashlib.sha256(fh.read()).hexdigest()[:10]
+    return "/local/wp-zoom-chart.js?v=" + ver
+
 AUTH = "/config/.storage/auth"
 DASH = "/config/.storage/lovelace.waermepumpe_dashboard"
 RES_URL = "/local/wp-zoom-chart.js"
-
-d = json.load(open(AUTH))
-rt = [t for t in d["data"]["refresh_tokens"]
-      if t.get("token_type") == "long_lived_access_token"][0]
-now = int(time.time())
-access = jwt.encode({"iss": rt["id"], "iat": now, "exp": now + 900},
-                    rt["jwt_key"], algorithm="HS256")
-if isinstance(access, bytes):
-    access = access.decode()
-
 URL = "ws://127.0.0.1:8123/api/websocket"
+
+
+def admin_token():
+    """Mint a short-lived admin JWT from HA's stored refresh token."""
+    d = json.load(open(AUTH))
+    rt = [t for t in d["data"]["refresh_tokens"]
+          if t.get("token_type") == "long_lived_access_token"][0]
+    now = int(time.time())
+    access = jwt.encode({"iss": rt["id"], "iat": now, "exp": now + 900},
+                        rt["jwt_key"], algorithm="HS256")
+    return access.decode() if isinstance(access, bytes) else access
 
 # --- Chart-Entitaeten ---
 TEMPS = [
@@ -74,7 +88,7 @@ async def main():
 
     async with websockets.connect(URL, max_size=32 * 1024 * 1024) as ws:
         await ws.recv()
-        await ws.send(json.dumps({"type": "auth", "access_token": access}))
+        await ws.send(json.dumps({"type": "auth", "access_token": admin_token()}))
         r = json.loads(await ws.recv())
         if r["type"] != "auth_ok":
             print("AUTH FEHLER:", r)
@@ -88,15 +102,22 @@ async def main():
                 if msg.get("id") == mid and msg.get("type") == "result":
                     return msg
 
-        # 2) Ressource registrieren
+        # 2) Ressource registrieren (mit Inhalts-Hash gegen den 31-Tage-Cache)
+        want = resource_url(dst) if os.path.exists(dst) else RES_URL
         r = await call(1, {"type": "lovelace/resources"})
-        existing = {x.get("url", "").split("?")[0] for x in (r.get("result") or [])}
-        if RES_URL not in existing:
+        items = r.get("result") or []
+        cur = [x for x in items if x.get("url", "").split("?")[0] == RES_URL]
+        if not cur:
             r = await call(2, {"type": "lovelace/resources/create",
-                               "res_type": "module", "url": RES_URL})
-            print("Ressource erstellt:", r.get("success"), r.get("error") or "")
+                               "res_type": "module", "url": want})
+            print("Ressource erstellt:", r.get("success"), r.get("error") or "", want)
+        elif cur[0].get("url") != want:
+            r = await call(2, {"type": "lovelace/resources/update",
+                               "resource_id": cur[0]["id"],
+                               "res_type": "module", "url": want})
+            print("Ressource aktualisiert:", r.get("success"), r.get("error") or "", want)
         else:
-            print("Ressource existiert bereits")
+            print("Ressource aktuell:", want)
 
         # 3) Dashboard laden
         r = await call(3, {"type": "lovelace/config",
@@ -147,4 +168,5 @@ async def main():
         print("Ressourcen:", [x.get("url") for x in r.get("result", [])])
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

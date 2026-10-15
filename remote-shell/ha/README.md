@@ -41,11 +41,19 @@ cp ha_wp_zoom_chart.js /usr/share/hassio/homeassistant/wp-zoom-chart.js
 docker exec homeassistant python3 /config/ha_wp_dashboard.py
 ```
 
+The deploy registers the Lovelace resource as
+`/local/wp-zoom-chart.js?v=<content-hash>`. This is **required**: HA serves
+`/local/*` with `Cache-Control: max-age=2678400` (31 days), so a resource URL
+without a version query is cached for a month and every card update silently
+never reaches the browser. The hash changes with the file, so each deploy
+becomes a new URL and the browser reloads it.
+
 ## Tests
 
 The pure logic is covered without mocks (no network, no HA needed):
 
 ```bash
 python3 remote-shell/ha/test_ha_gateway_history.py
+python3 remote-shell/ha/test_ha_wp_dashboard.py    # resource_url versioning
 python3 remote-shell/ha/check_wp_zoom_chart.py   # needs node
 ```
