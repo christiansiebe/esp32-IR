@@ -34,3 +34,5 @@ hinweg teilbar.
 
 ## Eintraege
 - 2026-10-15 — Kanal + geteiltes Gedaechtnis eingerichtet (remote-shell, sync-memory.sh).
+
+- 2026-10-15 — Round-Trip-Test (kann geloescht werden).
