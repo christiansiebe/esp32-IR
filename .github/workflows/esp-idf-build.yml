@@ -159,6 +159,17 @@ jobs:
           out_dir="$RUNNER_TEMP/firmware"
           mkdir -p "$out_dir"
 
+          # Resolve the version first: it is part of the image name and of the
+          # artifact names, so a downloaded bundle is identifiable at a glance.
+          version="$(sed -n 's/^#define FIRMWARE_VERSION "\(.*\)"$/\1/p' main/build_version.h)"
+          if [[ -z "$version" ]]; then
+            echo "::error::main/build_version.h has no FIRMWARE_VERSION"
+            exit 1
+          fi
+          image="${{ matrix.role }}-sml-${version}.bin"
+          echo "FW_VERSION=$version" >> "$GITHUB_ENV"
+          echo "APP_IMAGE=$image" >> "$GITHUB_ENV"
+
           test -s "$build_dir/esp32-IR.bin"
           test -s "$build_dir/bootloader/bootloader.bin"
           test -s "$build_dir/partition_table/partition-table.bin"
@@ -166,8 +177,10 @@ jobs:
           test -s "$build_dir/ota_data_initial.bin"
           cp "$build_dir/ota_data_initial.bin" "$out_dir/ota_data_initial.bin"
           
-          cp "$build_dir/esp32-IR.bin" \
-            "$out_dir/${{ matrix.role }}-sml.bin"
+          cp "$build_dir/esp32-IR.bin" "$out_dir/$image"
+          # Stable, version-less alias so an OTA URL or script that expects
+          # <role>-sml.bin keeps working; the versioned name is the archive copy.
+          cp "$build_dir/esp32-IR.bin" "$out_dir/${{ matrix.role }}-sml.bin"
           cp "$build_dir/bootloader/bootloader.bin" \
             "$out_dir/bootloader.bin"
           cp "$build_dir/partition_table/partition-table.bin" \
@@ -191,9 +204,9 @@ jobs:
           # partition: flashing a blank storage.bin wipes the persisted
           # minute history. Strip the storage entry so flashing this bundle
           # keeps the data; OTA updates never touch it either.
-          python3 - "$out_dir/flasher_args.json" "${{ matrix.role }}" <<'PYEOF'
+          python3 - "$out_dir/flasher_args.json" "${{ matrix.role }}" "$image" <<'PYEOF'
           import json, os, sys
-          path, role = sys.argv[1], sys.argv[2]
+          path, role, app_name = sys.argv[1], sys.argv[2], sys.argv[3]
           with open(path) as fh:
               args = json.load(fh)
 
@@ -206,7 +219,6 @@ jobs:
                   continue
               args["flash_files"][off] = os.path.basename(str(val))
 
-          app_name = f"{role}-sml.bin"
           for off, val in args.get("flash_files", {}).items():
               if val == "esp32-IR.bin":
                   args["flash_files"][off] = app_name
@@ -233,14 +245,9 @@ jobs:
           print("flash_project_args written for direct esptool use")
           PYEOF
 
-          # Record the firmware version (from main/build_version.h, written by
-          # CMake via git describe) next to the image so a flash bundle is
-          # identifiable without booting the device.
-          version="$(sed -n 's/^#define FIRMWARE_VERSION "\(.*\)"$/\1/p' main/build_version.h)"
-          if [[ -z "$version" ]]; then
-            echo "::error::main/build_version.h has no FIRMWARE_VERSION"
-            exit 1
-          fi
+          # Record the firmware version (resolved at the top from
+          # main/build_version.h, written by CMake via git describe) next to the
+          # image so a flash bundle is identifiable without booting the device.
           printf '%s\n' "$version" > "$out_dir/firmware-version.txt"
           printf 'firmware version: %s (%s)\n' "$version" "${{ matrix.role }}"
           if ! grep -a -q "$version" "$build_dir/esp32-IR.bin"; then
@@ -252,8 +259,8 @@ jobs:
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.role }}-sml-firmware
-          path: ${{ runner.temp }}/firmware/${{ matrix.role }}-sml.bin
+          name: ${{ matrix.role }}-sml-firmware-${{ env.FW_VERSION }}
+          path: ${{ runner.temp }}/firmware/${{ env.APP_IMAGE }}
           if-no-files-found: error
           retention-days: 14
 
@@ -261,7 +268,7 @@ jobs:
       - name: Upload complete flash files
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.role }}-sml-flash-files
+          name: ${{ matrix.role }}-sml-flash-files-${{ env.FW_VERSION }}
           path: ${{ runner.temp }}/firmware/
           if-no-files-found: error
           retention-days: 14
