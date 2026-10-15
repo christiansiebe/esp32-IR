@@ -63,6 +63,7 @@ bool uart_sleep_init_idf(void)
      * both interfaces are up; without it the CPU could never enter light sleep. */
     (void)esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
+#if CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE
     /* The sender's station is never associated with an AP (it only scans the
      * receiver's AP for the channel), so the Wi-Fi driver keeps
      * ESP_PM_APB_FREQ_MAX asserted and the radio on all the time. That pins DFS
@@ -70,7 +71,11 @@ bool uart_sleep_init_idf(void)
      * "240 MHz, slept 0.0 s". ESP-NOW is a Wi-Fi connectionless module: giving it
      * a wake window smaller than the interval lets the driver drop the radio (and
      * the APB lock) between windows, so DFS and light sleep work again. A request
-     * arriving while the radio is off is retried by the receiver. */
+     * arriving while the radio is off is retried by the receiver.
+     *
+     * OFF by default: on the original ESP32 this was observed to break the
+     * ESP-NOW link ("sender connects no more"), so the radio stays on unless the
+     * user opts in and bench-verifies it. */
     esp_err_t wake_err = esp_wifi_connectionless_module_set_wake_interval(
         (uint16_t)CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS);
     if (wake_err == ESP_OK) {
@@ -83,6 +88,7 @@ bool uart_sleep_init_idf(void)
                  "the DFS ceiling because the Wi-Fi APB lock is never released",
                  esp_err_to_name(wake_err));
     }
+#endif
 
     esp_pm_lock_acquire(s_no_light_sleep);
     /* Compiled in only when this real branch is active (not the stub), so the

@@ -157,19 +157,24 @@ Two firmware roles are built from one source tree.
   four PM options and the 240 MHz ceiling.
 - Wi-Fi power save stays at the default `WIFI_PS_MIN_MODEM`; `WIFI_PS_NONE`
   would burn power and power save beyond the default hurts ESP-NOW reliability.
-- **ESP-NOW connectionless power save (2026-10-15, the real fix for "240 MHz,
-  0 steps, slept 0.0 s").** The sender's station is never associated with an AP,
-  so the Wi-Fi driver keeps `ESP_PM_APB_FREQ_MAX` asserted and the radio on all
-  the time; that pins DFS at the ceiling and blocks light sleep entirely.
-  `WIFI_PS_MIN_MODEM` only helps a *connected* station. The fix is to give the
-  connectionless module (ESP-NOW) a periodic wake window:
+- **ESP-NOW connectionless power save (`CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE`,
+  default OFF).** The sender's station is never associated with an AP, so the
+  Wi-Fi driver keeps `ESP_PM_APB_FREQ_MAX` asserted and the radio on all the
+  time; that pins DFS at the ceiling and blocks light sleep entirely ("240 MHz,
+  0 steps, slept 0.0 s"). `WIFI_PS_MIN_MODEM` only helps a *connected* station.
+  The documented fix is a periodic wake window on the connectionless module:
   `esp_wifi_connectionless_module_set_wake_interval()` +
   `esp_now_set_wake_window()` with window < interval
   (`CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_{INTERVAL,WINDOW}_MS`, default 100/70 ms),
-  set in `uart_sleep_init_idf()` after `esp_wifi_start()`. The driver then drops
-  the radio (and the APB lock) between windows. A request arriving while the
-  radio is off is retried: `sender_diag_exchange_raw()` retries idempotent
-  requests up to `SENDER_DIAG_ATTEMPTS` (4); a command uses the single-shot
+  set in `uart_sleep_init_idf()` after `esp_wifi_start()`; the driver then drops
+  the radio (and the APB lock) between windows. **It is opt-in and off by
+  default because on the original ESP32 it was observed to break the ESP-NOW
+  link ("sender connects no more") even though the API is documented as
+  supported.** With it off the sender keeps the Wi-Fi radio on, i.e. exactly the
+  behaviour before the option existed. Do not turn it on without a bench test
+  that the link survives. When on, a request arriving while the radio is off is
+  retried: `sender_diag_exchange_raw()` retries idempotent requests up to
+  `SENDER_DIAG_ATTEMPTS` (4); a command uses the single-shot
   `sender_diag_exchange_once()` so it cannot run twice. See Espressif issue
   esp-idf#11714 ("ESP-NOW does not release the WiFi module and APB_FREQ_MAX").
 - **Receiver without the SoftAP (`CONFIG_ESPNOW_RECEIVER_DISABLE_AP`, default
