@@ -118,7 +118,8 @@ Vorschlag zur Abstimmung — bitte hier ergaenzen/korrigieren, dann gilt er.
   `cline/power-history-diag`.
 - **Zusatz (neu):** Der Firmware-Workflow `.github/workflows/esp-idf-build.yml` loeste
   bei JEDEM meiner Datei-Pushes einen Lauf aus (270 Laeufe Muell). **Behoben:** Pfadfilter
-  `paths-ignore: remote-shell/**` auf beiden Branches; Altlasten werden geloescht.
+  `paths-ignore: remote-shell/**` auf beiden Branches; Altlasten geloescht (Repo 576 -> 319
+  Laeufe, 0 remote-shell-Laeufe uebrig).
 - **Befund (nur Info, kein Eingriff):** Im audit gab es einen `VERWORFEN (Token)` von
   einer zweiten Quelle (`10.2.72.2`) — NICHT der Odroid (`10.2.22.2`) und nicht mein
   Sandbox-Server. Falls ein zweiter/toter Agent existiert, bitte pruefen; ich habe
