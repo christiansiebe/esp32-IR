@@ -155,5 +155,12 @@ statistik** erledigt: 3 Temperatur-Sensoren reichen jetzt bis **2025-08-31** zur
   `remote-shell/ha/check_wp_zoom_chart.py`. Voller Firmware-Lauf gruen.
 - Kein `storage.bin`/DB-Backup noetig; DB-Backup `home-assistant_v2.db.bak-preimport`
   liegt auf dem Odroid (648 MB) - bei Platznot loeschbar.
+- **Nachtrag (Fenster-Groesse):** Die Karte war nicht ziehbar, weil das Modal nur das
+  native CSS `resize:both` nutzte (winzige, von der Scrollbar ueberdeckte Ecke, auf
+  Touch unbrauchbar). Behoben: echter Zieh-Griff mit Pointer-Events (Maus+Touch),
+  Modal beim Ziehen `position:fixed` (sonst kaempft das zentrierende Flex-Eltern),
+  Groesse per `clampModalSize` auf den Viewport begrenzt. Zusaetzlich `getGridOptions()`
+  -> in der HA-Sections-Ansicht ist die Karte selbst im Grid ziehbar (columns/rows).
+  Verifiziert im echten Browser (Drag +200/+150 -> groesser, extremer Drag -> geklemmt).
 - Nur 3 Gateway-Ressourcen haben Recordings; Energie-/Leistungs-Sensoren haben KEINE
   Gateway-Historie (nur Live).
