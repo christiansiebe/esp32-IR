@@ -257,11 +257,9 @@ trap 'rm -rf "$out"' EXIT
 "$out/test_history_ring_repair" full
 
 python3 "$here/test_ha_stats.py"
-python3 "$here/test_ha_gateway_history.py"
 python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"
 python3 "$here/check_dashboard_js.py"
-python3 "$here/check_wp_zoom_chart.py"
 
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.

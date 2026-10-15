@@ -23,7 +23,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CARD = os.path.join(HERE, "..", "tools", "ha_wp_zoom_chart.js")
+CARD = os.path.join(HERE, "ha_wp_zoom_chart.js")
 
 HARNESS = r"""
 const fs = require('fs');

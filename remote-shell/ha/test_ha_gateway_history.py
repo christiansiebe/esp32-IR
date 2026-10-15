@@ -1,4 +1,4 @@
-"""Host tests for tools/ha_gateway_history.py (pure logic, no network).
+"""Host tests for remote-shell/ha/ha_gateway_history.py (pure logic, no network).
 
 Only ``build_points`` is exercised here: the gateway fetch and the WebSocket
 import need a live HA + gateway and are covered by the end-to-end run on the
@@ -9,7 +9,7 @@ import datetime as dt
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import ha_gateway_history as hgh  # noqa: E402
 

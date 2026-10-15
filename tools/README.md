@@ -6,15 +6,6 @@ records what is published live. To get the already-stored records into Home
 Assistant you push them in with the `recorder/import_statistics` WebSocket
 command. There is no REST endpoint for that, so `ha_import.py` bridges the two.
 
-## Files
-- `ha_import.py` / `ha_stats.py` / `ws_min.py` — push the receiver's minute
-  history into HA long-term statistics (hourly aggregation, WebSocket import).
-- `ha_gateway_history.py` — backfill a heat-pump gateway's own recordings
-  (daily/monthly buckets) into HA, for the time before the integration existed.
-- `ha_wp_zoom_chart.js` — custom Lovelace card (click-to-zoom history chart with
-  a draggable border, adaptive resolution and selectable time ranges); deploy to
-  HA's `config/www/` and register it as a Lovelace resource.
-
 ## Quick start
 
 1. In Home Assistant create a long-lived access token
@@ -68,26 +59,4 @@ minutes with an unusually low `sample_count`:
 ```bash
 python3 tools/analyze_power_csv.py power-history.csv
 ```
-
-## Backfilling a heat-pump gateway's own history
-
-A Bosch/Buderus gateway (K40RF local API) keeps its own long-term history as
-daily/monthly recordings that reach far beyond HA's recorder. HA only records
-from the day the `bosch_k40rf` integration was set up, so everything before that
-is missing from the HA database even though the gateway still has it.
-
-`ha_gateway_history.py` pulls those recordings and imports the buckets that
-precede HA's own first sample into HA long-term statistics (via the same
-`recorder/import_statistics` WebSocket command). It runs **inside** the HA
-container so it can read the gateway credentials and mint an admin token from
-HA's `.storage`:
-
-```bash
-docker exec homeassistant python3 /config/ha_gateway_history.py --dry-run
-docker exec homeassistant python3 /config/ha_gateway_history.py
-```
-
-Only buckets older than HA's first stored point are imported, so live data is
-never overwritten; re-running is idempotent. The pure selection logic is covered
-by `test/test_ha_gateway_history.py`.
 
