@@ -56,7 +56,48 @@ def test_url_is_versioned_and_content_addressed(tmp="/tmp/hwd_card.js"):
     os.remove(tmp)
 
 
+def test_apex_card_becomes_resizable():
+    print("test_apex_card_becomes_resizable")
+    card = {
+        "type": "custom:apexcharts-card",
+        "apex_config": {"chart": {"height": 380}, "grid": {"borderColor": "#dddddd"}},
+    }
+    check(hwd.normalize_apex_card(card) is True, "changed on first pass")
+    check(card["section_mode"] is True, "section_mode enabled")
+    check("height" not in card["apex_config"]["chart"], "fixed height removed")
+    check(card["apex_config"]["grid"]["borderColor"] == "#dddddd", "rest untouched")
+    # Idempotent: a second pass reports no change.
+    check(hwd.normalize_apex_card(card) is False, "idempotent on second pass")
+
+
+def test_other_cards_untouched():
+    print("test_other_cards_untouched")
+    card = {"type": "custom:wp-zoom-chart", "title": "x"}
+    check(hwd.normalize_apex_card(card) is False, "not an apex card -> no change")
+    check(card == {"type": "custom:wp-zoom-chart", "title": "x"}, "unchanged")
+
+
+def test_recurses_into_stacks_and_sections():
+    print("test_recurses_into_stacks_and_sections")
+    cfg = {"views": [{"sections": [
+        {"cards": [
+            {"type": "vertical-stack", "cards": [
+                {"type": "custom:apexcharts-card", "apex_config": {"chart": {"height": 300}}},
+            ]},
+            {"type": "custom:apexcharts-card", "apex_config": {}},
+        ]},
+    ]}]}
+    check(hwd.normalize_cards(cfg) is True, "found nested cards")
+    nested = cfg["views"][0]["sections"][0]["cards"][0]["cards"][0]
+    direct = cfg["views"][0]["sections"][0]["cards"][1]
+    check(nested["section_mode"] is True, "nested card normalized")
+    check(direct["section_mode"] is True, "direct card normalized")
+
+
 if __name__ == "__main__":
     test_url_is_versioned_and_content_addressed()
+    test_apex_card_becomes_resizable()
+    test_other_cards_untouched()
+    test_recurses_into_stacks_and_sections()
     print(f"\n{CHECKS - FAILURES}/{CHECKS} checks passed")
     sys.exit(1 if FAILURES else 0)

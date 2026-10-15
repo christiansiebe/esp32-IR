@@ -76,6 +76,43 @@ def find_view(cfg):
     return cfg["views"][0]
 
 
+def normalize_apex_card(card):
+    """Make a HACS ``apexcharts-card`` resizable in HA's sections view.
+
+    The card only returns grid options (``getGridOptions`` -> rows/columns) when
+    ``section_mode`` is set, and it forces ``chart.height = "100%"`` in that
+    mode. A fixed ``apex_config.chart.height`` is merged *after* and would pin
+    the height again, so it is removed. Returns True when something changed.
+    """
+    if card.get("type") != "custom:apexcharts-card":
+        return False
+    changed = False
+    if card.get("section_mode") is not True:
+        card["section_mode"] = True
+        changed = True
+    apex = card.get("apex_config")
+    chart = apex.get("chart") if isinstance(apex, dict) else None
+    if isinstance(chart, dict) and "height" in chart:
+        del chart["height"]
+        changed = True
+    return changed
+
+
+def normalize_cards(node):
+    """Apply normalize_apex_card to every card, recursing through the config."""
+    changed = False
+    if isinstance(node, dict):
+        if node.get("type") == "custom:apexcharts-card":
+            changed = normalize_apex_card(node) or changed
+        for value in node.values():
+            if isinstance(value, (dict, list)):
+                changed = normalize_cards(value) or changed
+    elif isinstance(node, list):
+        for child in node:
+            changed = normalize_cards(child) or changed
+    return changed
+
+
 async def main():
     # 1) JS kopieren
     src = "/config/wp-zoom-chart.js"
@@ -124,6 +161,10 @@ async def main():
                            "url_path": "waermepumpe-dashboard"})
         cfg = r["result"]
         view = find_view(cfg)
+
+        # HACS apexcharts-card resizable machen (section_mode + feste Hoehe weg)
+        if normalize_cards(cfg):
+            print("apexcharts-card fuer Grid-Resize normalisiert")
 
         # Karten: Zoom-Karten ersetzen/ergaenzen
         charts = {
