@@ -2,7 +2,11 @@ name: ESP-IDF firmware
 
 on:
   push:
+    paths-ignore:
+      - 'remote-shell/**'
   pull_request:
+    paths-ignore:
+      - 'remote-shell/**'
   workflow_dispatch:
 
 permissions:
