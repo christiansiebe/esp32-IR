@@ -54,6 +54,7 @@ const sandbox = {
   Math, Date, JSON, parseFloat, isFinite, Promise, Object, Array, Number, String,
 };
 sandbox.window = sandbox; sandbox.globalThis = sandbox;
+sandbox.window.innerWidth = 1920; sandbox.window.innerHeight = 1080;
 vm.createContext(sandbox);
 
 function fail(m) { console.error('FAIL: ' + m); process.exit(1); }
@@ -64,10 +65,26 @@ catch (e) { fail('load: ' + e.message); }
 const Cls = registered['wp-zoom-chart'];
 if (!Cls) fail('custom element wp-zoom-chart not registered');
 
+// Sections view: the card must expose grid sizing so HA lets the user resize it.
+const inst0 = new Cls();
+if (typeof inst0.getGridOptions !== 'function') fail('getGridOptions missing (no sections resize)');
+const go = inst0.getGridOptions();
+if (!go.columns || !go.rows) fail('getGridOptions lacks columns/rows');
+
 const inst = new Cls();
 try { inst.setConfig({ title: 'T', entities: [{ entity: 'sensor.x', name: 'X' }] }); }
 catch (e) { fail('setConfig: ' + e.message); }
 if (inst.getCardSize() < 1) fail('getCardSize too small');
+
+// The modal drag clamps to the viewport; the helper must enforce min/max.
+if (typeof sandbox.clampModalSize !== 'function') fail('clampModalSize not exposed');
+const b = { minW: 420, minH: 320, maxW: 1920, maxH: 1080 };
+let s = sandbox.clampModalSize({ w: 5000, h: 5000 }, b);
+if (s.w !== 1920 || s.h !== 1080) fail('clamp max wrong: ' + JSON.stringify(s));
+s = sandbox.clampModalSize({ w: 10, h: 10 }, b);
+if (s.w !== 420 || s.h !== 320) fail('clamp min wrong: ' + JSON.stringify(s));
+s = sandbox.clampModalSize({ w: 800, h: 600 }, b);
+if (s.w !== 800 || s.h !== 600) fail('clamp passthrough wrong: ' + JSON.stringify(s));
 
 // Raw 7-day history (enough points that downsampling must kick in).
 const t0 = Date.now() - 7 * 86400 * 1000;

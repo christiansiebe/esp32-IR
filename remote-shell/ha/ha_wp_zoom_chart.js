@@ -33,6 +33,12 @@ function downsample(points, buckets) {
   return out;
 }
 
+function clampModalSize(rect, bounds) {
+  const w = Math.max(bounds.minW, Math.min(rect.w, bounds.maxW));
+  const h = Math.max(bounds.minH, Math.min(rect.h, bounds.maxH));
+  return { w, h };
+}
+
 class WpZoomChart extends HTMLElement {
   setConfig(config) {
     this._cfg = config || {};
@@ -54,6 +60,9 @@ class WpZoomChart extends HTMLElement {
   disconnectedCallback() { this._destroyChart(); }
 
   getCardSize() { return 4; }
+
+  // Sections view: let the user resize the card in the grid (columns x rows).
+  getGridOptions() { return { columns: 12, rows: 4, min_columns: 6, min_rows: 2 }; }
 
   _render() {
     this.innerHTML = "";
@@ -238,6 +247,41 @@ class WpZoomChart extends HTMLElement {
     box.appendChild(mbox);
     box.appendChild(el("div", "wz-hint",
       "Ecke unten rechts ziehen zum Vergroessern \u2013 die Aufloesung waechst mit."));
+
+    // A real drag grip: the native CSS resize handle is a tiny, scrollbar-overlapped
+    // corner that is unusable on touch. Pointer events cover mouse + pen + touch.
+    const grip = el("div", "wz-grip");
+    grip.title = "Ziehen zum Vergroessern";
+    box.appendChild(grip);
+    grip.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      grip.setPointerCapture(ev.pointerId);
+      const r = box.getBoundingClientRect();
+      // Pin the modal so the centering flex parent cannot fight the drag.
+      box.style.position = "fixed";
+      box.style.margin = "0";
+      box.style.left = r.left + "px";
+      box.style.top = r.top + "px";
+      box.style.width = r.width + "px";
+      box.style.height = r.height + "px";
+      const move = (e) => {
+        const b = { minW: 420, minH: 320,
+                    maxW: window.innerWidth - 16, maxH: window.innerHeight - 16 };
+        const s = clampModalSize(
+          { w: r.width + (e.clientX - ev.clientX), h: r.height + (e.clientY - ev.clientY) }, b);
+        box.style.width = s.w + "px";
+        box.style.height = s.h + "px";
+      };
+      const up = () => {
+        grip.removeEventListener("pointermove", move);
+        grip.removeEventListener("pointerup", up);
+        grip.removeEventListener("pointercancel", up);
+      };
+      grip.addEventListener("pointermove", move);
+      grip.addEventListener("pointerup", up);
+      grip.addEventListener("pointercancel", up);
+    });
+
     ov.appendChild(box);
     ov.onclick = (ev) => { if (ev.target === ov) this._closeModal(ov); };
     this._esc = (ev) => { if (ev.key === "Escape") this._closeModal(ov); };
@@ -292,9 +336,10 @@ style.textContent = `
 .wz-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;
   display:flex;align-items:center;justify-content:center;padding:16px}
 .wz-modal{background:var(--card-background-color,#fff);border-radius:14px;
-  padding:10px 12px 6px;display:flex;flex-direction:column;
+  padding:10px 12px 6px;display:flex;flex-direction:column;position:relative;
+  box-sizing:border-box;
   width:min(1400px,94vw);height:min(880px,90vh);
-  resize:both;overflow:auto;min-width:420px;min-height:320px;
+  overflow:hidden;min-width:420px;min-height:320px;
   box-shadow:0 12px 40px rgba(0,0,0,.4)}
 .wz-mhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-bottom:6px}
 .wz-mtitle{font-weight:700;font-size:17px;flex:1}
@@ -306,5 +351,11 @@ style.textContent = `
 .wz-close{background:transparent;border:0;font-size:18px;cursor:pointer;color:var(--secondary-text-color,#666)}
 .wz-mchart{flex:1;min-height:240px;width:100%}
 .wz-hint{font-size:11px;color:var(--secondary-text-color,#888);padding:4px 2px 2px}
+.wz-grip{position:absolute;right:3px;bottom:3px;width:18px;height:18px;
+  cursor:nwse-resize;touch-action:none;opacity:.75;
+  background:
+    linear-gradient(135deg,transparent 0 50%,var(--secondary-text-color,#aaa) 50% 60%,transparent 60%),
+    linear-gradient(135deg,transparent 0 70%,var(--secondary-text-color,#aaa) 70% 80%,transparent 80%)}
+.wz-grip:hover{opacity:1}
 `;
 document.head.appendChild(style);
