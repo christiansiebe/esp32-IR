@@ -1,29 +1,37 @@
-#!/bin/bash
-# Installiert einen ~/.bashrc-Hook, der den Kanal-Server (supervise.py)
-# bei Bedarf automatisch startet. Die Sandbox hat kein systemd/cron, daher
-# ist ein Shell-Hook der einfachste Autostart.
+#!/usr/bin/env bash
+# Installiert/aktualisiert den Autostart-Hook fuer den Sandbox-Kommando-Server.
+# Idempotent: kann beliebig oft laufen. Setzt einen markierten Block in ~/.bashrc.
 #
-# Aufruf (in der Sandbox):
-#   bash tools/remote-shell/install_autostart.sh
-set -eu
+#   bash /workspace/remote-shell/install_autostart.sh
+#
+# Hinweis: ~/.bashrc ist im Sandbox-Container (Overlay) NICHT dauerhaft; /workspace
+# schon. Nach einem Sandbox-Reset dieses Skript erneut aufrufen (oder den Hook ueber
+# die Repo-/AGENTS.md-Regel beim ersten Befehl ausfuehren lassen).
+set -euo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-SUP="$HERE/supervise.py"
-MARK="# remote-shell autostart"
+BASE="/workspace/remote-shell"
+RC="$HOME/.bashrc"
+BEGIN="# >>> remote-shell autostart >>>"
+END="# <<< remote-shell autostart <<<"
 
-if grep -qF "$MARK" "$HOME/.bashrc" 2>/dev/null; then
-  echo "Autostart-Hook ist schon in $HOME/.bashrc"
-  exit 0
+chmod +x "$BASE/supervise.py" "$BASE/cmd_send.sh" 2>/dev/null || true
+[ -f "$BASE/token" ] && chmod 600 "$BASE/token" || true
+
+touch "$RC"
+# alten Block entfernen (idempotent)
+if grep -qF "$BEGIN" "$RC"; then
+  sed -i "\|$BEGIN|,\|$END|d" "$RC"
 fi
 
-cat >> "$HOME/.bashrc" <<EOF
-
-$MARK
-if ! python3 "$SUP" --status 2>/dev/null | grep -q 'supervisor: laeuft'; then
-  nohup python3 "$SUP" > /dev/null 2>&1 &
-  disown
+cat >> "$RC" <<EOF
+$BEGIN
+# Startet den Sandbox-Kommando-Server selbstheilend (einmal pro Shell).
+if [ -z "\${REMOTE_SHELL_AUTOSTART:-}" ] && [ -f "$BASE/supervise.py" ]; then
+  export REMOTE_SHELL_AUTOSTART=1
+  python3 "$BASE/supervise.py" >/dev/null 2>&1 || true
 fi
+$END
 EOF
 
-echo "Autostart-Hook zu $HOME/.bashrc hinzugefuegt:"
-echo "  $SUP"
+echo "Autostart-Hook in $RC installiert."
+python3 "$BASE/supervise.py" --status || true
