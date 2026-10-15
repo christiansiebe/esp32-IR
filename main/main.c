@@ -175,6 +175,9 @@ typedef struct {
     uint8_t source[ESP_NOW_ETH_ALEN];
     uint32_t request_id;
     uint16_t flags;
+    /* Wire version of the request; responses echo it so a peer that only knows
+     * an older version still accepts them. */
+    uint8_t version;
     uint32_t page;
     int8_t rssi;
     /* Only meaningful for ESPNOW_DIAG_SECTION_HISTORY. */
@@ -1318,7 +1321,7 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
 
     *header = (espnow_diag_header_t) {
         .magic = ESPNOW_DIAG_MAGIC,
-        .version = ESPNOW_DIAG_VERSION,
+        .version = request->version,
         .type = ESPNOW_DIAG_TYPE_RESPONSE,
         .flags = ESPNOW_DIAG_SECTION_COUNTERS,
         .request_id = request->request_id,
@@ -1467,7 +1470,7 @@ static void build_diag_events_response(const espnow_diag_request_item_t *request
         (espnow_diag_events_response_t *)frame;
     response->header = (espnow_diag_header_t) {
         .magic = ESPNOW_DIAG_MAGIC,
-        .version = ESPNOW_DIAG_VERSION,
+        .version = request->version,
         .type = ESPNOW_DIAG_TYPE_RESPONSE,
         .flags = ESPNOW_DIAG_SECTION_EVENTS,
         .request_id = request->request_id,
@@ -1508,7 +1511,7 @@ static void build_diag_history_response(const espnow_diag_request_item_t *reques
         (espnow_diag_history_response_t *)frame;
     response->header = (espnow_diag_header_t) {
         .magic = ESPNOW_DIAG_MAGIC,
-        .version = ESPNOW_DIAG_VERSION,
+        .version = request->version,
         .type = ESPNOW_DIAG_TYPE_RESPONSE,
         .flags = ESPNOW_DIAG_SECTION_HISTORY,
         .request_id = request->request_id,
@@ -1570,7 +1573,7 @@ static void build_diag_crash_response(const espnow_diag_request_item_t *request,
         (espnow_diag_crash_response_t *)frame;
     response->header = (espnow_diag_header_t) {
         .magic = ESPNOW_DIAG_MAGIC,
-        .version = ESPNOW_DIAG_VERSION,
+        .version = request->version,
         .type = ESPNOW_DIAG_TYPE_RESPONSE,
         .flags = ESPNOW_DIAG_SECTION_CRASH,
         .request_id = request->request_id,
@@ -1605,7 +1608,7 @@ static void build_diag_cmd_response(const espnow_diag_request_item_t *request,
     espnow_diag_cmd_response_t *response = (espnow_diag_cmd_response_t *)frame;
     response->header = (espnow_diag_header_t) {
         .magic = ESPNOW_DIAG_MAGIC,
-        .version = ESPNOW_DIAG_VERSION,
+        .version = request->version,
         .type = ESPNOW_DIAG_TYPE_RESPONSE,
         .flags = ESPNOW_DIAG_SECTION_CMD,
         .request_id = request->request_id,
@@ -1793,7 +1796,8 @@ static bool is_diag_request(const uint8_t *data, int data_len)
     espnow_diag_header_t header;
     memcpy(&header, data, sizeof(header));
     return header.magic == ESPNOW_DIAG_MAGIC &&
-           header.version == ESPNOW_DIAG_VERSION &&
+           header.version >= ESPNOW_DIAG_VERSION_MIN &&
+           header.version <= ESPNOW_DIAG_VERSION &&
            header.type == ESPNOW_DIAG_TYPE_REQUEST;
 }
 
@@ -1805,7 +1809,8 @@ static bool is_diag_response(const uint8_t *data, int data_len)
     espnow_diag_header_t header;
     memcpy(&header, data, sizeof(header));
     return header.magic == ESPNOW_DIAG_MAGIC &&
-           header.version == ESPNOW_DIAG_VERSION &&
+           header.version >= ESPNOW_DIAG_VERSION_MIN &&
+           header.version <= ESPNOW_DIAG_VERSION &&
            header.type == ESPNOW_DIAG_TYPE_RESPONSE;
 }
 
@@ -1878,6 +1883,7 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         espnow_diag_request_item_t request = {
             .request_id = diag_header.request_id,
             .flags = diag_header.flags,
+            .version = diag_header.version,
             .page = diag_header.page,
             .rssi = (info->rx_ctrl != NULL) ? info->rx_ctrl->rssi : 0,
         };
@@ -1980,7 +1986,7 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             espnow_diag_time_sync_t response = {
                 .header = {
                     .magic = ESPNOW_DIAG_MAGIC,
-                    .version = ESPNOW_DIAG_VERSION,
+                    .version = request.header.version,
                     .type = ESPNOW_DIAG_TYPE_RESPONSE,
                     .flags = ESPNOW_DIAG_SECTION_TIME_SYNC,
                     .request_id = request.header.request_id,

@@ -18,6 +18,11 @@
 /* 2: the counters section carries the sender firmware version (fw_version), so
  * the receiver can show which sender build is running. */
 #define ESPNOW_DIAG_VERSION 2u
+/* Oldest version still accepted. The header layout never changed and the
+ * counters payload only grew at the tail, so a receiver on version 1 keeps
+ * working against a version 2 sender (and vice versa). Without this, bumping
+ * the version silently broke an un-reflashed peer: its requests were dropped. */
+#define ESPNOW_DIAG_VERSION_MIN 1u
 
 #define ESPNOW_DIAG_TYPE_REQUEST  1u
 #define ESPNOW_DIAG_TYPE_RESPONSE 2u
