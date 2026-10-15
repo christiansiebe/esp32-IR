@@ -34,3 +34,18 @@ hinweg teilbar.
 
 ## Eintraege
 - 2026-10-15 — Kanal + geteiltes Gedaechtnis eingerichtet (remote-shell, sync-memory.sh).
+
+## Mehrere Sandboxes + Cloud-API-Zeiger (2026-10-15)
+- Jede Sandbox traegt sich selbst in `memory/sandboxes.json` ein (Branch `main`).
+  Der Odroid liest das Register und verbindet sich zu ALLEN -> kein Eintrag pro Sandbox.
+- Zeiger fuer jeden Chat: `AGENTS.md` + `.openhands/setup.sh` im Repo (Branch `main`
+  UND `cline/power-history-diag`). Zusaetzlich Cloud-API-Tag
+  `memory=shared-memory:memory/SHARED.md` an allen Conversations.
+- **Wichtig:** Cloud-Secrets (`SANDBOX_TERM_TOKEN`, `GITHUB_WRITE_TOKEN`) erreichen nur
+  Sandboxes, die NACH dem Anlegen des Secrets gestartet wurden. Aeltere Sandboxes haben
+  leere Env-Vars -> dort Token/Bootstrap per Cloud-API setzen:
+  `python3 tools/remote-shell/remote_exec.py <conversation_id> "<cmd>"`.
+- Server liest den Token PRO VERBINDUNG; Datei `/workspace/remote-shell/token` hat Vorrang
+  vor der Umgebung -> Token live rotierbar.
+- Token-Rotation: Odroid-Token in `/etc/systemd/system/odroid-cmd-agent.service`
+  (`Environment=SANDBOX_TERM_TOKEN=...`) ist die Wahrheit; Cloud-Secret darauf angleichen.
