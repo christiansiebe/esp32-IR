@@ -2158,8 +2158,11 @@ static esp_err_t sleep_exit_callback(int64_t sleep_time_us, void *arg)
         g_sleep_entered_us = 0;
     }
     /* Feed the real accumulated sleep time to the adaptive window: it only grows
-     * after a window the CPU actually slept, not after one a hold skipped. */
+     * after a window the CPU actually slept, not after one a hold skipped. The
+     * controller is sender-only, so this call is too. */
+#if CONFIG_ESPNOW_ROLE_SENDER
     uart_sleep_set_slept_ms((uint32_t)g_sleep_accumulated_ms);
+#endif
     g_last_sleep_exit_us = (uint64_t)esp_timer_get_time();
     g_sleep_state = 0;
     return ESP_OK;
@@ -5347,6 +5350,7 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        "\"gap_cause_meter\":%lu,\"gap_cause_sleep\":%lu,"
                        "\"gap_cause_stall\":%lu,\"gap_cause_buffer\":%lu,"
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
+                       "\"sender_fw_version\":\"%s\","
                        "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u}%s%s}",
                        mac_known ? "true" : "false",
                        (int)sender_rssi,
@@ -5403,9 +5407,9 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        (unsigned long)counters.gap_cause_buffer,
                        (unsigned int)counters.wifi_ps_mode,
                        (unsigned int)counters.build_profile,
-                       counters.fw_version,
                        (unsigned long)counters.boot_marker_count,
                        (unsigned int)counters.boot_marker_reason,
+                       counters.fw_version,
                        crash_json[0] != '\0' ? "," : "",
                        crash_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
