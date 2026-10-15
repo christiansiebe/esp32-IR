@@ -136,6 +136,8 @@ sie **selbststaendig wiederherstellen**.
   python3 tools/remote-shell/supervise.py            # starten (im Hintergrund)
   python3 tools/remote-shell/supervise.py --status
   ```
+- Autostart (Sandbox hat kein systemd/cron): `bash tools/remote-shell/install_autostart.sh`
+  haengt einen `~/.bashrc`-Hook an, der den Supervisor bei Bedarf startet.
 - Token kommt aus `$SANDBOX_TERM_TOKEN_FILE` (Default:
   `<workspace>/.remote-shell/token`, **ausserhalb** des Git-Baums). Fehlt die
   Datei, wird ein Token erzeugt. Token-Rotation = Datei ueberschreiben, **kein**
