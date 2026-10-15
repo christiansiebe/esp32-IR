@@ -68,4 +68,4 @@ systemctl daemon-reload && systemctl restart odroid-cmd-agent.service
 - **Desktop im Browser (noVNC)**: `novnc.service` (websockify `6080` → VNC `5901`),
   `xfce-vnc.service` (TigerVNC `:1`). Aufruf: `http://192.168.178.71:6080/vnc.html`.
 
-Details/Historie: `.openhands/memory/MEMORY.md` und `2026-10-14.md`.
+Details/Historie: gemeinsames Gedaechtnis `remote-shell/memory/SHARED.md` (live: `/workspace/MEMORY.md`).
