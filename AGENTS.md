@@ -60,6 +60,15 @@ Two firmware roles are built from one source tree.
   version becomes `unknown`; the workflow therefore sets
   `safe.directory $GITHUB_WORKSPACE` and exports `FIRMWARE_VERSION`. Tag releases
   (`git tag -a vX.Y.Z`) give a clean version instead of a bare SHA.
+- **Versioning + commit convention: see `VERSIONING.md`.** One SemVer tag per
+  firmware (`v0.1.0` is the first baseline; before it the version was `unknown`).
+  The sender's `fw_version()` also travels in the counters frame
+  (`espnow_diag_counters_t.fw_version`, `ESPNOW_DIAG_VERSION` 2) and is shown on
+  the receiver's sender page as `sender fw:` — so the other device's build is
+  visible without guessing. Commits stay role-scoped: only the sender's or the
+  receiver's files, and `feat(both):` when a change touches both (e.g. the wire
+  format in `espnow_diag.h`). `main/main.c` carries both roles, so split its diff
+  per hunk (`git add -p`) when only one side changed.
 
 ## Flash layout (4 MB)
 | Partition | Offset | Size |

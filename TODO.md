@@ -302,6 +302,37 @@ Image, kein separates `sender-sleep`-Artefakt mehr.
       wirklich enthalten ist. `build_profile` im `counters`-Diag zeigt zur Laufzeit, welches
       Image läuft (1 = mit Sleep). (`.github/workflows/esp-idf-build.yml`)
 
+### 🐛 Sender bleibt „HELD AWAKE", `slept: 0.0 s` (BEHOBEN 2026-10-15)
+Symptom (am Gerät, T+38 s nach Boot): `adaptive sleep window: 100 ms (shortest gap
+seen: 691 ms)` und gleichzeitig `sleep: awake … slept this session: 0.0 s · HELD AWAKE
+(data / OTA request active)`, CPU bei `80 MHz now`. Die Kalibrierung hatte also eine
+691-ms-Lücke gesehen (Obergrenze 518 ms), der Schlaf lief trotzdem nie.
+Ursache: **Jeder** ESP-NOW-Diag-Request setzte in `receive_callback()` einen 2-s-Hold —
+auch ein reiner Counters-/Events-Statistik-Poll. Das Dashboard/der Receiver fragt die
+Counters aber im Sekundentakt ab, damit wurde der Hold ständig erneuert und lief nie ab
+(`uart_sleep_hold_active()` blockiert dann `uart_sleep_maybe_sleep_idf()`). Zweitens zählte
+der Regler ein Fenster als „sauberen Schlaf", sobald nach dem `vTaskDelay` nichts im
+UART-Puffer lag — auch wenn der `vTaskDelay` wegen des Holds gar nicht geschlafen hat.
+- [x] `uart_sleep_hold(2000)` nur noch bei **echten Datenflüssen**: `ESPNOW_DIAG_SECTION_HISTORY`
+      oder `_CMD` (OTA hält weiterhin 5 s). Ein Counters/Events-Poll hält die CPU nicht mehr.
+- [x] Sauberer Schlaf nur bei **echtem** Schlaf: `sleep_exit_callback()` speist die real
+      akkumulierte Light-Sleep-Zeit via `uart_sleep_set_slept_ms()` ein; `uart_sleep_note_clean()`
+      wächst nur, wenn `slept_ms != 0`. Sonst wächst der Regler ein Fenster, das er nie getestet hat.
+- [x] Host-Test: `test_no_sleep_does_not_grow_the_window` (Fenster bleibt bei `slept_ms == 0`).
+      `test_uart_sleep_window.c` 21 → **25 Checks**, alle grün.
+- [ ] Am Gerät verifizieren: nach dem Flashen müssen `slept this session > 0` und (ohne
+      History-Pull) `HELD AWAKE` verschwinden; `parser_resyncs`/`gap_loss` bleiben 0.
+
+### Versionierung + Commit-Konvention
+- [x] `VERSIONING.md`: SemVer-Tag `vMAJOR.MINOR.PATCH` ist die Wahrheit (erste Baseline
+      `v0.1.0`); `git describe` schreibt sie in `main/build_version.h` → `fw_version()`.
+      MAJOR steigt bei Wire-/Speicher-Bruch, MINOR bei neuer Funktion, PATCH bei Bugfix.
+- [x] Sender-Version über den Draht: `espnow_diag_counters_t.fw_version` (aus `fw_version()`),
+      `ESPNOW_DIAG_VERSION` 1 → 2; Receiver zeigt sie auf der Senderseite als `sender fw:`.
+      Frame bleibt in einem ESP-NOW-Payload (16 + 204 = 220 ≤ 250, `_Static_assert`).
+- [x] Commit-Konvention: je Commit nur die Dateien der weiterentwickelten Seite; `feat(both):`
+      wenn beide (z. B. Wire-Format). `main/main.c` trägt beide Rollen → Diff hunk-genau teilen.
+
 ### 🐛 Sender-Diagnose: „DID NOT END CLEANLY" bei bewusstem Reboot (BEHOBEN)
 Symptom: Nach OTA/Console-Reboot meldete der Sender beim nächsten Boot
 „Previous session: DID NOT END CLEANLY" mit `reset reason: software-restart (3)` —
