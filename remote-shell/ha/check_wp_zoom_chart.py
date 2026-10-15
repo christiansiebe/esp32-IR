@@ -111,7 +111,31 @@ r = sandbox.resizeRect(base, 'nw', -5000, -5000, b);
 if (r.left < 0 || r.top < 0 || r.left + r.width > 1920 || r.top + r.height > 1080)
   fail('nw escaped viewport: ' + JSON.stringify(r));
 
-// Raw 7-day history (enough points that downsampling must kick in).
+// The chart must not stay on ApexCharts' light theme in HA dark mode.
+if (typeof sandbox.chartTheme !== 'function') fail('chartTheme not exposed');
+const light = sandbox.chartTheme('light');
+const dark = sandbox.chartTheme('dark');
+if (light.mode !== 'light' || dark.mode !== 'dark') fail('theme mode wrong');
+const lum = (hex) => {
+  const h = hex.replace('#', '');
+  return 0.299 * parseInt(h.slice(0,2),16) + 0.587 * parseInt(h.slice(2,4),16) + 0.114 * parseInt(h.slice(4,6),16);
+};
+if (lum(dark.text) < 128) fail('dark text not light: ' + dark.text);
+if (lum(light.text) > 128) fail('light text not dark: ' + light.text);
+if (lum(dark.grid) > 128) fail('dark grid not dark: ' + dark.grid);
+if (lum(light.grid) < 128) fail('light grid not light: ' + light.grid);
+
+// A dark-mode instance must hand the dark palette to the chart options.
+const darkInst = new Cls();
+darkInst._hass = { themes: { darkMode: true } };
+darkInst._series = [];
+const opts = darkInst._chartOptions();
+if (opts.theme.mode !== 'dark') fail('options theme not dark: ' + JSON.stringify(opts.theme));
+if (opts.chart.foreColor !== dark.text) fail('chart foreColor wrong: ' + opts.chart.foreColor);
+if (opts.grid.borderColor !== dark.grid) fail('grid colour wrong: ' + opts.grid.borderColor);
+if (opts.legend.labels.colors !== dark.text) fail('legend colour wrong');
+if (opts.xaxis.labels.style.colors !== dark.subtle) fail('xaxis label colour wrong');
+
 const t0 = Date.now() - 7 * 86400 * 1000;
 const raw = [];
 for (let i = 0; i < 4000; i++) raw.push({ s: String(20 + Math.sin(i / 30) * 5), lu: (t0 + i * 60000) / 1000 });

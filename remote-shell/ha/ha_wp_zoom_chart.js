@@ -59,6 +59,20 @@ function resizeRect(rect, dir, dx, dy, b) {
   return { left, top, width: right - left, height: bottom - top };
 }
 
+// ApexCharts defaults to its light theme, so on HA's dark theme the axis,
+// legend and grid colours stay dark and vanish into the card background.
+// Derive a readable palette from the mode, then refine it with the HA CSS
+// variables (which follow the user's theme) when they are available.
+function chartTheme(mode) {
+  const dark = mode === "dark";
+  return {
+    mode: dark ? "dark" : "light",
+    text: dark ? "#e1e1e1" : "#212121",
+    subtle: dark ? "#b0b0b0" : "#727272",
+    grid: dark ? "#3a3a3a" : "#e0e0e0",
+  };
+}
+
 class WpZoomChart extends HTMLElement {
   setConfig(config) {
     this._cfg = config || {};
@@ -83,6 +97,36 @@ class WpZoomChart extends HTMLElement {
 
   // Sections view: let the user resize the card in the grid (columns x rows).
   getGridOptions() { return { columns: 12, rows: 4, min_columns: 6, min_rows: 2 }; }
+
+  // Follow HA's light/dark theme so the axes and legend stay readable. The
+  // card element inherits the theme, so its computed colours are authoritative;
+  // fall back to a plain mode probe when getComputedStyle is unavailable.
+  _theme() {
+    const t = chartTheme(this._dark() ? "dark" : "light");
+    if (typeof getComputedStyle !== "function") return t;
+    try {
+      const cs = getComputedStyle(this);
+      const pick = (name, def) => (cs.getPropertyValue(name) || "").trim() || def;
+      t.text = pick("--primary-text-color", t.text);
+      t.subtle = pick("--secondary-text-color", t.subtle);
+      t.grid = pick("--divider-color", t.grid);
+    } catch (e) { /* keep the mode defaults */ }
+    return t;
+  }
+
+  _dark() {
+    if (this._hass && this._hass.themes && typeof this._hass.themes.darkMode === "boolean") {
+      return this._hass.themes.darkMode;
+    }
+    if (typeof getComputedStyle === "function") {
+      try {
+        const bg = getComputedStyle(this).backgroundColor || "";
+        const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+        if (m) return (0.299 * +m[1] + 0.587 * +m[2] + 0.114 * +m[3]) < 128;
+      } catch (e) { /* ignore */ }
+    }
+    return false;
+  }
 
   _render() {
     this.innerHTML = "";
@@ -124,26 +168,34 @@ class WpZoomChart extends HTMLElement {
     const series = (this._series || []).map((s) => ({
       name: s.name, data: s.points,
     }));
+    const t = this._theme();
     return {
       chart: {
         type: "line", height: "100%", width: "100%",
         animations: { enabled: false },
         toolbar: { show: false }, zoom: { enabled: true, type: "x" },
         fontFamily: "inherit",
+        background: "transparent",
+        foreColor: t.text,
       },
+      theme: { mode: t.mode },
       series,
       stroke: { curve: "smooth", width: 2 },
       markers: { size: 0 },
-      legend: { show: true, position: "bottom" },
-      grid: { borderColor: "#e0e0e0", strokeDashArray: 3 },
-      xaxis: { type: "datetime", labels: { datetimeUTC: false } },
+      legend: { show: true, position: "bottom", labels: { colors: t.text } },
+      grid: { borderColor: t.grid, strokeDashArray: 3 },
+      xaxis: {
+        type: "datetime", labels: { datetimeUTC: false, style: { colors: t.subtle } },
+        axisBorder: { color: t.grid }, axisTicks: { color: t.grid },
+      },
       yaxis: (this._series || []).map((s) => ({
         seriesName: s.name, show: true,
-        title: { text: s.unit || "" },
+        title: { text: s.unit || "", style: { color: t.subtle } },
+        labels: { style: { colors: t.subtle } },
         opposite: !!s.opposite, decimalsInFloat: 1,
       })),
-      tooltip: { x: { format: "dd.MM. HH:mm" } },
-      noData: { text: "Keine Daten im Zeitraum" },
+      tooltip: { theme: t.mode, x: { format: "dd.MM. HH:mm" } },
+      noData: { text: "Keine Daten im Zeitraum", style: { color: t.subtle } },
     };
   }
 
