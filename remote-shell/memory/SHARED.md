@@ -25,6 +25,13 @@ hinweg teilbar.
 - Erreichbarkeit: Odroid nur per IPv6 (DS-Lite); die Sandbox hat kein IPv6 -> direkter
   Zugriff unmoeglich, nur der ausgehende Weg funktioniert.
 
+## Repo-Layout (vom Nutzer bestaetigt)
+- Der ESP-IDF-Firmware-Baum (main/, components/, tools/, test/, CMakeLists.txt,
+  partitions.csv, sdkconfig.defaults, .github/, Firmware/) bleibt UNBERUEHRT,
+  ausser die Aufgabe betrifft wirklich die Firmware.
+- Alles Nicht-Firmware (Odroid/HA/Dashboard/Sandbox + Hilfsskripte/Tests) gehoert
+  unter remote-shell/ (CI ignoriert remote-shell/**). HA-Tools: remote-shell/ha/.
+
 ## Konventionen
 - Keine Geheimnisse in dieser Datei (oeffentliches Repo).
 - Kurze, dauerhafte Fakten hier; ausfuehrliche Historie in datierten Logs.
