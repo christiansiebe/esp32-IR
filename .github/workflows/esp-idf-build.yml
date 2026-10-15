@@ -150,6 +150,11 @@ jobs:
           test -s "build/sender/esp32-IR.bin"
           grep -a -q 'adaptive sleep path compiled in' "build/sender/esp32-IR.bin"
           echo "Sender image contains the adaptive light-sleep path"
+          # The ESP-NOW connectionless wake window is what actually lets the
+          # Wi-Fi driver release its APB lock (otherwise DFS/light sleep never
+          # engage on an unassociated station). Assert the config is on.
+          grep -q '^CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS=[0-9]\+$' sdkconfig
+          grep -q '^CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS=[0-9]\+$' sdkconfig
 
       - name: Stage firmware and flash files
         shell: bash

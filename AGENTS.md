@@ -157,6 +157,29 @@ Two firmware roles are built from one source tree.
   four PM options and the 240 MHz ceiling.
 - Wi-Fi power save stays at the default `WIFI_PS_MIN_MODEM`; `WIFI_PS_NONE`
   would burn power and power save beyond the default hurts ESP-NOW reliability.
+- **ESP-NOW connectionless power save (2026-10-15, the real fix for "240 MHz,
+  0 steps, slept 0.0 s").** The sender's station is never associated with an AP,
+  so the Wi-Fi driver keeps `ESP_PM_APB_FREQ_MAX` asserted and the radio on all
+  the time; that pins DFS at the ceiling and blocks light sleep entirely.
+  `WIFI_PS_MIN_MODEM` only helps a *connected* station. The fix is to give the
+  connectionless module (ESP-NOW) a periodic wake window:
+  `esp_wifi_connectionless_module_set_wake_interval()` +
+  `esp_now_set_wake_window()` with window < interval
+  (`CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_{INTERVAL,WINDOW}_MS`, default 100/70 ms),
+  set in `uart_sleep_init_idf()` after `esp_wifi_start()`. The driver then drops
+  the radio (and the APB lock) between windows. A request arriving while the
+  radio is off is retried: `sender_diag_exchange_raw()` retries idempotent
+  requests up to `SENDER_DIAG_ATTEMPTS` (4); a command uses the single-shot
+  `sender_diag_exchange_once()` so it cannot run twice. See Espressif issue
+  esp-idf#11714 ("ESP-NOW does not release the WiFi module and APB_FREQ_MAX").
+- **Receiver without the SoftAP (`CONFIG_ESPNOW_RECEIVER_DISABLE_AP`, default
+  off).** Station-only mode: no `ESP32-IR-Meter` AP, dashboard over the home
+  WLAN only (DHCP/mDNS). ESP-NOW runs on `ESPNOW_IF` (station when the AP is off,
+  otherwise the AP interface) for every receiver-side peer. Because the sender
+  learns the channel by scanning for that AP, the AP-off receiver requires both
+  roles built with the same `CONFIG_ESPNOW_CHANNEL` (now configurable); the
+  sender falls back to it when the scan finds nothing, and a station-connected
+  receiver cannot leave its home AP's channel, so pick that channel.
 - Adaptive sender light sleep (`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP`, default
   **on**, sender ships as a single image): `main/uart_sleep_window.{h,c}` parks
   the CPU only in the quiet gap between SML telegram bursts. The window starts at

@@ -19,6 +19,7 @@
 
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_now.h"
 #include "esp_pm.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -61,6 +62,27 @@ bool uart_sleep_init_idf(void)
     /* Wi-Fi modem sleep releases the APB_MAX lock the Wi-Fi driver holds while
      * both interfaces are up; without it the CPU could never enter light sleep. */
     (void)esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+
+    /* The sender's station is never associated with an AP (it only scans the
+     * receiver's AP for the channel), so the Wi-Fi driver keeps
+     * ESP_PM_APB_FREQ_MAX asserted and the radio on all the time. That pins DFS
+     * at the ceiling (0 steps) and blocks light sleep entirely, which is exactly
+     * "240 MHz, slept 0.0 s". ESP-NOW is a Wi-Fi connectionless module: giving it
+     * a wake window smaller than the interval lets the driver drop the radio (and
+     * the APB lock) between windows, so DFS and light sleep work again. A request
+     * arriving while the radio is off is retried by the receiver. */
+    esp_err_t wake_err = esp_wifi_connectionless_module_set_wake_interval(
+        (uint16_t)CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS);
+    if (wake_err == ESP_OK) {
+        wake_err = esp_now_set_wake_window(
+            (uint16_t)CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS);
+    }
+    if (wake_err != ESP_OK) {
+        ESP_LOGW(UART_SLEEP_TAG,
+                 "Could not enable ESP-NOW power save (%s); the CPU may stay at "
+                 "the DFS ceiling because the Wi-Fi APB lock is never released",
+                 esp_err_to_name(wake_err));
+    }
 
     esp_pm_lock_acquire(s_no_light_sleep);
     /* Compiled in only when this real branch is active (not the stub), so the

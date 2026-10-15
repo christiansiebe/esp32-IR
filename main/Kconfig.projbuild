@@ -39,3 +39,55 @@ config ESPNOW_SENDER_LIGHT_SLEEP
         releases its APB lock. Enabled by default: the sender ships as a single
         image. Verify on the bench that ESP-NOW broadcasts are still received
         while sleeping (see TODO.md); disable to fall back to DFS only.
+
+config ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS
+    int "ESP-NOW connectionless wake interval (ms)"
+    range 10 1000
+    default 100
+    depends on ESPNOW_SENDER_LIGHT_SLEEP
+    help
+        ESP-NOW is a Wi-Fi "connectionless" module. On a sender whose station
+        is not associated with any AP the Wi-Fi driver keeps ESP_PM_APB_FREQ_MAX
+        asserted (RF/PHY/BB always on) unless a periodic wake window is set,
+        which pins DFS and light sleep at the maximum clock forever (observed:
+        "240 MHz, 0 steps, slept 0.0 s"). Setting an interval with a smaller
+        window makes the driver release the radio (and the APB lock) between
+        windows, so the CPU can scale down and light-sleep. The radio is awake
+        for ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS out of every interval; a request
+        that arrives while the radio is off is simply retried by the receiver.
+
+config ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS
+    int "ESP-NOW connectionless wake window (ms)"
+    range 1 1000
+    default 70
+    depends on ESPNOW_SENDER_LIGHT_SLEEP
+    help
+        Must stay below the wake interval; a window >= interval keeps the radio
+        on all the time and the APB lock stays pinned (no DFS, no light sleep).
+        ~70% of the interval is a good trade-off between power saving and not
+        dropping ESP-NOW requests from the receiver.
+
+config ESPNOW_CHANNEL
+    int "ESP-NOW channel"
+    range 1 13
+    default 1
+    help
+        Radio channel used for ESP-NOW. With the receiver's SoftAP enabled this
+        is also the AP's channel and the sender scans for the AP to learn it
+        automatically, so it rarely needs changing. With the AP disabled the
+        sender can no longer discover the channel: both devices must be built
+        with the same value here, and (station-connected receiver) it must match
+        the channel of the home AP the receiver associates with, because a
+        connected station cannot leave its AP's channel.
+
+config ESPNOW_RECEIVER_DISABLE_AP
+    bool "Receiver: disable the SoftAP (station-only dashboard)"
+    default n
+    depends on ESPNOW_ROLE_RECEIVER
+    help
+        Do not start the "ESP32-IR-Meter" SoftAP; keep the receiver in station
+        mode only and serve the dashboard over the home WLAN (reachable by its
+        DHCP address / mDNS). This removes the AP the sender used to find the
+        channel, so the sender falls back to ESPNOW_CHANNEL and both sides must
+        be built with the same ESPNOW_CHANNEL (see above). If no home WLAN is
+        configured the dashboard is then unreachable; ESP-NOW still works.

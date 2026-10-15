@@ -48,7 +48,20 @@
 
 static const char *TAG = "espnow_meter";
 
-#define ESPNOW_CHANNEL       1
+/* ESP-NOW channel. Configurable so it can be pinned when the receiver runs
+ * without its SoftAP (the sender then has no AP to scan for the channel and
+ * falls back to this value; both roles must agree). */
+#define ESPNOW_CHANNEL       CONFIG_ESPNOW_CHANNEL
+
+/* Wi-Fi interface ESP-NOW runs on. The sender uses its station interface; the
+ * receiver uses its SoftAP interface, or its station interface when the AP is
+ * disabled. Used for every receiver-side peer (diag/OTA targets and the broadcast
+ * peer) so the interface never has to be hard-coded per call site. */
+#if CONFIG_ESPNOW_ROLE_SENDER || CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+#define ESPNOW_IF            WIFI_IF_STA
+#else
+#define ESPNOW_IF            WIFI_IF_AP
+#endif
 /* mDNS name of the receiver dashboard (http://esp32-meter.local/). ESP-NOW is a
  * link-layer protocol with no IP, so the sender has no network identity and only
  * the receiver advertises a name. */
@@ -640,11 +653,13 @@ static void initialize_wifi_and_espnow(void)
     }
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 #else
+#if !CONFIG_ESPNOW_RECEIVER_DISABLE_AP
     g_ap_netif = esp_netif_create_default_wifi_ap();
     if (g_ap_netif == NULL) {
         ESP_LOGE(TAG, "Could not create default AP netif");
         ESP_ERROR_CHECK(ESP_FAIL);
     }
+#endif
     g_sta_netif = esp_netif_create_default_wifi_sta();
     if (g_sta_netif == NULL) {
         ESP_LOGE(TAG, "Could not create default station netif");
@@ -655,6 +670,14 @@ static void initialize_wifi_and_espnow(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                wifi_event_handler, NULL));
     ESP_ERROR_CHECK(load_wifi_credentials());
+#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+    /* Station-only: no SoftAP. The dashboard is reachable over the home WLAN;
+     * ESP-NOW runs on the station interface. The sender can no longer discover
+     * the channel from the AP, so both roles must share CONFIG_ESPNOW_CHANNEL. */
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_LOGI(TAG, "SoftAP disabled (CONFIG_ESPNOW_RECEIVER_DISABLE_AP); "
+                  "dashboard only reachable over the configured WLAN");
+#else
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     wifi_config_t ap_config = {0};
     memcpy(ap_config.ap.ssid, "ESP32-IR-Meter", sizeof("ESP32-IR-Meter"));
@@ -665,6 +688,7 @@ static void initialize_wifi_and_espnow(void)
     ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
     ap_config.ap.ssid_hidden = 0;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+#endif
     wifi_config_t sta_config;
     fill_station_config(&sta_config);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
@@ -691,15 +715,17 @@ static void initialize_wifi_and_espnow(void)
     ESP_ERROR_CHECK(esp_wifi_set_channel(g_espnow_channel, WIFI_SECOND_CHAN_NONE));
     wifi_interface_t espnow_interface = WIFI_IF_STA;
 #else
+#if !CONFIG_ESPNOW_RECEIVER_DISABLE_AP
     ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP,
                                           WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G |
                                           WIFI_PROTOCOL_11N));
+#endif
     if (g_wifi_configured) {
         ESP_ERROR_CHECK(esp_wifi_connect());
     } else {
         ESP_LOGI(TAG, "No FRITZ!Box credentials saved; use the local AP configuration page");
     }
-    wifi_interface_t espnow_interface = WIFI_IF_AP;
+    wifi_interface_t espnow_interface = ESPNOW_IF;
 #endif
     ESP_ERROR_CHECK(esp_now_init());
 
@@ -715,8 +741,13 @@ static void initialize_wifi_and_espnow(void)
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
+#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+    ESP_LOGI(TAG, "Receiver ready on ESP-NOW channel %u (SoftAP disabled)",
+             g_espnow_channel);
+#else
     ESP_LOGI(TAG, "AP started: SSID=ESP32-IR-Meter, channel=%u, IP=192.168.4.1",
              g_espnow_channel);
+#endif
 #endif
 }
 
@@ -1996,7 +2027,7 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
                 .utc_seconds = (int64_t)time(NULL),
                 .valid = system_time_is_valid() ? 1 : 0,
             };
-            if (add_espnow_peer(info->src_addr, WIFI_IF_AP) == ESP_OK) {
+            if (add_espnow_peer(info->src_addr, ESPNOW_IF) == ESP_OK) {
                 (void)esp_now_send(info->src_addr, (const uint8_t *)&response,
                                    sizeof(response));
                 ESP_LOGI(TAG, "Answered sender time sync (%s, utc=%lld)",
@@ -4467,9 +4498,9 @@ static esp_err_t console_page_handler(httpd_req_t *req)
 /* Send one diagnostic request (whose header/body is already built in `payload`)
  * to the sender and wait for the matching response. Shared by the section
  * queries and the history-backfill session. */
-static esp_err_t sender_diag_exchange_raw(const void *payload, size_t payload_len,
-                                          uint32_t request_id,
-                                          uint8_t *response, size_t *response_len)
+static esp_err_t sender_diag_exchange_once(const void *payload, size_t payload_len,
+                                           uint32_t request_id,
+                                           uint8_t *response, size_t *response_len)
 {
     uint8_t sender_mac[ESP_NOW_ETH_ALEN];
     portENTER_CRITICAL(&g_sender_mac_lock);
@@ -4480,7 +4511,7 @@ static esp_err_t sender_diag_exchange_raw(const void *payload, size_t payload_le
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t err = add_espnow_peer(sender_mac, WIFI_IF_AP);
+    esp_err_t err = add_espnow_peer(sender_mac, ESPNOW_IF);
     if (err != ESP_OK) {
         return err;
     }
@@ -4514,6 +4545,31 @@ static esp_err_t sender_diag_exchange_raw(const void *payload, size_t payload_le
         return ESP_OK;
     }
     return ESP_ERR_TIMEOUT;
+}
+
+/* Retry a diagnostic request a few times. With ESP-NOW power save the sender's
+ * radio is off for part of every wake interval, so a request sent in that gap is
+ * never received; a short retry rides over it. Only used for idempotent requests
+ * (status/history reads); a command must not run twice. */
+#define SENDER_DIAG_ATTEMPTS 4u
+
+static esp_err_t sender_diag_exchange_raw(const void *payload, size_t payload_len,
+                                          uint32_t request_id,
+                                          uint8_t *response, size_t *response_len)
+{
+    esp_err_t err = ESP_ERR_TIMEOUT;
+    for (unsigned int attempt = 0; attempt < SENDER_DIAG_ATTEMPTS; ++attempt) {
+        err = sender_diag_exchange_once(payload, payload_len, request_id,
+                                        response, response_len);
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        /* A MAC/send error will not fix itself by retrying; only timeouts do. */
+        if (err != ESP_ERR_TIMEOUT) {
+            return err;
+        }
+    }
+    return err;
 }
 
 static esp_err_t sender_diag_exchange(uint16_t flags, uint32_t page,
@@ -4560,8 +4616,9 @@ static esp_err_t sender_cmd_exchange(const char *line, char *out, size_t out_siz
 
     uint8_t response[ESP_NOW_MAX_DATA_LEN];
     size_t response_len = 0;
-    esp_err_t err = sender_diag_exchange_raw(&request, sizeof(request), request_id,
-                                             response, &response_len);
+    /* No retry here: the sender would run the command again on a lost response. */
+    esp_err_t err = sender_diag_exchange_once(&request, sizeof(request), request_id,
+                                              response, &response_len);
     if (err != ESP_OK) {
         return err;
     }
@@ -5589,7 +5646,7 @@ static esp_err_t send_sender_ota_command(espnow_ota_packet_t *command,
                 continue;
             }
             memcpy(g_espnow_ota_sender_mac, ack.source, ESP_NOW_ETH_ALEN);
-            err = add_espnow_peer(g_espnow_ota_sender_mac, WIFI_IF_AP);
+            err = add_espnow_peer(g_espnow_ota_sender_mac, ESPNOW_IF);
             if (err != ESP_OK) {
                 return err;
             }
