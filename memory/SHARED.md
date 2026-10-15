@@ -49,3 +49,8 @@ hinweg teilbar.
   vor der Umgebung -> Token live rotierbar.
 - Token-Rotation: Odroid-Token in `/etc/systemd/system/odroid-cmd-agent.service`
   (`Environment=SANDBOX_TERM_TOKEN=...`) ist die Wahrheit; Cloud-Secret darauf angleichen.
+
+## Verifiziert (2026-10-15)
+- Odroid verbindet automatisch zu BEIDEN Sandboxes (`fkhhrtgachhziqps`, `zvqpzxrtfjcxbcgw`).
+- E2E: Befehl aus der Fremd-Sandbox heraus -> Odroid antwortet (`E2E-OK`, `odroidn2`).
+- Zeiger gesetzt: `AGENTS.md`, `.openhands/setup.sh`, Cloud-Tag an 12 Conversations.
