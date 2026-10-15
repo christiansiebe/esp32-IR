@@ -78,3 +78,7 @@ Desktop.ini
 *.sln.docstates # Visual Studio
 .ccache/
 sdkconfig.*
+
+# remote-shell channel state (token must never be committed)
+.remote-shell/
+*.token
