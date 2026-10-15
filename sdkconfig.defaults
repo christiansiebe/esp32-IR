@@ -1,0 +1,43 @@
+# Cap the CPU at 80 MHz instead of the IDF default of 160 MHz, but let power
+# management scale the clock down (to the 40 MHz XTAL) when the CPU is idle.
+#
+# The device is network-/UART-bound and the SML UART runs at only 9600 baud, so
+# the top clock buys almost nothing while roughly doubling dynamic current. A
+# *variable* clock keeps the 80 MHz ceiling for the ESP-NOW send burst and drops
+# to 40 MHz between cycles; automatic light sleep (tickless idle) then parks the
+# CPU while the tasks block.
+#
+# Trade-off: on the ESP32 the Wi-Fi driver holds an APB_MAX lock while the
+# interfaces are up, and light sleep can make the receiver miss the sender's
+# connectionless ESP-NOW broadcasts. The minute-history backfill exists exactly
+# for that case: anything missed over the air is pulled from the sender's own
+# SPIFFS history afterwards, so enabling sleep does not lose data. If ESP-NOW
+# ever proves unreliable on the bench, disable CONFIG_PM_ENABLE (and with it DFS
+# and tickless idle) to fall back to the fixed 80 MHz behaviour. Hardware
+# verification of ESP-NOW under light sleep is still open (see TODO.md).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
+CONFIG_PM_ENABLE=y
+# DFS at startup: max = DEFAULT_CPU_FREQ_MHZ (80), min = XTAL (40).
+CONFIG_PM_DFS_INIT_AUTO=y
+# Keep the light-sleep and idle paths in IRAM / optimised so the wake overhead
+# (and therefore the average current) is lower.
+CONFIG_PM_SLP_IRAM_OPT=y
+CONFIG_PM_RTOS_IDLE_OPT=y
+# Automatic light sleep ("tickless idle") in FreeRTOS.
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+# Let the firmware register entry/exit callbacks so the on-demand diagnostics can
+# report whether the device actually sleeps in idle (and for how long).
+CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
+# Wi-Fi sleep-related code in IRAM (lower power-save wake latency).
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=y
+
+# Adaptive sender light sleep: ON by default (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
+# defaults to y in main/Kconfig.projbuild), so the sender ships as a single
+# image. The sender parks the CPU in the quiet gaps between SML telegram bursts
+# only: the window starts at 400 ms, is always capped below the shortest
+# inter-telegram gap it has observed, and halves itself if a telegram ever
+# arrives while it slept. An ESP_PM_NO_LIGHT_SLEEP lock keeps the CPU awake for
+# the whole burst, so the UART FIFO is never starved. It also switches the
+# sender to WIFI_PS_MIN_MODEM (required to release the Wi-Fi driver's APB_MAX
+# lock, otherwise light sleep is never entered). See TODO.md for the open bench
+# verification; set CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=n to fall back to DFS only.

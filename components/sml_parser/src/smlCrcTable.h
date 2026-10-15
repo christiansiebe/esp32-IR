@@ -3,6 +3,12 @@
 
 #include <stdint.h>
 
+/* SML standard CRC-16 (FNN / BSI TR-03109-1): reflected polynomial 0x8408,
+ * init 0xFFFF, final XOR 0xFFFF. Not every meter uses it - the Holley DTZ541
+ * over RS485 wants Kermit CRC instead. Supporting such a meter needs a second
+ * table/algorithm here; the standard table is correct for the common meters.
+ * (Caveat confirmed against spacemanspiff2007/sml2mqtt.) */
+
 #ifdef ARDUINO
 #include <Arduino.h>
 static const uint16_t smlCrcTable[256] PROGMEM =

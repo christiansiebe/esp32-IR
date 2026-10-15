@@ -9,3 +9,63 @@ config ESPNOW_ROLE_RECEIVER
     bool "Receiver (SML value transport and Wi-Fi dashboard)"
 
 endchoice
+
+config ESPNOW_AP_BEACON_INTERVAL
+    int "Receiver SoftAP beacon interval (TU, 1 TU = 1024 us)"
+    default 100
+    range 100 60000
+    depends on ESPNOW_ROLE_RECEIVER
+    help
+        Beacon interval of the receiver's setup SoftAP (SSID ESP32-IR-Meter).
+        Beacons are the receiver's largest continuous radio cost, so a longer
+        interval saves a little power. The Wi-Fi API requires a multiple of 100.
+        100 (the API default) is kept unless changed deliberately: a longer
+        interval delays clients that discover or reconnect to the AP.
+
+config ESPNOW_RX_POWER_SAVE
+    bool "Sender: ESP-NOW receive power save (windowed RX)"
+    default n
+    depends on ESPNOW_ROLE_SENDER
+    help
+        Let the ESP-NOW connectionless module sleep between wake intervals
+        instead of listening continuously. This lowers the sender's idle
+        current, but ESP-NOW has no time synchronisation, so packets that
+        arrive outside the wake window are lost. Off by default: it trades
+        receive reliability for power, and the sender is already the low-power
+        side. Enable only after verifying on the bench that the receiver still
+        gets the telegrams it needs (the history backfill can recover minutes,
+        but not real-time values).
+
+config ESPNOW_PS_INTERVAL_MS
+    int "ESP-NOW power-save wake interval (ms)"
+    default 100
+    range 1 65535
+    depends on ESPNOW_RX_POWER_SAVE
+    help
+        How often the ESP-NOW connectionless module wakes up, in milliseconds.
+        Espressif recommends a multiple of 100.
+
+config ESPNOW_PS_WINDOW_MS
+    int "ESP-NOW power-save wake window (ms)"
+    default 70
+    range 0 65535
+    depends on ESPNOW_RX_POWER_SAVE
+    help
+        How long the module keeps the radio on after each wake, in milliseconds.
+        Espressif recommends about 70% of the interval. A value at or above the
+        interval means "listen all the time" and is clamped to interval - 1.
+
+config ESPNOW_SENDER_LIGHT_SLEEP
+    bool "Sender: adaptive light sleep between SML telegram bursts"
+    default y
+    depends on ESPNOW_ROLE_SENDER
+    help
+        Let the sender park the CPU (light sleep) in the quiet gaps between
+        SML telegram bursts. The window adapts to the shortest quiet interval
+        the UART has shown and backs off when a sleep was too long. Light sleep
+        stops the APB clock, so an actively receiving UART would lose bytes;
+        the window is therefore only entered after the line has gone quiet.
+        This also enables Wi-Fi modem sleep on the sender so the Wi-Fi driver
+        releases its APB lock. Enabled by default: the sender ships as a single
+        image. Verify on the bench that ESP-NOW broadcasts are still received
+        while sleeping (see TODO.md); disable to fall back to DFS only.

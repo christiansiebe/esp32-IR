@@ -76,3 +76,12 @@ Desktop.ini
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
+.ccache/
+sdkconfig.*
+
+# remote-shell channel state (token must never be committed)
+.remote-shell/
+*.token
+
+# OpenHands agent memory (local, not part of the firmware)
+.openhands/
