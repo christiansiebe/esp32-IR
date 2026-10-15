@@ -131,7 +131,7 @@ Vorschlag zur Abstimmung — bitte hier ergaenzen/korrigieren, dann gilt er.
 in HA. HA zeichnet erst ab Einrichtung (2026-10-11) auf. Import in die HA-**Langzeit-
 statistik** erledigt: 3 Temperatur-Sensoren reichen jetzt bis **2025-08-31** zurueck
 (297 Tages- + 14 Monatswerte je Sensor, lueckenfuellend VOR dem HA-Eigenbestand).
-- Werkzeug (committed): `tools/ha_gateway_history.py` (laeuft IM HA-Container; liest
+- Werkzeug (committed): `remote-shell/ha/ha_gateway_history.py` (laeuft IM HA-Container; liest
   Gateway-Credentials + Admin-JWT aus `.storage`, importiert via WS-Befehl
   `recorder/import_statistics`; nur Buckets AELTER als HA's erster Punkt -> keine
   Ueberschneidung, idempotent). `--dry-run` verfuegbar.
@@ -140,12 +140,12 @@ statistik** erledigt: 3 Temperatur-Sensoren reichen jetzt bis **2025-08-31** zur
   metadata braucht `mean_type` (1=arithmetisch) + `unit_class`. `statistics_meta.has_mean`
   kann NULL sein -> Abfragen trotzdem per `recorder/statistics_during_period` (period
   day/week/month), NICHT per history-API fuer lange Zeitraeume.
-- Karte (committed): `tools/ha_wp_zoom_chart.js` -> deployt nach `/config/www/`
+- Karte (committed): `remote-shell/ha/ha_wp_zoom_chart.js` -> deployt nach `/config/www/`
   (`wp-zoom-chart.js`). Klick = Grossansicht, Rand ziehbar, Aufloesung skaliert mit
   Breite (300px->150 .. 2400px->1200 Punkte), Zeitraeume 1h/6h/24h/7T/30T/90T/1J;
   kurze Zeitraeume = Rohhistorie, lange = Statistik.
-- Host-Tests (committed, in `run_host_tests.sh`): `test/test_ha_gateway_history.py`,
-  `test/check_wp_zoom_chart.py`. Voller Lauf gruen.
+- Host-Tests (committed, NICHT im Firmware-CI, weil remote-shell/** ignoriert wird): `remote-shell/ha/test_ha_gateway_history.py`,
+  `remote-shell/ha/check_wp_zoom_chart.py`. Voller Firmware-Lauf gruen.
 - Kein `storage.bin`/DB-Backup noetig; DB-Backup `home-assistant_v2.db.bak-preimport`
   liegt auf dem Odroid (648 MB) - bei Platznot loeschbar.
 - Nur 3 Gateway-Ressourcen haben Recordings; Energie-/Leistungs-Sensoren haben KEINE
