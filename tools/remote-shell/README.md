@@ -1,181 +1,71 @@
-# Remote-Zugriff auf die Sandbox (Token-Auth)
+# remote-shell — Odroid von der Sandbox aus steuern
 
-Ziel: Von deinem **Odroid (Armbian)** aus auf die **Sandbox** zugreifen — mit
-Token-Authentifizierung, ohne offenen Port bei dir.
+Persistenter, selbstheilender Kanal: **Odroid verbindet sich ausgehend (WSS)** zur Sandbox;
+die Sandbox kann den Odroid **nicht** direkt anwählen. Deshalb muss der Sandbox-Server laufen,
+bevor der Odroid-Agent sich verbinden kann.
 
-## Ausgangslage (in der Sandbox getestet)
-- **Ausgehend** ist frei (Internet, SSH-Client) ✅
-- **Eingehend** nur über den **Runtime-Proxy** (2 öffentliche URLs, Ports
-  12000/12001) ✅ — **WebSockets werden durchgereicht** (verifiziert) ✅
-- Rohes `ssh -p 12000` durch den Proxy geht **nicht** (Proxy terminiert TLS/HTTP).
-
-Deshalb zwei Wege. Beide brauchen nur, dass die Sandbox **ausgehend** darf —
-das kann sie.
-
----
-
-## Option A — Shell im Terminal des Odroid (empfohlen, kein offener Port)
-
-Ablauf:
-1. In der **Sandbox** läuft `sandbox_term_server.py` (WS→PTY, Token-geschützt).
-2. Auf dem **Odroid** läuft `sandbox_term_client.py`, verbindet sich **ausgehend**
-   per WSS zur Proxy-URL und gibt die Sandbox-Shell im lokalen Terminal aus.
-   → Du tippst auf dem Odroid, die Befehle laufen in der Sandbox.
-
+## Schnellstart (Sandbox, nach jedem Sandbox-Reset)
 ```bash
-# --- Sandbox ---
-export SANDBOX_TERM_TOKEN="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
-export SANDBOX_TERM_PORT=12001
-python3 tools/remote-shell/sandbox_term_server.py
-
-# --- Odroid ---
-python3 -m pip install websockets
-export SANDBOX_TERM_TOKEN='<dasselbe Token>'
-python3 sandbox_term_client.py 'wss://work-2-<id>.prod-runtime.all-hands.dev/'
+python3 /workspace/remote-shell/supervise.py           # startet/repariert den Server (idempotent)
+python3 /workspace/remote-shell/supervise.py --status  # laeuft? + benoetigte Agent-URL
+bash    /workspace/remote-shell/install_autostart.sh   # optional: Hook in ~/.bashrc
 ```
+`supervise.py` leitet die Proxy-URL aus `$RUNTIME_ID` ab:
+`wss://work-2-<RUNTIME_ID>.prod-runtime.all-hands.dev/` (Port 12001).
 
-Sicherheit: ohne/mit falschem Token → `close 1008 unauthorized` (getestet).
-Es lauscht auf `0.0.0.0:12001`; öffentlich nur über den Proxy.
-
----
-
-## Option B — SSH-Reverse-Tunnel (dein `ssh`-Client, wie gewohnt)
-
-Setzt voraus, dass die **Sandbox den Odroid ausgehend erreicht** (`ssh` auf
-Host/IP:Port). Dann baut die Sandbox einen Reverse-Tunnel: die **Odroid-SSH-Shell
-bleibt deine Konsole**, zusätzlich wird die Sandbox-Shell auf
-`127.0.0.1:2222` des Odroid freigelegt.
-
+## Befehl senden
 ```bash
-# --- Odroid: /etc/ssh/sshd_config ---
-GatewayPorts no          # Standard; nur localhost-Bindung genuegt
-# ggf. AddReverseForward (OpenSSH >= 9.8) fuer RemoteForward
-
-# --- Sandbox ---
-export SANDBOX_SSH_HOST=<odroid-ip-oder-host>
-export SANDBOX_SSH_USER=<dein-user>
-export SANDBOX_SSH_KEY=~/.ssh/id_ed25519      # Key auf dem Odroid autorisieren
-export SANDBOX_SSH_TOKEN=<tunnel-token>
-tools/remote-shell/reverse_ssh.sh -R          # nur Tunnel
-tools/remote-shell/reverse_ssh.sh             # interaktive Odroid-Shell
+bash /workspace/remote-shell/cmd_send.sh "uname -a"
+bash /workspace/remote-shell/cmd_send.sh "systemctl status novnc.service --no-pager" 60
 ```
+Der Odroid zeigt den Befehl und fuehrt ihn nach **lokaler Bestaetigung** aus.
+Lange Laeufe: Timeout via `SANDBOX_TERM_CMD_TIMEOUT` (Default 300 s) — oder am Odroid
+detached starten (`systemd-run`/`systemctl start`).
 
-Danach auf dem Odroid: `python3 sandbox_term_client.py ws://127.0.0.1:2222/`
-(mit demselben Token) — oder direkt die Sandbox-Shell nutzen.
+`cmd_send.sh` ist **selbstheilend**: laeuft der Server nicht (z.B. nach einem Reset),
+startet es `supervise.py` automatisch und wartet auf den Reconnect des Odroid-Agenten (~5 s).
 
-> Hinweis: Auf einem `sshd` mit `AllowTcpForwarding no` oder einem
-> `Match`-Block, der `RemoteForward` verbietet, schlägt `-R` fehl. Dann
-> Option A nehmen.
+## Mehrere Chats / mehrere Sandboxes
 
----
+Der Server liegt auf **Sandbox-Ebene** (`/workspace/remote-shell/`). Jeder weitere Chat in
+**derselben Sandbox** kann daher sofort `cmd_send.sh` nutzen — kein Setup, kein Token-Handling.
+Nur bei einem Chat in einer **anderen Sandbox** verbindet sich ein zweiter Agent dorthin.
 
-## Option C — Kommando-Kanal: Agent führt auf dem Odroid aus, DU bestätigst
-
-Ziel: Der Agent kann Befehle **auf dem Odroid** ausführen (z. B. btrfs prüfen),
-aber **nur nach deiner Bestätigung** am Odroid-Terminal.
-
-```
-Agent (Sandbox)  --Befehl-->  Server  --WS-->  cmd_agent.py (Odroid)
-                                                   |
-                                            Anzeige + [y]/[a]/[N]
-                                                   |
-Agent (Sandbox)  <--Ergebnis--  Server  <--WS---  Ausführung
-```
-
-**Auf dem Odroid** (eigenes Terminal, als root):
+**Zweite Sandbox hinzufuegen** (auf dem Odroid, kein Neustart des Kanaels noetig):
 ```bash
-export SANDBOX_TERM_TOKEN='<token>'
-python3 cmd_agent.py 'wss://work-2-<id>.prod-runtime.all-hands.dev/'
+echo 'wss://work-2-<ANDERE_ID>.prod-runtime.all-hands.dev/' >> /etc/odroid-cmd-agent.urls
+systemctl restart odroid-cmd-agent.service
 ```
-Optionen am Agenten:
-- **`y`** = einmal ausführen · **`a`** = immer (bis Ctrl-C) · **`N`** = ablehnen
-- **Ctrl-C** schaltet die Bestätigungspflicht um (Pause-Modus)
+Der Agent liest die Datei (eine URL pro Zeile, `#` = Kommentar) und haelt **alle** Ziele
+gleichzeitig verbunden — je Ziel eigener Reconnect. Alternativ ohne Datei:
+`Environment=SANDBOX_TERM_URLS=wss://a/ wss://b/` (leerzeichengetrennt) im Unit setzen.
+Alle Ziele teilen sich `SANDBOX_TERM_TOKEN`.
 
-**Auf der Sandbox** (hier) senden:
+Hinweis: `run_remote_command` im Server **broadcastet** an alle verbundenen Agenten — pro
+Sandbox also **genau ein** Ziel eintragen (sonst fuehrt derselbe Befehl mehrfach aus).
+
+## Dateien
+- `supervise.py` — Supervisor (flock-geschuetzt, startet Server bei Absturz neu, `--status`/`--stop`)
+- `sandbox_term_server.py` — WS-Server: PTY-Terminal + `/agent`-Befehlskanal
+- `cmd_send.sh` — Befehle ueber die Queue senden
+- `cmd_agent.py` — Odroid-Seite (URL aus `$SANDBOX_TERM_URL` oder Argument)
+- `token` (0600) — shared secret; wird **pro Verbindung** gelesen → Rotation = Datei ersetzen
+- `install_autostart.sh` — Autostart-Hook fuer `~/.bashrc`
+- `run/` — `server.log`, `supervisor.pid`, `server.pid`, `supervisor.lock`
+
+## Odroid-Seite (reboot-fest)
+`/etc/systemd/system/odroid-cmd-agent.service` — `Restart=always`, Token inline.
+Nach Sandbox-Wechsel **nur** die URL in `ExecStart` anpassen (oder `EnvironmentFile` nutzen):
 ```bash
-tools/remote-shell/cmd_send.sh "btrfs subvolume list /" 60
+sed -i -E 's|wss://work-[0-9]+-[a-z0-9]+\.prod-runtime|wss://work-2-NEUERID.prod-runtime|' \
+  /etc/systemd/system/odroid-cmd-agent.service
+systemctl daemon-reload && systemctl restart odroid-cmd-agent.service
 ```
 
-Regeln:
-- Bestätigungspflicht ist **Standard** und **serverseitig nicht abschaltbar**.
-- Jede Ausführung/Ablehnung wird in `$CMD_BASE/audit.log` protokolliert.
-- Ergebnis in `$CMD_BASE/results/<id>.out` / `.json`.
+## Betrieb auf dem Odroid (diese Session eingerichtet)
+- **Taegliches inkrementelles Backup**: `backup-daily.timer` → `/root/backup-daily.sh`
+  (rsync `--link-dest`, nur geaenderte Daten, 14 Tage, `/mnt/ssd/backups/rsync/`).
+- **Desktop im Browser (noVNC)**: `novnc.service` (websockify `6080` → VNC `5901`),
+  `xfce-vnc.service` (TigerVNC `:1`). Aufruf: `http://192.168.178.71:6080/vnc.html`.
 
-> Hinweis: `a` (immer) ist bequem, aber dann läuft alles ohne Rückfrage — für
-> heikle Befehle besser einzeln bestätigen. `rm -rf` o. Ä. gehört **nicht** in
-> den Kanal.
-
----
-
-## Welche Option?
-- **Nur die Sandbox bedienen** → **A**.
-- **Deine Odroid-Konsole behalten und zusätzlich die Sandbox** → **B**.
-- **Soll der Agent auf dem Odroid Befehle ausführen** → das ist die Umkehrung:
-  die Sandbox verbindet sich als **Client** (`ssh user@odroid`) — dafür braucht
-  der Odroid einen erreichbaren `sshd` (Tailscale/LAN/Portfreigabe).
-
-## Sicherheit
-- **Immer** ein starkes Token (`secrets.token_urlsafe(32)`); nie ohne Token starten
-  (der Server verweigert den Start, wenn `SANDBOX_TERM_TOKEN` fehlt).
-- Token nur per Umgebungsvariable/Datei übergeben, **nie committen**.
-- Nach Gebrauch den Server beenden — er läuft sonst öffentlich (wenn auch geschützt).
-- Empfehlung: Odroid per **WireGuard/Tailscale** ins gleiche Netz holen; dann ist
-  alles nur im privaten Netz erreichbar und der öffentliche Proxy entfällt.
-
----
-
-## Selbstheilung / Verbindung nie verlieren
-
-Ziel: Der Kontroll-Chat soll die Verbindung zum Odroid **nicht verlieren** und
-sie **selbststaendig wiederherstellen**.
-
-**Sandbox-Seite (Autostart, ueberlebt Resets):**
-- `tools/remote-shell/supervise.py` startet `sandbox_term_server.py` und haelt
-  ihn am Leben (Neustart bei Absturz). Idempotent, mit `--status` / `--stop`.
-  ```bash
-  python3 tools/remote-shell/supervise.py            # starten (im Hintergrund)
-  python3 tools/remote-shell/supervise.py --status
-  ```
-- Autostart (Sandbox hat kein systemd/cron): `bash tools/remote-shell/install_autostart.sh`
-  haengt einen `~/.bashrc`-Hook an, der den Supervisor bei Bedarf startet.
-- Token kommt aus `$SANDBOX_TERM_TOKEN_FILE` (Default:
-  `<workspace>/.remote-shell/token`, **ausserhalb** des Git-Baums). Fehlt die
-  Datei, wird ein Token erzeugt. Token-Rotation = Datei ueberschreiben, **kein**
-  Neustart noetig (wird pro Verbindung gelesen).
-- Die **oeffentliche URL** wird aus `$RUNTIME_ID` abgeleitet:
-  `wss://work-2-<id>.prod-runtime.all-hands.dev/`. Aendert sich mit jeder neuen
-  Sandbox-Session -> danach den Odroid-Agenten neu ausrichten (siehe unten).
-
-**Odroid-Seite (reboot-fest):**
-- systemd-Dienst `odroid-cmd-agent.service` (`Restart=always`, `RestartSec=5`,
-  `enabled`), enthaelt Token + `CMD_AGENT_AUTO=1` (unbeaufsichtigter Betrieb).
-- Faellt der Agent aus, verbindet er sich in 5 s neu; nach Reboot startet er
-  automatisch, sobald Netz da ist (`After=network-online.target`).
-- **Neue Sandbox (ID/Token geaendert):** Unit neu ausrichten mit
-  `tools/remote-shell/odroid-bootstrap.sh <wss-url> <token>` (aendert nur die
-  `SANDBOX_TERM_TOKEN=`- und `ExecStart=`-Zeile, legt ein Backup an).
-- Achtung: `pkill -f cmd_agent.py` aus dem Kanal heraus toetet die eigene Shell
-  (der Befehlstext enthaelt den Suchstring) -> Agent per `kill <pid>` beenden.
-
-**Diagnose bei Verbindungsverlust:**
-- `tail -5 /tmp/cmdchannel/audit.log` (letzte connect/disconnect/timeouts)
-- `python3 tools/remote-shell/supervise.py --status`
-
-## noVNC: den echten XFCE-Desktop im Browser
-
-Der Odroid hat bereits einen echten Desktop (XFCE + TigerVNC auf Port 5901).
-`tools/remote-shell/odroid-novnc-setup.sh` installiert noVNC + websockify und
-legt den reboot-festen Dienst `novnc.service` an
-(`websockify --web=/usr/share/novnc/ 6080 localhost:5901`).
-Danach im Browser: `http://odroidn2.local:6080/vnc.html`.
-
-## Tests
-- `tools/remote-shell/test_agent.py` verbindet sich als Pseudo-Agent ueber die
-  **oeffentliche** Proxy-URL auf `/agent` und fuehrt Befehle lokal aus — damit
-  laesst sich die Sandbox-Seite ohne Odroid verifizieren:
-  ```bash
-  python3 tools/remote-shell/test_agent.py &      # lauscht auf Befehle
-  tools/remote-shell/cmd_send.sh "echo roundtrip" 20
-  ```
-
-
+Details/Historie: `.openhands/memory/MEMORY.md` und `2026-10-14.md`.
