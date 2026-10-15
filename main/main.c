@@ -4951,6 +4951,7 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"gap_cause_sleep\":%lu,\"gap_cause_stall\":%lu,"
                        "\"gap_cause_buffer\":%lu,"
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
+                       "\"sender_fw_version\":\"%s\","
                        "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u}",
                        fw_version(),
                        (unsigned long long)counters.uptime_ms,
@@ -5005,6 +5006,7 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.gap_cause_buffer,
                        (unsigned int)counters.wifi_ps_mode,
                        (unsigned int)counters.build_profile,
+                       counters.fw_version,
                        (unsigned long)counters.boot_marker_count,
                        (unsigned int)counters.boot_marker_reason);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
@@ -5182,7 +5184,7 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
         "+'cpu: '+d.cpu_freq_mhz+' MHz now (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)  session clock: min '+d.cpu_freq_hist_min_mhz+' / avg '+d.cpu_freq_avg_mhz+' / max '+d.cpu_freq_hist_max_mhz+' MHz, '+d.cpu_freq_changes+' steps'+nl"
         "+'sleep: '+(d.sleep_state?'in light sleep':(d.light_sleep_enabled?'awake, light sleep enabled':'awake, light sleep disabled'))"
         "+'  slept this session: '+(d.uptime_sleep_ms/1000).toFixed(1)+' s'+nl"
-        "+'fw: '+(d.version||'?')+'   build profile: '+(d.build_profile===1?'sender-sleep (light sleep compiled in)':'plain sender (light sleep NOT compiled in)')"
+        "+'fw (receiver): '+(d.version||'?')+'  sender fw: '+(d.sender_fw_version||'?')+'   build profile: '+(d.build_profile===1?'sender-sleep (light sleep compiled in)':'plain sender (light sleep NOT compiled in)')"
         "+'  boot markers: '+d.boot_marker_count+' ('+d.boot_marker_reason+')'+nl"
         "+'adaptive sleep window: '+(d.sleep_window_ms||0)+' ms (shortest gap seen: '+(d.sleep_min_gap_ms||0)+' ms)'"
         "+(d.sleep_hold_active?'  HELD AWAKE (data / OTA request active)':'')+nl"
@@ -5401,6 +5403,7 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        (unsigned long)counters.gap_cause_buffer,
                        (unsigned int)counters.wifi_ps_mode,
                        (unsigned int)counters.build_profile,
+                       counters.fw_version,
                        (unsigned long)counters.boot_marker_count,
                        (unsigned int)counters.boot_marker_reason,
                        crash_json[0] != '\0' ? "," : "",
@@ -5481,7 +5484,7 @@ static esp_err_t sender_page_handler(httpd_req_t *req)
         "function fmtInfo(d){const c=d.counters||{};"
         "return 'rssi (sender->receiver): '+(d.sender_rssi_valid?d.sender_rssi+' dBm':'n/a')+nl"
         "+'uptime: '+(c.uptime_ms/1000).toFixed(1)+' s   esp-now channel: '+c.channel+nl"
-        "+'fw: '+(c.version||'?')+'   build profile: '+(c.build_profile===1?'sender-sleep (light sleep compiled in)':'plain sender')+nl"
+        "+'fw (receiver): '+(c.version||'?')+'  sender fw: '+(c.sender_fw_version||'?')+'   build profile: '+(c.build_profile===1?'sender-sleep (light sleep compiled in)':'plain sender')+nl"
         "+'sleep: '+(c.sleep_state?'in light sleep':(c.light_sleep_enabled?'awake, light sleep enabled':'awake, light sleep disabled'))"
         "+'   slept: '+(c.uptime_sleep_ms/1000).toFixed(1)+' s   window: '+(c.sleep_window_ms||0)+' ms'+nl"
         "+'cpu: '+c.cpu_freq_mhz+' MHz now (DFS '+c.cpu_freq_min_mhz+'-'+c.cpu_freq_max_mhz+'), avg '+c.cpu_freq_avg_mhz+' MHz, '+c.cpu_freq_changes+' steps'+nl"

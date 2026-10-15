@@ -15,7 +15,9 @@
  */
 
 #define ESPNOW_DIAG_MAGIC   0x44494147u /* "DIAG" */
-#define ESPNOW_DIAG_VERSION 1u
+/* 2: the counters section carries the sender firmware version (fw_version), so
+ * the receiver can show which sender build is running. */
+#define ESPNOW_DIAG_VERSION 2u
 
 #define ESPNOW_DIAG_TYPE_REQUEST  1u
 #define ESPNOW_DIAG_TYPE_RESPONSE 2u
@@ -46,6 +48,10 @@
 #define ESPNOW_DIAG_SECTION_CMD 0x0020u
 #define ESPNOW_DIAG_CMD_LINE_LEN 96u
 #define ESPNOW_DIAG_CMD_OUTPUT_LEN 192u
+
+/* Sender firmware version (from version.c's fw_version(), e.g. "v0.1.0-3-gabc"
+ * or "unknown"). Length includes the terminating NUL. */
+#define ESPNOW_DIAG_FW_VERSION_LEN 24u
 
 /* Response flag: at least one more event page follows for this request. */
 #define ESPNOW_DIAG_FLAG_MORE 0x8000u
@@ -151,6 +157,9 @@ typedef struct __attribute__((packed)) {
      * Lets the diagnostics page (and the receiver) tell which sender image is
      * actually running, so a flashed-but-inactive sleep path is unambiguous. */
     uint8_t build_profile;
+    /* Sender firmware version string (fw_version()), NUL-terminated. Empty when
+     * the build did not provide one (host build without build_version.h). */
+    char fw_version[ESPNOW_DIAG_FW_VERSION_LEN];
     uint8_t reserved4[2];
 } espnow_diag_counters_t;
 
