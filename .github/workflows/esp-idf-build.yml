@@ -30,6 +30,8 @@ jobs:
           gcc -std=c11 -fsyntax-only \
             -DCONFIG_ESPNOW_SENDER_LIGHT_SLEEP=1 \
             -DCONFIG_ESPNOW_CPU_MAX_MHZ=240 \
+            -DCONFIG_ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS=100 \
+            -DCONFIG_ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS=70 \
             -DSOC_LIGHT_SLEEP_SUPPORTED=1 \
             -I test/host/include \
             main/uart_sleep_window.c
