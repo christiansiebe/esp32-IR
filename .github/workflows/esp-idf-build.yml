@@ -15,6 +15,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          # Full history + tags so `git describe --tags` can resolve the version
+          # tag instead of falling back to a bare commit SHA.
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Compile the adaptive sender sleep path
         shell: bash
@@ -64,6 +69,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          # Full history + tags so `git describe --tags` resolves the version tag
+          # (e.g. v0.1.0-3-gabc1234) instead of a bare commit SHA.
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Cache compiler outputs
         uses: actions/cache@v4
