@@ -17,7 +17,8 @@
 #define RUNTIME_CONFIG_CPU_MAX_MHZ 240u
 
 typedef struct {
-    uint32_t cpu_mhz;      /* DFS ceiling */
+    uint32_t cpu_mhz;      /* DFS ceiling (max_freq) */
+    uint32_t cpu_min_mhz;  /* DFS floor (min_freq); == cpu_mhz pins the clock */
     bool light_sleep;      /* allow the adaptive light sleep */
     uint32_t espnow_retries; /* per-frame ESP-NOW send attempts */
 } runtime_config_t;

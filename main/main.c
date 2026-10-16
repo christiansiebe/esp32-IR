@@ -4856,7 +4856,8 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     char key[24] = {0};
     char value[32] = {0};
     if (sscanf(args, "%23s %31s", key, value) != 2) {
-        snprintf(out, out_size, "usage: set <cpu|sleep|retries> <value>\n");
+        snprintf(out, out_size,
+                 "usage: set <cpu|freq|cpu-min|sleep|retries> <value>\n");
         return;
     }
     runtime_config_t *cfg = active_runtime_config();
@@ -4868,7 +4869,9 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     }
     bool applied = runtime_config_apply(cfg);
 #if CONFIG_ESPNOW_ROLE_SENDER
-    /* Light sleep has its own latch; mirror the knob onto it. */
+    /* Keep the sleep module's PM re-apply in sync with the pinned range, then
+     * mirror the light-sleep knob onto its latch. */
+    uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
     if (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0) {
         uart_sleep_set_enabled(cfg->light_sleep);
     }
@@ -4888,6 +4891,7 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
     runtime_config_reset(cfg);
     runtime_config_apply(cfg);
 #if CONFIG_ESPNOW_ROLE_SENDER
+    uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
     uart_sleep_set_enabled(cfg->light_sleep);
 #endif
     size_t used = (size_t)snprintf(out, out_size, "config reset to defaults\n");
@@ -4901,7 +4905,7 @@ static void web_console_register_commands(void)
     web_console_register("help", "list available commands", console_cmd_help);
     web_console_register("test", "run a self-test: sleep|sml|espnow|storage",
                          console_cmd_test);
-    web_console_register("set", "change a runtime knob: cpu|sleep|retries",
+    web_console_register("set", "change a runtime knob: cpu|freq|cpu-min|sleep|retries",
                          console_cmd_set);
     web_console_register("reset-config", "restore the default test knobs",
                          console_cmd_reset_config);
@@ -4980,8 +4984,8 @@ static esp_err_t console_page_handler(httpd_req_t *req)
         "<p>Same information as the serial console. Enter the Wi-Fi key once "
         "(stored for this tab) and send commands such as <b>status</b>, "
         "<b>history</b>, <b>time</b>, <b>wifi</b>, <b>power</b>, <b>reboot</b>, "
-        "<b>test sleep 400</b>, <b>test sml</b>, <b>set cpu 80</b>, "
-        "<b>help</b>.</p>"
+        "<b>test sleep 400</b>, <b>test sml</b>, <b>set freq 80</b> "
+        "(pin the CPU), <b>set cpu 80</b> (DFS ceiling), <b>help</b>.</p>"
         "<input id=\"key\" type=\"password\" placeholder=\"Wi-Fi / OTA key\">"
         "<br><input id=\"cmd\" placeholder=\"command\" autocomplete=\"off\">"
         "<button id=\"send\" type=\"button\">Send</button>"

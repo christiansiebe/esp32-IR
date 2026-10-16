@@ -21,6 +21,7 @@ runtime_config_t runtime_config_defaults(void)
         .light_sleep = false,
 #endif
         .cpu_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ,
+        .cpu_min_mhz = 40u,
         .espnow_retries = 3u,
     };
     return cfg;
@@ -92,6 +93,28 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             snprintf(err, err_size, "cpu: expected a number of MHz\n");
             return false;
         }
+        /* Keep the floor at or below the ceiling; otherwise min > max and the
+         * PM API rejects the whole config. */
+        if (next.cpu_min_mhz > next.cpu_mhz) {
+            next.cpu_min_mhz = next.cpu_mhz;
+        }
+    } else if (strcmp(key, "freq") == 0 || strcmp(key, "freq-mhz") == 0) {
+        /* Pin the CPU: DFS is off and the clock stays at this value. */
+        uint32_t mhz;
+        if (!runtime_config_parse_cpu_mhz(value, ceiling_mhz, &mhz)) {
+            snprintf(err, err_size, "freq: expected a number of MHz\n");
+            return false;
+        }
+        next.cpu_mhz = mhz;
+        next.cpu_min_mhz = mhz;
+    } else if (strcmp(key, "cpu-min") == 0 || strcmp(key, "cpu-min-mhz") == 0) {
+        if (!runtime_config_parse_cpu_mhz(value, ceiling_mhz, &next.cpu_min_mhz)) {
+            snprintf(err, err_size, "cpu-min: expected a number of MHz\n");
+            return false;
+        }
+        if (next.cpu_min_mhz > next.cpu_mhz) {
+            next.cpu_min_mhz = next.cpu_mhz;
+        }
     } else if (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0) {
         if (!runtime_config_parse_bool(value, &next.light_sleep)) {
             snprintf(err, err_size, "sleep: expected on or off\n");
@@ -107,7 +130,7 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
         next.espnow_retries = (uint32_t)v;
     } else {
         snprintf(err, err_size,
-                 "unknown key '%s' (cpu, sleep, retries)\n", key);
+                 "unknown key '%s' (cpu, freq, cpu-min, sleep, retries)\n", key);
         return false;
     }
     *cfg = next;
@@ -121,9 +144,11 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
     }
     snprintf(out, out_size,
              "cpu ceiling: %u MHz\n"
+             "cpu floor: %u MHz\n"
              "light sleep: %s\n"
              "espnow retries: %u\n",
-             (unsigned)cfg->cpu_mhz, cfg->light_sleep ? "on" : "off",
+             (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
+             cfg->light_sleep ? "on" : "off",
              (unsigned)cfg->espnow_retries);
 }
 
@@ -136,11 +161,12 @@ bool runtime_config_apply(const runtime_config_t *cfg)
     if (cfg == NULL) {
         return false;
     }
-    /* Changing max_freq_mhz reconfigures DFS; light_sleep_enable toggles the
-     * idle park. min_freq stays at 40 MHz (the lowest DFS step). */
+    /* Changing max_freq_mhz reconfigures DFS; when min_freq == max_freq DFS is
+     * effectively off and the clock is pinned. light_sleep_enable toggles the
+     * idle park. */
     esp_pm_config_t pm = {
         .max_freq_mhz = (int)cfg->cpu_mhz,
-        .min_freq_mhz = 40,
+        .min_freq_mhz = (int)cfg->cpu_min_mhz,
         .light_sleep_enable = cfg->light_sleep,
     };
     return esp_pm_configure(&pm) == ESP_OK;

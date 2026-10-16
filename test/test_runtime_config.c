@@ -60,6 +60,31 @@ int main(void)
     CHECK(runtime_config_set(&cfg, "retries", "5", 240, err, sizeof(err)) &&
               cfg.espnow_retries == 5,
           "set retries=5");
+
+    /* freq pins the clock: floor == ceiling (DFS off). */
+    CHECK(runtime_config_set(&cfg, "freq", "80", 240, err, sizeof(err)) &&
+              cfg.cpu_mhz == 80 && cfg.cpu_min_mhz == 80,
+          "set freq=80 pins the clock");
+    /* Raising the ceiling afterwards keeps the pin and lifts the floor with it
+     * only up to the ceiling. */
+    CHECK(runtime_config_set(&cfg, "cpu", "40", 240, err, sizeof(err)) &&
+              cfg.cpu_mhz == 40 && cfg.cpu_min_mhz == 40,
+          "a ceiling below the floor clamps the floor down");
+    /* cpu-min raises the floor without changing the ceiling. */
+    CHECK(runtime_config_set(&cfg, "freq", "160", 240, err, sizeof(err)) &&
+              cfg.cpu_mhz == 160 && cfg.cpu_min_mhz == 160,
+          "set freq=160");
+    CHECK(runtime_config_set(&cfg, "cpu-min", "80", 240, err, sizeof(err)) &&
+              cfg.cpu_min_mhz == 80 && cfg.cpu_mhz == 160,
+          "set cpu-min=80 keeps the ceiling");
+    CHECK(runtime_config_set(&cfg, "cpu-min", "240", 240, err, sizeof(err)) &&
+              cfg.cpu_min_mhz == 160,
+          "cpu-min cannot exceed the ceiling");
+    before = cfg;
+    CHECK(!runtime_config_set(&cfg, "freq", "abc", 240, err, sizeof(err)),
+          "non-numeric freq is rejected");
+    CHECK(cfg.cpu_mhz == before.cpu_mhz && cfg.cpu_min_mhz == before.cpu_min_mhz,
+          "a rejected freq leaves the config unchanged");
     before = cfg;
     CHECK(!runtime_config_set(&cfg, "bogus", "1", 240, err, sizeof(err)),
           "unknown key is rejected");
@@ -72,7 +97,9 @@ int main(void)
     /* reset restores the defaults. */
     cfg = runtime_config_reset(&cfg);
     runtime_config_t defaults = runtime_config_defaults();
-    CHECK(cfg.cpu_mhz == defaults.cpu_mhz && cfg.light_sleep == defaults.light_sleep,
+    CHECK(cfg.cpu_mhz == defaults.cpu_mhz &&
+              cfg.cpu_min_mhz == defaults.cpu_min_mhz &&
+              cfg.light_sleep == defaults.light_sleep,
           "reset restores the defaults");
 
     printf("runtime config: %d checks, %d failures\n", g_checks, g_failures);

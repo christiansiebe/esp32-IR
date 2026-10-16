@@ -188,6 +188,12 @@ bool uart_sleep_is_enabled(void);
  * range. No-op/false when the feature is compiled out. */
 bool uart_sleep_force_window(uint32_t ms, uint32_t *slept_ms_out);
 
+/* Test console: remember a pinned CPU frequency range (max, min) so a later
+ * uart_sleep_set_enabled() re-applies it instead of resetting the clock to the
+ * compile-time values. max_mhz <= 0 clears the override. No-op when the feature
+ * is compiled out. */
+void uart_sleep_set_pm_override(int max_mhz, int min_mhz);
+
 /* True while a hold set with uart_sleep_hold() is still active. Pure so it is
  * host-tested. */
 static inline bool uart_sleep_hold_active(int64_t hold_until_us, int64_t now_us)

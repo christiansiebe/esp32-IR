@@ -37,6 +37,22 @@ static volatile int64_t s_hold_until_us;
 static volatile uint32_t s_slept_ms; /* real light-sleep time, fed by main.c */
 static volatile bool s_disabled;     /* link fallback dropped light sleep */
 
+/* CPU frequency pinned by the test console (0 = use the compile-time values).
+ * The three esp_pm_configure() calls below would otherwise reset a pinned clock
+ * back to CONFIG_ESPNOW_CPU_MAX_MHZ / 40 whenever the sleep toggle is used. */
+static volatile int s_pm_max_override;
+static volatile int s_pm_min_override;
+
+static int sleep_pm_max(void)
+{
+    return s_pm_max_override > 0 ? s_pm_max_override : CONFIG_ESPNOW_CPU_MAX_MHZ;
+}
+
+static int sleep_pm_min(void)
+{
+    return s_pm_min_override > 0 ? s_pm_min_override : 40;
+}
+
 bool uart_sleep_init_idf(void)
 {
     uart_sleep_init(&s_ctrl, uart_sleep_default_cfg());
@@ -52,8 +68,8 @@ bool uart_sleep_init_idf(void)
      * call light_sleep_enable stays 0 and the chip never sleeps. The ceiling is
      * shared with the receiver (CONFIG_ESPNOW_CPU_MAX_MHZ). */
     esp_pm_config_t pm = {
-        .max_freq_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ,
-        .min_freq_mhz = 40,
+        .max_freq_mhz = sleep_pm_max(),
+        .min_freq_mhz = sleep_pm_min(),
         .light_sleep_enable = true,
     };
     if (esp_pm_configure(&pm) != ESP_OK) {
@@ -195,8 +211,8 @@ void uart_sleep_disable_idf(void)
     }
     s_disabled = true;
     esp_pm_config_t pm = {
-        .max_freq_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ,
-        .min_freq_mhz = 40,
+        .max_freq_mhz = sleep_pm_max(),
+        .min_freq_mhz = sleep_pm_min(),
         .light_sleep_enable = false,
     };
     (void)esp_pm_configure(&pm);
@@ -218,8 +234,8 @@ void uart_sleep_set_enabled(bool enabled)
         /* Clear the fallback latch and allow the idle path to park again. */
         s_disabled = false;
         esp_pm_config_t pm = {
-            .max_freq_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ,
-            .min_freq_mhz = 40,
+            .max_freq_mhz = sleep_pm_max(),
+            .min_freq_mhz = sleep_pm_min(),
             .light_sleep_enable = true,
         };
         (void)esp_pm_configure(&pm);
@@ -249,6 +265,15 @@ bool uart_sleep_force_window(uint32_t ms, uint32_t *slept_ms_out)
     return true;
 }
 
+/* Test console: remember a pinned CPU range so the sleep toggle re-applies it
+ * instead of resetting the clock to the compile-time values. max <= 0 clears
+ * the override. */
+void uart_sleep_set_pm_override(int max_mhz, int min_mhz)
+{
+    s_pm_max_override = max_mhz;
+    s_pm_min_override = min_mhz;
+}
+
 #else /* feature disabled or unsupported target: the glue is a no-op */
 
 bool uart_sleep_init_idf(void) { return false; }
@@ -274,6 +299,11 @@ bool uart_sleep_force_window(uint32_t ms, uint32_t *slept_ms_out)
         *slept_ms_out = 0;
     }
     return false;
+}
+void uart_sleep_set_pm_override(int max_mhz, int min_mhz)
+{
+    (void)max_mhz;
+    (void)min_mhz;
 }
 uint32_t uart_sleep_window_ms(void) { return 0; }
 uint32_t uart_sleep_min_gap_ms(void) { return 0; }
