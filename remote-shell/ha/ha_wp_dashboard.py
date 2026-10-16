@@ -113,6 +113,40 @@ def normalize_cards(node):
     return changed
 
 
+def wrap_expand_card(card, title=""):
+    """Wrap a card in ``custom:wp-expand-card`` so it gets the expand button.
+
+    The HACS ``apexcharts-card`` cannot be enlarged itself and brings no such
+    button. Wrapping it in our own card renders it unchanged but adds the same
+    expand control the zoom charts have (click -> large, resizable overlay).
+    Idempotent: an already wrapped card is returned as-is.
+    """
+    if card.get("type") == "custom:wp-expand-card":
+        return card
+    inner = dict(card)
+    return {"type": "custom:wp-expand-card", "title": title, "card": inner}
+
+
+def wrap_all_apex(node, title=""):
+    """Wrap every custom:apexcharts-card found in the config. Returns count."""
+    count = 0
+    if isinstance(node, dict):
+        for key, value in list(node.items()):
+            if isinstance(value, list):
+                for i, child in enumerate(value):
+                    if isinstance(child, dict) and child.get("type") == "custom:apexcharts-card":
+                        value[i] = wrap_expand_card(child, title)
+                        count += 1
+                    else:
+                        count += wrap_all_apex(child, title)
+            elif isinstance(value, dict):
+                count += wrap_all_apex(value, title)
+    elif isinstance(node, list):
+        for child in node:
+            count += wrap_all_apex(child, title)
+    return count
+
+
 async def main():
     # 1) JS kopieren
     src = "/config/wp-zoom-chart.js"
@@ -165,6 +199,11 @@ async def main():
         # HACS apexcharts-card resizable machen (section_mode + feste Hoehe weg)
         if normalize_cards(cfg):
             print("apexcharts-card fuer Grid-Resize normalisiert")
+
+        # Jede apexcharts-card in unser Hüllen-Card packen -> ⛶-Grossansicht
+        n = wrap_all_apex(cfg)
+        if n:
+            print(f"{n} apexcharts-card(s) in wp-expand-card verpackt")
 
         # Karten: Zoom-Karten ersetzen/ergaenzen
         charts = {

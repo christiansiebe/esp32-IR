@@ -94,10 +94,39 @@ def test_recurses_into_stacks_and_sections():
     check(direct["section_mode"] is True, "direct card normalized")
 
 
+def test_wrap_expand_card_is_idempotent():
+    print("test_wrap_expand_card_is_idempotent")
+    inner = {"type": "custom:apexcharts-card", "section_mode": True}
+    wrapped = hwd.wrap_expand_card(inner, "Energiemonitoring")
+    check(wrapped["type"] == "custom:wp-expand-card", "wrapper type")
+    check(wrapped["title"] == "Energiemonitoring", "title carried")
+    check(wrapped["card"] == inner, "inner card preserved")
+    # Wrapping again must not nest a second time.
+    check(hwd.wrap_expand_card(wrapped, "x") is wrapped, "idempotent")
+
+
+def test_wrap_all_apex_only_touches_apex():
+    print("test_wrap_all_apex_only_touches_apex")
+    cfg = {"views": [{"sections": [{"cards": [
+        {"type": "custom:apexcharts-card"},
+        {"type": "custom:wp-zoom-chart", "title": "Verlauf"},
+        {"type": "sensor"},
+    ]}]}]}
+    n = hwd.wrap_all_apex(cfg)
+    check(n == 1, f"one apex card wrapped, got {n}")
+    cards = cfg["views"][0]["sections"][0]["cards"]
+    check(cards[0]["type"] == "custom:wp-expand-card", "apex wrapped")
+    check(cards[0]["card"]["type"] == "custom:apexcharts-card", "inner apex kept")
+    check(cards[1]["type"] == "custom:wp-zoom-chart", "zoom card untouched")
+    check(cards[2]["type"] == "sensor", "plain card untouched")
+
+
 if __name__ == "__main__":
     test_url_is_versioned_and_content_addressed()
     test_apex_card_becomes_resizable()
     test_other_cards_untouched()
     test_recurses_into_stacks_and_sections()
+    test_wrap_expand_card_is_idempotent()
+    test_wrap_all_apex_only_touches_apex()
     print(f"\n{CHECKS - FAILURES}/{CHECKS} checks passed")
     sys.exit(1 if FAILURES else 0)

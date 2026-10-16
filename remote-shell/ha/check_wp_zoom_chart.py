@@ -140,6 +140,20 @@ const t0 = Date.now() - 7 * 86400 * 1000;
 const raw = [];
 for (let i = 0; i < 4000; i++) raw.push({ s: String(20 + Math.sin(i / 30) * 5), lu: (t0 + i * 60000) / 1000 });
 
+// The generic wrapper must register, expose grid sizing and require a 'card'.
+const WrapCls = registered['wp-expand-card'];
+if (!WrapCls) fail('custom element wp-expand-card not registered');
+const w0 = new WrapCls();
+if (typeof w0.getGridOptions !== 'function') fail('wp-expand-card getGridOptions missing');
+const wg = w0.getGridOptions();
+if (!wg.columns || !wg.rows) fail('wp-expand-card grid options lack columns/rows');
+let threw = false;
+try { new WrapCls().setConfig({ title: 'x' }); } catch (e) { threw = true; }
+if (!threw) fail('wp-expand-card accepted a config without card');
+const w1 = new WrapCls();
+w1.setConfig({ title: 'Energie', card: { type: 'custom:apexcharts-card' } });
+if (w1.getCardSize() < 1) fail('wp-expand-card getCardSize too small');
+
 function instFor(w) {
   const c = new Cls();
   c.setConfig({ title: 'T', height: 200, default_range: '7T',

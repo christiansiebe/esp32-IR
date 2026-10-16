@@ -59,6 +59,78 @@ function resizeRect(rect, dir, dx, dy, b) {
   return { left, top, width: right - left, height: bottom - top };
 }
 
+// Real 8-way resize for a modal box: the native CSS corner handle is tiny and
+// overlapped by the scrollbar, which is unusable on touch. Edge + corner zones
+// with pointer events cover mouse, pen and touch.
+function addResizeHandles(box) {
+  for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
+    const h = el("div", "wz-rs wz-rs-" + dir);
+    h.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      h.setPointerCapture(ev.pointerId);
+      const r = box.getBoundingClientRect();
+      const start = { left: r.left, top: r.top, width: r.width, height: r.height };
+      // Pin the modal so the centering flex parent cannot fight the drag.
+      box.style.position = "fixed";
+      box.style.margin = "0";
+      const apply = (e) => {
+        const b = { minW: 420, minH: 320, vw: window.innerWidth, vh: window.innerHeight, pad: 8 };
+        const s = resizeRect(start, dir, e.clientX - ev.clientX, e.clientY - ev.clientY, b);
+        box.style.left = s.left + "px";
+        box.style.top = s.top + "px";
+        box.style.width = s.width + "px";
+        box.style.height = s.height + "px";
+      };
+      apply(ev);
+      const up = () => {
+        h.removeEventListener("pointermove", apply);
+        h.removeEventListener("pointerup", up);
+        h.removeEventListener("pointercancel", up);
+      };
+      h.addEventListener("pointermove", apply);
+      h.addEventListener("pointerup", up);
+      h.addEventListener("pointercancel", up);
+    });
+    box.appendChild(h);
+  }
+}
+
+// Overlay scaffold shared by the zoom card and the generic wrapper: a full
+// viewport backdrop holding one resizable box with a title, optional control
+// slot and a close button. Returns { ov, box, body, close }.
+function openOverlay(title, cleanup) {
+  const ov = el("div", "wz-overlay");
+  const box = el("div", "wz-modal");
+  const head = el("div", "wz-mhead");
+  head.appendChild(el("div", "wz-mtitle", title));
+  const close = el("button", "wz-close", "\u2715");
+  head.appendChild(close);
+  box.appendChild(head);
+  const body = el("div", "wz-mbody");
+  box.appendChild(body);
+  box.appendChild(el("div", "wz-hint",
+    "Beliebige Kante oder Ecke ziehen zum Vergroessern \u2013 die Aufloesung waechst mit."));
+  addResizeHandles(box);
+  ov.appendChild(box);
+
+  let closed = false;
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener("keydown", esc);
+    if (cleanup) cleanup();
+    if (ov.parentNode) ov.parentNode.removeChild(ov);
+  };
+  const esc = (ev) => { if (ev.key === "Escape") finish(); };
+  close.onclick = finish;
+  ov.onclick = (ev) => { if (ev.target === ov) finish(); };
+  document.addEventListener("keydown", esc);
+  document.body.appendChild(ov);
+  return { ov, box, body, finish };
+}
+
+
 // ApexCharts defaults to its light theme, so on HA's dark theme the axis,
 // legend and grid colours stay dark and vanish into the card background.
 // Derive a readable palette from the mode, then refine it with the HA CSS
@@ -319,42 +391,7 @@ class WpZoomChart extends HTMLElement {
     box.appendChild(mbox);
     box.appendChild(el("div", "wz-hint",
       "Beliebige Kante oder Ecke ziehen zum Vergroessern \u2013 die Aufloesung waechst mit."));
-
-    // Real 8-way resize: the native CSS handle is a tiny, scrollbar-overlapped
-    // corner that is unusable on touch. Edge + corner zones with pointer events
-    // cover mouse, pen and touch.
-    const dirs = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
-    for (const dir of dirs) {
-      const h = el("div", "wz-rs wz-rs-" + dir);
-      h.addEventListener("pointerdown", (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        h.setPointerCapture(ev.pointerId);
-        const r = box.getBoundingClientRect();
-        const start = { left: r.left, top: r.top, width: r.width, height: r.height };
-        // Pin the modal so the centering flex parent cannot fight the drag.
-        box.style.position = "fixed";
-        box.style.margin = "0";
-        const apply = (e) => {
-          const b = { minW: 420, minH: 320, vw: window.innerWidth, vh: window.innerHeight, pad: 8 };
-          const s = resizeRect(start, dir, e.clientX - ev.clientX, e.clientY - ev.clientY, b);
-          box.style.left = s.left + "px";
-          box.style.top = s.top + "px";
-          box.style.width = s.width + "px";
-          box.style.height = s.height + "px";
-        };
-        apply(ev);
-        const up = () => {
-          h.removeEventListener("pointermove", apply);
-          h.removeEventListener("pointerup", up);
-          h.removeEventListener("pointercancel", up);
-        };
-        h.addEventListener("pointermove", apply);
-        h.addEventListener("pointerup", up);
-        h.addEventListener("pointercancel", up);
-      });
-      box.appendChild(h);
-    }
+    addResizeHandles(box);
 
     ov.appendChild(box);
     ov.onclick = (ev) => { if (ev.target === ov) this._closeModal(ov); };
@@ -393,8 +430,84 @@ class WpZoomChart extends HTMLElement {
   }
 }
 
+// Generic wrapper: renders any single card and adds the same expand button the
+// zoom charts have. Clicking it shows the card large in a resizable overlay.
+// Use it around cards that cannot be enlarged themselves (e.g. the HACS
+// apexcharts-card):
+//   type: custom:wp-expand-card
+//   title: Energiemonitoring
+//   card: { type: custom:apexcharts-card, ... }
+class WpExpandCard extends HTMLElement {
+  setConfig(config) {
+    if (!config || !config.card) throw new Error("wp-expand-card braucht 'card'");
+    this._cfg = config;
+    this._title = config.title || "";
+    if (this._hass) this._build();
+  }
+
+  set hass(h) {
+    this._hass = h;
+    if (!this._built && h) this._build();
+    if (this._cardEl) this._cardEl.hass = h;
+    if (this._modalCard) this._modalCard.hass = h;
+  }
+
+  connectedCallback() { if (this._hass) this._build(); }
+  disconnectedCallback() { this._teardown(); }
+
+  getCardSize() { return 8; }
+  getGridOptions() { return { columns: 12, rows: 6, min_columns: 6, min_rows: 4 }; }
+
+  async _build() {
+    if (this._built) return;
+    this._built = true;
+    this.innerHTML = "";
+    const wrap = el("div", "wz-wrap");
+    const bar = el("div", "wz-wrap-bar");
+    if (this._title) bar.appendChild(el("div", "wz-wrap-title", this._title));
+    else bar.appendChild(el("div", "wz-wrap-title"));
+    const exp = el("button", "wz-expand", "\u26f6");
+    exp.title = "Grossansicht";
+    exp.onclick = (e) => { e.stopPropagation(); this._openModal(); };
+    bar.appendChild(exp);
+    wrap.appendChild(bar);
+    const slot = el("div", "wz-wrap-card");
+    wrap.appendChild(slot);
+    this.appendChild(wrap);
+
+    this._cardEl = await makeCard(this._cfg.card, this._hass);
+    slot.appendChild(this._cardEl);
+  }
+
+  async _openModal() {
+    const { body } = openOverlay(this._title || "Grossansicht",
+      () => { this._modalCard = null; });
+    const holder = el("div", "wz-mcard");
+    body.appendChild(holder);
+    this._modalCard = await makeCard(this._cfg.card, this._hass);
+    holder.appendChild(this._modalCard);
+  }
+
+  _teardown() {
+    this._modalCard = null;
+  }
+}
+
+// Build a card element from a Lovelace card config. Uses HA's own factory so
+// built-in and custom cards both work (async in newer frontends).
+async function makeCard(config, hass) {
+  let h = window.loadCardHelpers ? await window.loadCardHelpers() : null;
+  const node = h ? h.createCardElement(config) : document.createElement("hui-error-card");
+  if (!h) node.setConfig({ type: "error", error: "loadCardHelpers fehlt" });
+  node.hass = hass;
+  return node;
+}
+
 if (!customElements.get("wp-zoom-chart")) {
   customElements.define("wp-zoom-chart", WpZoomChart);
+}
+if (!customElements.get("wp-expand-card")) {
+  customElements.define("wp-expand-card", WpExpandCard);
 }
 
 const style = document.createElement("style");
@@ -436,5 +549,13 @@ style.textContent = `
 .wz-rs-se{right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize}
 .wz-rs-se::after{content:"";position:absolute;right:3px;bottom:3px;width:7px;height:7px;
   border-right:2px solid var(--secondary-text-color,#aaa);border-bottom:2px solid var(--secondary-text-color,#aaa)}
+.wz-wrap{position:relative}
+.wz-wrap-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  min-height:24px;padding:2px 2px 4px}
+.wz-wrap-title{font-weight:600;font-size:15px}
+.wz-wrap-card{position:relative}
+.wz-mbody{flex:1;min-height:240px;width:100%;display:flex;overflow:auto}
+.wz-mcard{flex:1;min-height:240px;width:100%}
+.wz-mcard>*{height:100%}
 `;
 document.head.appendChild(style);
