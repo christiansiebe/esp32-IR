@@ -1,0 +1,21 @@
+[Unit]
+Description=CPU hotplug governor (idle cores offline)
+# Braucht eine gefuellte /sys/devices/system/cpu, also nach sysinit.
+After=sysinit.target cpu-freq-guard.service
+Wants=cpu-freq-guard.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/cpu_hotplug.py
+# Beim Stoppen SIGTERM schicken: der Daemon nimmt dann alle Kerne wieder online.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=always
+RestartSec=10
+# Der Daemon soll selbst nicht auf einen Kern festgenagelt werden, sonst
+# koennte er sich beim Offline-Nehmen seinen eigenen Kern wegziehen.
+Nice=10
+CPUAffinity=0
+
+[Install]
+WantedBy=multi-user.target

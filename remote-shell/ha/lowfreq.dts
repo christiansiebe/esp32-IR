@@ -7,28 +7,36 @@
  * The stock opp-table-0 (Cortex-A53 "little", policy0) and opp-table-1
  * (Cortex-A73 "big", policy2) start at 1.0 GHz, so cpufreq cannot select
  * anything slower even though the meson clock tree can. cpu_clk_dyn0_sel muxes
- * xtal (24 MHz), fclk_div2 (1.0 GHz) and fclk_div3 (666.67 MHz), followed by a
- * 6-bit divider, so every rate here is parent/div exactly:
+ * xtal, fclk_div2 and fclk_div3 through a 6-bit divider, so every rate below is
+ * parent/div exactly:
  *
- *   666666666 = fclk_div3 / 1     500000000 = fclk_div2 / 2
- *   333333333 = fclk_div3 / 2     250000000 = fclk_div2 / 4
- *   200000000 = fclk_div2 / 5     125000000 = fclk_div2 / 8
- *   100000000 = fclk_div2 / 10     50000000 = fclk_div2 / 20
+ *   666666666   = fclk_div3 / 1
+ *   500000000   = fclk_div2 / 2
+ *   250000000   = fclk_div2 / 4
+ *   200000000   = fclk_div2 / 5
+ *   125000000   = fclk_div2 / 8
+ *   100000000   = fclk_div2 / 10
+ *   62500000    = fclk_div2 / 16
+ *   50000000    = fclk_div2 / 20
+ *   40000000    = fclk_div2 / 25
+ *   31250000    = fclk_div2 / 32
+ *   25000000    = fclk_div2 / 40
+ *   20000000    = fclk_div2 / 50
+ *   15625000    = fclk_div2 / 64
+ *   24000000    = xtal / 1
  *
- * 50 MHz is the documented floor here: the driver's own parking clock is
- * xtal/1 = 24 MHz, so the core tolerates a very low rate, but the AXI/APB
- * clocks hang off cpu_clk and a sustained rate below ~50 MHz risks starving
- * the interconnect. Lower points can be added to this table later if needed.
+ * 24 MHz is the hard floor: xtal is the lowest mux parent, and it is also the
+ * driver's own parking clock, so the core demonstrably runs there. Rates below
+ * it are not reachable through this mux.
  *
- * The voltages are deliberately the stock 1.0 GHz values (761 mV little,
- * 731 mV big): this overlay only unlocks the frequency, undervolting is a
- * separate experiment. They are also well above the regulator floor (680 mV),
- * so nothing here asks for less voltage than the board already uses.
+ * The voltages are the stock 1.0 GHz values: this overlay only unlocks the
+ * frequency, undervolting is a separate experiment. They also sit well above
+ * the regulator floor (680 mV).
  *
- * These points are NOT reachable at boot: Armbian's hardware optimisation pins
- * scaling_min_freq to MIN_SPEED (1.0 GHz) and cpu-freq-guard.sh re-asserts it,
- * so a bad low point can only be hit by an explicit runtime probe - a reset
- * then restores the 1.0 GHz floor instead of looping.
+ * These points are NOT reachable at boot: cpufreq.default_governor=performance
+ * keeps early boot at maximum frequency and cpu-freq-guard.sh pins
+ * scaling_min_freq to 1.0 GHz, so a bad low point can only be hit by an
+ * explicit runtime probe - a reset then restores the floor instead of looping.
  */
 
 / {
@@ -45,11 +53,6 @@
 				opp-microvolt = <761000>;
 				clock-latency-ns = <50000>;
 			};
-			opp-333333333 {
-				opp-hz = /bits/ 64 <333333333>;
-				opp-microvolt = <761000>;
-				clock-latency-ns = <50000>;
-			};
 			opp-250000000 {
 				opp-hz = /bits/ 64 <250000000>;
 				opp-microvolt = <761000>;
@@ -70,14 +73,51 @@
 				opp-microvolt = <761000>;
 				clock-latency-ns = <50000>;
 			};
+			opp-62500000 {
+				opp-hz = /bits/ 64 <62500000>;
+				opp-microvolt = <761000>;
+				clock-latency-ns = <50000>;
+			};
 			opp-50000000 {
 				opp-hz = /bits/ 64 <50000000>;
 				opp-microvolt = <761000>;
 				clock-latency-ns = <50000>;
 			};
+			opp-40000000 {
+				opp-hz = /bits/ 64 <40000000>;
+				opp-microvolt = <761000>;
+				clock-latency-ns = <50000>;
+			};
+			opp-31250000 {
+				opp-hz = /bits/ 64 <31250000>;
+				opp-microvolt = <761000>;
+				clock-latency-ns = <50000>;
+			};
+			opp-25000000 {
+				opp-hz = /bits/ 64 <25000000>;
+				opp-microvolt = <761000>;
+				clock-latency-ns = <50000>;
+			};
+			opp-20000000 {
+				opp-hz = /bits/ 64 <20000000>;
+				opp-microvolt = <761000>;
+				clock-latency-ns = <50000>;
+			};
+			opp-15625000 {
+				opp-hz = /bits/ 64 <15625000>;
+				opp-microvolt = <761000>;
+				clock-latency-ns = <50000>;
+			};
+			opp-24000000 {
+				opp-hz = /bits/ 64 <24000000>;
+				opp-microvolt = <761000>;
+				clock-latency-ns = <50000>;
+			};
 		};
 	};
+};
 
+/ {
 	fragment@1 {
 		target-path = "/opp-table-1";
 		__overlay__ {
@@ -91,11 +131,6 @@
 				opp-microvolt = <731000>;
 				clock-latency-ns = <50000>;
 			};
-			opp-333333333 {
-				opp-hz = /bits/ 64 <333333333>;
-				opp-microvolt = <731000>;
-				clock-latency-ns = <50000>;
-			};
 			opp-250000000 {
 				opp-hz = /bits/ 64 <250000000>;
 				opp-microvolt = <731000>;
@@ -116,8 +151,43 @@
 				opp-microvolt = <731000>;
 				clock-latency-ns = <50000>;
 			};
+			opp-62500000 {
+				opp-hz = /bits/ 64 <62500000>;
+				opp-microvolt = <731000>;
+				clock-latency-ns = <50000>;
+			};
 			opp-50000000 {
 				opp-hz = /bits/ 64 <50000000>;
+				opp-microvolt = <731000>;
+				clock-latency-ns = <50000>;
+			};
+			opp-40000000 {
+				opp-hz = /bits/ 64 <40000000>;
+				opp-microvolt = <731000>;
+				clock-latency-ns = <50000>;
+			};
+			opp-31250000 {
+				opp-hz = /bits/ 64 <31250000>;
+				opp-microvolt = <731000>;
+				clock-latency-ns = <50000>;
+			};
+			opp-25000000 {
+				opp-hz = /bits/ 64 <25000000>;
+				opp-microvolt = <731000>;
+				clock-latency-ns = <50000>;
+			};
+			opp-20000000 {
+				opp-hz = /bits/ 64 <20000000>;
+				opp-microvolt = <731000>;
+				clock-latency-ns = <50000>;
+			};
+			opp-15625000 {
+				opp-hz = /bits/ 64 <15625000>;
+				opp-microvolt = <731000>;
+				clock-latency-ns = <50000>;
+			};
+			opp-24000000 {
+				opp-hz = /bits/ 64 <24000000>;
 				opp-microvolt = <731000>;
 				clock-latency-ns = <50000>;
 			};

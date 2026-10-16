@@ -73,6 +73,44 @@ def freqs(c):
     return [int(f) for f in uv.read_sys(uv.policy(c) + '/scaling_available_frequencies').split()]
 
 
+def real_khz(c):
+    """Tatsaechlicher CPU-Takt aus debugfs (cpu_clk_dyn), in kHz.
+
+    scaling_cur_freq meldet die WUNSCHrate. Der Teiler kennt aber nur 2^a*5^b;
+    eine Rate mit Faktor 3 wird still abgerundet und cpufreq meldet trotzdem die
+    Wunschrate. Nur cpu_clk_dyn zeigt, was der Kern wirklich faehrt.
+    """
+    name = 'cpu_clk_dyn' if c == 'little' else 'cpub_clk_dyn'
+    try:
+        return int(uv.read_sys('/sys/kernel/debug/clk/%s/clk_rate' % name)) // 1000
+    except OSError:
+        return None
+
+
+def bench(cluster):
+    """Wall-clock einer festen Arbeit -> belegt die tatsaechliche Taktung.
+
+    Die Hash-Pruefung belegt nur Korrektheit; sie kann nicht zeigen, dass der
+    Takt wirklich niedriger ist (der Prozessstart dominiert bei 50 MHz). Ein
+    fester Rechenumfang bei 1.0 GHz als Referenz und der Quotient der Zeiten
+    ist dagegen ein direkter Taktbeleg. Der Prozess wird auf die CPUs des
+    Clusters festgenagelt, damit er auch dort laeuft.
+    """
+    cpus = CLUSTER_CPUS[cluster]
+    os.sched_setaffinity(0, cpus)
+    n = 400000
+    best = None
+    for _ in range(3):
+        t0 = time.time()
+        digest(7, n)
+        dt = time.time() - t0
+        best = dt if best is None else min(best, dt)
+    return best
+
+
+CLUSTER_CPUS = {'little': {0, 1}, 'big': {2, 3, 4, 5}}
+
+
 def restore():
     for c in uv.CLUSTERS:
         p = uv.policy(c)
@@ -106,6 +144,17 @@ def main():
     ref = load(args.iters, args.workers)
     print('Referenz-Hashes: %s' % ref, flush=True)
 
+    # Takt-Referenz je Cluster bei 1.0 GHz (Governor auf userspace, gleiche Rate).
+    base_ms = {}
+    for c in uv.CLUSTERS:
+        p = uv.policy(c)
+        uv.write_sys(p + '/scaling_governor', 'userspace')
+        uv.write_sys(p + '/scaling_setspeed', '1000000')
+        time.sleep(0.3)
+        base_ms[c] = bench(c)
+        print('Takt-Referenz %-6s @1000000 kHz: %.3f s' % (c, base_ms[c]), flush=True)
+    uv.revert()
+
     results = []
     t0 = time.time()
     aborted = False
@@ -124,15 +173,30 @@ def main():
                 uv.write_sys(p + '/scaling_setspeed', f)
                 time.sleep(0.3)
                 cur = int(uv.read_sys(p + '/scaling_cur_freq'))
+                real = real_khz(c)
                 time.sleep(args.dwell)
                 res = load(args.iters, args.workers)
                 bad = [s for s, h in res.items() if h != ref.get(s)]
                 cur2 = int(uv.read_sys(p + '/scaling_cur_freq'))
-                ok = (not bad and abs(cur - f) <= TOL_KHZ and abs(cur2 - f) <= TOL_KHZ)
+                real2 = real_khz(c)
+                t = bench(c)
+                # Erwarteter Faktor: 1.0 GHz / Zielrate.
+                exp = 1000000.0 / f
+                ratio = t / base_ms[c] if base_ms[c] else 0
+                # Massgeblich ist der ECHTE Takt: meldet der Mux eine andere Rate
+                # als angefordert, ist der OPP-Punkt unbrauchbar (Spannung passt
+                # nicht zur Rate) und wird als Fehler gewertet.
+                real_ok = (real is not None and abs(real - f) <= TOL_KHZ
+                           and abs(real2 - f) <= TOL_KHZ)
+                ok = (not bad and abs(cur - f) <= TOL_KHZ and abs(cur2 - f) <= TOL_KHZ
+                      and real_ok)
                 results.append(dict(cluster=c, want_khz=f, got_khz=cur, got2_khz=cur2,
-                                    errors=len(bad), ok=ok))
-                print('%-6s %8d kHz  ist=%d/%d  rechenfehler=%d  %s' % (
-                    c, f, cur, cur2, len(bad), 'OK' if ok else 'FEHLER'), flush=True)
+                                    real_khz=real, real2_khz=real2, errors=len(bad),
+                                    bench_s=round(t, 3), ratio=round(ratio, 2), ok=ok))
+                print('%-6s soll=%7d  meldet=%d/%d  real=%s/%s  fehler=%d  %.3fs '
+                      '(x%.1f, erwartet x%.1f)  %s'
+                      % (c, f, cur, cur2, real, real2, len(bad), t, ratio, exp,
+                         'OK' if ok else 'FEHLER'), flush=True)
                 with open(RESULT, 'w') as fh:
                     json.dump(results, fh, indent=2)
                 if not ok:

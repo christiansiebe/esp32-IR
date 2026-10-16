@@ -22,8 +22,9 @@ fdtoverlay -i "$DTB" -o /tmp/merged.dtb /root/lowfreq.dtbo || { echo 'FEHLER: fd
 
 echo '== 3. neue OPPs im gemergten DTB pruefen =='
 dtc -I dtb -O dts /tmp/merged.dtb > /tmp/merged.dts 2>/dev/null
-for f in 666666666 500000000 333333333 250000000 200000000 125000000 100000000 50000000; do
-	n=$(grep -c "opp-$f" /tmp/merged.dts)
+for f in 666666666 500000000 250000000 200000000 125000000 100000000 62500000 50000000 40000000 31250000 25000000 20000000 15625000 24000000; do
+	# Anker " {" noetig: "opp-100000000" ist Praefix von "opp-1000000000".
+	n=$(grep -c "opp-$f {" /tmp/merged.dts)
 	[ "$n" = "2" ] || { echo "FEHLER: opp-$f $n mal (erwartet 2)"; exit 1; }
 done
 echo 'alle neuen OPPs vorhanden (je 2)'
