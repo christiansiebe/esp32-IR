@@ -104,6 +104,48 @@ def test_wrap_expand_card_is_idempotent():
     # Wrapping again must not nest a second time.
     check(hwd.wrap_expand_card(wrapped, "x") is wrapped, "idempotent")
 
+def test_reference_gauges_idempotent():
+    print("test_reference_gauges_idempotent")
+    view = {"sections": [{"cards": [
+        {"type": "gauge", "entity": "sensor.mx_400_compressor_electrical_power"},
+        {"type": "gauge", "entity": "sensor.wp_cop_1h"},
+    ]}]}
+    check(hwd.ensure_reference_gauges(view), "first run changes")
+    ents = [c["entity"] for c in view["sections"][0]["cards"]]
+    check("sensor.buderus_thermische_leistung_heizung" in ents, "thermal gauge added")
+    check(hwd.MOD_ENTITY in ents, "modulation gauge added")
+    before = list(ents)
+    check(not hwd.ensure_reference_gauges(view), "second run is a no-op")
+    after = [c["entity"] for c in view["sections"][0]["cards"]]
+    check(before == after, "no duplicates on rerun")
+
+
+def test_replace_raw_modulation_tile():
+    print("test_replace_raw_modulation_tile")
+    view = {"sections": [{"cards": [
+        {"type": "sensor", "entity": "sensor.mx_400_actual_modulation"},
+    ]}]}
+    check(hwd.replace_raw_modulation_tile(view), "tile changed")
+    c = view["sections"][0]["cards"][0]
+    check(c["entity"] == hwd.MOD_ENTITY, "points at derived sensor")
+    check(not hwd.replace_raw_modulation_tile(view), "idempotent")
+
+
+
+
+def test_upsert_marker_block_is_idempotent():
+    print("test_upsert_marker_block_is_idempotent")
+    s, e = "# >>> X <<<", "# <<< X <<<"
+    block = s + "\nbody\n" + e + "\n"
+    t1 = hwd.upsert_marker_block("pre\n", s, e, block)
+    check("body" in t1 and t1.startswith("pre"), "append works")
+    t2 = hwd.upsert_marker_block(t1, s, e, block)
+    check(t2 == t1, "idempotent")
+    check(t2.count(s) == 1 and t2.count(e) == 1, "no duplicate markers")
+    t3 = hwd.upsert_marker_block(t1, s, e, s + "\nNEW\n" + e + "\n")
+    check("NEW" in t3 and "body" not in t3, "replace body")
+    check(t3.count(s) == 1 and t3.count(e) == 1, "still one marker pair")
+
 
 def test_wrap_all_apex_only_touches_apex():
     print("test_wrap_all_apex_only_touches_apex")
@@ -128,5 +170,8 @@ if __name__ == "__main__":
     test_recurses_into_stacks_and_sections()
     test_wrap_expand_card_is_idempotent()
     test_wrap_all_apex_only_touches_apex()
+    test_reference_gauges_idempotent()
+    test_replace_raw_modulation_tile()
+    test_upsert_marker_block_is_idempotent()
     print(f"\n{CHECKS - FAILURES}/{CHECKS} checks passed")
     sys.exit(1 if FAILURES else 0)

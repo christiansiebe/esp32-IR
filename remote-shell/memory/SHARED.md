@@ -285,3 +285,20 @@ Wichtigste Punkte (sonst scheitert es):
   Workaround fuer eine sichtbare "Modulation": die **Kompressorleistung**
   (`sensor.mx_400_compressor_electrical_power`, W, reagiert live) bzw. deren
   Verhaeltnis zu einer Nominalleistung als Ersatz-Kurve nutzen.
+
+### Modulation ersatzweise berechnet + Dashboard nach Bosch-Referenz (2026-10-15)
+- **`sensor.wp_modulation`** (Template-Sensor, `templates.yaml` Block
+  `WP-MODULATION (auto)`, via `ha_wp_dashboard.py` idempotent gepflegt):
+  `Kompressorleistung / 3000 W * 100`, auf 0..100 % begrenzt. Grund: das Gateway
+  liefert `actualModulation` konstant 0; die elektr. Anschlussleistung (3 kW) hat
+  der Nutzer genannt.
+- Dashboard: die immer-0-Kachel `sensor.mx_400_actual_modulation` zeigt jetzt
+  `sensor.wp_modulation` (Name "Modulation (berechnet)"). Gauges in Sektion 0 nun
+  elektr. Leistung / Modulation / **thermische Leistung** (`sensor.buderus_thermische_leistung_heizung`)
+  / Arbeitszahl — angelehnt an die Referenz
+  https://github.com/bosch-buderus-wp/home-assistant/blob/main/dashboards/simple-dashboard.yaml
+- **Wichtig:** Die Bosch-Referenz nutzt EMS-ESP (`sensor.boiler_*`) samt
+  `climate.`/`select.`-Entitäten (Thermostat, Silent). Die `bosch_k40rf`-Integration
+  ist **read-only** (kein `climate`, kein `select`) — daher kein Thermostat-/
+  Silent-Card. "Modulation" ist in der Referenz ebenfalls die Brennerleistung
+  (`sensor.boiler_curburnpow`), was unseren Ersatzansatz stuetzt.

@@ -36,8 +36,44 @@ def resource_url(path):
 
 AUTH = "/config/.storage/auth"
 DASH = "/config/.storage/lovelace.waermepumpe_dashboard"
+TEMPLATES = "/config/templates.yaml"
 RES_URL = "/local/wp-zoom-chart.js"
 URL = "ws://127.0.0.1:8123/api/websocket"
+
+# The heat source reports actualModulation as a constant 0, so derive the
+# modulation from the compressor's electrical power against the 3 kW rating of
+# the connection. See the module docstring / SHARED.md for the evidence.
+MOD_START = "# >>> WP-MODULATION (auto) <<<"
+MOD_END = "# <<< WP-MODULATION (auto) <<<"
+MOD_ENTITY = "sensor.wp_modulation"
+MOD_RATING_W = 3000
+
+MODULATION_BLOCK = MOD_START + """
+- sensor:
+    - name: "WP Modulation"
+      unique_id: wp_modulation
+      unit_of_measurement: "%"
+      state_class: measurement
+      icon: mdi:percent
+      state: >
+        {% set p = states('sensor.mx_400_compressor_electrical_power') | float(0) %}
+        {% set m = p * 100 / """ + str(MOD_RATING_W) + """ %}
+        {{ (m if m < 100 else 100) | round(0) }}
+""" + MOD_END + "\n"
+
+
+def upsert_marker_block(text, start, end, block):
+    """Replace the block between ``start`` and ``end`` markers, else append it.
+
+    Idempotent: running twice yields the same text. Used for the generated
+    template-sensor sections so a redeploy never duplicates or drops them.
+    """
+    if start in text and end in text:
+        pre = text.split(start)[0].rstrip()
+        post = text.split(end)[-1].lstrip("\n")
+        return pre + "\n" + block + post
+    return text.rstrip() + "\n" + block
+
 
 
 def admin_token():
@@ -147,6 +183,68 @@ def wrap_all_apex(node, title=""):
     return count
 
 
+def write_modulation_template():
+    """Add the derived modulation sensor to templates.yaml (idempotent)."""
+    if not os.path.exists(TEMPLATES):
+        print("templates.yaml fehlt – Modulation uebersprungen")
+        return
+    text = open(TEMPLATES).read()
+    new = upsert_marker_block(text, MOD_START, MOD_END, MODULATION_BLOCK)
+    if new != text:
+        open(TEMPLATES, "w").write(new)
+        print("templates.yaml: WP-Modulation Block aktualisiert")
+    else:
+        print("templates.yaml: WP-Modulation Block aktuell")
+
+
+def ensure_reference_gauges(view):
+    """Match the Bosch reference layout: electrical / thermal / efficiency.
+
+    The referenced ``simple-dashboard.yaml`` shows three gauges for electrical
+    intake, thermal output and efficiency. Our dashboard already carries the
+    first and last; add the thermal-output gauge next to the compressor gauge.
+    Idempotent.
+    """
+    thermal = "sensor.buderus_thermische_leistung_heizung"
+    changed = False
+    for s in view.get("sections", []):
+        for i, c in enumerate(s.get("cards", [])):
+            if c.get("entity") == "sensor.mx_400_compressor_electrical_power":
+                have = [x.get("entity") for x in s["cards"]]
+                if thermal not in have:
+                    s["cards"].insert(i + 1, {
+                        "type": "gauge", "entity": thermal,
+                        "name": "Thermische Leistung", "min": 0, "max": 15,
+                        "unit": "kW", "needle": True, "max_decimals": 1})
+                    changed = True
+                if MOD_ENTITY not in have and not any(
+                        c2.get("entity") == MOD_ENTITY for c2 in s["cards"]):
+                    s["cards"].insert(i, {
+                        "type": "gauge", "entity": MOD_ENTITY,
+                        "name": "Modulation (berechnet)", "min": 0, "max": 100,
+                        "needle": True, "unit": "%"})
+                    changed = True
+                return changed
+    return changed
+
+
+def replace_raw_modulation_tile(view):
+    """Point the always-zero tile at the derived sensor instead.
+
+    ``sensor.mx_400_actual_modulation`` is a constant 0 from the gateway, so the
+    tile is misleading. Swap the entity but keep the user's card/name styling.
+    Returns True when the tile was changed.
+    """
+    changed = False
+    for s in view.get("sections", []):
+        for c in s.get("cards", []):
+            if c.get("entity") == "sensor.mx_400_actual_modulation":
+                c["entity"] = MOD_ENTITY
+                c.setdefault("name", "Modulation (berechnet)")
+                changed = True
+    return changed
+
+
 async def main():
     # 1) JS kopieren
     src = "/config/wp-zoom-chart.js"
@@ -205,6 +303,13 @@ async def main():
         if n:
             print(f"{n} apexcharts-card(s) in wp-expand-card verpackt")
 
+        # Abgeleitete Modulation (Quelle meldet konstant 0) + Anzeige
+        write_modulation_template()
+        if replace_raw_modulation_tile(view):
+            print("Immer-0-Kachel auf berechnete Modulation umgestellt")
+        if ensure_reference_gauges(view):
+            print("Referenz-Gauges (Modulation/thermisch) ergaenzt")
+
         # Karten: Zoom-Karten ersetzen/ergaenzen
         charts = {
             "zoom-temp": zoom_card("Temperaturen im Verlauf", TEMPS, "24h", 260),
@@ -240,12 +345,17 @@ async def main():
         # 4) Kontrolle
         r = await call(5, {"type": "lovelace/config",
                            "url_path": "waermepumpe-dashboard"})
-        v = r["result"]["views"][0]
+        v = (r.get("result") or {}).get("views", [{}])[0]
         for i, s in enumerate(v.get("sections", [])):
             types = [c.get("type") for c in s.get("cards", [])]
             print(f"  section {i}: {types}")
         r = await call(6, {"type": "lovelace/resources"})
         print("Ressourcen:", [x.get("url") for x in r.get("result", [])])
+
+        # 5) Templates neu laden, damit sensor.wp_modulation ohne HA-Neustart lebt
+        r = await call(7, {"type": "call_service", "domain": "template",
+                           "service": "reload"})
+        print("Template-Reload:", r.get("success"), r.get("error") or "")
 
 
 if __name__ == "__main__":
