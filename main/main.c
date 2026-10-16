@@ -1939,22 +1939,19 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 #endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
-    /* Bootstrap the sender MAC from any frame whose header carries a known
-     * magic, not only from a fully valid SML packet. The receiver needs the MAC
-     * to send diagnostics/history requests, but the SML path can stay silent
-     * (wrong channel, a momentarily sleeping sender), and then the MAC never
-     * arrives: the backfill cannot start and the receiver cannot even query the
-     * sender. The request/response handlers still do the full validation. */
-    if (data_len >= (int)sizeof(uint32_t)) {
-        uint32_t magic;
-        memcpy(&magic, data, sizeof(magic));
-        if (magic == SML_TRANSPORT_MAGIC || magic == ESPNOW_DIAG_MAGIC) {
-            portENTER_CRITICAL(&g_sender_mac_lock);
-            memcpy(g_sender_mac, info->src_addr, ESP_NOW_ETH_ALEN);
-            g_sender_mac_valid = true;
-            portEXIT_CRITICAL(&g_sender_mac_lock);
-        }
-    }
+    /* Bootstrap the sender MAC from any inbound frame, whatever its type. The
+     * receiver needs the MAC to send diagnostics/history requests, but gating
+     * that on a fully valid SML packet means a silent SML path (no meter head,
+     * wrong channel, a momentarily sleeping sender) leaves the MAC unknown
+     * forever: the backfill cannot start and the dashboard reports "waiting for
+     * SML telemetry" with zero live values. Any ESP-NOW frame the sender emits
+     * - SML, a diagnostic, a time sync - proves where it is, so learn from all
+     * of them. The request/response handlers still do the full validation, so a
+     * spoofed source only redirects our own unicast replies, nothing more. */
+    portENTER_CRITICAL(&g_sender_mac_lock);
+    memcpy(g_sender_mac, info->src_addr, ESP_NOW_ETH_ALEN);
+    g_sender_mac_valid = true;
+    portEXIT_CRITICAL(&g_sender_mac_lock);
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
