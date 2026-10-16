@@ -169,7 +169,11 @@ typedef struct __attribute__((packed)) {
      * kept awake); reuses the first reserved byte so the struct keeps its size
      * and no wire-version bump is needed. */
     uint8_t sleep_fallback_active;
-    uint8_t reserved4;
+    /* Furthest fallback response applied so a repeated silence is visible and
+     * does not look like a fresh event each time. 0 = none, 1 = channel
+     * re-aligned, 2 = light sleep also dropped. Reuses the second reserved
+     * byte, so the struct still keeps its size. */
+    uint8_t link_fallback_stage;
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {
