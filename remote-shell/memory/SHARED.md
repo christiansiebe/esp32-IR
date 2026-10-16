@@ -376,3 +376,18 @@ Wichtigste Punkte (sonst scheitert es):
 - Client-Auto-Install nicht moeglich/notwendig: LE-CA ist ueberall vorinstalliert
   (gilt fuer den lancert-Namen). Nur die lokale CA (fuer die IP) importiert man
   einmalig - Server kann nichts auf fremde Browser schieben.
+
+### Undervolting Odroid N2+ (2026-10-15) - uv.py, NICHT persistent
+- Spannung = PWM-Regler (VDDCPU_A grosse Kerne/policy2, VDDCPU_B kleine/policy0).
+  Regler-Sysfs UND OPP-Tabelle sind read-only -> kein Sysfs-Weg. Einziger
+  Laufzeit-Weg: PWM-Register direkt (/dev/mem).
+- Register: big 0xffd1b000+0x00 period 999; little 0xff802000+0x04 period 333.
+  Linear: V=680000+duty*360000/period; Reg = ((period-duty)<<16)|duty.
+  `microvolts`-Sysfs zeigt danach weiter den ALTEN Wert (Cache) -> duty_uv gilt.
+- Undervolting haelt NUR mit userspace-Governor + fester Frequenz (sonst
+  ueberschreibt cpufreq-dt die Spannung). `uv.py apply/revert/status`.
+- Getestet: Volllast 6x25s bei -20/-60/-100/-140mV stabil. Empfehlung -100mV
+  @1.8GHz (big 831->731mV, little 1000->900mV). Sicherheitsgrenze 700mV.
+- Sicherheitsleine steht: RuntimeWatchdogUSec=1min, watchdog-guard.timer aktiv,
+  panic=10 -> Hang rebootet, danach Werkswert (nichts persistent).
+- Datei: remote-shell/ha/uv.py + UV-README.md.
