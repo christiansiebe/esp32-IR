@@ -55,6 +55,7 @@ const sandbox = {
 };
 sandbox.window = sandbox; sandbox.globalThis = sandbox;
 sandbox.window.innerWidth = 1920; sandbox.window.innerHeight = 1080;
+sandbox.loadCardHelpers = async () => ({ createCardElement: () => mkEl('div') });
 vm.createContext(sandbox);
 
 function fail(m) { console.error('FAIL: ' + m); process.exit(1); }
@@ -202,6 +203,26 @@ function instFor(w) {
   }
   if (counts[counts.length - 1] <= counts[0]) fail('resolution did not increase: ' + counts.join(','));
   console.log('OK (resolution ' + widths.map((w, i) => w + 'px->' + counts[i]).join(', ') + ')');
+
+  // The wrapper must actually build: render the inner card and add the expand
+  // button. A card that renders nothing is the bug the user reports.
+  const wc = new WrapCls();
+  wc.setConfig({ title: 'Energie', card: { type: 'custom:apexcharts-card' } });
+  wc._hass = { callWS: async () => ({}) };
+  await wc._build();
+  if (!wc._cardEl) fail('wrapper did not create the inner card element');
+  const exp = wc.querySelector ? wc.querySelector('.wz-expand') : null;
+  // Fall back: walk the tree we built via appendChild.
+  function findBtn(node) {
+    if (!node || !node.children) return null;
+    for (const c of node.children) {
+      if (c.className && c.className.indexOf('wz-expand') >= 0) return c;
+      const hit = findBtn(c);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (!findBtn(wc)) fail('wrapper did not add the expand button');
 })();
 """
 

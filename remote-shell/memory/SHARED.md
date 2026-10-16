@@ -247,3 +247,41 @@ Wichtigste Punkte (sonst scheitert es):
 - **Odroid-Stand 2026-10-15:** aarch64/Debian 12, Python 3.11.2, Internet ok,
   Ports 7681/8080/8081/8090 frei, `/dev/ttyUSB*` **nicht** angeschlossen (Abnahmetest
   braucht angesteckte Hardware), USB-Serial-Module (ch341/cp210x/ftdi) vorhanden.
+
+### HTTPS fuer Home Assistant (Chat 7a894c13, 2026-10-15)
+- **Additive TLS-Terminierung per nginx** auf dem Odroid (HA bleibt unangetastet
+  plain auf `127.0.0.1:8123`). nginx lauscht auf **80** (-> 301 https) und **443**
+  (proxy_pass auf 8123, WebSocket-Upgrade durchgereicht). `http://<ip>:8123`
+  funktioniert weiter.
+- **Zertifikat:** selbstsigniert (`/etc/nginx/ssl/odroidn2.{crt,key}`), 10 Jahre,
+  SANs `DNS:odroidn2.local,DNS:odroidn2,IP:192.168.178.71,IP:127.0.0.1`.
+  Browser zeigen beim ersten Aufruf eine Warnung (normal bei self-signed; im
+  LAN akzeptabel). Fuer ein vertrauenswuerdiges Zertifikat braeuchte man DNS-01
+  (Let's Encrypt) oder eine eigene CA.
+- **Skript (versioniert):** `remote-shell/ha/setup_https_nginx.sh` — idempotent,
+  installiert nginx, erzeugt das Zertifikat (nur wenn nicht vorhanden), schreibt
+  den vhost, `systemctl enable nginx`.
+- **Verifiziert:** `systemctl is-enabled nginx`=enabled, lauscht 80+443,
+  `curl -sk https://127.0.0.1/`=200, `curl http://127.0.0.1/`=301,
+  HA 8123=200, noVNC 6080=200 (unberuehrt).
+- **Reboot-fest:** nginx ist ein normaler systemd-Dienst (enabled). HA-Supervisor,
+  noVNC, VNC bleiben unveraendert.
+- **Nicht vergessen:** Wenn spaeter HA selbst TLS uebernimmt oder ein Reverse-Proxy
+  davor kommt, diesen nginx wieder entfernen (`systemctl disable --now nginx`).
+
+### Modulation bleibt 0 (Chat 7a894c13, 2026-10-15) — kein HA-Bug
+- Sensor `sensor.mx_400_actual_modulation` (Integration `bosch_k40rf`, lokal am
+  Gateway `192.168.178.31:9443`). **Das Gateway selbst liefert `value: 0.0`** fuer
+  `/heatSources/actualModulation` — HA zeigt also korrekt an, was das Geraet gibt.
+- **Beweis:** Waerend der Kompressor moduliert (`/heatSources/compressor/powerElecActual`
+  2419 -> 1869 -> 1271 -> 22 W in 90 s), bleibt `actualModulation` exakt 0.0 %.
+  `flameStatus`=off, Heizungspumpe/Fan aus (kein Gasbrenner aktiv), Flame current
+  ~0.1-0.2 uA. Gateway-Firmware `15.00.01`.
+- **Alle Modulations-Pfade** im Katalog geprueft: `/devices/{id}/actuatorModulation`,
+  `/dhwCircuits/{id}/friwaPrimaryPumpModulation`, `/solarCircuits/{id}/pumpModulation`
+  = 404 (nicht vorhanden); nur `/heatSources/actualModulation` existiert und ist 0.
+- **Schlussfolgerung:** Das ist ein Geraete-/Gateway-Thema (der K40RF meldet fuer
+  diese Anlage keine Modulation), kein Problem der Integration oder des Dashboards.
+  Workaround fuer eine sichtbare "Modulation": die **Kompressorleistung**
+  (`sensor.mx_400_compressor_electrical_power`, W, reagiert live) bzw. deren
+  Verhaeltnis zu einer Nominalleistung als Ersatz-Kurve nutzen.
