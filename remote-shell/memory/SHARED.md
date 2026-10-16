@@ -339,3 +339,27 @@ Wichtigste Punkte (sonst scheitert es):
 - **FRITZ!Box:** Name ggf. vom DNS-Rebind-Schutz ausnehmen (Heimnetz > Netzwerk >
   Netzwerkeinstellungen > Ausnahmen), sonst kann es Aufloesungsprobleme geben.
 - **Noch offen:** braucht vom Nutzer DuckDNS-Subdomain + Token.
+
+### lancert.dev: echtes LE-Zertifikat ohne Registrierung (2026-10-15)
+- Nutzer wollte HTTPS ohne Warnung, ohne Zertifikat zu installieren, und NICHT
+  oeffentlich. Antwort: **lancert.dev** (MIT, github.com/lucor/lancert) — ein
+  oeffentlicher DNS+acme-dns-Dienst, der einen Namen `<wort-wort>.lancert.dev`
+  auf eine **RFC-1918-IP** zeigen laesst. Kein Konto, keine Registrierung!
+- `POST https://lancert.dev/register/192.168.178.71` -> einmalig
+  `{hostname,username,password,subdomain,fulldomain}`. acme-dns-Update per
+  Headern `X-Api-User`/`X-Api-Key` an `https://lancert.dev/update`.
+- **Skript: `remote-shell/ha/setup_lancert_tls.sh`** (idempotent, versioniert).
+  Ergebnis: `beaver-plain.lancert.dev` -> 192.168.178.71, echtes LE-Zert
+  (issuer "Let's Encrypt", systemweit vertrauenswuerdig, `--cacert` = 200).
+  Creds in `/root/.lancert/acmedns.env` (0600), NIE ins Repo.
+- acme.sh: Provider `dns_acmedns` (ACMEDNS_BASE_URL/USERNAME/PASSWORD/SUBDOMAIN).
+  **Fallen (beide behoben):** (1) acme.sh-Installer installiert nach `/.acme.sh`,
+  wenn HOME leer -> immer `HOME=/root` setzen; (2) die env-Variablen MÜSSEN
+  exportiert werden (`set -a`), sonst fragt der Provider interaktiv `read` ->
+  "invalid response of acme-dns" und cert fehlt. `--dnssleep 15` reicht (TTL 1s).
+- Erneuerung: `acme-renew.timer` (taeglich, `acme.sh --cron`), enabled.
+- nginx: lancert-Name als default_server (LE), `odroidn2.local` weiter per
+  lokaler CA parallel (SNI). HA 8123 + noVNC 6080 unveraendert.
+- Getestet via `--resolve <name>:443:127.0.0.1`: HTTP 301, HTTPS 200, Chain
+  gegen System-CA-Store OK (`--cacert /etc/ssl/certs/ca-certificates.crt`).
+- Doku: `remote-shell/ha/tls/README.md` (beide Wege: lancert + lokale CA).

@@ -1,29 +1,44 @@
 # Vertrauenswürdiges HTTPS für Home Assistant (Odroid N2)
 
-Ein **selbstsigniertes** Zertifikat stuft jeder Browser als „nicht
-zertifiziert" ein — das ist normal und kein Fehler. Für ein LAN-Gerät mit dem
-privaten Namen `odroidn2.local` kann auch Let's Encrypt kein Zertifikat
-ausstellen (dafür bräuchte man eine echte Domain + DNS-01). Der saubere Weg ist
-eine **eigene kleine CA**: ist sie einmal auf den Geräten installiert, gilt die
-Verbindung als vertrauenswürdig (kein Warnhinweis mehr).
+Ziel: `https://<name>` **ohne Browser-Warnung** und **ohne** dass Clients etwas
+installieren müssen — aber auch **ohne** den Dienst ins Internet zu stellen.
 
-## Was auf dem Odroid läuft
+Ein Zertifikat braucht keinen öffentlich erreichbaren Server; entscheidend ist,
+dass der **Name öffentlich auflösbar** ist und die CA den Besitz per DNS-01
+prüfen kann (TXT-Eintrag `_acme-challenge.<name>`). Der A-Record darf dabei auf
+eine **private IP** zeigen — im LAN wird HA erreicht, aus dem Internet nicht.
 
-- nginx terminiert TLS auf **443** und leitet auf HA (`127.0.0.1:8123`) weiter;
-  Port **80** leitet auf HTTPS um. HA selbst bleibt unverändert.
-- `setup_https_nginx.sh` legt an (idempotent):
-  - `/etc/nginx/ssl/ca.crt` + `ca.key` — die lokale Root-CA (10 Jahre)
-  - `/etc/nginx/ssl/odroidn2.crt` + `.key` — Server-Zertifikat (2 Jahre),
-    SANs `odroidn2.local`, `odroidn2`, `192.168.178.71`, `127.0.0.1`
-- **Wichtig:** Die CA wird nur einmal erzeugt. Ein erneuter Lauf behält dieselbe
-  CA, damit bereits eingerichtete Geräte weiter vertrauen.
+Es gibt zwei eingerichtete Wege:
 
-## CA auf den Geräten installieren
+## Empfohlen: lancert.dev (keine Registrierung, kein Konto)
 
-Die Datei `odroidn2-ca.crt` (in diesem Ordner) ist das **öffentliche**
-CA-Zertifikat — kein Geheimnis, darf verteilt werden.
+`setup_lancert_tls.sh` (idempotent) nutzt **[lancert.dev](https://lancert.dev)**
+(MIT, github.com/lucor/lancert). Ein POST auf `/register/<ip>` legt automatisch
+einen Namen wie `<wort-wort>.lancert.dev` an, der auf die private IP zeigt, und
+gibt einmalig DNS-01-Zugangsdaten (acme-dns-API) aus. acme.sh holt damit ein
+echtes Let's-Encrypt-Zertifikat.
 
-Fingerabdruck (SHA-256, zum Abgleich):
+```bash
+# auf dem Odroid
+LAN_IP=192.168.178.71 bash setup_lancert_tls.sh
+```
+
+- Ergebnis: z. B. `beaver-plain.lancert.dev` -> `192.168.178.71`,
+  Zertifikat von Let's Encrypt, **systemweit vertrauenswürdig**.
+- Zugangsdaten liegen in `/root/.lancert/acmedns.env` (0600), **nicht im Repo**.
+- Erneuerung: `acme-renew.timer` (täglich, `acme.sh --cron`).
+- ⚠️ **Sicherheitsmodell:** Die lancert-Zugangsdaten autorisieren nur den
+  TXT-/DNS-01-Nachweis für den einen Namen — nicht mehr. Trotzdem privat halten.
+  Der A-Record auf eine RFC-1918-Adresse bleibt im LAN.
+
+## Alternativ: eigene lokale CA (`setup_https_nginx.sh`)
+
+Falls der Name nicht öffentlich auflösbar sein soll (z. B. `odroidn2.local`),
+stellt keine öffentliche CA aus. Dann erzeugt `setup_https_nginx.sh` eine
+**lokale Root-CA** und signiert damit das Server-Zertifikat. Einmalig muss
+`ca.crt` auf den Geräten als vertrauenswürdig installiert werden.
+
+Fingerabdruck der lokalen CA (SHA-256):
 ```
 0D:87:78:39:C6:31:3D:11:EF:8D:4A:CB:BC:DD:27:AC:88:0B:13:5A:51:02:9A:A7:A2:06:99:4B:34:6C:5C:EE
 ```
@@ -31,38 +46,25 @@ Fingerabdruck (SHA-256, zum Abgleich):
 **Windows:** Doppelklick → *Zertifikat installieren* → *Lokaler Computer* →
 *Alle Zertifikate in folgendem Speicher* → *Vertrauenswürdige
 Stammzertifizierungsstellen*.
+**macOS:** in den Schlüsselbund „System" → *Systemzertifikate* → *Immer vertrauen*.
+**Linux:** `sudo cp odroidn2-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`
+**Firefox:** eigener Speicher → *Einstellungen → Datenschutz → Zertifikate → importieren*.
 
-**macOS:** Datei öffnen (Schlüsselbund) → im Schlüsselbund „System" unter
-*Systemzertifikate* ablegen → doppelklicken → *Immer vertrauen*.
+## Beide Namen parallel
 
-**Linux (Debian/Ubuntu):**
-```
-sudo cp odroidn2-ca.crt /usr/local/share/ca-certificates/odroidn2-ca.crt
-sudo update-ca-certificates
-```
-Firefox führt einen eigenen Speicher → dort zusätzlich unter
-*Einstellungen → Datenschutz → Zertifikate → Zertifizierungsstellen importieren*.
+nginx bedient SNI: Der **lancert**-Name (Let's Encrypt, `default_server`) und
+`odroidn2.local` (lokale CA) funktionieren gleichzeitig. Die CA ist zusätzlich
+unter `http://<host>/ca.crt` abrufbar (über HTTP, ohne Henne-Ei-Problem).
 
-**Android:** *Einstellungen → Sicherheit → Verschlüsselung → Zertifikat
-installieren → CA-Zertifikat*. (Neuere Android-Versionen stufen Nutzer-CAs für
-Apps als nicht vertrauenswürdig ein; im Browser funktioniert es.)
+## FRITZ!Box
 
-**iOS:** Zertifikat per AirDrop/Mail öffnen → *Profil installiert* →
-*Einstellungen → Allgemein → Info → Zertifikatsvertrauenseinstellungen* →
-für diese CA *Vertrauen* aktivieren.
+Falls ein Name im LAN nicht auflöst (DNS-Rebind-Schutz blockiert öffentliche
+Namen auf private IPs): *Heimnetz → Netzwerk → Netzwerkeinstellungen → Ausnahmen*
+den Namen hinzufügen.
 
-Die CA herunterladen — am einfachsten direkt vom Odroid (funktioniert ohne
-Zertifikat, da über **HTTP** ausgeliefert):
-```
-http://odroidn2.local/ca.crt
-```
-Alternativ per SSH:
-```
-scp root@odroidn2.local:/etc/nginx/ssl/ca.crt ./odroidn2-ca.crt
-```
+## Rückbau
 
-## Herunterfahren / Rückbau
-
-```
-systemctl disable --now nginx
+```bash
+systemctl disable --now acme-renew.timer
+rm -f /etc/nginx/sites-enabled/homeassistant
 ```
