@@ -299,6 +299,18 @@ python3 "$here/check_dashboard_js.py"
 
 "$out/test_web_guard"
 
+# Runtime test knobs behind the console's `set` / `reset-config`: clamping and
+# rejection must be exact so a bench run never silently changes the CPU ceiling
+# or the light-sleep flag. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/runtime_config.c" \
+    "$here/test_runtime_config.c" \
+    -o "$out/test_runtime_config"
+
+"$out/test_runtime_config"
+
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.
 cxx="${CXX:-g++}"
@@ -324,6 +336,19 @@ ASAN_OPTIONS=detect_leaks=1 "$out/test_sml_parser"
     -o "$out/test_sml_parser_golden"
 
 ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_parser_golden"
+
+# The console's `test sml` self-test must reach PASS on a healthy parser; this
+# locks the device-facing verdict (same fixture and values) as well.
+"$cxx" -std=c++17 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I"$repo/components/sml_parser/src" \
+    -I"$repo/components/sml_parser/include" \
+    -I"$repo/components/sml_transport/include" \
+    "$repo/components/sml_parser/src/sml.cpp" \
+    "$repo/components/sml_parser/src/sml_selftest.cpp" \
+    "$here/test_sml_selftest.cpp" \
+    -o "$out/test_sml_selftest"
+
+ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_selftest"
 
 # Stability / fault-injection harness for the power-history logic (ASan+UBSan):
 # corrupted, truncated, adversarial and boundary inputs must never crash or be

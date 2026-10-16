@@ -176,6 +176,18 @@ void uart_sleep_set_slept_ms(uint32_t ms);
  * a no-op when the feature is compiled out. */
 void uart_sleep_disable_idf(void);
 
+/* Test-console toggle: force light sleep on/off for a bench run without
+ * reflashing. Re-enabling clears the link-fallback latch, so use it deliberately
+ * when the link is known good. No-op when the feature is compiled out. */
+void uart_sleep_set_enabled(bool enabled);
+bool uart_sleep_is_enabled(void);
+
+/* Test console: park the CPU for one forced light-sleep window of `ms`
+ * (1..1000) and return, so the caller can time it and read back how much was
+ * really slept. Returns false when light sleep is disabled or ms is out of
+ * range. No-op/false when the feature is compiled out. */
+bool uart_sleep_force_window(uint32_t ms, uint32_t *slept_ms_out);
+
 /* True while a hold set with uart_sleep_hold() is still active. Pure so it is
  * host-tested. */
 static inline bool uart_sleep_hold_active(int64_t hold_until_us, int64_t now_us)

@@ -1,0 +1,157 @@
+#include "runtime_config.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* Host builds compile this file without the IDF-injected sdkconfig.h. */
+#ifndef CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
+#define CONFIG_ESPNOW_SENDER_LIGHT_SLEEP 0
+#endif
+#ifndef CONFIG_ESPNOW_CPU_MAX_MHZ
+#define CONFIG_ESPNOW_CPU_MAX_MHZ 240
+#endif
+
+runtime_config_t runtime_config_defaults(void)
+{
+    runtime_config_t cfg = {
+#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
+        .light_sleep = true,
+#else
+        .light_sleep = false,
+#endif
+        .cpu_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ,
+        .espnow_retries = 3u,
+    };
+    return cfg;
+}
+
+runtime_config_t runtime_config_reset(runtime_config_t *cfg)
+{
+    runtime_config_t defaults = runtime_config_defaults();
+    if (cfg != NULL) {
+        *cfg = defaults;
+    }
+    return defaults;
+}
+
+bool runtime_config_parse_cpu_mhz(const char *text, uint32_t ceiling_mhz, uint32_t *out)
+{
+    if (text == NULL || out == NULL) {
+        return false;
+    }
+    char *end = NULL;
+    unsigned long value = strtoul(text, &end, 10);
+    if (end == text || *end != '\0' || value == 0) {
+        return false;
+    }
+    uint32_t limit = ceiling_mhz;
+    if (limit > RUNTIME_CONFIG_CPU_MAX_MHZ) {
+        limit = RUNTIME_CONFIG_CPU_MAX_MHZ;
+    }
+    if (limit < RUNTIME_CONFIG_CPU_MIN_MHZ) {
+        limit = RUNTIME_CONFIG_CPU_MIN_MHZ;
+    }
+    if (value < RUNTIME_CONFIG_CPU_MIN_MHZ) {
+        value = RUNTIME_CONFIG_CPU_MIN_MHZ;
+    }
+    if (value > limit) {
+        value = limit;
+    }
+    *out = (uint32_t)value;
+    return true;
+}
+
+bool runtime_config_parse_bool(const char *text, bool *out)
+{
+    if (text == NULL || out == NULL) {
+        return false;
+    }
+    if (strcmp(text, "on") == 0 || strcmp(text, "1") == 0 ||
+        strcmp(text, "true") == 0) {
+        *out = true;
+        return true;
+    }
+    if (strcmp(text, "off") == 0 || strcmp(text, "0") == 0 ||
+        strcmp(text, "false") == 0) {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *value,
+                        uint32_t ceiling_mhz, char *err, size_t err_size)
+{
+    if (cfg == NULL || key == NULL || value == NULL) {
+        return false;
+    }
+    runtime_config_t next = *cfg;
+    if (strcmp(key, "cpu") == 0 || strcmp(key, "cpu-mhz") == 0) {
+        if (!runtime_config_parse_cpu_mhz(value, ceiling_mhz, &next.cpu_mhz)) {
+            snprintf(err, err_size, "cpu: expected a number of MHz\n");
+            return false;
+        }
+    } else if (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0) {
+        if (!runtime_config_parse_bool(value, &next.light_sleep)) {
+            snprintf(err, err_size, "sleep: expected on or off\n");
+            return false;
+        }
+    } else if (strcmp(key, "retries") == 0 || strcmp(key, "espnow-retries") == 0) {
+        char *end = NULL;
+        unsigned long v = strtoul(value, &end, 10);
+        if (end == value || *end != '\0' || v > 10) {
+            snprintf(err, err_size, "retries: expected 0..10\n");
+            return false;
+        }
+        next.espnow_retries = (uint32_t)v;
+    } else {
+        snprintf(err, err_size,
+                 "unknown key '%s' (cpu, sleep, retries)\n", key);
+        return false;
+    }
+    *cfg = next;
+    return true;
+}
+
+void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_size)
+{
+    if (cfg == NULL || out == NULL || out_size == 0) {
+        return;
+    }
+    snprintf(out, out_size,
+             "cpu ceiling: %u MHz\n"
+             "light sleep: %s\n"
+             "espnow retries: %u\n",
+             (unsigned)cfg->cpu_mhz, cfg->light_sleep ? "on" : "off",
+             (unsigned)cfg->espnow_retries);
+}
+
+#ifdef ESP_PLATFORM
+
+#include "esp_pm.h"
+
+bool runtime_config_apply(const runtime_config_t *cfg)
+{
+    if (cfg == NULL) {
+        return false;
+    }
+    /* Changing max_freq_mhz reconfigures DFS; light_sleep_enable toggles the
+     * idle park. min_freq stays at 40 MHz (the lowest DFS step). */
+    esp_pm_config_t pm = {
+        .max_freq_mhz = (int)cfg->cpu_mhz,
+        .min_freq_mhz = 40,
+        .light_sleep_enable = cfg->light_sleep,
+    };
+    return esp_pm_configure(&pm) == ESP_OK;
+}
+
+#else /* host build: no power management to apply */
+
+bool runtime_config_apply(const runtime_config_t *cfg)
+{
+    (void)cfg;
+    return true;
+}
+
+#endif

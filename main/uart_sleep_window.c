@@ -212,6 +212,43 @@ bool uart_sleep_hold_is_active(void)
     return uart_sleep_hold_active(s_hold_until_us, esp_timer_get_time());
 }
 
+void uart_sleep_set_enabled(bool enabled)
+{
+    if (enabled) {
+        /* Clear the fallback latch and allow the idle path to park again. */
+        s_disabled = false;
+        esp_pm_config_t pm = {
+            .max_freq_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ,
+            .min_freq_mhz = 40,
+            .light_sleep_enable = true,
+        };
+        (void)esp_pm_configure(&pm);
+        uart_sleep_lock(true); /* lock is released only for the sleep window */
+    } else {
+        uart_sleep_disable_idf();
+    }
+}
+
+bool uart_sleep_is_enabled(void) { return !s_disabled; }
+
+bool uart_sleep_force_window(uint32_t ms, uint32_t *slept_ms_out)
+{
+    if (slept_ms_out != NULL) {
+        *slept_ms_out = 0;
+    }
+    if (s_disabled || ms == 0 || ms > 1000u) {
+        return false;
+    }
+    uint32_t before_ms = s_slept_ms;
+    uart_sleep_lock(false);
+    vTaskDelay(pdMS_TO_TICKS(ms));
+    uart_sleep_lock(true);
+    if (slept_ms_out != NULL) {
+        *slept_ms_out = s_slept_ms - before_ms; /* real light-sleep time */
+    }
+    return true;
+}
+
 #else /* feature disabled or unsupported target: the glue is a no-op */
 
 bool uart_sleep_init_idf(void) { return false; }
@@ -228,6 +265,16 @@ void uart_sleep_hold(uint32_t hold_ms) { (void)hold_ms; }
 void uart_sleep_maybe_sleep_idf(void) {}
 void uart_sleep_set_slept_ms(uint32_t ms) { (void)ms; }
 void uart_sleep_disable_idf(void) {}
+void uart_sleep_set_enabled(bool enabled) { (void)enabled; }
+bool uart_sleep_is_enabled(void) { return false; }
+bool uart_sleep_force_window(uint32_t ms, uint32_t *slept_ms_out)
+{
+    (void)ms;
+    if (slept_ms_out != NULL) {
+        *slept_ms_out = 0;
+    }
+    return false;
+}
 uint32_t uart_sleep_window_ms(void) { return 0; }
 uint32_t uart_sleep_min_gap_ms(void) { return 0; }
 bool uart_sleep_hold_is_active(void) { return false; }

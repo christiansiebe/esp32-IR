@@ -34,6 +34,8 @@
 #include "json_escape.h"
 #include "link_fallback.h"
 #include "power_history.h"
+#include "runtime_config.h"
+#include "sml_selftest.h"
 #include "version.h"
 #include "web_console.h"
 #include "web_guard.h"
@@ -4760,9 +4762,149 @@ static esp_err_t simulate_page_handler(httpd_req_t *req)
 }
 #endif /* !CONFIG_ESPNOW_ROLE_SENDER */
 
+/* RAM-only test knobs, changed through the console ('set' / 'reset-config').
+ * A reboot restores the compile-time defaults. */
+static runtime_config_t g_runtime_config;
+static bool g_runtime_config_ready;
+
+static runtime_config_t *active_runtime_config(void)
+{
+    if (!g_runtime_config_ready) {
+        g_runtime_config = runtime_config_defaults();
+        g_runtime_config_ready = true;
+    }
+    return &g_runtime_config;
+}
+
+static void console_cmd_test(const char *args, char *out, size_t out_size)
+{
+    char what[24] = {0};
+    char rest[32] = {0};
+    int parsed = sscanf(args, "%23s %31s", what, rest);
+    if (parsed < 1) {
+        snprintf(out, out_size,
+                 "usage: test sleep <ms> | test sml | test espnow | test storage\n");
+        return;
+    }
+    if (strcmp(what, "sml") == 0) {
+        sml_selftest_result_t r;
+        sml_selftest_run(&r);
+        snprintf(out, out_size,
+                 "sml self-test: %s\n"
+                 "  crc valid: %s  listends: %d\n"
+                 "  1-0:1.8.0 = %lld Wh  1-0:1.8.1 = %lld Wh  1-0:15.7.0 = %lld W\n",
+                 r.pass ? "PASS" : "FAIL", r.crc_valid ? "yes" : "no", r.listends,
+                 r.energy_1_8_0, r.energy_1_8_1, r.power_15_7_0);
+        return;
+    }
+#if CONFIG_ESPNOW_ROLE_SENDER
+    if (strcmp(what, "sleep") == 0) {
+        char *end = NULL;
+        unsigned long ms = (parsed < 2) ? 0 : strtoul(rest, &end, 10);
+        if (parsed < 2 || end == rest || *end != '\0' || ms == 0 || ms > 1000) {
+            snprintf(out, out_size, "usage: test sleep <ms> (1..1000)\n");
+            return;
+        }
+        uint32_t slept = 0;
+        bool ok = uart_sleep_force_window((uint32_t)ms, &slept);
+        if (!ok) {
+            snprintf(out, out_size,
+                     "sleep test: not available (light sleep off, or ms out of 1..1000)\n");
+            return;
+        }
+        snprintf(out, out_size,
+                 "sleep test: requested %lu ms, slept %u ms, light sleep %s\n",
+                 ms, (unsigned)slept,
+                 uart_sleep_is_enabled() ? "enabled" : "disabled");
+        return;
+    }
+#else
+    if (strcmp(what, "storage") == 0) {
+        power_history_status_t s;
+        power_history_get_status(&s);
+        int64_t oldest = 0;
+        int64_t latest = 0;
+        (void)power_history_time_range(&oldest, &latest);
+        snprintf(out, out_size,
+                 "storage: %s\n"
+                 "  records: %u  sequences: %u..%u\n"
+                 "  range: %lld..%lld UTC\n"
+                 "  queue drops: %u  write errors: %u\n",
+                 s.ready ? "ready" : "not ready", (unsigned)s.record_count,
+                 (unsigned)s.oldest_sequence, (unsigned)s.latest_sequence,
+                 (long long)oldest, (long long)latest,
+                 (unsigned)s.queue_drops, (unsigned)s.write_errors);
+        return;
+    }
+    if (strcmp(what, "espnow") == 0) {
+        bool fb = false;
+#if CONFIG_ESPNOW_LINK_FALLBACK
+        fb = g_link_fallback_active;
+#endif
+        snprintf(out, out_size,
+                 "espnow: channel %u  link fallback: %s\n"
+                 "  run 'pull' to exercise the link, or open the sender counters page\n",
+                 (unsigned)g_espnow_channel, fb ? "active" : "idle");
+        return;
+    }
+#endif
+    snprintf(out, out_size, "unknown test '%s' (sleep, sml, espnow, storage)\n", what);
+}
+
+static void console_cmd_set(const char *args, char *out, size_t out_size)
+{
+    char key[24] = {0};
+    char value[32] = {0};
+    if (sscanf(args, "%23s %31s", key, value) != 2) {
+        snprintf(out, out_size, "usage: set <cpu|sleep|retries> <value>\n");
+        return;
+    }
+    runtime_config_t *cfg = active_runtime_config();
+    char err[64] = {0};
+    if (!runtime_config_set(cfg, key, value, CONFIG_ESPNOW_CPU_MAX_MHZ, err,
+                            sizeof(err))) {
+        snprintf(out, out_size, "%s", err);
+        return;
+    }
+    bool applied = runtime_config_apply(cfg);
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* Light sleep has its own latch; mirror the knob onto it. */
+    if (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0) {
+        uart_sleep_set_enabled(cfg->light_sleep);
+    }
+#endif
+    int written = snprintf(out, out_size,
+                           "%s=%s%s\n", key, value,
+                           applied ? "" : " (hardware rejected the change)");
+    if (written > 0 && (size_t)written < out_size) {
+        runtime_config_render(cfg, out + written, out_size - (size_t)written);
+    }
+}
+
+static void console_cmd_reset_config(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    runtime_config_t *cfg = active_runtime_config();
+    runtime_config_reset(cfg);
+    runtime_config_apply(cfg);
+#if CONFIG_ESPNOW_ROLE_SENDER
+    uart_sleep_set_enabled(cfg->light_sleep);
+#endif
+    size_t used = (size_t)snprintf(out, out_size, "config reset to defaults\n");
+    if (used < out_size) {
+        runtime_config_render(cfg, out + used, out_size - used);
+    }
+}
+
 static void web_console_register_commands(void)
 {
     web_console_register("help", "list available commands", console_cmd_help);
+    web_console_register("test", "run a self-test: sleep|sml|espnow|storage",
+                         console_cmd_test);
+    web_console_register("set", "change a runtime knob: cpu|sleep|retries",
+                         console_cmd_set);
+    web_console_register("reset-config", "restore the default test knobs",
+                         console_cmd_reset_config);
     web_console_register("status", "wifi, channel, clock and heap",
                          console_cmd_status);
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -4838,6 +4980,7 @@ static esp_err_t console_page_handler(httpd_req_t *req)
         "<p>Same information as the serial console. Enter the Wi-Fi key once "
         "(stored for this tab) and send commands such as <b>status</b>, "
         "<b>history</b>, <b>time</b>, <b>wifi</b>, <b>power</b>, <b>reboot</b>, "
+        "<b>test sleep 400</b>, <b>test sml</b>, <b>set cpu 80</b>, "
         "<b>help</b>.</p>"
         "<input id=\"key\" type=\"password\" placeholder=\"Wi-Fi / OTA key\">"
         "<br><input id=\"cmd\" placeholder=\"command\" autocomplete=\"off\">"
@@ -6680,6 +6823,10 @@ static void run_sender(void)
     /* Load the previous session's journal and report the reset reason first, so
      * a crash is explained as early as possible in the boot log. */
     crash_journal_init();
+
+    /* The sender has no web server; the receiver tunnels console commands to it
+     * over ESP-NOW, so register the same command set here. */
+    web_console_register_commands();
 
     const uart_config_t uart_config = {
         .baud_rate = UART_BAUD_RATE,
