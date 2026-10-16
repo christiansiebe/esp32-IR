@@ -391,3 +391,15 @@ Wichtigste Punkte (sonst scheitert es):
 - Sicherheitsleine steht: RuntimeWatchdogUSec=1min, watchdog-guard.timer aktiv,
   panic=10 -> Hang rebootet, danach Werkswert (nichts persistent).
 - Datei: remote-shell/ha/uv.py + UV-README.md.
+
+### Undervolt-Grenze unter Frequenzwechsel (2026-10-16, gemessen)
+- uvstress.py faehrt die ganze OPP-Tabelle durch, setzt je Frequenz den Undervolt
+  aus der GEMESSENEN Werks-Tabelle (stock_duties) und prueft Ergebnisse per Hash.
+- STABIL: -40/-60/-80/-100 mV. HANG (Watchdog-Reboot): -110 und -120 mV.
+  -> Grenze zwischen 100 und 110 mV; Empfehlung mit Reserve: -80 mV.
+- Achtung Regler-Cache: programmiert nur bei GEAENDERTER Zielspannung neu. Bei zwei
+  Frequenzen mit gleicher Werksspannung bleibt der alte Duty stehen -> eine
+  Ableitung vom aktuellen Duty summiert sich auf (Runaway bis 700mV -> Hang).
+  Deshalb stock_duties() einmal messen und Zielwert absolut setzen.
+- Ersparnis nur moderat: P~V^2*f, Kerne ~5-10% der Board-Leistung. Idle wird
+  SCHLECHTER (userspace nagelt Frequenz fest). Kein Leistungsmesser vorhanden.

@@ -50,10 +50,42 @@ Sicherheitsgrenze: nie unter **700 mV** (`SAFE_MIN_UV`).
 ## Verifikation am Board (2026-10-15)
 
 - Schreibpfad per No-Op-Write bestätigt.
-- Volllast (6 Prozesse × 25 s) bei -20/-60/-100/-140 mV jeweils stabil.
-- Empfohlener Startwert: **-100 mV** @ 1.8 GHz (big 831→731, little 1000→900).
+- **Feste Frequenz** (1.8 GHz), Volllast (6×25 s): stabil bei -20/-60/-100/-140 mV.
+- **Unter Frequenzwechsel** (`uvstress.py`, ganze OPP-Tabelle, 2 Zyklen, 6 Prozesse,
+  Ergebnisprüfung per Hash):
+
+| Absenkung | Ergebnis |
+|---|---|
+| -40 mV | STABIL |
+| -60 mV | STABIL |
+| -80 mV | STABIL |
+| -100 mV | STABIL |
+| -110 mV | **Hang → Watchdog-Reboot** |
+| -120 mV | **Hang → Watchdog-Reboot** |
+
+- Grenze unter Frequenzwechsel liegt also zwischen **100 und 110 mV**. Empfohlen
+  mit Reserve: **-80 mV** (big 831→751, little 1000→920).
+- Der frühere Absturz bei -100/-40 mV war ein **Fehler im Test**, nicht die
+  Hardware: der Regler-Cache programmiert nur bei geänderter Zielspannung neu,
+  wodurch sich die Absenkung bei gleicher Werksspannung aufsummierte (siehe
+  `stock_duties()` in `uvstress.py`).
 - Watchdog: `RuntimeWatchdogUSec=1min`, `watchdog-guard.timer` aktiv,
   `kernel.panic=10` → ein Hang rebootet das Board, danach ist alles auf Werkswert.
+  Alle Hänger wurden so automatisch aufgefangen.
+
+## Erwartete Ersparnis (ehrlich, nicht gemessen)
+
+Keine Leistungsmess-Hardware vorhanden, daher nur Abschätzung über P ∝ V²·f:
+
+- Big-Cluster bei -100 mV: (731/831)² = 0,77 → ~23 % weniger **dynamische**
+  Kernleistung. Little bei -100 mV: (900/1000)² = 0,81 → ~19 %.
+- Das betrifft nur die CPU-Kern-Rails. Am gesamten Board (RAM, USB, WLAN, SSD,
+  HDMI) sind die Kerne nur ein Teil → unter Volllast grob **5–10 % der
+  Board-Leistung**.
+- Im **Idle kann es schlechter werden**: der userspace-Governor nagelt die
+  Frequenz fest (z. B. 1.8 GHz), schedutil würde auf 1.0 GHz heruntertakten.
+- Fazit: echter, aber **moderater** Effekt — kein großer Sprung. Und nur
+  sinnvoll unter Dauerlast, nicht im Leerlauf.
 
 ## Nicht persistent
 
