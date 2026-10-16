@@ -1,0 +1,12 @@
+[Unit]
+Description=Hold the CPU minimum frequency at a safe floor
+After=sysinit.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cpu-freq-guard.sh
+
+[Install]
+WantedBy=multi-user.target
