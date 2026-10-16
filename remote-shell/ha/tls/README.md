@@ -51,7 +51,12 @@ Apps als nicht vertrauenswürdig ein; im Browser funktioniert es.)
 *Einstellungen → Allgemein → Info → Zertifikatsvertrauenseinstellungen* →
 für diese CA *Vertrauen* aktivieren.
 
-Die CA herunterladen (auf dem Odroid erreichbar solange man dort Zugriff hat):
+Die CA herunterladen — am einfachsten direkt vom Odroid (funktioniert ohne
+Zertifikat, da über **HTTP** ausgeliefert):
+```
+http://odroidn2.local/ca.crt
+```
+Alternativ per SSH:
 ```
 scp root@odroidn2.local:/etc/nginx/ssl/ca.crt ./odroidn2-ca.crt
 ```

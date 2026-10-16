@@ -47,7 +47,13 @@ server {
     listen 80;
     listen [::]:80;
     server_name _;
-    return 301 https://$host$request_uri;
+    location = /ca.crt {
+        alias /etc/nginx/ssl/ca.crt;
+        default_type application/x-x509-ca-cert;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 server {
     listen 443 ssl;
