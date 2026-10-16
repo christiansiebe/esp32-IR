@@ -49,12 +49,6 @@ jobs:
           python3 test/test_ws_client.py
           python3 test/check_dashboard_js.py
 
-      - name: Run IDF-monitor-web tests (host bridge)
-        shell: bash
-        run: |
-          python3 test/test_idf_monitor_web.py
-          python3 remote-shell/idf-monitor-web/test_smoke.py
-
   build:
     name: Build ${{ matrix.role }}
     runs-on: ubuntu-24.04

@@ -27,6 +27,7 @@
 #include "mdns.h"
 #include "nvs_flash.h"
 #include "boot_confirm.h"
+#include "boot_log.h"
 #include "history_backfill.h"
 #include "history_sync.h"
 #include "history_csv_import.h"
@@ -47,6 +48,10 @@
 #endif
 
 static const char *TAG = "espnow_meter";
+
+/* Boot-log API payload: slightly larger than the ring in boot_log.c (6144) so a
+ * full ring fits, plus the terminating NUL. */
+#define BOOT_LOG_API_MAX 6300
 
 /* ESP-NOW channel. Configurable so it can be pinned when the receiver runs
  * without its SoftAP (the sender then has no AP to scan for the channel and
@@ -4104,6 +4109,76 @@ static esp_err_t rssi_api_handler(httpd_req_t *req)
 }
 #endif
 
+/* --- Boot log over Wi-Fi ---------------------------------------------------
+ * The boot log lives only on UART0. This page shows the copy captured in RAM
+ * (boot_log.c) so it can be read when no serial host was attached at boot. The
+ * page is public like the other dashboards; the API is gated by the same key as
+ * the console. */
+static bool ota_key_is_valid(httpd_req_t *req);
+static esp_err_t send_http_error_status(httpd_req_t *req,
+                                        const char *status,
+                                        const char *message);
+
+static esp_err_t bootlog_api_handler(httpd_req_t *req)
+{
+    if (!ota_key_is_valid(req)) {
+        return send_http_error_status(req, "401 Unauthorized",
+                                      "X-OTA-Key missing or wrong");
+    }
+    static char buffer[BOOT_LOG_API_MAX];
+    size_t total = boot_log_total();
+    size_t n = boot_log_read(buffer, sizeof(buffer));
+
+    char total_str[24];
+    snprintf(total_str, sizeof(total_str), "%u", (unsigned)total);
+    httpd_resp_set_hdr(req, "X-Boot-Log-Total", total_str);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, buffer, n);
+}
+
+static esp_err_t bootlog_page_handler(httpd_req_t *req)
+{
+    static const char page[] =
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<title>ESP32 boot log</title>"
+        "<style>body{font-family:monospace;margin:20px;background:#10151f;color:#e5edf7}"
+        "input,button{font:inherit;padding:8px;margin:4px 0}"
+        "input{width:60%;background:#182330;color:#e5edf7;border:1px solid #2c3e50;"
+        "border-radius:6px}button{background:#176b91;color:#fff;border:0;border-radius:6px;"
+        "cursor:pointer}button:hover{background:#2086b2}pre{white-space:pre-wrap;"
+        "word-break:break-word;background:#0b0f16;padding:12px;border-radius:8px}"
+        "a{color:#78d6ff}.muted{color:#8aa0b8}</style></head><body>"
+        "<h1>Boot log (from RAM)</h1>"
+        "<p class=\"muted\">Captured since boot; the last ~6&nbsp;kB are kept in RAM and "
+        "lost on restart. For anything before this capture started, use the serial monitor."
+        "</p>"
+        "<input id=\"key\" type=\"password\" placeholder=\"Wi-Fi / OTA key\">"
+        "<button id=\"load\" type=\"button\">Load / refresh</button>"
+        "<button id=\"clear\" type=\"button\">Clear</button>"
+        "<p id=\"status\" class=\"muted\">Enter the key and press Load.</p>"
+        "<pre id=\"out\"></pre><script>"
+        "const out=document.getElementById('out'),key=document.getElementById('key'),"
+        "status=document.getElementById('status');"
+        "try{key.value=sessionStorage.getItem('consoleKey')||'';}catch(e){}"
+        "async function load(){try{sessionStorage.setItem('consoleKey',key.value);}catch(e){}"
+        "status.textContent='loading...';out.textContent='';"
+        "try{const r=await fetch('/api/bootlog',{cache:'no-store',"
+        "headers:{'X-OTA-Key':key.value}});const t=await r.text();"
+        "if(!r.ok){status.textContent='['+r.status+'] '+t;return;}"
+        "const total=parseInt(r.headers.get('X-Boot-Log-Total')||'0',10);"
+        "out.textContent=t;out.scrollTop=out.scrollHeight;"
+        "status.textContent='loaded '+t.length+' of '+total+' bytes'"
+        "+(total>t.length?' (older bytes overwritten)':'')+'.';}"
+        "catch(e){status.textContent='request failed: '+e;}}"
+        "document.getElementById('load').onclick=load;"
+        "document.getElementById('clear').onclick=()=>{out.textContent='';};"
+        "key.addEventListener('keydown',e=>{if(e.key==='Enter')load();});"
+        "if(key.value)load();key.focus();</script></body></html>";
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t log_page_handler(httpd_req_t *req)
 {
     static const char page[] =
@@ -6152,6 +6227,16 @@ static void register_webserver_handlers(httpd_handle_t server)
         .method = HTTP_POST,
         .handler = console_api_handler,
     };
+    httpd_uri_t bootlog_page = {
+        .uri = "/bootlog",
+        .method = HTTP_GET,
+        .handler = bootlog_page_handler,
+    };
+    httpd_uri_t bootlog_api = {
+        .uri = "/api/bootlog",
+        .method = HTTP_GET,
+        .handler = bootlog_api_handler,
+    };
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &data));
@@ -6177,6 +6262,8 @@ static void register_webserver_handlers(httpd_handle_t server)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &save));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &console_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &console_api));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &bootlog_page));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &bootlog_api));
     web_console_register_commands();
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update));
@@ -6307,6 +6394,9 @@ static void apply_power_management(void)
 
 void app_main(void)
 {
+    /* Capture the boot log in RAM first, so the Wi-Fi dashboard can offer it
+     * later even when no host is attached at boot. */
+    boot_log_init();
     initialize_wifi_and_espnow();
     apply_power_management();
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -6400,7 +6490,7 @@ void app_main(void)
     if (backfill_result != pdPASS) {
         ESP_LOGW(TAG, "Could not start the history-backfill worker");
     }
-    ESP_LOGI(TAG, "Receiver ready: http://192.168.4.1/ | /sender | /diag | /log | /config | /update");
+    ESP_LOGI(TAG, "Receiver ready: http://192.168.4.1/ | /sender | /diag | /log | /console | /bootlog | /config | /update");
     while (1) {
         /* Confirm the running OTA image once it has been stable for the policy
          * window; a no-op on a normal (already accepted) boot. */
