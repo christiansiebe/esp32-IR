@@ -195,6 +195,12 @@ esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
  * Backs the full-store sync's per-minute dedupe so the receiver never merges a
  * minute it already holds. Binary search, so it stays cheap on a full store. */
 bool power_history_has_minute(int64_t interval_start_utc);
+
+/* Real stored time range (oldest/latest record minute). Used to report the
+ * sender's true data horizon over ESP-NOW, so the receiver can tell whether it
+ * has caught up instead of comparing against a synthetic "now" bound. Returns
+ * false (and leaves both at 0) while the store is not ready or empty. */
+bool power_history_time_range(int64_t *oldest_utc, int64_t *latest_utc);
 /* True when the record's minute interval falls inside [from_utc, to_utc). The
  * record is validated (and migrated in a local copy) first, so corrupt or
  * unsupported entries are rejected. Exposed so the backfill window filter is

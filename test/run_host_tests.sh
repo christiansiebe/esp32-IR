@@ -329,3 +329,20 @@ ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_parser_golden"
 # corrupted, truncated, adversarial and boundary inputs must never crash or be
 # accepted as consistent records.
 "$here/stability/run_stability.sh"
+
+# Virtual link simulator: drives the real history_sync_run() against a scripted
+# sender and a lossy ESP-NOW link, so backfill changes can be validated on the
+# host before flashing. Asserts a clean mirror, a resume after a link drop with
+# no lost/duplicated minute, and caught_up against the sender's real horizon
+# (the regression where a synthetic latest_utc pinned the receiver to a 10 s
+# poll).
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/history_sync.c" \
+    "$repo/main/history_backfill.c" \
+    "$here/test_virtual_day.c" \
+    -o "$out/test_virtual_day"
+
+"$out/test_virtual_day"

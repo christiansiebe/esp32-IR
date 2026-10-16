@@ -1461,6 +1461,56 @@ esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
     return result;
 }
 
+bool power_history_time_range(int64_t *oldest_utc, int64_t *latest_utc)
+{
+    if (oldest_utc != NULL) {
+        *oldest_utc = 0;
+    }
+    if (latest_utc != NULL) {
+        *latest_utc = 0;
+    }
+    if (!g_history_ready ||
+        xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        return false;
+    }
+    int64_t oldest = 0;
+    int64_t latest = 0;
+    if (g_history_header.record_count != 0) {
+        uint32_t oldest_slot =
+            (g_history_header.next_slot + POWER_HISTORY_CAPACITY -
+             g_history_header.record_count) % POWER_HISTORY_CAPACITY;
+        uint32_t newest_slot =
+            (g_history_header.next_slot + POWER_HISTORY_CAPACITY - 1u) % POWER_HISTORY_CAPACITY;
+        if (g_history_file == NULL) {
+            oldest = g_history_ram_records[0].interval_start_utc;
+            latest = g_history_ram_records[g_history_ram_count == 0 ? 0 : g_history_ram_count - 1]
+                         .interval_start_utc;
+        } else {
+            power_history_record_t record;
+            long offset = (long)(2u * sizeof(power_history_header_t) +
+                                 oldest_slot * sizeof(record));
+            if (fseek(g_history_file, offset, SEEK_SET) == 0 &&
+                fread(&record, sizeof(record), 1, g_history_file) == 1) {
+                oldest = record.interval_start_utc;
+            }
+            offset = (long)(2u * sizeof(power_history_header_t) +
+                            newest_slot * sizeof(record));
+            if (fseek(g_history_file, offset, SEEK_SET) == 0 &&
+                fread(&record, sizeof(record), 1, g_history_file) == 1) {
+                latest = record.interval_start_utc;
+            }
+        }
+    }
+    xSemaphoreGive(g_history_mutex);
+    if (oldest_utc != NULL) {
+        *oldest_utc = oldest;
+    }
+    if (latest_utc != NULL) {
+        *latest_utc = latest;
+    }
+    return true;
+}
+
 bool power_history_has_minute(int64_t interval_start_utc)
 {
     if (!g_history_ready ||

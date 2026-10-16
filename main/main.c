@@ -1159,6 +1159,7 @@ static void crash_journal_mark_clean_restart(void)
 
 static uint32_t g_boot_marker_count;
 static uint8_t  g_boot_marker_reason;
+static bool     g_boot_marker_done;
 
 static void boot_marker_flag_planned_reboot(void)
 {
@@ -1272,6 +1273,13 @@ static const char *boot_marker_reason_label(uint8_t reason)
 
 static void boot_marker_note_and_log(int64_t now_utc, uint8_t reason)
 {
+    /* Run at most once per boot: the fill drains the storage queue, so a repeat
+     * call (every time sync) would discard markers queued earlier and re-enqueue
+     * the same window, inflating the queue-drop counter. */
+    if (g_boot_marker_done) {
+        return;
+    }
+    g_boot_marker_done = true;
     g_boot_marker_reason = reason;
     uint32_t written = boot_marker_fill(now_utc, reason);
     g_boot_marker_count = written;
@@ -1601,11 +1609,17 @@ static void build_diag_history_response(const espnow_diag_request_item_t *reques
     power_history_status_t store;
     power_history_get_status(&store);
     if (store.record_count != 0) {
-        /* Newest minute is the live tail; the oldest is bounded by the sender's
-         * own recording horizon (kept a little behind live, same as the window). */
-        response->latest_utc = request->to_utc;
-        response->oldest_utc = request->to_utc -
-                               (int64_t)HISTORY_BACKFILL_WINDOW_SECONDS;
+        /* Report the sender's REAL data horizon, not a synthetic "now" window:
+         * the receiver compares its cursor against latest_utc to decide whether
+         * it has caught up. With a clock-less sender the newest record is far
+         * behind "now", so a synthetic bound kept caught_up false forever and
+         * pinned the receiver to a 10 s poll. */
+        int64_t oldest_utc = 0;
+        int64_t latest_utc = 0;
+        if (power_history_time_range(&oldest_utc, &latest_utc)) {
+            response->oldest_utc = oldest_utc;
+            response->latest_utc = latest_utc;
+        }
     }
 
     size_t count = 0;
@@ -6376,10 +6390,10 @@ static void start_webserver(void)
     register_webserver_handlers(server);
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
-    /* Health endpoint + guard: if the dashboard stops answering later (the
-     * confirmed-image blind spot), restart the server and, as a last resort,
-     * reboot so the boot_confirm policy runs again. */
-    ESP_ERROR_CHECK(web_guard_register_healthz(server));
+    /* Guard: if the dashboard stops answering later (the confirmed-image blind
+     * spot), restart the server and, as a last resort, reboot so the
+     * boot_confirm policy runs again. /healthz is registered inside
+     * register_webserver_handlers() so it survives the guard's own restarts. */
     web_guard_start(&server, &config, register_webserver_handlers);
 #endif
     ESP_LOGI(TAG, "Webserver available through the setup AP at http://192.168.4.1/");
@@ -6575,6 +6589,10 @@ static void register_webserver_handlers(httpd_handle_t server)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update));
 #if !CONFIG_ESPNOW_ROLE_SENDER
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update_sender));
+    /* /healthz must be (re)registered here, not only at first start: the guard
+     * restarts the server with this function and would otherwise drop the
+     * endpoint its own self-probe depends on. */
+    ESP_ERROR_CHECK(web_guard_register_healthz(server));
 #endif
 }
 
