@@ -141,17 +141,36 @@ def apply(big_freq, little_freq, offset_uv, explicit):
 
 
 def revert():
-    if not os.path.exists(STATE):
-        return {'note': 'kein Zustand gespeichert - setze nur Governor zurueck'}
-    orig = json.load(open(STATE))
+    orig = json.load(open(STATE)) if os.path.exists(STATE) else {}
     for c in CLUSTERS:
         p = policy(c)
+        if c in orig:
+            write_sys(p + '/scaling_max_freq', orig[c]['max_freq'])
+            write_sys(p + '/scaling_min_freq', '1000000')
         write_sys(p + '/scaling_governor', 'schedutil')
-        write_sys(p + '/scaling_max_freq', orig[c]['max_freq'])
-        write_sys(p + '/scaling_min_freq', '1000000')
     time.sleep(0.3)
-    os.remove(STATE)
+    if os.path.exists(STATE):
+        os.remove(STATE)
     return status()
+
+
+def opp_table():
+    """Frequenz -> Werksspannung je Cluster (aus dem PWM-Regler gelesen)."""
+    out = {}
+    for c in CLUSTERS:
+        p = policy(c)
+        gov = read_sys(p + '/scaling_governor')
+        rows = []
+        # Frequenz setzen, Werksspannung (Duty) ablesen, dann naechste.
+        write_sys(p + '/scaling_governor', 'userspace')
+        for f in read_sys(p + '/scaling_available_frequencies').split():
+            f = int(f)
+            write_sys(p + '/scaling_setspeed', f)
+            time.sleep(0.05)
+            rows.append(dict(freq=f, stock_uv=round(duty_to_uv(c, read_duty(c)))))
+        write_sys(p + '/scaling_governor', gov)
+        out[c] = rows
+    return out
 
 
 def main():
@@ -159,6 +178,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('status')
+    t = sub.add_parser('table')
+    t.add_argument('--out', default='')
     a = sub.add_parser('apply')
     a.add_argument('--big-freq', type=int, default=1800000)
     a.add_argument('--little-freq', type=int, default=1800000)
@@ -170,6 +191,14 @@ def main():
 
     if args.cmd == 'status':
         print(json.dumps(status(), indent=2))
+    elif args.cmd == 'table':
+        tbl = opp_table()
+        text = json.dumps(tbl, indent=2)
+        print(text)
+        if args.out:
+            with open(args.out, 'w') as f:
+                f.write(text + '\n')
+            print('geschrieben: %s' % args.out)
     elif args.cmd == 'apply':
         explicit = {}
         if args.big_mv:
