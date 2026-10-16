@@ -293,6 +293,15 @@ static double g_power_bucket_sum_w;
 static uint32_t g_power_bucket_sample_count;
 static portMUX_TYPE g_sml_history_lock = portMUX_INITIALIZER_UNLOCKED;
 
+/* Link watchdog counters. When the peer stays silent, the watchdog undoes the
+ * new outbound paths that can drop ESP-NOW frames (a missed boot channel scan;
+ * the adaptive light sleep) and returns to the proven, always-radio-on mode.
+ * One instance per device, sticky until the next boot so it cannot flap. Kept
+ * unconditional so the diagnostics JSON needs no extra #if. */
+static int64_t g_last_rx_us;
+static volatile bool g_link_fallback_active;
+static volatile uint8_t g_link_fallback_stage;
+
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* sml_tx_item_t lives in tx_batch.h so the batching ring is host-testable. */
 #include "uart_sleep_window.h"
@@ -606,6 +615,21 @@ static uint8_t scan_receiver_ap_channel(void)
     }
     return 0;
 }
+
+/* Align the sender's radio with the receiver's SoftAP channel. Only sets the
+ * channel; the caller re-adds the broadcast peer once esp_now is initialised.
+ * Returns the detected channel, or 0 when the AP is not visible yet. */
+static uint8_t espnow_align_channel_from_receiver_ap(void)
+{
+    uint8_t detected = scan_receiver_ap_channel();
+    if (detected == 0 || detected == g_espnow_channel) {
+        return detected;
+    }
+    g_espnow_channel = detected;
+    ESP_ERROR_CHECK(esp_wifi_set_channel(g_espnow_channel, WIFI_SECOND_CHAN_NONE));
+    ESP_LOGI(TAG, "Using receiver AP channel %u for ESP-NOW", g_espnow_channel);
+    return detected;
+}
 #endif
 
 static void initialize_wifi_and_espnow(void)
@@ -668,22 +692,22 @@ static void initialize_wifi_and_espnow(void)
     ESP_ERROR_CHECK(esp_wifi_start());
 
 #if CONFIG_ESPNOW_ROLE_SENDER
+    /* Learn the receiver's SoftAP channel before the first send. Best effort
+     * only: the receiver may not be up yet and a stuck channel is repaired by
+     * the link watchdog, so a miss here is not fatal. */
     uint8_t detected_channel = 0;
     for (unsigned int attempt = 0; attempt < 30 && detected_channel == 0; ++attempt) {
-        detected_channel = scan_receiver_ap_channel();
+        detected_channel = espnow_align_channel_from_receiver_ap();
         if (detected_channel == 0) {
             ESP_LOGI(TAG, "Waiting for receiver AP on channel %d", ESPNOW_CHANNEL);
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
-    if (detected_channel != 0) {
-        g_espnow_channel = detected_channel;
-        ESP_LOGI(TAG, "Using receiver AP channel %u for ESP-NOW", g_espnow_channel);
-    } else {
-        ESP_LOGE(TAG, "Receiver AP not found; using fallback ESP-NOW channel %u",
-                 g_espnow_channel);
+    if (detected_channel == 0) {
+        ESP_LOGW(TAG, "Receiver AP not found; using ESP-NOW channel %u and "
+                      "re-checking if the link stays silent", g_espnow_channel);
+        ESP_ERROR_CHECK(esp_wifi_set_channel(g_espnow_channel, WIFI_SECOND_CHAN_NONE));
     }
-    ESP_ERROR_CHECK(esp_wifi_set_channel(g_espnow_channel, WIFI_SECOND_CHAN_NONE));
     wifi_interface_t espnow_interface = WIFI_IF_STA;
 #else
     ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP,
@@ -733,6 +757,73 @@ static esp_err_t add_espnow_peer(const uint8_t *mac, wifi_interface_t interface)
     peer.encrypt = false;
     return esp_now_add_peer(&peer);
 }
+
+#if CONFIG_ESPNOW_LINK_FALLBACK && CONFIG_ESPNOW_ROLE_SENDER
+/* The broadcast peer holds a fixed channel chosen at boot, so after the
+ * watchdog re-aligns to the receiver's AP the peer must be rebuilt; ESP-NOW
+ * rejects a duplicate add(), so delete first. */
+static esp_err_t readd_broadcast_peer_on_current_channel(void)
+{
+    esp_now_del_peer(broadcast_mac);
+    esp_now_peer_info_t peer = {0};
+    memcpy(peer.peer_addr, broadcast_mac, ESP_NOW_ETH_ALEN);
+    peer.channel = g_espnow_channel;
+    peer.ifidx = WIFI_IF_STA;
+    peer.encrypt = false;
+    return esp_now_add_peer(&peer);
+}
+
+static void link_fallback_worker(void *arg)
+{
+    (void)arg;
+    const int64_t silence_us = (int64_t)CONFIG_ESPNOW_LINK_FALLBACK_MS * 1000;
+    const int64_t grace_us = (int64_t)CONFIG_ESPNOW_LINK_FALLBACK_GRACE_MS * 1000;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        if (g_link_fallback_active) {
+            continue; /* already in the proven mode; nothing left to do */
+        }
+
+        int64_t now = esp_timer_get_time();
+        if (now < grace_us) {
+            continue; /* a slow peer boot must not look like a dead link */
+        }
+        int64_t last = g_last_rx_us;
+        if (last != 0 && now - last < silence_us) {
+            continue; /* the peer is answering */
+        }
+
+        /* Stage 1: re-align the radio to the receiver's AP. A missed boot scan
+         * (receiver not up yet, or a home WLAN that moved the AP's channel) is
+         * the first thing that breaks, and it is cheap to repair. */
+        if (g_link_fallback_stage < 1) {
+            g_link_fallback_stage = 1;
+            uint8_t detected = espnow_align_channel_from_receiver_ap();
+            if (detected != 0) {
+                readd_broadcast_peer_on_current_channel();
+                ESP_LOGW(TAG, "Link fallback: peer silent, re-aligned ESP-NOW to "
+                              "receiver AP channel %u", g_espnow_channel);
+            } else {
+                ESP_LOGW(TAG, "Link fallback: peer silent and receiver AP not "
+                              "visible; keeping ESP-NOW channel %u", g_espnow_channel);
+            }
+        }
+        if (esp_timer_get_time() - last < silence_us && last != 0) {
+            continue; /* a frame arrived in the meantime: link recovered */
+        }
+
+        /* Stage 2: the channel did not help. Undo the adaptive light sleep for
+         * good and pin the CPU awake, back to the always-radio-on mode that ran
+         * stably before the sleep feature existed. */
+        uart_sleep_disable_idf();
+        g_link_fallback_active = true;
+        ESP_LOGW(TAG, "Link fallback: no frames from the receiver; adaptive sleep "
+                      "disabled, radio stays awake from now on");
+        /* Stay quiet after this: the mode is now the proven one. */
+    }
+}
+#endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* Defined with the crash journal further down; the OTA restart path below uses
@@ -1844,6 +1935,27 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         ESP_LOGW(TAG, "Received an invalid ESP-NOW packet");
         return;
     }
+
+#if CONFIG_ESPNOW_LINK_FALLBACK
+    /* Any inbound frame proves the peer is alive; the watchdog reads this. */
+    g_last_rx_us = esp_timer_get_time();
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Bootstrap the sender MAC from any inbound frame, whatever its type. The
+     * receiver needs the MAC to answer a time sync and to send diagnostics or
+     * history requests, but gating that on a fully valid SML packet means a
+     * silent SML path (no meter head, wrong channel, a momentarily sleeping
+     * sender) leaves the MAC unknown forever: the dashboard shows "waiting for
+     * SML telemetry" and the backfill cannot start. Any ESP-NOW frame the sender
+     * emits - SML, a diagnostic, a time sync - proves where it is, so learn from
+     * all of them. The request/response handlers still do the full validation,
+     * so a spoofed source only redirects our own unicast replies, nothing more. */
+    portENTER_CRITICAL(&g_sender_mac_lock);
+    memcpy(g_sender_mac, info->src_addr, ESP_NOW_ETH_ALEN);
+    g_sender_mac_valid = true;
+    portEXIT_CRITICAL(&g_sender_mac_lock);
+#endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
     if (is_espnow_ota_packet(data, data_len)) {
@@ -4912,7 +5024,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"gap_cause_sleep\":%lu,\"gap_cause_stall\":%lu,"
                        "\"gap_cause_buffer\":%lu,"
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
-                       "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u}",
+                       "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
+                       "\"fallback_active\":%u,\"fallback_stage\":%u}",
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
                        (unsigned long)counters.fifo_overflows,
@@ -4966,7 +5079,9 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned int)counters.wifi_ps_mode,
                        (unsigned int)counters.build_profile,
                        (unsigned long)counters.boot_marker_count,
-                       (unsigned int)counters.boot_marker_reason);
+                       (unsigned int)counters.boot_marker_reason,
+                       (unsigned int)g_link_fallback_active,
+                       (unsigned int)g_link_fallback_stage);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -5305,7 +5420,8 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        "\"gap_cause_meter\":%lu,\"gap_cause_sleep\":%lu,"
                        "\"gap_cause_stall\":%lu,\"gap_cause_buffer\":%lu,"
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
-                       "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u}%s%s}",
+                       "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
+                       "\"fallback_active\":%u,\"fallback_stage\":%u}%s%s}",
                        mac_known ? "true" : "false",
                        (int)sender_rssi,
                        sender_rssi_valid ? "true" : "false",
@@ -5362,6 +5478,8 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        (unsigned int)counters.build_profile,
                        (unsigned long)counters.boot_marker_count,
                        (unsigned int)counters.boot_marker_reason,
+                       (unsigned int)g_link_fallback_active,
+                       (unsigned int)g_link_fallback_stage,
                        crash_json[0] != '\0' ? "," : "",
                        crash_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
@@ -6147,6 +6265,14 @@ static void run_sender(void)
         ESP_LOGE(TAG, "Could not start sender time-sync worker");
         ESP_ERROR_CHECK(ESP_FAIL);
     }
+#if CONFIG_ESPNOW_LINK_FALLBACK
+    task_result = xTaskCreate(link_fallback_worker, "link_fallback",
+                              3072, NULL, 2, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Could not start the link fallback worker");
+        ESP_ERROR_CHECK(ESP_FAIL);
+    }
+#endif
 }
 #endif
 

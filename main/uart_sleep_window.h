@@ -161,6 +161,12 @@ void uart_sleep_maybe_sleep_idf(void);
  * acquire/release pairing to leak). */
 void uart_sleep_hold(uint32_t hold_ms);
 
+/* Permanently stop the adaptive light sleep for this boot and pin the CPU
+ * awake. Used by the link watchdog once the peer stays silent: the sleep is
+ * one of the two paths that can drop outbound ESP-NOW frames, so undoing it
+ * restores the proven, always-radio-on mode. No-op when sleep is compiled out. */
+void uart_sleep_disable_idf(void);
+
 /* True while a hold set with uart_sleep_hold() is still active. Pure so it is
  * host-tested. */
 static inline bool uart_sleep_hold_active(int64_t hold_until_us, int64_t now_us)

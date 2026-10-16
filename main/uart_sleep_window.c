@@ -31,6 +31,7 @@
 
 static uart_sleep_ctrl_t s_ctrl;
 static bool s_locked = true; /* NO_LIGHT_SLEEP is held by default */
+static volatile bool s_disabled; /* latched off by the link watchdog */
 static esp_pm_lock_handle_t s_no_light_sleep;
 static volatile int64_t s_hold_until_us;
 
@@ -112,6 +113,9 @@ void uart_sleep_hold(uint32_t hold_ms)
 
 void uart_sleep_maybe_sleep_idf(void)
 {
+    if (s_disabled) {
+        return;
+    }
     if (!uart_sleep_should_request(&s_ctrl)) {
         return;
     }
@@ -144,6 +148,14 @@ void uart_sleep_maybe_sleep_idf(void)
     }
 }
 
+void uart_sleep_disable_idf(void)
+{
+    s_disabled = true;
+    /* Pin the CPU awake for good: acquire the lock the sleep path releases. */
+    uart_sleep_lock(true);
+    ESP_LOGW(UART_SLEEP_TAG, "adaptive sleep disabled at runtime");
+}
+
 uint32_t uart_sleep_window_ms(void) { return s_ctrl.window_ms; }
 uint32_t uart_sleep_min_gap_ms(void) { return s_ctrl.last_min_gap_ms; }
 bool uart_sleep_hold_is_active(void)
@@ -164,6 +176,7 @@ void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t 
 }
 void uart_sleep_note_uart_idle(void) {}
 void uart_sleep_hold(uint32_t hold_ms) { (void)hold_ms; }
+void uart_sleep_disable_idf(void) {}
 void uart_sleep_maybe_sleep_idf(void) {}
 uint32_t uart_sleep_window_ms(void) { return 0; }
 uint32_t uart_sleep_min_gap_ms(void) { return 0; }

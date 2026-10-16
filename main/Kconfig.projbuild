@@ -69,3 +69,34 @@ config ESPNOW_SENDER_LIGHT_SLEEP
         releases its APB lock. Enabled by default: the sender ships as a single
         image. Verify on the bench that ESP-NOW broadcasts are still received
         while sleeping (see TODO.md); disable to fall back to DFS only.
+
+config ESPNOW_LINK_FALLBACK
+    bool "Both roles: fall back to the proven mode when the peer stops answering"
+    default y
+    depends on ESPNOW_ROLE_SENDER || ESPNOW_ROLE_RECEIVER
+    help
+        Each device watches the ESP-NOW link on its own: when no frame from the
+        peer arrives for CONFIG_ESPNOW_LINK_FALLBACK_MS (after the grace has
+        passed), it returns to its proven mode. The sender turns its adaptive
+        light sleep off for good and keeps the Wi-Fi radio awake; the receiver
+        just records it in the diagnostics (a hung receiver is already handled
+        by web_guard). Sticky until the next boot, so it cannot flap, and
+        independent per device: no handshake, so the two sides cannot deadlock.
+
+config ESPNOW_LINK_FALLBACK_MS
+    int "Peer silence before the link is declared down (ms)"
+    depends on ESPNOW_LINK_FALLBACK
+    range 5000 600000
+    default 60000
+    help
+        How long no inbound frame may arrive before the fallback fires. Must be
+        longer than the slowest expected poll interval on a healthy link.
+
+config ESPNOW_LINK_FALLBACK_GRACE_MS
+    int "Grace after boot before the link is judged (ms)"
+    depends on ESPNOW_LINK_FALLBACK
+    range 0 600000
+    default 30000
+    help
+        Uptime that must pass before the fallback may fire, so a slow peer boot
+        does not look like a dead link.
