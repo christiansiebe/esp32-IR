@@ -41,6 +41,21 @@ int main(void)
     CHECK(link_fallback_should_fallback(&slow_boot, 120000, 120000),
           "grace passed -> fallback");
 
+    /* Own acknowledged sends count too: a sender whose peer never answers (a
+     * channel-stuck receiver) must not disable its sleep. */
+    link_fallback_t sender;
+    link_fallback_init(&sender, T_MS, 0, 0);
+    uint64_t ts = 0;
+    bool sender_tripped = false;
+    for (int i = 0; i < 1000; ++i) {
+        ts += 1000;
+        link_fallback_note_send_ok(&sender, ts);
+        if (link_fallback_should_fallback(&sender, ts, ts)) {
+            sender_tripped = true;
+        }
+    }
+    CHECK(!sender_tripped, "acknowledged sends alone keep the link up");
+
     /* A single inbound frame re-arms the silence timer. */
     link_fallback_t armed;
     link_fallback_init(&armed, T_MS, 0, 0);

@@ -23,10 +23,19 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* What counts as the peer being alive. A link can be half-dead: the sender
+ * transmits but nothing reaches the receiver (wrong channel) while the
+ * receiver's requests still arrive because unicast uses a different channel
+ * rule than broadcast. So a single "last heard" timestamp is ambiguous. Track
+ * both directions: `last_rx` (peer heard) and `last_ok` (our own traffic to the
+ * peer acknowledged). The proven modes both restore the send direction, and a
+ * sender that fell silent because its *send* died would otherwise never trip the
+ * watchdog (a channel-stuck receiver never answers anyway). */
 typedef struct {
-    uint32_t silence_timeout_ms; /* no peer traffic for this long = link down */
+    uint32_t silence_timeout_ms; /* no healthy sign in either direction = down */
     uint32_t min_uptime_ms;      /* grace after boot before the link is judged */
     uint64_t last_rx_ms;         /* last inbound peer frame */
+    uint64_t last_ok_ms;         /* last acknowledged send to the peer */
     bool latched;                /* fell back; sticky until a fresh init */
 } link_fallback_t;
 
@@ -36,12 +45,17 @@ typedef struct {
 /* Grace after boot: the peer may still be starting up. */
 #define LINK_FALLBACK_DEFAULT_MIN_UPTIME_MS (30u * 1000u)
 
-/* Initialise at boot; last_rx is "now" so the grace window covers startup. */
+/* Initialise at boot; both clocks start at "now" so the grace window covers
+ * startup. */
 void link_fallback_init(link_fallback_t *fb, uint32_t silence_timeout_ms,
                         uint32_t min_uptime_ms, uint64_t started_at_ms);
 
 /* A peer frame was received; re-arms the silence timer (no effect once fired). */
 void link_fallback_note_rx(link_fallback_t *fb, uint64_t now_ms);
+
+/* Our own send to the peer was acknowledged; also counts as the link being up.
+ * Used by the sender, whose outbound path is what adaptive light sleep breaks. */
+void link_fallback_note_send_ok(link_fallback_t *fb, uint64_t now_ms);
 
 /* True when the peer has been silent past the timeout and the uptime grace has
  * passed. Latches on first true (sticky) so the caller cannot flap. */

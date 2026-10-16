@@ -464,6 +464,7 @@ static esp_err_t send_http_error_status(httpd_req_t *req, const char *status,
                                         const char *message);
 #endif
 
+
 static void register_webserver_handlers(httpd_handle_t server);
 
 static esp_err_t load_wifi_credentials(void)
@@ -1738,6 +1739,15 @@ static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_statu
 {
     if (status != ESP_NOW_SEND_SUCCESS) {
         ESP_LOGW(TAG, "ESP-NOW send callback reported a failure");
+    } else {
+#if CONFIG_ESPNOW_LINK_FALLBACK
+        /* A confirmed send to any peer proves our own TX path works; keep the
+         * link watchdog quiet even when the peer never answers (a channel-stuck
+         * receiver answers nothing, yet the link is healthy from our side). */
+        portENTER_CRITICAL(&g_link_fallback_lock);
+        link_fallback_note_send_ok(&g_link_fallback, (uint64_t)(esp_timer_get_time() / 1000));
+        portEXIT_CRITICAL(&g_link_fallback_lock);
+#endif
     }
     if (tx_info == NULL || tx_info->des_addr == NULL) {
         return;
@@ -1905,6 +1915,25 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
     portENTER_CRITICAL(&g_link_fallback_lock);
     link_fallback_note_rx(&g_link_fallback, (uint64_t)(esp_timer_get_time() / 1000));
     portEXIT_CRITICAL(&g_link_fallback_lock);
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Bootstrap the sender MAC from any frame whose header carries a known
+     * magic, not only from a fully valid SML packet. The receiver needs the MAC
+     * to send diagnostics/history requests, but the SML path can stay silent
+     * (wrong channel, a momentarily sleeping sender), and then the MAC never
+     * arrives: the backfill cannot start and the receiver cannot even query the
+     * sender. The request/response handlers still do the full validation. */
+    if (data_len >= (int)sizeof(uint32_t)) {
+        uint32_t magic;
+        memcpy(&magic, data, sizeof(magic));
+        if (magic == SML_TRANSPORT_MAGIC || magic == ESPNOW_DIAG_MAGIC) {
+            portENTER_CRITICAL(&g_sender_mac_lock);
+            memcpy(g_sender_mac, info->src_addr, ESP_NOW_ETH_ALEN);
+            g_sender_mac_valid = true;
+            portEXIT_CRITICAL(&g_sender_mac_lock);
+        }
+    }
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
