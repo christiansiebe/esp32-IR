@@ -4469,6 +4469,212 @@ static void console_cmd_reboot(const char *args, char *out, size_t out_size)
     esp_restart();
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* --- Restart simulation ----------------------------------------------------
+ * Shows what the NEXT boot would decide, WITHOUT resetting: it reads the same
+ * state the early app_main reads (reset reason, running OTA slot + its verify
+ * state, configured Wi-Fi / mDNS target, persistent history, backfill window)
+ * and prints the forecast. Read-only and non-blocking, so it can be run from the
+ * web console while the device keeps serving.
+ *
+ * It is a forecast, not a reboot: nothing here changes state, and an image that
+ * is PENDING_VERIFY is only confirmed by the real dashboard-up path. */
+
+static const char *reset_reason_name(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "external pin";
+    case ESP_RST_SW:        return "software (esp_restart)";
+    case ESP_RST_PANIC:     return "panic / exception";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_WDT:       return "other watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep sleep wake";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "SDIO";
+    case ESP_RST_USB:       return "USB";
+    case ESP_RST_JTAG:      return "JTAG";
+    case ESP_RST_EFUSE:     return "eFuse error";
+    case ESP_RST_PWR_GLITCH:return "power glitch";
+    case ESP_RST_CPU_LOCKUP:return "CPU lockup";
+    case ESP_RST_UNKNOWN:
+    default:                return "unknown";
+    }
+}
+
+static const char *ota_state_name(esp_ota_img_states_t state)
+{
+    switch (state) {
+    case ESP_OTA_IMG_NEW:            return "new (not yet booted to confirmation)";
+    case ESP_OTA_IMG_PENDING_VERIFY: return "pending verify (rollback armed)";
+    case ESP_OTA_IMG_VALID:          return "valid (confirmed)";
+    case ESP_OTA_IMG_INVALID:        return "invalid";
+    case ESP_OTA_IMG_ABORTED:        return "aborted";
+    case ESP_OTA_IMG_UNDEFINED:
+    default:                         return "undefined";
+    }
+}
+
+static void sim_line(char **cur, size_t *rem, const char *fmt, ...)
+{
+    if (*rem == 0) {
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(*cur, *rem, fmt, ap);
+    va_end(ap);
+    if (w < 0) {
+        return;
+    }
+    if ((size_t)w >= *rem) {
+        *cur += *rem - 1;
+        *rem = 1;
+        return;
+    }
+    *cur += w;
+    *rem -= (size_t)w;
+}
+
+static size_t simulate_render(char *out, size_t out_size)
+{
+    char *cur = out;
+    size_t rem = out_size;
+    if (out_size == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+
+    sim_line(&cur, &rem, "== Restart simulation (does NOT reboot) ==\n");
+
+    esp_reset_reason_t reason = esp_reset_reason();
+    sim_line(&cur, &rem, "last reset reason : %s\n", reset_reason_name(reason));
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
+    if (running != NULL) {
+        bool have_state = esp_ota_get_state_partition(running, &ota_state) == ESP_OK;
+        sim_line(&cur, &rem, "running slot      : %s\n", running->label);
+        sim_line(&cur, &rem, "OTA image state   : %s\n",
+                 have_state ? ota_state_name(ota_state) : "n/a (factory/plain build)");
+        const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+        sim_line(&cur, &rem, "next OTA target   : %s\n",
+                 next ? next->label : "(none)");
+        if (have_state && ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+            sim_line(&cur, &rem,
+                     "  -> on next boot: image stays unconfirmed until the\n"
+                     "     dashboard is up; failure within the stability window\n"
+                     "     rolls back to the other slot.\n");
+        }
+    } else {
+        sim_line(&cur, &rem, "running slot      : (unknown)\n");
+    }
+
+    sim_line(&cur, &rem, "Wi-Fi SSID        : %s\n",
+             g_wifi_configured ? g_wifi_ssid : "(not configured -> SoftAP 192.168.4.1)");
+    sim_line(&cur, &rem, "mDNS target       : http://%s.local/\n", MDNS_HOSTNAME);
+
+    power_history_status_t st;
+    power_history_get_status(&st);
+    sim_line(&cur, &rem, "history ready     : %s\n", st.ready ? "yes" : "no");
+    sim_line(&cur, &rem, "history records   : %u (written %u, dropped %u)\n",
+             (unsigned)st.record_count, (unsigned)st.write_errors,
+             (unsigned)st.queue_drops);
+
+    if (system_time_is_valid()) {
+        time_t now_s;
+        time(&now_s);
+        int64_t now = (int64_t)now_s;
+        time_t from_s = (time_t)(now - (int64_t)HISTORY_BACKFILL_WINDOW_SECONDS);
+        struct tm tm;
+        char ts[24] = "?";
+        if (gmtime_r(&from_s, &tm) != NULL) {
+            strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%MZ", &tm);
+        }
+        power_history_gap_summary_t gap;
+        if (power_history_summarize_window(now - (int64_t)HISTORY_BACKFILL_WINDOW_SECONDS,
+                                           now, &gap) == ESP_OK) {
+            sim_line(&cur, &rem,
+                     "backfill window   : last 3 days (%s)\n", ts);
+            sim_line(&cur, &rem,
+                     "  minutes total   : %u\n"
+                     "  measured        : %u\n"
+                     "  boot-marked     : %u (offline/OTA/crash window)\n"
+                     "  MISSING         : %u -> the next backfill run pulls these\n",
+                     (unsigned)gap.total, (unsigned)gap.measured,
+                     (unsigned)gap.expected, (unsigned)gap.missing);
+        } else {
+            sim_line(&cur, &rem, "backfill window   : (history not ready)\n");
+        }
+    } else {
+        sim_line(&cur, &rem, "backfill window   : (clock not synced; a real boot\n"
+                              "                     waits for SNTP before pulling)\n");
+    }
+
+    sim_line(&cur, &rem, "boot log in RAM   : %u bytes captured this session\n",
+             (unsigned)boot_log_total());
+    sim_line(&cur, &rem, "=> no action taken; device keeps running and serving.\n");
+    return (size_t)(cur - out);
+}
+
+static void console_cmd_simulate(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    simulate_render(out, out_size);
+}
+
+static esp_err_t simulate_api_handler(httpd_req_t *req)
+{
+    if (!ota_key_is_valid(req)) {
+        return send_http_error_status(req, "401 Unauthorized",
+                                      "X-OTA-Key missing or wrong");
+    }
+    static char buffer[2048];
+    size_t n = simulate_render(buffer, sizeof(buffer));
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, buffer, n);
+}
+
+static esp_err_t simulate_page_handler(httpd_req_t *req)
+{
+    static const char page[] =
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<title>ESP32 restart simulation</title>"
+        "<style>body{font-family:monospace;margin:20px;background:#10151f;color:#e5edf7}"
+        "input,button{font:inherit;padding:8px;margin:4px 0}"
+        "input{width:60%;background:#182330;color:#e5edf7;border:1px solid #2c3e50;"
+        "border-radius:6px}button{background:#176b91;color:#fff;border:0;border-radius:6px;"
+        "cursor:pointer}button:hover{background:#2086b2}pre{white-space:pre-wrap;"
+        "word-break:break-word;background:#0b0f16;padding:12px;border-radius:8px}"
+        ".muted{color:#8aa0b8}.warn{color:#ffd479}</style></head><body>"
+        "<h1>Restart simulation</h1>"
+        "<p class=\"muted\">Forecasts what the <b>next boot would decide</b> — reads the "
+        "same state the early boot reads. It does <b>not</b> reboot and changes nothing; "
+        "the device keeps serving while you look.</p>"
+        "<input id=\"key\" type=\"password\" placeholder=\"Wi-Fi / OTA key\">"
+        "<button id=\"load\" type=\"button\">Run simulation</button>"
+        "<p id=\"status\" class=\"muted\">Enter the key and run.</p>"
+        "<pre id=\"out\"></pre><script>"
+        "const out=document.getElementById('out'),key=document.getElementById('key'),"
+        "status=document.getElementById('status');"
+        "try{key.value=sessionStorage.getItem('consoleKey')||'';}catch(e){}"
+        "async function run(){try{sessionStorage.setItem('consoleKey',key.value);}catch(e){}"
+        "status.textContent='running...';"
+        "try{const r=await fetch('/api/simulate',{cache:'no-store',"
+        "headers:{'X-OTA-Key':key.value}});const t=await r.text();"
+        "out.textContent=(r.ok?'':'['+r.status+'] ')+t;"
+        "status.textContent=r.ok?'done (no reset happened)':'error';}"
+        "catch(e){status.textContent='request failed: '+e;}}"
+        "document.getElementById('load').onclick=run;"
+        "key.addEventListener('keydown',e=>{if(e.key==='Enter')run();});"
+        "if(key.value)run();key.focus();</script></body></html>";
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+}
+#endif /* !CONFIG_ESPNOW_ROLE_SENDER */
+
 static void web_console_register_commands(void)
 {
     web_console_register("help", "list available commands", console_cmd_help);
@@ -4491,6 +4697,11 @@ static void web_console_register_commands(void)
                          console_cmd_mqtt);
 #endif
     web_console_register("reboot", "restart the device", console_cmd_reboot);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    web_console_register("simulate",
+                         "forecast the next boot without restarting",
+                         console_cmd_simulate);
+#endif
 }
 
 static esp_err_t console_api_handler(httpd_req_t *req)
@@ -6227,6 +6438,18 @@ static void register_webserver_handlers(httpd_handle_t server)
         .method = HTTP_POST,
         .handler = console_api_handler,
     };
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    httpd_uri_t simulate_page = {
+        .uri = "/simulate",
+        .method = HTTP_GET,
+        .handler = simulate_page_handler,
+    };
+    httpd_uri_t simulate_api = {
+        .uri = "/api/simulate",
+        .method = HTTP_GET,
+        .handler = simulate_api_handler,
+    };
+#endif
     httpd_uri_t bootlog_page = {
         .uri = "/bootlog",
         .method = HTTP_GET,
@@ -6264,6 +6487,10 @@ static void register_webserver_handlers(httpd_handle_t server)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &console_api));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &bootlog_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &bootlog_api));
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &simulate_page));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &simulate_api));
+#endif
     web_console_register_commands();
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update));
