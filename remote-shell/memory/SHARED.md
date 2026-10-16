@@ -319,3 +319,23 @@ Wichtigste Punkte (sonst scheitert es):
   = OK. HTTPS 200, HTTP 301.
 - **Achtung:** Base64-Transfer per Kanal kann beim Copy-Paste verstuemmelt
   werden -> immer mit `sha256sum`/Fingerprint gegenpruefen.
+
+### DuckDNS + Let's Encrypt (DNS-01) fuer vertrauenswuerdiges HTTPS, ohne oeffentliche Erreichbarkeit (2026-10-15)
+- Ziel des Nutzers: echtes Zertifikat (kein Warnhinweis, KEIN Zertifikat-Download),
+  aber **nicht** aus dem Internet erreichbar.
+- Weg: DuckDNS-A-Record zeigt auf die **private LAN-IP** (DuckDNS erlaubt das),
+  Zertifikat per **DNS-01** (Let's Encrypt prueft nur den TXT-Eintrag
+  `_acme-challenge.<name>`, nicht die Server-Erreichbarkeit). Aus dem Internet
+  ist die private IP nicht erreichbar -> nicht oeffentlich.
+- **Skript (versioniert): `remote-shell/ha/setup_duckdns_tls.sh`** (idempotent).
+  Aufruf (Token NUR per Umgebung, nie loggen/committen):
+  `DUCKDNS_DOMAIN=<name>.duckdns.org DUCKDNS_TOKEN=<token> bash setup_duckdns_tls.sh`
+  Schritte: A-Record setzen (curl an duckdns.org/update) -> acme.sh installieren
+  -> `--issue --dns dns_duckdns -d <name>` (ec-256) -> `--install-cert` an
+  `/etc/nginx/ssl/duckdns.{crt,key}` + nginx-reload -> systemd-Timer
+  `acme-renew.timer` als Erneuerungs-Absicherung.
+- nginx bleibt **parallel**: LE-Zert fuer den DuckDNS-Namen (default_server),
+  lokale CA weiter fuer `odroidn2.local` (falls `ca.crt` existiert). SNI waehlt.
+- **FRITZ!Box:** Name ggf. vom DNS-Rebind-Schutz ausnehmen (Heimnetz > Netzwerk >
+  Netzwerkeinstellungen > Ausnahmen), sonst kann es Aufloesungsprobleme geben.
+- **Noch offen:** braucht vom Nutzer DuckDNS-Subdomain + Token.
