@@ -12,8 +12,14 @@
 #include <stdint.h>
 
 /* CPU frequency range the ESP32-WROOM-32D supports; the compile-time ceiling is
- * the upper bound and is enforced by the caller when applying. */
+ * the upper bound and is enforced by the caller when applying.
+ *
+ * The DFS *floor* may go down to 40 MHz, but the DFS *ceiling* must stay at or
+ * above 80 MHz: the Wi-Fi/ESP-NOW driver asserts ESP_PM_APB_FREQ_MAX, and a
+ * max_freq below 80 makes esp_pm_configure()/the Wi-Fi task abort (the sender
+ * crashed when 40 was pinned as the ceiling). */
 #define RUNTIME_CONFIG_CPU_MIN_MHZ 40u
+#define RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ 80u
 #define RUNTIME_CONFIG_CPU_MAX_MHZ 240u
 
 typedef struct {
@@ -32,6 +38,11 @@ runtime_config_t runtime_config_reset(runtime_config_t *cfg);
 /* Parse a decimal MHz value and clamp it to [CPU_MIN, min(CPU_MAX, ceiling)].
  * Returns false (and leaves *out untouched) on non-numeric input or 0. */
 bool runtime_config_parse_cpu_mhz(const char *text, uint32_t ceiling_mhz, uint32_t *out);
+
+/* As above but with an explicit lower bound, so a ceiling can be held at the
+ * Wi-Fi minimum (80 MHz) while a floor may still go down to 40 MHz. */
+bool runtime_config_parse_cpu_mhz_min(const char *text, uint32_t ceiling_mhz,
+                                      uint32_t floor_mhz, uint32_t *out);
 
 /* Parse "on"/"off" (also 1/0, true/false) for a boolean knob. */
 bool runtime_config_parse_bool(const char *text, bool *out);

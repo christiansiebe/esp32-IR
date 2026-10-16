@@ -40,6 +40,11 @@ int main(void)
           "a lower compile-time ceiling wins");
     CHECK(!runtime_config_parse_cpu_mhz("abc", 240, &v), "non-numeric is rejected");
     CHECK(!runtime_config_parse_cpu_mhz("0", 240, &v), "zero is rejected");
+    /* The explicit-floor variant holds a ceiling at the Wi-Fi minimum. */
+    CHECK(runtime_config_parse_cpu_mhz_min("40", 240, 80, &v) && v == 80,
+          "ceiling clamped up to the 80 MHz Wi-Fi minimum");
+    CHECK(runtime_config_parse_cpu_mhz_min("80", 240, 80, &v) && v == 80,
+          "80 MHz is accepted as a ceiling");
 
     /* Booleans. */
     bool b = false;
@@ -65,11 +70,14 @@ int main(void)
     CHECK(runtime_config_set(&cfg, "freq", "80", 240, err, sizeof(err)) &&
               cfg.cpu_mhz == 80 && cfg.cpu_min_mhz == 80,
           "set freq=80 pins the clock");
-    /* Raising the ceiling afterwards keeps the pin and lifts the floor with it
-     * only up to the ceiling. */
+    /* A ceiling below the Wi-Fi minimum (80 MHz) is clamped up: 40 as a
+     * max_freq aborts the Wi-Fi task. */
     CHECK(runtime_config_set(&cfg, "cpu", "40", 240, err, sizeof(err)) &&
-              cfg.cpu_mhz == 40 && cfg.cpu_min_mhz == 40,
-          "a ceiling below the floor clamps the floor down");
+              cfg.cpu_mhz == 80 && cfg.cpu_min_mhz == 80,
+          "a ceiling below 80 MHz clamps up to 80");
+    CHECK(runtime_config_set(&cfg, "freq", "40", 240, err, sizeof(err)) &&
+              cfg.cpu_mhz == 80 && cfg.cpu_min_mhz == 80,
+          "pinning 40 MHz clamps up to the 80 MHz Wi-Fi minimum");
     /* cpu-min raises the floor without changing the ceiling. */
     CHECK(runtime_config_set(&cfg, "freq", "160", 240, err, sizeof(err)) &&
               cfg.cpu_mhz == 160 && cfg.cpu_min_mhz == 160,

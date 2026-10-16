@@ -4853,8 +4853,9 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
              * low, measurable frequency instead of at the DFS ceiling. */
             char *mhz_end = NULL;
             unsigned long mhz = strtoul(extra, &mhz_end, 10);
-            if (mhz_end == extra || *mhz_end != '\0' || mhz < 40 || mhz > 240) {
-                snprintf(out, out_size, "usage: test sleep pin <mhz> (40..240)\n");
+            /* A pinned clock is still a ceiling, so it must stay >= 80 MHz. */
+            if (mhz_end == extra || *mhz_end != '\0' || mhz < 80 || mhz > 240) {
+                snprintf(out, out_size, "usage: test sleep pin <mhz> (80..240)\n");
                 return;
             }
             esp_pm_config_t pinned = {
@@ -5087,11 +5088,11 @@ static esp_err_t console_page_handler(httpd_req_t *req)
         "(pin the CPU), <b>set cpu 80</b> (DFS ceiling), <b>help</b>.</p>"
         "<input id=\"key\" type=\"password\" placeholder=\"Wi-Fi / OTA key\">"
         "<h2>CPU / power</h2>"
-        "<p class=\"note\">RAM only; a reboot restores the defaults. Use a value "
-        "from 40, 80, 160, 240. Here 'Set fixed' raises the DFS floor, so the "
-        "clock stays in [value, ceiling] (min_freq = value, max_freq = ceiling); "
+        "<p class=\"note\">RAM only; a reboot restores the defaults. Use 80, 160 "
+        "or 240 MHz (40 MHz is not allowed with Wi-Fi and would abort it). Here "
+        "'Set fixed' raises the DFS floor, so the clock stays in [value, ceiling]; "
         "'Set ceiling' lowers the DFS ceiling. The sender keeps its own pin.</p>"
-        "<select id=\"cpuval\"><option>40</option><option>80</option>"
+        "<select id=\"cpuval\"><option>80</option>"
         "<option>160</option><option>240</option></select>"
         "<button id=\"pin\" type=\"button\">Set fixed</button>"
         "<button id=\"ceiling\" type=\"button\">Set ceiling</button>"
@@ -6186,9 +6187,10 @@ static esp_err_t sender_page_handler(httpd_req_t *req)
         "<h2>Recent events</h2><pre id=\"events\"></pre>"
         "<h2>CPU / power</h2>"
         "<p class=\"note\">Pins the sender CPU in RAM (a reboot restores the "
-        "defaults). Use a value from 40, 80, 160, 240. 'Set fixed' turns DFS off "
-        "and holds exactly that clock; 'Set ceiling' only caps the DFS ceiling.</p>"
-        "<select id=\"cpuval\"><option>40</option><option>80</option>"
+        "defaults). Use 80, 160 or 240 MHz (40 MHz is not allowed with Wi-Fi and "
+        "would abort it). 'Set fixed' turns DFS off and holds exactly that clock; "
+        "'Set ceiling' only caps the DFS ceiling.</p>"
+        "<select id=\"cpuval\"><option>80</option>"
         "<option>160</option><option>240</option></select>"
         "<button id=\"pin\" type=\"button\">Set fixed</button>"
         "<button id=\"ceiling\" type=\"button\">Set ceiling</button>"

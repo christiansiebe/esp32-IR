@@ -38,6 +38,13 @@ runtime_config_t runtime_config_reset(runtime_config_t *cfg)
 
 bool runtime_config_parse_cpu_mhz(const char *text, uint32_t ceiling_mhz, uint32_t *out)
 {
+    return runtime_config_parse_cpu_mhz_min(text, ceiling_mhz,
+                                            RUNTIME_CONFIG_CPU_MIN_MHZ, out);
+}
+
+bool runtime_config_parse_cpu_mhz_min(const char *text, uint32_t ceiling_mhz,
+                                      uint32_t floor_mhz, uint32_t *out)
+{
     if (text == NULL || out == NULL) {
         return false;
     }
@@ -50,11 +57,11 @@ bool runtime_config_parse_cpu_mhz(const char *text, uint32_t ceiling_mhz, uint32
     if (limit > RUNTIME_CONFIG_CPU_MAX_MHZ) {
         limit = RUNTIME_CONFIG_CPU_MAX_MHZ;
     }
-    if (limit < RUNTIME_CONFIG_CPU_MIN_MHZ) {
-        limit = RUNTIME_CONFIG_CPU_MIN_MHZ;
+    if (limit < floor_mhz) {
+        limit = floor_mhz;
     }
-    if (value < RUNTIME_CONFIG_CPU_MIN_MHZ) {
-        value = RUNTIME_CONFIG_CPU_MIN_MHZ;
+    if (value < floor_mhz) {
+        value = floor_mhz;
     }
     if (value > limit) {
         value = limit;
@@ -89,7 +96,11 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
     }
     runtime_config_t next = *cfg;
     if (strcmp(key, "cpu") == 0 || strcmp(key, "cpu-mhz") == 0) {
-        if (!runtime_config_parse_cpu_mhz(value, ceiling_mhz, &next.cpu_mhz)) {
+        /* The ceiling must stay >= 80 MHz: a lower max_freq aborts the Wi-Fi
+         * task (the sender crashed when 40 was set as the ceiling). */
+        if (!runtime_config_parse_cpu_mhz_min(value, ceiling_mhz,
+                                              RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ,
+                                              &next.cpu_mhz)) {
             snprintf(err, err_size, "cpu: expected a number of MHz\n");
             return false;
         }
@@ -99,9 +110,12 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             next.cpu_min_mhz = next.cpu_mhz;
         }
     } else if (strcmp(key, "freq") == 0 || strcmp(key, "freq-mhz") == 0) {
-        /* Pin the CPU: DFS is off and the clock stays at this value. */
+        /* Pin the CPU: DFS is off and the clock stays at this value. The pin is
+         * a ceiling, so it is held at >= 80 MHz like 'cpu'. */
         uint32_t mhz;
-        if (!runtime_config_parse_cpu_mhz(value, ceiling_mhz, &mhz)) {
+        if (!runtime_config_parse_cpu_mhz_min(value, ceiling_mhz,
+                                              RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ,
+                                              &mhz)) {
             snprintf(err, err_size, "freq: expected a number of MHz\n");
             return false;
         }
