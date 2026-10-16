@@ -37,6 +37,13 @@ jobs:
             -I test/host/include \
             main/uart_sleep_window.c
 
+      - name: Compile the serial console glue
+        shell: bash
+        run: |
+          # The UART0 console reads lines and feeds them to the shared command
+          # dispatcher; IDF headers are stubbed, so this checks C syntax only.
+          gcc -std=c11 -fsyntax-only -I test/host/include main/serial_console.c
+
       - name: Run aggregation / data-gap / day-boundary tests
         shell: bash
         run: ./test/run_host_tests.sh

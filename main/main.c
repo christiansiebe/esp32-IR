@@ -38,6 +38,7 @@
 #include "sml_selftest.h"
 #include "version.h"
 #include "web_console.h"
+#include "serial_console.h"
 #include "web_guard.h"
 #if !CONFIG_ESPNOW_ROLE_SENDER
 #include "mqtt_bridge.h"
@@ -6831,6 +6832,9 @@ static void run_sender(void)
     /* The sender has no web server; the receiver tunnels console commands to it
      * over ESP-NOW, so register the same command set here. */
     web_console_register_commands();
+    /* ...and expose it on the USB serial monitor (UART0), so the sender can be
+     * driven locally without the Wi-Fi dashboard. */
+    serial_console_start();
 
     const uart_config_t uart_config = {
         .baud_rate = UART_BAUD_RATE,
@@ -7045,6 +7049,9 @@ void app_main(void)
     run_sender();
 #else
     start_webserver();
+    /* Same command set on the USB serial monitor (UART0), so the receiver can
+     * be driven locally even if the dashboard is unreachable. */
+    serial_console_start();
     BaseType_t backfill_result = xTaskCreate(history_backfill_worker, "hist_backfill",
                                              4096, NULL, 3, NULL);
     if (backfill_result != pdPASS) {

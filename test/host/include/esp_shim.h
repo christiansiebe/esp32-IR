@@ -192,6 +192,7 @@ static inline void portEXIT_CRITICAL(portMUX_TYPE *m) { (void)m; }
 /* Only the syntax-check of the sleep glue calls this; real wait behaviour is
  * not exercised on the host. */
 static inline void vTaskDelay(uint32_t ticks) { (void)ticks; }
+static inline void vTaskDelete(void *task) { (void)task; }
 
 typedef struct {
     const char *partition_label;

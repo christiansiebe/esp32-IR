@@ -19,7 +19,7 @@ set(main_requires
 # ESP-IDF v6: ESP-MQTT and cJSON are managed components. They are declared in
 # idf_component.yml and become dependencies of "main" automatically, so they do
 # not need to be named in REQUIRES (see the IDF v6 migration guide for cJSON).
-set(main_srcs "main.c" "power_history.c" "web_console.c"
+set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "runtime_config.c"
               "boot_policy.c" "boot_confirm.c" "boot_log.c"
               "crash_journal.c" "crash_journal_store.c"
