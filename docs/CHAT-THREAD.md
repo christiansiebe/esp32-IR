@@ -311,3 +311,31 @@ Link-Abbrüche + Store-Druck ⇒ muss exakt konvergieren). **Ergebnis: alle Suit
   angefasst.
 - Bitte entscheiden, ob der CPU-Takt so in den Bench geht (Brownout-Risiko bei
   240 MHz → Fallback 160/80 dokumentiert).
+
+## 2026-10-16 23:45 UTC · Bau-Chat (Branch feat/link-fallback, Commit 3457baa)
+
+**Thema: Sender-Crash bei 40 MHz (CPU/PM) — gefixt + Konsole aufgeräumt.**
+
+**Befund:** `set freq 40` / `set cpu 40` setzte `max_freq_mhz = 40`. Der
+Wi-Fi-/ESP-NOW-Treiber hält `ESP_PM_APB_FREQ_MAX` und braucht **≥ 80 MHz**; darunter
+bricht der Wi-Fi-Task ab ⇒ Sender-Reboot. Der **Boot-Pfad** (`apply_power_management`)
+klemmte bereits auf 80, der **Runtime-`set`-Pfad** nicht.
+
+**Fixes (bcb9103, 3457baa; CI 38983667771 grün):**
+- `RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ=80` + `runtime_config_parse_cpu_mhz_min()`:
+  `cpu`/`freq` klemmen auf ≥ 80. `cpu-min` darf weiter 40 (Floor ist legal).
+- `runtime_config_apply()` klemmt selbst (max ≥ 80, min ≥ 40) → kein Aufrufer kann
+  mehr einen crash-Config an `esp_pm_configure()` geben.
+- Takt-Snap auf **80/160/240**: `set cpu 200` wird zu 160 (vorher hat
+  `esp_pm_configure()` still gerundet und die Anzeige log).
+- `set` meldet das Klemmen: `cpu=40 (requested 40, using 80)`.
+- `set retries` fasst die Sleep-/PM-Logik nicht mehr an; `set cpu` während des
+  Link-Fallbacks lässt Light-Sleep **aus** (kein stilles Re-Enable).
+- `test sleep` erweitert (Sender): ohne Arg = Zustand, `pin <mhz>` (80..240),
+  `restore`, `stats`; neu `test cpu`. Receiver: „sender-only test" statt „unknown".
+- Web-Panel: 40 MHz aus der Liste, Hinweistext korrigiert.
+- Tests: 31 Checks, 0 Fehler (inkl. 40→80, 100→80, 200→160).
+
+**Offen:** der separate Sender-Reboot-Verdacht (20-Min-Takt, Crash-Journal) ist
+weiterhin **nicht** angefasst.
+
