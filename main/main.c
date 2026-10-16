@@ -4906,6 +4906,13 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
         return;
     }
 #else
+    if (strcmp(what, "sleep") == 0) {
+        /* The receiver has no SML light-sleep path; it is sender-only. Say so
+         * instead of reporting 'unknown test'. */
+        snprintf(out, out_size,
+                 "sleep: not available on the receiver (sender-only test)\n");
+        return;
+    }
     if (strcmp(what, "storage") == 0) {
         power_history_status_t s;
         power_history_get_status(&s);
@@ -4955,16 +4962,40 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         return;
     }
     bool applied = runtime_config_apply(cfg);
+
+    /* Say so when the stored value differs from what was asked for (a value
+     * below the Wi-Fi minimum or off the DFS grid is snapped, not rejected). */
+    bool cpu_key = (strcmp(key, "cpu") == 0 || strcmp(key, "cpu-mhz") == 0 ||
+                    strcmp(key, "freq") == 0 || strcmp(key, "freq-mhz") == 0 ||
+                    strcmp(key, "cpu-min") == 0 || strcmp(key, "cpu-min-mhz") == 0);
+    bool sleep_key = (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0);
+    char note[80] = {0};
+    if (cpu_key) {
+        char *end = NULL;
+        unsigned long req = strtoul(value, &end, 10);
+        unsigned got = (strcmp(key, "cpu-min") == 0 || strcmp(key, "cpu-min-mhz") == 0)
+                           ? cfg->cpu_min_mhz
+                           : cfg->cpu_mhz;
+        if (end != value && *end == '\0' && (unsigned long)got != req) {
+            snprintf(note, sizeof(note), " (requested %lu, using %u)", req, got);
+        }
+    }
+
 #if CONFIG_ESPNOW_ROLE_SENDER
     /* Keep the sleep module's PM re-apply in sync with the pinned range, then
-     * mirror the light-sleep knob onto its latch. */
-    uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
-    if (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0) {
+     * mirror the light-sleep knob onto its latch. Only the CPU knobs and the
+     * sleep toggle touch power management; 'retries' must not. */
+    if (cpu_key) {
+        uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
+        /* Re-apply with the pinned range but keep the current latch, so a set
+         * during the link fallback does not silently re-enable light sleep. */
+        uart_sleep_set_enabled(uart_sleep_is_enabled());
+    } else if (sleep_key) {
         uart_sleep_set_enabled(cfg->light_sleep);
     }
 #endif
     int written = snprintf(out, out_size,
-                           "%s=%s%s\n", key, value,
+                           "%s=%s%s%s\n", key, value, note,
                            applied ? "" : " (hardware rejected the change)");
     if (written > 0 && (size_t)written < out_size) {
         runtime_config_render(cfg, out + written, out_size - (size_t)written);

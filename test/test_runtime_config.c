@@ -78,6 +78,17 @@ int main(void)
     CHECK(runtime_config_set(&cfg, "freq", "40", 240, err, sizeof(err)) &&
               cfg.cpu_mhz == 80 && cfg.cpu_min_mhz == 80,
           "pinning 40 MHz clamps up to the 80 MHz Wi-Fi minimum");
+    /* Only 80/160/240 exist; values in between snap so the reported clock is
+     * the real one (esp_pm_configure() would silently round anyway). */
+    CHECK(runtime_config_set(&cfg, "cpu", "100", 240, err, sizeof(err)) &&
+              cfg.cpu_mhz == 80,
+          "a ceiling between steps snaps down to 80");
+    CHECK(runtime_config_set(&cfg, "cpu", "200", 240, err, sizeof(err)) &&
+              cfg.cpu_mhz == 160,
+          "a ceiling between steps snaps down to 160");
+    CHECK(runtime_config_set(&cfg, "freq", "100", 240, err, sizeof(err)) &&
+              cfg.cpu_mhz == 80 && cfg.cpu_min_mhz == 80,
+          "pinning 100 MHz snaps to 80");
     /* cpu-min raises the floor without changing the ceiling. */
     CHECK(runtime_config_set(&cfg, "freq", "160", 240, err, sizeof(err)) &&
               cfg.cpu_mhz == 160 && cfg.cpu_min_mhz == 160,

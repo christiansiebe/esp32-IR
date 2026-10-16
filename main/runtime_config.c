@@ -12,6 +12,10 @@
 #define CONFIG_ESPNOW_CPU_MAX_MHZ 240
 #endif
 
+/* Snap a value to the nearest of the DFS steps the ESP32 supports; defined
+ * below, declared here so the defaults can use it too. */
+static uint32_t snap_cpu_mhz(uint32_t mhz);
+
 runtime_config_t runtime_config_defaults(void)
 {
     runtime_config_t cfg = {
@@ -20,7 +24,7 @@ runtime_config_t runtime_config_defaults(void)
 #else
         .light_sleep = false,
 #endif
-        .cpu_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ,
+        .cpu_mhz = snap_cpu_mhz(CONFIG_ESPNOW_CPU_MAX_MHZ),
         .cpu_min_mhz = 40u,
         .espnow_retries = 3u,
     };
@@ -70,6 +74,25 @@ bool runtime_config_parse_cpu_mhz_min(const char *text, uint32_t ceiling_mhz,
     return true;
 }
 
+/* Snap a value to the nearest of the four DFS steps the ESP32 supports. Values
+ * in between are silently rounded by esp_pm_configure() (a request for 200 MHz
+ * becomes 240), which made 'set cpu' look like it did nothing. 40 is a legal
+ * DFS step but not a legal ceiling, so anything at or below 80 snaps to 80. */
+static uint32_t snap_cpu_mhz(uint32_t mhz)
+{
+    static const uint32_t steps[] = {80u, 160u, 240u};
+    if (mhz <= steps[0]) {
+        return steps[0];
+    }
+    uint32_t best = steps[0];
+    for (size_t i = 1; i < sizeof(steps) / sizeof(steps[0]); ++i) {
+        if (mhz >= steps[i]) {
+            best = steps[i];
+        }
+    }
+    return best;
+}
+
 bool runtime_config_parse_bool(const char *text, bool *out)
 {
     if (text == NULL || out == NULL) {
@@ -104,6 +127,8 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             snprintf(err, err_size, "cpu: expected a number of MHz\n");
             return false;
         }
+        /* Only 80/160/240 exist; snap so the reported value is the real clock. */
+        next.cpu_mhz = snap_cpu_mhz(next.cpu_mhz);
         /* Keep the floor at or below the ceiling; otherwise min > max and the
          * PM API rejects the whole config. */
         if (next.cpu_min_mhz > next.cpu_mhz) {
@@ -119,8 +144,8 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             snprintf(err, err_size, "freq: expected a number of MHz\n");
             return false;
         }
-        next.cpu_mhz = mhz;
-        next.cpu_min_mhz = mhz;
+        next.cpu_mhz = snap_cpu_mhz(mhz);
+        next.cpu_min_mhz = next.cpu_mhz;
     } else if (strcmp(key, "cpu-min") == 0 || strcmp(key, "cpu-min-mhz") == 0) {
         if (!runtime_config_parse_cpu_mhz(value, ceiling_mhz, &next.cpu_min_mhz)) {
             snprintf(err, err_size, "cpu-min: expected a number of MHz\n");
@@ -178,9 +203,23 @@ bool runtime_config_apply(const runtime_config_t *cfg)
     /* Changing max_freq_mhz reconfigures DFS; when min_freq == max_freq DFS is
      * effectively off and the clock is pinned. light_sleep_enable toggles the
      * idle park. */
+    /* Safety net: never hand esp_pm_configure() a ceiling below the Wi-Fi
+     * minimum. A 40 MHz max_freq aborts the Wi-Fi task and crashes the sender,
+     * so clamp here too in case a caller bypasses the parser. */
+    int max_mhz = (int)cfg->cpu_mhz;
+    if (max_mhz < (int)RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ) {
+        max_mhz = (int)RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ;
+    }
+    int min_mhz = (int)cfg->cpu_min_mhz;
+    if (min_mhz < (int)RUNTIME_CONFIG_CPU_MIN_MHZ) {
+        min_mhz = (int)RUNTIME_CONFIG_CPU_MIN_MHZ;
+    }
+    if (min_mhz > max_mhz) {
+        min_mhz = max_mhz;
+    }
     esp_pm_config_t pm = {
-        .max_freq_mhz = (int)cfg->cpu_mhz,
-        .min_freq_mhz = (int)cfg->cpu_min_mhz,
+        .max_freq_mhz = max_mhz,
+        .min_freq_mhz = min_mhz,
         .light_sleep_enable = cfg->light_sleep,
     };
     return esp_pm_configure(&pm) == ESP_OK;
