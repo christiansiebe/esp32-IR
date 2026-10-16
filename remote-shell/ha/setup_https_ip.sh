@@ -73,6 +73,31 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t || { echo "FEHLER: nginx-Config ungueltig." >&2; exit 1; }
 systemctl reload nginx 2>/dev/null || systemctl restart nginx
 
+# Auto-Erneuerung des lokalen-CA-Leaf-Zertifikats (die CA selbst bleibt gleich,
+# damit Clients nicht neu installieren muessen).
+if [ -x /root/renew_local_ca_leaf.sh ] || [ -f "$(dirname "$0")/renew_local_ca_leaf.sh" ]; then
+  SRC="$(dirname "$0")/renew_local_ca_leaf.sh"; [ -f /root/renew_local_ca_leaf.sh ] && SRC=/root/renew_local_ca_leaf.sh
+  cp "$SRC" /root/renew_local_ca_leaf.sh; chmod +x /root/renew_local_ca_leaf.sh
+  cat > /etc/systemd/system/local-ca-renew.service <<'UNIT'
+[Unit]
+Description=Erneuert das lokale-CA-Serverzertifikat vor Ablauf
+[Service]
+Type=oneshot
+ExecStart=/root/renew_local_ca_leaf.sh
+UNIT
+  cat > /etc/systemd/system/local-ca-renew.timer <<'UNIT'
+[Unit]
+Description=monatliche Pruefung des lokalen-CA-Serverzertifikats
+[Timer]
+OnCalendar=monthly
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now local-ca-renew.timer >/dev/null 2>&1
+fi
+
 sleep 1
 echo "https IP            -> $(curl -sk -o /dev/null -w '%{http_code}' https://${IP}/ 2>/dev/null)"
 echo "https odroidn2.local-> $(curl -sk -o /dev/null -w '%{http_code}' --resolve ${LOCAL_NAME}:443:127.0.0.1 https://${LOCAL_NAME}/ 2>/dev/null)"

@@ -83,3 +83,21 @@ hat die IP bereits als SAN. `setup_https_ip.sh` legt die nginx-Bloecke so an:
 Voraussetzung fuer die IP ohne Warnung: **die lokale CA einmalig auf dem Geraet
 installieren** (siehe oben). Ohne das zeigt der Browser weiterhin eine Warnung -
 das liegt am Client, nicht am Server.
+
+## Automatische Erneuerung (server-seitig)
+
+Zwei systemd-Timer halten beide Zertifikate aktuell - nichts muss manuell
+nachgezogen werden:
+
+- `acme-renew.timer` (taeglich): `acme.sh --cron` erneuert das **Let's-Encrypt**
+  Zertifikat und laedt nginx neu (via `--install-cert --reloadcmd`).
+- `local-ca-renew.timer` (monatlich): `renew_local_ca_leaf.sh` signiert das
+  **lokale-CA-Serverzert** neu, wenn es < 30 Tage gueltig ist. Die **CA selbst
+  bleibt unveraendert** (sonst muessten Clients die CA neu installieren); es wird
+  nur das Leaf-Zert erneuert, danach `systemctl reload nginx`.
+
+Auf den **Client-Geraeten** gibt es keine Auto-Installation: Der Server kann eine
+CA nicht auf fremde Browser schieben. Beim **Namen** (lancert/Let's Encrypt) ist
+das auch nicht noetig - die CA ist bereits ueberall vertrauenswuerdig. Nur bei
+der **IP** importiert man die lokale CA einmalig (oder zentral per
+Windows-GPO/MDM in einer Domaene).

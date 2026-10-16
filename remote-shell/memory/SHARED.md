@@ -363,3 +363,16 @@ Wichtigste Punkte (sonst scheitert es):
 - Getestet via `--resolve <name>:443:127.0.0.1`: HTTP 301, HTTPS 200, Chain
   gegen System-CA-Store OK (`--cacert /etc/ssl/certs/ca-certificates.crt`).
 - Doku: `remote-shell/ha/tls/README.md` (beide Wege: lancert + lokale CA).
+
+### HTTPS-Auto-Erneuerung beider Zertifikate (2026-10-15)
+- `acme-renew.timer` (taeglich) erneuert das LE-Zert (dns_acmedns/lancert),
+  `--install-cert --reloadcmd "systemctl reload nginx"` kopiert + laedt neu.
+- `local-ca-renew.timer` (monatlich) -> `renew_local_ca_leaf.sh`: signiert das
+  lokale-CA-Leaf neu, wenn < RENEW_BEFORE_DAYS (Default 30) gueltig. **CA selbst
+  bleibt unveraendert** (Fingerprint stabil) -> Clients muessen NICHT neu
+  installieren. Nutzt vorhandene `ca.srl` (Seriennummern fortlaufend).
+- Real getestet: `RENEW_BEFORE_DAYS=999 bash renew_local_ca_leaf.sh` -> neue
+  Seriennummer, CA-Fingerprint identisch, `openssl verify` OK, https IP = 200.
+- Client-Auto-Install nicht moeglich/notwendig: LE-CA ist ueberall vorinstalliert
+  (gilt fuer den lancert-Namen). Nur die lokale CA (fuer die IP) importiert man
+  einmalig - Server kann nichts auf fremde Browser schieben.
