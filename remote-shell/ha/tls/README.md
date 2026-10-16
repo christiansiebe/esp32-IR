@@ -68,3 +68,18 @@ den Namen hinzufügen.
 systemctl disable --now acme-renew.timer
 rm -f /etc/nginx/sites-enabled/homeassistant
 ```
+
+## IP-Adresse behalten (`https://192.168.178.71`)
+
+Oeffentliche CAs (Let's Encrypt) stellen fuer **private** IPs keine Zertifikate
+aus (RFC-1918 wird gefiltert, IP-Zerts nur fuer oeffentliche IPs). Ein Schloss
+auf der nackten IP gibt es daher nur mit der **lokalen CA** - deren Server-Zert
+hat die IP bereits als SAN. `setup_https_ip.sh` legt die nginx-Bloecke so an:
+
+- `https://192.168.178.71` + `https://odroidn2.local` -> lokale CA
+  (`default_server`, greift bei IP), SAN = DNS odroidn2.local/odroidn2 + IPs.
+- `https://<wort-wort>.lancert.dev` -> Let's Encrypt (kein Client-Setup).
+
+Voraussetzung fuer die IP ohne Warnung: **die lokale CA einmalig auf dem Geraet
+installieren** (siehe oben). Ohne das zeigt der Browser weiterhin eine Warnung -
+das liegt am Client, nicht am Server.
