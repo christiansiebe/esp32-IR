@@ -65,6 +65,10 @@ Sicherheitsgrenze: nie unter **700 mV** (`SAFE_MIN_UV`).
 
 - Grenze unter Frequenzwechsel liegt also zwischen **100 und 110 mV**. Empfohlen
   mit Reserve: **-80 mV** (big 831→751, little 1000→920).
+- **Zusätzlicher Chaos-Test** (`uvchaos.py`): -100 mV, Frequenz springt alle
+  10–60 ms auf einen zufälligen Punkt der OPP-Tabelle beider Cluster, während
+  6 Prozesse rechnen. **4107 Schaltvorgänge, Undervolt 4107× gehalten, 0
+  Rechenfehler, kein Reboot.** Also auch bei ständigem Taktsprung stabil.
 - Der frühere Absturz bei -100/-40 mV war ein **Fehler im Test**, nicht die
   Hardware: der Regler-Cache programmiert nur bei geänderter Zielspannung neu,
   wodurch sich die Absenkung bei gleicher Werksspannung aufsummierte (siehe
