@@ -302,3 +302,20 @@ Wichtigste Punkte (sonst scheitert es):
   ist **read-only** (kein `climate`, kein `select`) — daher kein Thermostat-/
   Silent-Card. "Modulation" ist in der Referenz ebenfalls die Brennerleistung
   (`sensor.boiler_curburnpow`), was unseren Ersatzansatz stuetzt.
+
+### HTTPS: lokale CA statt selbstsigniert (2026-10-15)
+- Selbstsignierte Zertifikate sind in jedem Browser "nicht zertifiziert"; fuer
+  `odroidn2.local` ist Let's Encrypt (DNS-01) unpraktikabel. Loesung: **lokale
+  Root-CA** auf dem Odroid.
+- `setup_https_nginx.sh` (geaendert): erzeugt einmalig `/etc/nginx/ssl/ca.{crt,key}`
+  (CN "Odroid N2 Local CA", 10 J, CA:TRUE) und signiert damit das Server-Zert
+  `/etc/nginx/ssl/odroidn2.{crt,key}` (2 J, SANs odroidn2.local/odroidn2/
+  192.168.178.71/127.0.0.1). Idempotent: erneuter Lauf **behaelt** die CA.
+- **Oeffentliche CA-Datei im Repo:** `remote-shell/ha/tls/odroidn2-ca.crt`
+  (kein Geheimnis) + Installationsanleitung `remote-shell/ha/tls/README.md`.
+  Fingerprint SHA-256: `0D:87:78:39:...:5C:EE`.
+- Sobald die CA auf dem Client installiert ist, ist die Verbindung
+  vertrauenswuerdig (kein Warnhinweis). Chain-Verify am Odroid: `openssl verify`
+  = OK. HTTPS 200, HTTP 301.
+- **Achtung:** Base64-Transfer per Kanal kann beim Copy-Paste verstuemmelt
+  werden -> immer mit `sha256sum`/Fingerprint gegenpruefen.
