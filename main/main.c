@@ -6354,9 +6354,11 @@ static void start_webserver(void)
      * the whole HTTP server. */
     config.stack_size = 8192;
     config.lru_purge_enable = true;
-    /* Headroom for the web-health self-probe plus normal browsers; with
-     * lru_purge_enable a stalled client cannot starve the guard's connection. */
-    config.max_open_sockets = 10;
+    /* httpd reserves 3 sockets for itself, so asking for more than
+     * CONFIG_LWIP_MAX_SOCKETS - 3 makes httpd_start() return ESP_ERR_INVALID_ARG;
+     * the ESP_ERROR_CHECK below would then abort and boot-loop. Derive the value
+     * from the LWIP cap so it can never drift past it again. */
+    config.max_open_sockets = CONFIG_LWIP_MAX_SOCKETS - 3;
 
     /* Static: the web-health guard keeps this pointer across restarts, so it
      * must outlive start_webserver()'s stack frame. */
