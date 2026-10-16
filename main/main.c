@@ -4901,6 +4901,17 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
     }
 }
 
+static void console_cmd_config(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    runtime_config_t *cfg = active_runtime_config();
+    /* One short line: the sender tunnel truncates the reply at 192 bytes. */
+    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u\n",
+             (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
+             cfg->light_sleep ? "on" : "off",
+             (unsigned)cfg->espnow_retries);
+}
+
 static void web_console_register_commands(void)
 {
     web_console_register("help", "list available commands", console_cmd_help);
@@ -4908,6 +4919,8 @@ static void web_console_register_commands(void)
                          console_cmd_test);
     web_console_register("set", "change a runtime knob: cpu|freq|cpu-min|sleep|retries",
                          console_cmd_set);
+    web_console_register("config", "show the current test knobs",
+                         console_cmd_config);
     web_console_register("reset-config", "restore the default test knobs",
                          console_cmd_reset_config);
     web_console_register("status", "wifi, channel, clock and heap",
@@ -4987,6 +5000,16 @@ static esp_err_t console_page_handler(httpd_req_t *req)
         "<b>history</b>, <b>time</b>, <b>wifi</b>, <b>power</b>, <b>reboot</b>, "
         "<b>test sleep 400</b>, <b>test sml</b>, <b>set freq 80</b> "
         "(pin the CPU), <b>set cpu 80</b> (DFS ceiling), <b>help</b>.</p>"
+        "<h2>CPU / power</h2>"
+        "<p class=\"note\">Pins this device's CPU (RAM only; a reboot restores "
+        "the defaults). Use a value from 40, 80, 160, 240. On the receiver the "
+        "pin sets the DFS floor, so the clock stays in [value, ceiling].</p>"
+        "<select id=\"cpuval\"><option>40</option><option>80</option>"
+        "<option>160</option><option>240</option></select>"
+        "<button id=\"pin\" type=\"button\">Set fixed</button>"
+        "<button id=\"ceiling\" type=\"button\">Set ceiling</button>"
+        "<button id=\"cfg\" type=\"button\">Read back</button>"
+        "<pre id=\"cpuout\"></pre>"
         "<input id=\"key\" type=\"password\" placeholder=\"Wi-Fi / OTA key\">"
         "<br><input id=\"cmd\" placeholder=\"command\" autocomplete=\"off\">"
         "<button id=\"send\" type=\"button\">Send</button>"
@@ -5006,6 +5029,16 @@ static esp_err_t console_page_handler(httpd_req_t *req)
         "document.getElementById('send').onclick=send;"
         "document.getElementById('clear').onclick=()=>{out.textContent='';};"
         "cmd.addEventListener('keydown',e=>{if(e.key==='Enter')send();});"
+        "async function postLine(line,target){"
+        "try{sessionStorage.setItem('consoleKey',key.value);}catch(e){}"
+        "append('> '+line+'\\n');"
+        "try{const r=await fetch('/api/console',{method:'POST',"
+        "headers:{'X-OTA-Key':key.value},body:line});const t=await r.text();"
+        "target.textContent=(r.ok?'':('['+r.status+'] '))+t;}"
+        "catch(e){target.textContent='request failed: '+e;}}"
+        "document.getElementById('pin').onclick=()=>postLine('set freq '+document.getElementById('cpuval').value,document.getElementById('cpuout'));"
+        "document.getElementById('ceiling').onclick=()=>postLine('set cpu '+document.getElementById('cpuval').value,document.getElementById('cpuout'));"
+        "document.getElementById('cfg').onclick=()=>postLine('config',document.getElementById('cpuout'));"
         "cmd.focus();</script></body></html>";
 
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
@@ -6064,6 +6097,15 @@ static esp_err_t sender_page_handler(httpd_req_t *req)
         "<h2>Status</h2><pre id=\"info\"></pre>"
         "<h2>Previous session / last crash</h2><pre id=\"crash\"></pre>"
         "<h2>Recent events</h2><pre id=\"events\"></pre>"
+        "<h2>CPU / power</h2>"
+        "<p class=\"note\">Pins the sender CPU (RAM only; a reboot restores the "
+        "defaults). Use a value from 40, 80, 160, 240.</p>"
+        "<select id=\"cpuval\"><option>40</option><option>80</option>"
+        "<option>160</option><option>240</option></select>"
+        "<button id=\"pin\" type=\"button\">Set fixed</button>"
+        "<button id=\"ceiling\" type=\"button\">Set ceiling</button>"
+        "<button id=\"cfg\" type=\"button\">Read back</button>"
+        "<pre id=\"cpuout\"></pre>"
         "<h2>Sender console (tunnelled)</h2>"
         "<input id=\"key\" type=\"password\" placeholder=\"Wi-Fi / OTA key\">"
         "<br><input id=\"cmd\" placeholder=\"command\" autocomplete=\"off\">"
@@ -6123,6 +6165,16 @@ static esp_err_t sender_page_handler(httpd_req_t *req)
         "byId('load').addEventListener('click',load);"
         "byId('send').addEventListener('click',send);"
         "cmd.addEventListener('keydown',e=>{if(e.key==='Enter')send();});"
+        "async function postLine(line,target){"
+        "try{sessionStorage.setItem('senderConsoleKey',key.value);}catch(e){}"
+        "append('> '+line+nl);"
+        "try{const r=await fetch('/api/sender-console',{method:'POST',"
+        "headers:{'X-OTA-Key':key.value},body:line});const t=await r.text();"
+        "target.textContent=(r.ok?'':('['+r.status+'] '))+t;}"
+        "catch(e){target.textContent='request failed: '+e;}}"
+        "byId('pin').addEventListener('click',()=>postLine('set freq '+byId('cpuval').value,byId('cpuout')));"
+        "byId('ceiling').addEventListener('click',()=>postLine('set cpu '+byId('cpuval').value,byId('cpuout')));"
+        "byId('cfg').addEventListener('click',()=>postLine('config',byId('cpuout')));"
         "load();</script><p><a href=\"/\">Back</a> · <a href=\"/diag\">Full diagnostics</a></p>"
         "</body></html>";
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
