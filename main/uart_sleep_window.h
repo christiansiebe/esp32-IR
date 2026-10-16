@@ -171,6 +171,11 @@ void uart_sleep_hold(uint32_t hold_ms);
  * the counter) so the controller only grows a window it actually slept. */
 void uart_sleep_set_slept_ms(uint32_t ms);
 
+/* Permanently disable light sleep at runtime and keep the CPU awake (used by
+ * the link fallback when the peer stops answering while sleeping). Idempotent;
+ * a no-op when the feature is compiled out. */
+void uart_sleep_disable_idf(void);
+
 /* True while a hold set with uart_sleep_hold() is still active. Pure so it is
  * host-tested. */
 static inline bool uart_sleep_hold_active(int64_t hold_until_us, int64_t now_us)

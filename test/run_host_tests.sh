@@ -147,6 +147,17 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_sleep_misbehavior"
 
+# Link fallback: the peer-silence decision that returns a device to its proven
+# mode. Pure C; the transition must be sticky (no flapping) and grace-bounded.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/link_fallback.c" \
+    "$here/test_link_fallback.c" \
+    -o "$out/test_link_fallback"
+
+"$out/test_link_fallback"
+
 # Receiver-side backfill merge bookkeeping (window/presence/dedupe). Pure C.
 "$cc" -std=c11 -Wall -Wextra -O2 \
     -Wno-unused-variable -Wno-unused-const-variable \

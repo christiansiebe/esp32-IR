@@ -165,7 +165,11 @@ typedef struct __attribute__((packed)) {
     /* Sender firmware version string (fw_version()), NUL-terminated. Empty when
      * the build did not provide one (host build without build_version.h). */
     char fw_version[ESPNOW_DIAG_FW_VERSION_LEN];
-    uint8_t reserved4[2];
+    /* 1 when the link fallback fired on the sender (light sleep dropped, radio
+     * kept awake); reuses the first reserved byte so the struct keeps its size
+     * and no wire-version bump is needed. */
+    uint8_t sleep_fallback_active;
+    uint8_t reserved4;
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {

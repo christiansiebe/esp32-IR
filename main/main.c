@@ -32,6 +32,7 @@
 #include "history_sync.h"
 #include "history_csv_import.h"
 #include "json_escape.h"
+#include "link_fallback.h"
 #include "power_history.h"
 #include "version.h"
 #include "web_console.h"
@@ -317,6 +318,16 @@ static int64_t g_power_bucket_last_sample_utc;
 static double g_power_bucket_sum_w;
 static uint32_t g_power_bucket_sample_count;
 static portMUX_TYPE g_sml_history_lock = portMUX_INITIALIZER_UNLOCKED;
+
+#if CONFIG_ESPNOW_LINK_FALLBACK
+/* Link fallback: the peer stopped answering -> drop the new path for the
+ * proven one. One instance per device, touched from the receive callback and
+ * the worker, so the silence clock lives in a lock. Declared outside the role
+ * guards: both roles run the same watchdog. */
+static link_fallback_t g_link_fallback;
+static portMUX_TYPE g_link_fallback_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool g_link_fallback_active;
+#endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* sml_tx_item_t lives in tx_batch.h so the batching ring is host-testable. */
@@ -1493,7 +1504,12 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .boot_marker_count = g_boot_marker_count,
         .boot_marker_reason = g_boot_marker_reason,
         .build_profile = BUILD_PROFILE_ID,
-        .reserved4 = {0, 0},
+#if CONFIG_ESPNOW_LINK_FALLBACK
+        .sleep_fallback_active = g_link_fallback_active ? 1 : 0,
+#else
+        .sleep_fallback_active = 0,
+#endif
+        .reserved4 = 0,
     };
     strlcpy(counters->fw_version, fw_version(), sizeof(counters->fw_version));
     *frame_len = sizeof(*header) + sizeof(*counters);
@@ -1882,6 +1898,14 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         ESP_LOGW(TAG, "Received an invalid ESP-NOW packet");
         return;
     }
+
+#if CONFIG_ESPNOW_LINK_FALLBACK
+    /* Any inbound frame proves the peer is alive: re-arm the silence timer so a
+     * working link never trips the fallback. */
+    portENTER_CRITICAL(&g_link_fallback_lock);
+    link_fallback_note_rx(&g_link_fallback, (uint64_t)(esp_timer_get_time() / 1000));
+    portEXIT_CRITICAL(&g_link_fallback_lock);
+#endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
     if (is_espnow_ota_packet(data, data_len)) {
@@ -5304,7 +5328,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"gap_cause_buffer\":%lu,"
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
                        "\"sender_fw_version\":\"%s\","
-                       "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u}",
+                       "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
+                       "\"sleep_fallback\":%u}",
                        fw_version(),
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
@@ -5360,7 +5385,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned int)counters.build_profile,
                        counters.fw_version,
                        (unsigned long)counters.boot_marker_count,
-                       (unsigned int)counters.boot_marker_reason);
+                       (unsigned int)counters.boot_marker_reason,
+                       (unsigned int)counters.sleep_fallback_active);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -5700,7 +5726,8 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        "\"gap_cause_stall\":%lu,\"gap_cause_buffer\":%lu,"
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
                        "\"sender_fw_version\":\"%s\","
-                       "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u}%s%s}",
+                       "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
+                       "\"sleep_fallback\":%u}%s%s}",
                        mac_known ? "true" : "false",
                        (int)sender_rssi,
                        sender_rssi_valid ? "true" : "false",
@@ -5759,6 +5786,7 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        counters.fw_version,
                        (unsigned long)counters.boot_marker_count,
                        (unsigned int)counters.boot_marker_reason,
+                       (unsigned int)counters.sleep_fallback_active,
                        crash_json[0] != '\0' ? "," : "",
                        crash_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
@@ -6499,6 +6527,55 @@ static void register_webserver_handlers(httpd_handle_t server)
 #endif
 }
 
+#if CONFIG_ESPNOW_LINK_FALLBACK
+/* Per-device link watchdog. It polls the pure link_fallback state every 5 s and,
+ * once the peer has been silent past the timeout, falls back to the proven mode
+ * exactly once (sticky until reboot, so it cannot flap). The two sides watch
+ * each other independently - no handshake, so they can never deadlock. */
+static void link_fallback_worker(void *arg)
+{
+    (void)arg;
+    const uint64_t started_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    portENTER_CRITICAL(&g_link_fallback_lock);
+    link_fallback_init(&g_link_fallback, CONFIG_ESPNOW_LINK_FALLBACK_MS,
+                       CONFIG_ESPNOW_LINK_FALLBACK_GRACE_MS, started_ms);
+    portEXIT_CRITICAL(&g_link_fallback_lock);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        if (g_link_fallback_active) {
+            continue; /* already fell back */
+        }
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        uint64_t uptime_ms = now_ms - started_ms;
+        bool fallback;
+        portENTER_CRITICAL(&g_link_fallback_lock);
+        fallback = link_fallback_should_fallback(&g_link_fallback, now_ms, uptime_ms);
+        portEXIT_CRITICAL(&g_link_fallback_lock);
+        if (!fallback) {
+            continue;
+        }
+        g_link_fallback_active = true;
+#if CONFIG_ESPNOW_ROLE_SENDER
+        /* Sender: the peer stopped answering -> drop the adaptive light sleep and
+         * keep the Wi-Fi radio awake (the proven, always-on mode). */
+        uart_sleep_disable_idf();
+        diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
+                       "link fallback: peer silent, light sleep off");
+        ESP_LOGW(TAG, "Link fallback: no peer traffic for %u ms; light sleep "
+                      "disabled, CPU stays awake", (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
+#else
+        /* Receiver: no peer traffic. A hung receiver is already covered by
+         * web_guard, so only surface it here for the dashboard. */
+        ESP_LOGW(TAG, "Link fallback: no sender traffic for %u ms",
+                 (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
+#endif
+    }
+}
+#endif /* CONFIG_ESPNOW_LINK_FALLBACK */
+
+
+
 #if CONFIG_ESPNOW_ROLE_SENDER
 static void run_sender(void)
 {
@@ -6589,6 +6666,13 @@ static void run_sender(void)
         ESP_LOGE(TAG, "Could not start sender time-sync worker");
         ESP_ERROR_CHECK(ESP_FAIL);
     }
+#if CONFIG_ESPNOW_LINK_FALLBACK
+    task_result = xTaskCreate(link_fallback_worker, "link_fallback",
+                              3072, NULL, 2, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the link-fallback worker");
+    }
+#endif
 }
 #endif
 
@@ -6717,6 +6801,13 @@ void app_main(void)
     if (backfill_result != pdPASS) {
         ESP_LOGW(TAG, "Could not start the history-backfill worker");
     }
+#if CONFIG_ESPNOW_LINK_FALLBACK
+    BaseType_t fallback_result = xTaskCreate(link_fallback_worker, "link_fallback",
+                                             3072, NULL, 2, NULL);
+    if (fallback_result != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the link-fallback worker");
+    }
+#endif
     ESP_LOGI(TAG, "Receiver ready: http://192.168.4.1/ | /sender | /diag | /log | /console | /bootlog | /config | /update");
     while (1) {
         /* Confirm the running OTA image once it has been stable for the policy

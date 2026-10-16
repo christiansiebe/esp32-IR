@@ -35,6 +35,7 @@ static bool s_locked = true; /* NO_LIGHT_SLEEP is held by default */
 static esp_pm_lock_handle_t s_no_light_sleep;
 static volatile int64_t s_hold_until_us;
 static volatile uint32_t s_slept_ms; /* real light-sleep time, fed by main.c */
+static volatile bool s_disabled;     /* link fallback dropped light sleep */
 
 bool uart_sleep_init_idf(void)
 {
@@ -142,6 +143,9 @@ void uart_sleep_hold(uint32_t hold_ms)
 
 void uart_sleep_maybe_sleep_idf(void)
 {
+    if (s_disabled) {
+        return;
+    }
     if (!uart_sleep_should_request(&s_ctrl)) {
         return;
     }
@@ -181,6 +185,26 @@ void uart_sleep_maybe_sleep_idf(void)
  * tested instead of assuming every vTaskDelay parked the CPU. */
 void uart_sleep_set_slept_ms(uint32_t ms) { s_slept_ms = ms; }
 
+/* Link fallback: the peer stopped answering while we slept. Turn light sleep off
+ * for good (a re-enable would flap) and keep the CPU awake. The DFS ceiling
+ * stays; only the idle sleep goes away. */
+void uart_sleep_disable_idf(void)
+{
+    if (s_disabled) {
+        return;
+    }
+    s_disabled = true;
+    esp_pm_config_t pm = {
+        .max_freq_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ,
+        .min_freq_mhz = 40,
+        .light_sleep_enable = false,
+    };
+    (void)esp_pm_configure(&pm);
+    uart_sleep_lock(true); /* hold NO_LIGHT_SLEEP so the idle path never parks */
+    ESP_LOGW(UART_SLEEP_TAG,
+             "light sleep disabled by the link fallback; CPU stays awake");
+}
+
 uint32_t uart_sleep_window_ms(void) { return s_ctrl.window_ms; }
 uint32_t uart_sleep_min_gap_ms(void) { return s_ctrl.last_min_gap_ms; }
 bool uart_sleep_hold_is_active(void)
@@ -203,6 +227,7 @@ void uart_sleep_note_uart_idle(void) {}
 void uart_sleep_hold(uint32_t hold_ms) { (void)hold_ms; }
 void uart_sleep_maybe_sleep_idf(void) {}
 void uart_sleep_set_slept_ms(uint32_t ms) { (void)ms; }
+void uart_sleep_disable_idf(void) {}
 uint32_t uart_sleep_window_ms(void) { return 0; }
 uint32_t uart_sleep_min_gap_ms(void) { return 0; }
 bool uart_sleep_hold_is_active(void) { return false; }
