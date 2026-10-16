@@ -4781,10 +4781,12 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
 {
     char what[24] = {0};
     char rest[32] = {0};
-    int parsed = sscanf(args, "%23s %31s", what, rest);
+    char extra[16] = {0};
+    int parsed = sscanf(args, "%23s %31s %15s", what, rest, extra);
     if (parsed < 1) {
         snprintf(out, out_size,
-                 "usage: test sleep <ms> | test sml | test espnow | test storage\n");
+                 "usage: test sleep [<ms>|pin <mhz>|restore|stats] | test cpu | "
+                 "test sml | test espnow | test storage\n");
         return;
     }
     if (strcmp(what, "sml") == 0) {
@@ -4800,10 +4802,78 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
     }
 #if CONFIG_ESPNOW_ROLE_SENDER
     if (strcmp(what, "sleep") == 0) {
+        esp_pm_config_t pm;
+        bool pm_ok = (esp_pm_get_configuration(&pm) == ESP_OK);
+        int ceiling = pm_ok ? pm.max_freq_mhz : 0;
+        int floor_mhz = pm_ok ? pm.min_freq_mhz : 0;
+        bool ls_on = pm_ok && pm.light_sleep_enable;
+
+        if (parsed < 2) {
+            /* No argument: report what the sleep path is doing right now. */
+            snprintf(out, out_size,
+                     "sleep: light sleep %s  enabled(console) %s\n"
+                     "  window %u ms  min gap seen %u ms  hold %s\n"
+                     "  cpu %d-%d MHz (0 steps means the clock never moved)\n"
+                     "usage: test sleep <ms> | pin <mhz> | restore | stats\n",
+                     ls_on ? "on" : "off",
+                     uart_sleep_is_enabled() ? "yes" : "no",
+                     (unsigned)uart_sleep_window_ms(),
+                     (unsigned)uart_sleep_min_gap_ms(),
+                     uart_sleep_hold_is_active() ? "active" : "idle",
+                     floor_mhz, ceiling);
+            return;
+        }
+        if (strcmp(rest, "stats") == 0) {
+            snprintf(out, out_size,
+                     "sleep stats: window %u ms  min gap %u ms  slept %u ms\n"
+                     "  light sleep %s  enabled(console) %s  hold %s\n",
+                     (unsigned)uart_sleep_window_ms(),
+                     (unsigned)uart_sleep_min_gap_ms(),
+                     (unsigned)g_sleep_accumulated_ms,
+                     ls_on ? "on" : "off",
+                     uart_sleep_is_enabled() ? "yes" : "no",
+                     uart_sleep_hold_is_active() ? "active" : "idle");
+            return;
+        }
+        if (strcmp(rest, "restore") == 0) {
+            /* Leave the pinned range and go back to the compile-time clock. */
+            esp_pm_config_t base = {
+                .max_freq_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ,
+                .min_freq_mhz = 40,
+                .light_sleep_enable = ls_on,
+            };
+            (void)esp_pm_configure(&base);
+            uart_sleep_set_pm_override(0, 0);
+            snprintf(out, out_size, "sleep: restored compile-time clock (max %d MHz)\n",
+                     (int)CONFIG_ESPNOW_CPU_MAX_MHZ);
+            return;
+        }
+        if (strcmp(rest, "pin") == 0) {
+            /* pin <mhz>: hold the clock exactly there so a sleep test runs at a
+             * low, measurable frequency instead of at the DFS ceiling. */
+            char *mhz_end = NULL;
+            unsigned long mhz = strtoul(extra, &mhz_end, 10);
+            if (mhz_end == extra || *mhz_end != '\0' || mhz < 40 || mhz > 240) {
+                snprintf(out, out_size, "usage: test sleep pin <mhz> (40..240)\n");
+                return;
+            }
+            esp_pm_config_t pinned = {
+                .max_freq_mhz = (int)mhz,
+                .min_freq_mhz = (int)mhz,
+                .light_sleep_enable = ls_on,
+            };
+            bool ok = (esp_pm_configure(&pinned) == ESP_OK);
+            uart_sleep_set_pm_override((int)mhz, (int)mhz);
+            snprintf(out, out_size, "sleep: cpu pinned to %lu MHz (light sleep %s)\n",
+                     mhz, ok ? (ls_on ? "on" : "off") : "configure failed");
+            return;
+        }
+        /* Otherwise: force one window and report how much was really slept. */
         char *end = NULL;
-        unsigned long ms = (parsed < 2) ? 0 : strtoul(rest, &end, 10);
-        if (parsed < 2 || end == rest || *end != '\0' || ms == 0 || ms > 1000) {
-            snprintf(out, out_size, "usage: test sleep <ms> (1..1000)\n");
+        unsigned long ms = strtoul(rest, &end, 10);
+        if (end == rest || *end != '\0' || ms == 0 || ms > 1000) {
+            snprintf(out, out_size,
+                     "usage: test sleep <ms> (1..1000) | pin <mhz> | restore | stats\n");
             return;
         }
         uint32_t slept = 0;
@@ -4817,6 +4887,21 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  "sleep test: requested %lu ms, slept %u ms, light sleep %s\n",
                  ms, (unsigned)slept,
                  uart_sleep_is_enabled() ? "enabled" : "disabled");
+        return;
+    }
+    if (strcmp(what, "cpu") == 0) {
+        esp_pm_config_t pm;
+        if (esp_pm_get_configuration(&pm) != ESP_OK) {
+            snprintf(out, out_size, "cpu: could not read the power config\n");
+            return;
+        }
+        snprintf(out, out_size,
+                 "cpu: %d-%d MHz  light sleep %s  avg %u MHz  %lu steps\n"
+                 "usage: test cpu | test sleep pin <mhz> | test sleep restore\n",
+                 pm.min_freq_mhz, pm.max_freq_mhz,
+                 pm.light_sleep_enable ? "on" : "off",
+                 (unsigned)(g_cpu_freq_samples ? g_cpu_freq_sum_mhz / g_cpu_freq_samples : 0),
+                 (unsigned long)g_cpu_freq_changes);
         return;
     }
 #else
@@ -4915,7 +5000,7 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
 static void web_console_register_commands(void)
 {
     web_console_register("help", "list available commands", console_cmd_help);
-    web_console_register("test", "run a self-test: sleep|sml|espnow|storage",
+    web_console_register("test", "run a self-test: sleep|cpu|sml|espnow|storage",
                          console_cmd_test);
     web_console_register("set", "change a runtime knob: cpu|freq|cpu-min|sleep|retries",
                          console_cmd_set);
