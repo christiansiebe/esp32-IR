@@ -224,6 +224,13 @@ static char g_wifi_password[WIFI_PASSWORD_MAX_LEN + 1];
 static bool g_wifi_configured;
 static bool g_wifi_connected;
 static bool g_sntp_started;
+#if !CONFIG_ESPNOW_ROLE_SENDER && !CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+/* SoftAP state for the "AP off once the station is up" power saving (receiver,
+ * APSTA mode only). g_ap_mode_switch_us debounces the switch: the mode change
+ * itself can trigger a STA disconnect, and we must not immediately undo it. */
+static bool g_ap_enabled = true;
+static int64_t g_ap_mode_switch_us;
+#endif
 static esp_netif_t *g_ap_netif;
 static esp_netif_t *g_sta_netif;
 static uint8_t g_espnow_channel = ESPNOW_CHANNEL;
@@ -577,6 +584,29 @@ static bool system_time_is_valid(void)
     return time(NULL) >= 1704067200;
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER && !CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+/* Turn the SoftAP on or off at runtime. The receiver keeps the AP until its
+ * station is actually up, so a misconfigured WLAN still has the 192.168.4.1
+ * fallback; once the home WLAN carries the dashboard the AP is pure idle cost.
+ * ESP-NOW uses the STA interface (peer.channel = 0), so switching the mode does
+ * not disturb the link. Only touches the radio when the state really changes. */
+static void wifi_set_ap_enabled(bool enable)
+{
+    if (enable == g_ap_enabled) {
+        return;
+    }
+    esp_err_t err = esp_wifi_set_mode(enable ? WIFI_MODE_APSTA : WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not %s the SoftAP: %s",
+                 enable ? "re-enable" : "disable", esp_err_to_name(err));
+        return;
+    }
+    g_ap_enabled = enable;
+    g_ap_mode_switch_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "SoftAP %s (station carries the dashboard)", enable ? "on" : "off");
+}
+#endif
+
 static void wifi_event_handler(void *arg,
                                esp_event_base_t event_base,
                                int32_t event_id,
@@ -592,6 +622,14 @@ static void wifi_event_handler(void *arg,
         const wifi_event_sta_disconnected_t *event = event_data;
         g_wifi_connected = false;
         ESP_LOGW(TAG, "Wi-Fi station disconnected (reason %u)", event->reason);
+#if !CONFIG_ESPNOW_ROLE_SENDER && !CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+        /* Bring the AP back so the dashboard stays reachable while the station
+         * is down. Skip the switch if we only just changed the mode: the mode
+         * change itself can emit a disconnect, and reacting to it would flap. */
+        if (esp_timer_get_time() - g_ap_mode_switch_us > 5 * 1000 * 1000) {
+            wifi_set_ap_enabled(true);
+        }
+#endif
         if (g_wifi_configured) {
             esp_err_t err = esp_wifi_connect();
             if (err != ESP_OK) {
@@ -609,6 +647,20 @@ static void wifi_event_handler(void *arg,
         ESP_LOGI(TAG, "Home network address: " IPSTR "  ->  http://%s.local/",
                  IP2STR(&event->ip_info.ip), MDNS_HOSTNAME);
         start_mdns();
+#if !CONFIG_ESPNOW_ROLE_SENDER && !CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+        /* Drop the SoftAP only when a late-booting sender can still find the
+         * ESP-NOW channel without it: the sender falls back to ESPNOW_CHANNEL
+         * when the AP is gone, so this is safe exactly when the home AP sits on
+         * ESPNOW_CHANNEL. On any other channel the AP must stay, otherwise a
+         * sender that boots after us would never align to the right channel. */
+        if (g_espnow_channel == ESPNOW_CHANNEL) {
+            wifi_set_ap_enabled(false);
+        } else {
+            ESP_LOGI(TAG, "SoftAP kept: home WLAN is on channel %u, not the "
+                          "ESP-NOW channel %u the sender falls back to",
+                     g_espnow_channel, (unsigned)ESPNOW_CHANNEL);
+        }
+#endif
         if (!g_sntp_started) {
             esp_sntp_config_t sntp_config =
                 ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
