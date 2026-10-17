@@ -49,6 +49,7 @@
 #endif
 #include "crash_journal.h"
 #include "liveness_guard.h"
+#include "ota_policy.h"
 #include "espnow_diag.h"
 #include "sml_transport.h"
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -729,8 +730,9 @@ static uint8_t espnow_align_channel_from_receiver_ap(void)
 /* The measurement store lives in its own data partition. An OTA image must
  * never be allowed to land there: a bad partitions.csv (e.g. a fat app slot
  * overlapping the data partition) would otherwise silently erase minutes of
- * power history. This asserts the next update slot cannot overlap the data
- * partition at all. Cheap and always on; called before every esp_ota_begin. */
+ * power history. The pure range decision lives in ota_policy.c (host-tested);
+ * this wrapper only resolves the partition descriptors. Cheap and always on;
+ * called before every esp_ota_begin. */
 static bool ota_target_is_safe(const esp_partition_t *target)
 {
     if (target == NULL) {
@@ -739,18 +741,18 @@ static bool ota_target_is_safe(const esp_partition_t *target)
     const esp_partition_t *store = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
         POWER_HISTORY_PARTITION);
-    if (store == NULL) {
-        return true; /* no measurement partition configured */
+    uint32_t store_start = 0;
+    uint32_t store_size = 0;
+    if (store != NULL) {
+        store_start = store->address;
+        store_size = store->size;
     }
-    uint32_t target_start = target->address;
-    uint32_t target_end = target->address + target->size;
-    uint32_t store_start = store->address;
-    uint32_t store_end = store->address + store->size;
-    if (target_start < store_end && store_start < target_end) {
+    if (!ota_target_is_safe_range(target->address, target->size,
+                                  store_start, store_size)) {
         ESP_LOGE(TAG, "Refusing OTA: update partition %s [0x%x..0x%x] overlaps "
-                      "the measurement partition %s [0x%x..0x%x]",
-                 target->label, (unsigned)target_start, (unsigned)target_end,
-                 store->label, (unsigned)store_start, (unsigned)store_end);
+                      "the measurement partition",
+                 target->label, (unsigned)target->address,
+                 (unsigned)(target->address + target->size));
         return false;
     }
     return true;
@@ -6678,12 +6680,11 @@ static esp_err_t ota_sender_update_handler(httpd_req_t *req)
 static char s_ota_pull_url[OTA_PULL_MAX_URL];
 static volatile bool s_ota_pull_busy;
 
+/* https-only guard for the pull-OTA URL; the pure check lives in ota_policy.c
+ * (host-tested). See that file for why https is mandatory. */
 static bool ota_url_is_trusted(const char *url)
 {
-    /* https only: an image pulled over cleartext HTTP could be swapped on the
-     * wire and brick the device. The sandbox front door presents a Let's
-     * Encrypt certificate that the ESP certificate bundle already trusts. */
-    return strncmp(url, "https://", 8) == 0;
+    return ota_url_is_trusted_policy(url);
 }
 
 static void ota_pull_task(void *arg)

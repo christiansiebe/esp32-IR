@@ -310,6 +310,18 @@ python3 "$here/check_dashboard_js.py"
 
 "$out/test_liveness_guard"
 
+# OTA safety policy: the update slot must never overlap the storage partition,
+# and a pull-OTA URL must be https. Pure, driven with the real partitions.csv
+# addresses so the guard that protects the measurement history is covered.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/ota_policy.c" \
+    "$here/test_ota_policy.c" \
+    -o "$out/test_ota_policy"
+
+"$out/test_ota_policy"
+
 # Runtime test knobs behind the console's `set` / `reset-config`: clamping and
 # rejection must be exact so a bench run never silently changes the CPU ceiling
 # or the light-sleep flag. Pure C.
