@@ -4664,6 +4664,15 @@ static void console_cmd_wifi(const char *args, char *out, size_t out_size)
                            g_wifi_configured ? g_wifi_ssid : "(none)",
                            g_wifi_connected ? "connected" : "not connected",
                            (unsigned int)g_espnow_channel);
+#if !CONFIG_ESPNOW_ROLE_SENDER && !CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+    if (written > 0 && (size_t)written < out_size) {
+        written += snprintf(out + written, out_size - (size_t)written,
+                            "softap: %s (off only when the station is on the "
+                            "esp-now channel %u)\n",
+                            g_ap_enabled ? "on" : "off",
+                            (unsigned)ESPNOW_CHANNEL);
+    }
+#endif
     if (written < 0 || (size_t)written >= out_size) {
         snprintf(out, out_size, "wifi: output truncated\n");
     }
