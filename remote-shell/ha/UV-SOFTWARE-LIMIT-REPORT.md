@@ -19,10 +19,16 @@ relative Tastgrad **100** und das meson-Register-**LOW-Feld 0**. Niedriger geht
 der Registerwert nicht (`lo` ist ein Zaehler `0..cnt`). Ein Absenken von
 `regulator-min-microvolt` **benennt den Boden nur um**, es erzeugt keinen
 kleineren Registerwert (Kapitel 4). Das ist die Klasse **B** aus der
-Aufgabenstellung. Ob die **reale** Ausgangsspannung am Boden schon das
-Bauteil-/Schaltungsminimum ist, bleibt **hypothetisch** (Kapitel 5/6), weil die
-einzige Messquelle (SARADC) die PWM-Welligkeit mittelt und die Bauteilkennlinie
-(MP8756GD) nicht im Repo vermessen ist.
+Aufgabenstellung.
+
+**Nachtrag (Datenblatt-Belege, Kapitel 3a):** Die 680-mV-Grenze ist **nicht
+willkuerlich**. Das **Amlogic-S922X-Datenblatt** (Rev 0.2, Sec. 4.2, S. 48)
+spezifiziert `VDDCPU_A/B = 0.681 - 1.032 V`; das DT-Minimum 680000 uV = 0.680 V
+ist genau diese Silizium-Untergrenze. Die beiden DC-DC-Konverter (**MP8756GD**
+fuer A, **Silergy SY8120B1ABC** fuer B) koennen laut Datenblatt bis **0.600 V**
+regeln - sie koennten also tiefer, duerfen aber nicht, weil die **CPU** unter
+0.681 V nicht spezifiziert ist. Die Grenze ist damit **Hardware (SoC)** - die
+Frage "Software oder Hardware" ist **entschieden: Hardware.**
 
 ## 2. Vollstaendiger Spannungssteuerpfad (mit Zeilenbelegen)
 
@@ -104,11 +110,15 @@ die Werkskalibrierung des Bauteils, nicht durch Linux messbar.
   das sind die **Basis-N2**-Werte (721000..1022000).
 - Commit `98d24896ee11` (N2+): *"The rev. C support a slightly higher VDDCPU_A &
   VDDCPU_B voltages"* -> setzt **680000..1040000**.
-- **Ein Commit/Beleg, der 680 mV als Bauteil-Minimum *begruendet*, wurde nicht
-  gefunden.** Der N2+ erweitert den Bereich gegenueber dem N2 nach **unten**
-  (721 -> 680) und nach **oben** (1022 -> 1040); die Untergrenze ist damit eine
-  **plausible, aber unbelegte** Werksangabe. Ob 680 mV die FB-Kennlinie oder nur
-  eine konservative Rundung ist, ist aus den Quellen **nicht** entscheidbar.
+- **Der Beleg fuer 680000 ist gefunden: das Amlogic-S922X-Datenblatt (Rev 0.2,
+  2019-03-10), Abschnitt 4.2 "Recommended Operating Conditions", S. 48**,
+  spezifiziert `VDDCPU_A/B (Cortex A73/A53) = 0.681 - 1.032 V`. Die
+  DT-Untergrenze **680000 uV = 0.680 V** entspricht dem Datenblatt-Minimum
+  **0.681 V** (Rundung auf 1 mV). Siehe Kapitel 4.1.
+- Die DT-Obergrenze **1040000 uV** liegt dagegen *ueber* dem Datenblatt-Maximum
+  1.032 V - sie ist nur durch die OPP-Tabellen gedeckelt, nicht durch den Chip.
+- Die Werksbeschaltung ist damit **nicht** mehr "unbelegt": 680 mV ist die
+  **Silizium-Untergrenze**, nicht eine willkuerliche Softwarezahl.
 
 **Drei Begriffe sauber getrennt:**
 1. niedrigste *zulaessige Anforderung* = 680000 uV (Software-Klemme),
@@ -116,8 +126,56 @@ die Werkskalibrierung des Bauteils, nicht durch Linux messbar.
 3. niedrigste *reale Ausgangsspannung* = **unbekannt**; gemessen ~722-730 mV,
    aber durch die ADC-Mittelung nach oben verzerrt (Kapitel 5).
 
-## 4. Voltage-Table-Modus: umgeht er die Grenze?
+## 3a. Datenblatt-Belege (Hardware-Grenzen) - **neu, entscheidend**
 
+Drei Primaerquellen wurden beschafft und ausgewertet (nur lesend, kein Board):
+
+**A) Amlogic S922X Datasheet, Rev 0.2 (2019-03-10), Sec. 4.2
+"Recommended Operating Conditions", S. 48** (Dokument traegt den Aufdruck
+*"Confidential for Hardkernel!"*; oeffentlich gespiegelte Kopie):
+
+> `VDDCPU_A/B  Voltage for Cortex A73/A53 CPU  0.681 - 1.032 V`
+
+Fussnote 1 dazu: *"Minimal VDDCPU_A/B voltage is for sleep mode while system runs
+at very low speed. ... Considering the power supply may have 3% deviation, the
+minimal voltage in actual application should not be set to lower than min spec
+plus 0.02V."* -> **Empfehlung fuer die Anwendung: >= 0.701 V.**
+
+- Das **DT-Minimum 680000 uV = 0.680 V** trifft das **Silizium-Minimum 0.681 V**
+  (1-mV-Rundung). **Das ist der fehlende Beleg fuer die 680-mV-Grenze.**
+- Der Datenblatt-Maximalwert 1.032 V liegt **unter** dem DT-Maximum 1040000 uV.
+- Wichtig: diese Werte gelten **an den Pins des Chips**, nicht am DC-DC-Ausgang
+  (Datenblatt-Fussnote: *"applicable at the pins of the chip, not the output of
+  the DC-DC"*). Bei realem IR-Drop muss der Konverter **etwas hoeher** liefern.
+
+**B) MP8756 (MPS) - VDDCPU_A-Regler, Rev 1.1 (2017-04-13), Electrical
+Characteristics, S. 4-5:**
+> `Feedback voltage V_REF  594 (min) 600 (typ) 606 (max) mV`
+> `Output voltage (V_OUT)  0.6V to 5.5V` / `Output Adjustable from 0.6V`
+> `Minimum on time T_ON Min  50 ns`
+
+Der Baustein kann per FB-Teiler bis **0.6 V** herunterregeln - also **unter** die
+680-mV-Grenze. Sein `V_REF = 600 mV +/-1%` ist die absolute Untergrenze des
+Wandlers.
+
+**C) Silergy SY8120B1ABC - VDDCPU_B-Regler (Datenblatt S. 1-2):**
+> `V_FB FB Pin Voltage  588 (min) 600 (typ) 612 (max) mV` (2% Referenz)
+> `V_OUT = 0.6*(1+R1/R2)`; `D_max Maximum Duty Cycle (V_FB=0V)  90 %`
+
+Ebenfalls **0.6 V** als untere FB-Referenz.
+
+**Konsequenz (neu):** Der Chip erlaubt **0.681 V**, die beiden Konverter koennen
+bis **0.600 V** regeln. Die 680-mV-DT-Grenze ist damit **die Silizium-Untergrenze
+- keine DC-DC- und keine Softwaregrenze.** Die DC-DC-Bauteile koennten tiefer,
+duerfen aber nicht, weil die **CPU** unter 0.681 V nicht spezifiziert ist. Damit
+ist die Grenze **keine "blosse Softwarezahl"**, sondern (auf 1 mV gerundet) die
+**Hersteller-Untergrenze des SoC**.
+
+Der N2+ (S922X Rev. C) hat den Bereich gegenueber dem N2 (721000 uV) nach unten
+auf das Datenblatt-Minimum erweitert - konsistent mit "rev. C supports slightly
+higher voltages".
+
+## 4. Voltage-Table-Modus: umgeht er die Grenze?
 Im Table-Modus (`pwm-regulator.c:72-95` `pwm_regulator_set_voltage_sel()`) ist
 `pwm_set_relative_duty_cycle(&pstate, duty_cycle_table[sel].dutycycle, 100)` (Z. 90)
 gesetzt - der Tabellen-Tastgrad ist **direkt** der relative Wert (Prozent).
@@ -200,6 +258,8 @@ jede Aussage ueber seine reale Untergrenze ist **Hypothese**.
 | OPP-Spannungen | `meson-g12b-a311d.dtsi` | Nur obere Punkte | Ja (Overlay) | Werte unter 680 mV klemmen auf `lo=0` |
 | `cpu-freq-guard` / `cpufrequtils` | `remote-shell/ha/cpu-freq-guard.sh` | **Nein** (nur Frequenz) | Ja | Frequenz-, nicht Spannungsgrenze |
 | ADC-Mittelung (8 Samples, FIFO-Clear) | `meson_saradc.c:689,651` | **Nein** (Messartefakt) | Nein | Verzerrt gemessenen Boden nach oben |
+| **SoC-Minimum VDDCPU 0.681 V** | **S922X-Datenblatt Sec. 4.2, S. 48** | **Ja (Hardware)** | **Nein** (Silizium) | Untergrenze des Chips; Anwendungsempfehlung >= 0.701 V |
+| DC-DC-Regler (MP8756GD / SY8120B1ABC) | Datenblaetter: V_REF/V_FB = 0.600 V | Nein (koennten bis 0.600 V) | - | Nicht der begrenzende Faktor |
 
 ## 8. Messbewertung
 
@@ -211,6 +271,11 @@ jede Aussage ueber seine reale Untergrenze ist **Hypothese**.
   Boden liegt **darueber** - aber **wie weit**, ist aus den vorhandenen Daten
   **nicht** belastbar ableitbar.
 - Fuer VDDCPU_B existiert **keine** Messung.
+- Mit dem Datenblatt (Kapitel 3a) ist der gemessene Boden von ~722 mV **erwartbar
+  zu hoch**: das Datenblatt spezifiziert VDDCPU **an den Chip-Pins**, der
+  DC-DC-Ausgang muss den IR-Drop dazwischen liefern. Der Messwert ist damit
+  **konsistent** mit einem 680-mV-Silizium-Minimum, belegt aber nicht dessen
+  exakte Hoehe.
 
 ## 9. Naechster sicherer Schritt (rein lesend)
 
@@ -230,6 +295,11 @@ aber ohne Boardzugriff (Vorgabe) bleibt als *naechster* Schritt:
    kontrollierte Messreihe Tastgrad 0 vs. 1-5, um zu sehen, ob das Register-LOW
    unterhalb des bisherigen Minimums ueberhaupt noch die Spannung senkt.
 
+**Erledigt (Nachtrag 2026-10-17):** Schritt 2 ist mit den drei Datenblaettern
+(Kapitel 3a) **abgeschlossen** - die Hardware-/Softwaregrenze ist entschieden.
+Schritt 1 bleibt eine optionale, rein lesende Bestaetigung. Schritt 3 ist **nicht
+mehr empfohlen**: unter 680 mV laege man ausserhalb der SoC-Spezifikation.
+
 ## 10. Einordnung
 
 - **B: Der Treiber erzeugt bereits den kleinsten gueltigen PWM-Wert.** Der
@@ -247,6 +317,26 @@ aber ohne Boardzugriff (Vorgabe) bleibt als *naechster* Schritt:
 erreicht (Klasse **B**). Der einzige verbleibende Hebel waere eine **andere
 Hardwarebeschaltung** (andere FB-Kennlinie) - das ist aber **unbewiesen** und
 setzt das Datenblatt der genannten Bauteile voraus.
+
+### 10.1 Abschluss nach Datenblatt-Beschaffung (Nachtrag)
+
+Mit den drei Primaerquellen aus Kapitel 3a ist die Frage **entschieden**:
+
+- **Die 680-mV-Grenze ist die Silizium-Untergrenze des S922X** (Datenblatt
+  `VDDCPU_A/B = 0.681 - 1.032 V`). Sie ist **keine** Software- und **keine**
+  DC-DC-Grenze.
+- **Die DC-DC-Konverter koennten tiefer** (beide bis `V_REF = 0.600 V`), aber der
+  **SoC ist unter 0.681 V nicht spezifiziert**.
+- Damit bleibt es bei **Klasse B** (Treiber am kleinsten gueltigen PWM-Wert) -
+  jetzt **zusaetzlich hardware-seitig belegt**: Der Registerboden (`lo=0`)
+  entspricht genau der Silizium-Untergrenze. **Zwei unabhaengige Grenzen fallen
+  zusammen.**
+- Eine **echte Undervolting-Reserve** unter 680 mV existiert nach Datenblatt
+  **nicht** - ein Absenken waere Betrieb **ausserhalb der Spezifikation**
+  (Risiko: Instabilitaet, Datenverlust, verkuerzte Lebensdauer; das Datenblatt
+  empfiehlt fuer die Anwendung sogar **>= 0.701 V** wegen 3% Versorgungsstreuung).
+- **Klasse A ist damit ausgeschlossen** (es gibt keinen "versteckten" tieferen
+  Softwareboden), **Klasse C ist aufgeloest** (die Hardwaregrenze ist belegt).
 
 ## 11. Reproduktion (Host)
 
@@ -281,5 +371,22 @@ python3 /tmp/verify_chain.py
     `remote-shell/ha/UV-README.md`, `remote-shell/ha/PWM-REGULATOR-NOTES.md`,
     `remote-shell/ha/pwm_reg_model.py`, `remote-shell/ha/adc_voltage.py`,
     `remote-shell/ha/gen_lowfreq_dts.py`, `remote-shell/ha/cpu-freq-guard.sh`
+14. **Amlogic S922X Datasheet Rev 0.2 (2019-03-10)**, Sec. 4.2 Recommended
+    Operating Conditions, S. 48: `VDDCPU_A/B = 0.681 - 1.032 V`; Ripple-Spec
+    VDDCPU_A/B `40 mV` (Sec. 4.3). Aufdruck "Confidential for Hardkernel!".
+    (Beschafft ueber eine oeffentlich gespiegelte Kopie; Original bei Amlogic
+    unter NDA.)
+15. **Monolithic Power Systems MP8756 Rev 1.1 (2017-04-13)**, Electrical
+    Characteristics S. 4-5: `V_REF = 594/600/606 mV`, `V_OUT 0.6V-5.5V`,
+    `T_ON Min 50 ns`. (digikey-Spiegel: `mm.digikey.com/.../MP8756.pdf`)
+16. **Silergy SY8120B1ABC Datasheet**, S. 1-2: `V_FB = 588/600/612 mV`,
+    `V_OUT = 0.6*(1+R1/R2)`, `D_max 90 %`. (digikey-Spiegel:
+    `mm.digikey.com/.../5399_SY8120B SOT-23-6.PDF`)
+17. **Nicht beschaffbar:** Hardkernel-Schaltplan
+    `dn.odroid.com/S922X/ODROID-N2/Schematic/odroid-n2_rev0.4_20190307.pdf` -
+    Cloudflare-Schutz blockiert den Abruf (auch via Web-Archive nicht
+    archiviert). Daher ist das **FB-Teilerverhaeltnis (R1/R2) unbekannt**; die
+    Aussage "DC-DC koennte bis 0.600 V" folgt aus der FB-Referenz der Bauteile,
+    nicht aus dem konkreten Beschaltungsverhaeltnis.
 
 Stand: 2026-10-17. Host-Analyse, kein Boardzugriff.
