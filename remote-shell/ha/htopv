@@ -1,0 +1,28 @@
+#!/bin/sh
+# htopv - start htop with a live per-core MHz + per-cluster voltage status bar.
+#
+# Why tmux: htop itself can show per-core MHz (show_cpu_frequency) but NOT the
+# CPU voltage. The Odroid N2+ has just two CPU rails (VDDCPU_A big, VDDCPU_B
+# little), so voltage is only meaningful per cluster. We run htop in a tmux
+# session whose status line refreshes the rails every 2 s, so MHz and voltage are
+# visible together while htop stays a normal, unmodified htop.
+#
+# Usage:  htopv [htop args...]
+set -e
+
+LINE=/usr/local/bin/cpu-volt-line
+CONF=/etc/htopv.tmux.conf
+if [ ! -x "$LINE" ]; then
+	echo "htopv: $LINE fehlt" >&2
+	exit 1
+fi
+
+if [ -n "$TMUX" ]; then
+	exec htop "$@"          # already inside tmux -> plain htop
+fi
+
+SESS=htopv
+tmux kill-session -t "$SESS" 2>/dev/null || true
+
+# Recreate the session, then attach; the status line polls cpu-volt-line.
+exec tmux -f "$CONF" new-session -A -s "$SESS" htop "$@"

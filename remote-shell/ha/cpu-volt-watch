@@ -1,0 +1,58 @@
+#!/bin/sh
+# Live panel: per-core MHz + per-cluster voltage (VDDCPU_A/B) + temps.
+#
+# The Odroid N2+ has only TWO CPU rails, so voltage is per cluster, not per
+# core; frequency is per core. Measured rail mapping (see htopv-README.md):
+#   VDDCPU_A -> big cluster (policy2, Cortex-A73, cpu2-5)
+#   VDDCPU_B -> little cluster (policy0, Cortex-A53, cpu0-1)
+#
+# CPU_SYS/REG_SYS/THERMAL_SYS are overridable so the host test can feed a fake
+# sysfs tree (test_htopv.py).
+CPU=${CPU_SYS:-/sys/devices/system/cpu}
+REG=${REG_SYS:-/sys/class/regulator}
+THERMAL=${THERMAL_SYS:-/sys/class/thermal}
+
+uv_of() {    # $1 = regulator name -> microvolts on stdout
+	for r in "$REG"/regulator*; do
+		if [ "$(cat "$r/name" 2>/dev/null)" = "$1" ]; then
+			cat "$r/microvolts" 2>/dev/null
+			return
+		fi
+	done
+}
+volts() { awk -v u="$1" 'BEGIN{ if(u=="") printf "  -  "; else printf "%.3f", u/1000000 }'; }
+temp()  { awk -v t="$1" 'BEGIN{ printf "%.1f", t/1000 }'; }
+
+cpus_of() {   # $1 = policy -> "0 1" (Fallback, wenn der Cluster ganz offline ist)
+	rel=$(cat "$CPU/cpufreq/$1/related_cpus" 2>/dev/null)
+	[ -n "$rel" ] && { echo "$rel"; return; }
+	case "$1" in policy0) echo "0 1" ;; policy2) echo "2 3 4 5" ;; esac
+}
+
+online_of() {  # $1 = policy -> "0=1 1=1 "
+	for c in $(cpus_of "$1"); do
+		printf '%s=%s ' "$c" "$(cat "$CPU/cpu$c/online" 2>/dev/null || echo 1)"
+	done
+}
+
+printf '\033[1mCPU  Takt & Spannung (Odroid N2+)\033[0m   %s\n' "$(date '+%H:%M:%S')"
+printf '%-26s %8s %8s  %s\n' "Cluster" "MHz" "Volt" "online"
+for p in policy0 policy2; do
+	[ -d "$CPU/cpufreq/$p" ] || continue
+	rel=$(cpus_of "$p" | tr ' ' ',')
+	case "$p" in
+		policy0) name="little (cpu$rel)"; rail=VDDCPU_B ;;
+		policy2) name="big    (cpu$rel)"; rail=VDDCPU_A ;;
+		*)       name="$p";               rail=? ;;
+	esac
+	mhz=$(cat "$CPU/cpufreq/$p/scaling_cur_freq" 2>/dev/null)
+	if [ -n "$mhz" ]; then mhz=$((mhz / 1000)); else mhz="-"; fi
+	v=$(volts "$(uv_of "$rail")")
+	printf '%-26s %8s %8s  %s\n' "$name" "$mhz" "$v" "$(online_of "$p")"
+done
+printf '\n'
+for z in "$THERMAL"/thermal_zone*; do
+	[ -f "$z/type" ] || continue
+	printf '  %-12s %s C\n' "$(cat "$z/type")" "$(temp "$(cat "$z/temp")")"
+done
+printf '\n\033[2mVolt = Rails VDDCPU_A(big)/_B(little) - nur 2 Rails, nicht pro Kern\033[0m\n'
