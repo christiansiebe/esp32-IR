@@ -9,3 +9,178 @@ config ESPNOW_ROLE_RECEIVER
     bool "Receiver (SML value transport and Wi-Fi dashboard)"
 
 endchoice
+
+config ESPNOW_CPU_MAX_MHZ
+    int "Maximum CPU frequency (MHz) for the DFS ceiling"
+    range 40 240
+    default 80 if ESPNOW_ROLE_SENDER
+    default 240
+    help
+        Upper clock for dynamic frequency scaling. The receiver is mains-powered
+        and both the Wi-Fi dashboard and the minute-history backfill are
+        CPU/SPIFFS bound, so its default stays at 240 MHz to keep the web UI
+        responsive during a full re-sync.
+
+        The sender defaults to 80 MHz: its Wi-Fi radio is held awake for a
+        reliable ESP-NOW link (CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE is off by
+        default), so the Wi-Fi driver holds ESP_PM_APB_FREQ_MAX and DFS cannot
+        step below the ceiling anyway. Pinning the ceiling at 80 MHz is
+        therefore the effective "DFS off, run at 80 MHz" setting and avoids the
+        240 MHz heat/power the clock would otherwise never leave. The floor
+        stays at the 40 MHz XTAL, so if the APB lock is ever released (e.g. the
+        modem-sleep experiment) the clock can still drop to 40 MHz.
+
+        Keep CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ in sdkconfig.defaults at or above
+        this value; power management lowers the boot clock to the ceiling.
+
+config ESPNOW_SENDER_LIGHT_SLEEP
+    bool "Sender: adaptive light sleep between SML telegram bursts"
+    default y
+    depends on ESPNOW_ROLE_SENDER
+    help
+        Let the sender park the CPU (light sleep) in the quiet gaps between
+        SML telegram bursts. The window adapts to the shortest quiet interval
+        the UART has shown and backs off when a sleep was too long. Light sleep
+        stops the APB clock, so an actively receiving UART would lose bytes;
+        the window is therefore only entered after the line has gone quiet.
+        This also enables Wi-Fi modem sleep on the sender so the Wi-Fi driver
+        releases its APB lock. Enabled by default: the sender ships as a single
+        image. Verify on the bench that ESP-NOW broadcasts are still received
+        while sleeping (see TODO.md); disable to fall back to DFS only.
+
+config ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS
+    int "ESP-NOW connectionless wake interval (ms)"
+    range 10 1000
+    default 100
+    depends on ESPNOW_SENDER_ESPNOW_POWER_SAVE
+    help
+        ESP-NOW is a Wi-Fi "connectionless" module. On a sender whose station
+        is not associated with any AP the Wi-Fi driver keeps ESP_PM_APB_FREQ_MAX
+        asserted (RF/PHY/BB always on) unless a periodic wake window is set,
+        which pins DFS and light sleep at the maximum clock forever (observed:
+        "240 MHz, 0 steps, slept 0.0 s"). Setting an interval with a smaller
+        window makes the driver release the radio (and the APB lock) between
+        windows, so the CPU can scale down and light-sleep. The radio is awake
+        for ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS out of every interval; a request
+        that arrives while the radio is off is simply retried by the receiver.
+
+config ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS
+    int "ESP-NOW connectionless wake window (ms)"
+    range 1 1000
+    default 70
+    depends on ESPNOW_SENDER_ESPNOW_POWER_SAVE
+    help
+        Must stay below the wake interval; a window >= interval keeps the radio
+        on all the time and the APB lock stays pinned (no DFS, no light sleep).
+        ~70% of the interval is a good trade-off between power saving and not
+        dropping ESP-NOW requests from the receiver.
+
+config ESPNOW_SENDER_ESPNOW_POWER_SAVE
+    bool "Sender: ESP-NOW power save + DFS (experimental)"
+    default n
+
+    help
+        Let the sender's Wi-Fi radio sleep between ESP-NOW wake windows so the
+        driver releases ESP_PM_APB_FREQ_MAX and DFS can step down. OFF by
+        default: on the ESP32 classic the wake window is accepted (err=0) but
+        the radio still cycles, ESP-NOW requests are missed and the link
+        watchdog disables the power saving again. Keeping the radio on (this
+        option off) is what keeps the ESP-NOW link reliable, which matters more
+        than the clock: the sender's data must not be lost.
+
+        What this option does when on (verified on hardware):
+          - esp_wifi_set_ps(WIFI_PS_MIN_MODEM) after esp_wifi_start(), and
+          - esp_now_set_wake_window() + esp_wifi_connectionless_module_set_wake_interval(),
+            applied from esp_now_init() and re-applied on every association.
+        Both are needed: without the wake window the connectionless module holds
+        the APB lock; without the explicit set_ps() call (after esp_wifi_start())
+        the driver holds it too. With both, the radio does cycle - but on the
+        ESP32 classic that breaks the ESP-NOW link, so expect the fallback.
+
+        Requires CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y (set in
+        sdkconfig.defaults) for the window to apply without an association.
+
+config ESPNOW_SENDER_ASSOCIATE
+    bool "Sender: also associate with the receiver SoftAP (optional)"
+    default n
+
+    help
+        Associate the sender's station with the receiver's ESP32-IR-Meter
+        SoftAP. This is optional: the DFS fix is the ESP-NOW wake window plus
+        CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE (see
+        ESPNOW_SENDER_ESPNOW_POWER_SAVE). Association on its own did NOT make
+        the clock scale in a bench test, so it is off by default and kept only
+        as an experiment. The station is otherwise unassociated (it just scans
+        for the AP's channel). If enabled, the sender uses the receiver AP
+        credentials below and re-associates after a drop; the ESP-NOW broadcast
+        to the receiver AP's BSSID still works either way.
+    depends on ESPNOW_ROLE_SENDER
+
+config ESPNOW_SENDER_ASSOC_SSID
+    string "Receiver SoftAP SSID for the sender to associate with"
+    default "ESP32-IR-Meter"
+    depends on ESPNOW_SENDER_ASSOCIATE
+
+config ESPNOW_SENDER_ASSOC_PASSWORD
+    string "Receiver SoftAP password for the sender to associate with"
+    default "12345678"
+    depends on ESPNOW_SENDER_ASSOCIATE
+
+config ESPNOW_CHANNEL
+    int "ESP-NOW channel"
+    range 1 13
+    default 1
+    help
+        Radio channel used for ESP-NOW. With the receiver's SoftAP enabled this
+        is also the AP's channel and the sender scans for the AP to learn it
+        automatically, so it rarely needs changing. With the AP disabled the
+        sender can no longer discover the channel: both devices must be built
+        with the same value here, and (station-connected receiver) it must match
+        the channel of the home AP the receiver associates with, because a
+        connected station cannot leave its AP's channel.
+
+config ESPNOW_RECEIVER_DISABLE_AP
+    bool "Receiver: disable the SoftAP (station-only dashboard)"
+    default n
+    depends on ESPNOW_ROLE_RECEIVER
+    help
+        Do not start the "ESP32-IR-Meter" SoftAP; keep the receiver in station
+        mode only and serve the dashboard over the home WLAN (reachable by its
+        DHCP address / mDNS). This removes the AP the sender used to find the
+        channel, so the sender falls back to ESPNOW_CHANNEL and both sides must
+        be built with the same ESPNOW_CHANNEL (see above). If no home WLAN is
+        configured the dashboard is then unreachable; ESP-NOW still works.
+
+config ESPNOW_LINK_FALLBACK
+    bool "Both roles: fall back to the proven mode when the peer stops answering"
+    default y
+    help
+        Each device watches the ESP-NOW link on its own: when no frame from the
+        peer arrives for CONFIG_ESPNOW_LINK_FALLBACK_MS (and the uptime grace
+        has passed), it returns to its proven mode. The sender turns its
+        adaptive light sleep off for good and keeps the Wi-Fi radio awake; the
+        receiver just records it in the diagnostics (a hung receiver is already
+        handled by web_guard). The decision is sticky until the next boot, so it
+        cannot flap between the new and the proven path. Independent per device:
+        no handshake, so the two sides cannot deadlock.
+
+config ESPNOW_LINK_FALLBACK_MS
+    int "Peer silence before the link is declared down (ms)"
+    depends on ESPNOW_LINK_FALLBACK
+    range 5000 600000
+    default 60000
+    help
+        How long no inbound frame may arrive before the fallback fires. Must be
+        longer than the slowest expected poll interval on a healthy link (the
+        dashboard polls the sender every few seconds), so a quiet but working
+        link does not trip it.
+
+config ESPNOW_LINK_FALLBACK_GRACE_MS
+    int "Grace after boot before the link is judged (ms)"
+    depends on ESPNOW_LINK_FALLBACK
+    range 0 600000
+    default 30000
+    help
+        Uptime that must pass before the fallback may fire, so a slow peer boot
+        does not look like a dead link.
+

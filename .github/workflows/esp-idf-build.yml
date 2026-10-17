@@ -13,6 +13,53 @@ permissions:
   contents: read
 
 jobs:
+  host-tests:
+    name: Host tests (aggregation)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          # Full history + tags so `git describe --tags` can resolve the version
+          # tag instead of falling back to a bare commit SHA.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compile the adaptive sender sleep path
+        shell: bash
+        run: |
+          # The adaptive light sleep is enabled by default in Kconfig; this
+          # compiles its branch of uart_sleep_window.c explicitly so it cannot
+          # rot silently. IDF headers are stubbed, so this checks C syntax only.
+          gcc -std=c11 -fsyntax-only \
+            -DCONFIG_ESPNOW_SENDER_LIGHT_SLEEP=1 \
+            -DCONFIG_ESPNOW_CPU_MAX_MHZ=240 \
+            -DCONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=1 \
+            -DCONFIG_ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS=100 \
+            -DCONFIG_ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS=70 \
+            -DSOC_LIGHT_SLEEP_SUPPORTED=1 \
+            -I test/host/include \
+            main/uart_sleep_window.c
+
+      - name: Compile the serial console glue
+        shell: bash
+        run: |
+          # The UART0 console reads lines and feeds them to the shared command
+          # dispatcher; IDF headers are stubbed, so this checks C syntax only.
+          gcc -std=c11 -fsyntax-only -I test/host/include main/serial_console.c
+
+      - name: Run aggregation / data-gap / day-boundary tests
+        shell: bash
+        run: ./test/run_host_tests.sh
+
+      - name: Run Home Assistant import helper tests
+        shell: bash
+        run: |
+          python3 test/test_ha_stats.py
+          python3 test/test_ws_min.py
+          python3 test/test_ws_client.py
+          python3 test/check_dashboard_js.py
+
   build:
     name: Build ${{ matrix.role }}
     runs-on: ubuntu-24.04
@@ -21,7 +68,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        role: [receiver, sender]
+        include:
+          - role: receiver
+            kconfig_role: RECEIVER
+          # The sender ships as a single image with the adaptive light sleep
+          # enabled by default (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y in Kconfig).
+          - role: sender
+            kconfig_role: SENDER
     env:
       IDF_CCACHE_ENABLE: "1"
       CCACHE_DIR: /root/.cache/ccache
@@ -29,10 +82,15 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          # Full history + tags so `git describe --tags` resolves the version tag
+          # (e.g. v0.1.0-3-gabc1234) instead of a bare commit SHA.
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Cache compiler outputs
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /root/.cache/ccache
           key: ${{ runner.os }}-idf-6.1-${{ matrix.role }}-${{ hashFiles('main/main.c', 'main/CMakeLists.txt', 'components/sml_parser/**', 'components/sml_transport/**', 'CMakeLists.txt', 'partitions.csv') }}
@@ -43,7 +101,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP"
-          role_upper="$(printf '%s' '${{ matrix.role }}' | tr '[:lower:]' '[:upper:]')"
+          # The build runs in the IDF container as root while the checkout is
+          # owned by the runner user; without safe.directory git refuses to
+          # describe the repo ("dubious ownership") and the version is unknown.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          fw_ver="$(cd "$GITHUB_WORKSPACE" && git describe --tags --always --dirty 2>/dev/null || echo unknown)"
+          echo "FIRMWARE_VERSION=$fw_ver" >> "$GITHUB_ENV"
+          echo "Firmware version: $fw_ver"
           cat > "$RUNNER_TEMP/sdkconfig.defaults" <<EOF
           CONFIG_IDF_TARGET="esp32"
           CONFIG_PARTITION_TABLE_CUSTOM=y
@@ -51,10 +115,9 @@ jobs:
           CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
           CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
           CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-          CONFIG_ESPNOW_ROLE_${role_upper}=y
+          CONFIG_ESPNOW_ROLE_${{ matrix.kconfig_role }}=y
           EOF
-          echo "SDKCONFIG=$RUNNER_TEMP/sdkconfig-${{ matrix.role }}" >> "$GITHUB_ENV"
-          echo "SDKCONFIG_DEFAULTS=$RUNNER_TEMP/sdkconfig.defaults" >> "$GITHUB_ENV"
+          echo "SDKCONFIG_DEFAULTS=sdkconfig.defaults;$RUNNER_TEMP/sdkconfig.defaults" >> "$GITHUB_ENV"
 
       - name: Build firmware
         shell: bash
@@ -62,6 +125,64 @@ jobs:
           source "${IDF_PATH:-/opt/esp/idf}/export.sh"
           idf.py --version
           idf.py -B "build/${{ matrix.role }}" build
+
+      - name: Verify the variable CPU clock is in effect
+        shell: bash
+        run: |
+          set -euo pipefail
+          conf="sdkconfig"
+          # Common: power management with dynamic frequency scaling and tickless
+          # idle on both roles. The ceiling is role-specific: the receiver keeps
+          # 240 MHz (dashboard + backfill), the sender uses 80 MHz (its radio is
+          # held awake for a reliable ESP-NOW link, so the APB lock pins DFS at
+          # the ceiling anyway - "DFS off" is a low ceiling). assert() so all
+          # mismatches are reported.
+          fail=0
+          assert() {
+            if ! grep -q "^$1$" "$conf"; then
+              echo "Expected $1 but got:"
+              grep "${1%%=*}" "$conf" || echo "(not set)"
+              fail=1
+            fi
+          }
+          assert 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240'
+          assert 'CONFIG_PM_ENABLE=y'
+          assert 'CONFIG_PM_DFS_INIT_AUTO=y'
+          assert 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y'
+          if [ "${{ matrix.role }}" = "sender" ]; then
+            assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=80'
+          else
+            assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=240'
+          fi
+          [ "$fail" -eq 0 ]
+          echo "CPU clock: role ceiling with DFS (sender 80, receiver 240), 40 MHz floor"
+
+      - name: Verify adaptive sleep config (sender)
+        if: matrix.role == 'sender'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The sender ships as one image with light sleep enabled by default.
+          grep -q '^CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y$' sdkconfig
+          grep -q '^CONFIG_ESPNOW_ROLE_SENDER=y$' sdkconfig
+          # Guard against shipping a sender image without the sleep path. The
+          # string below lives in uart_sleep_window.c's real branch only (the
+          # stub build never emits it), so grepping the built app proves the
+          # sleep code is actually compiled in, not just the config flag.
+          test -s "build/sender/esp32-IR.bin"
+          grep -a -q 'adaptive sleep path compiled in' "build/sender/esp32-IR.bin"
+          echo "Sender image contains the adaptive light-sleep path"
+          # The ESP-NOW wake window / modem sleep that would let DFS step down is
+          # opt-in: on the ESP32 classic it breaks the ESP-NOW link (verified on
+          # hardware), so the sender keeps the radio on for a reliable link.
+          # Assert it stays OFF by default so a sender image never ships with the
+          # radio cycling.
+          ! grep -q '^CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=y$' sdkconfig
+          # The option must be wired to the post-start modem-sleep call and the
+          # wake window; the STA_DISCONNECTED_PM_ENABLE default is what makes the
+          # window apply without an association when the option is turned on.
+          grep -q '^CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y$' sdkconfig
+          echo "Sender image keeps the ESP-NOW radio on (power save opt-in, off)"
 
       - name: Stage firmware and flash files
         shell: bash
@@ -71,6 +192,17 @@ jobs:
           out_dir="$RUNNER_TEMP/firmware"
           mkdir -p "$out_dir"
 
+          # Resolve the version first: it is part of the image name and of the
+          # artifact names, so a downloaded bundle is identifiable at a glance.
+          version="$(sed -n 's/^#define FIRMWARE_VERSION "\(.*\)"$/\1/p' main/build_version.h)"
+          if [[ -z "$version" ]]; then
+            echo "::error::main/build_version.h has no FIRMWARE_VERSION"
+            exit 1
+          fi
+          image="${{ matrix.role }}-sml-${version}.bin"
+          echo "FW_VERSION=$version" >> "$GITHUB_ENV"
+          echo "APP_IMAGE=$image" >> "$GITHUB_ENV"
+
           test -s "$build_dir/esp32-IR.bin"
           test -s "$build_dir/bootloader/bootloader.bin"
           test -s "$build_dir/partition_table/partition-table.bin"
@@ -78,8 +210,10 @@ jobs:
           test -s "$build_dir/ota_data_initial.bin"
           cp "$build_dir/ota_data_initial.bin" "$out_dir/ota_data_initial.bin"
           
-          cp "$build_dir/esp32-IR.bin" \
-            "$out_dir/${{ matrix.role }}-sml.bin"
+          cp "$build_dir/esp32-IR.bin" "$out_dir/$image"
+          # Stable, version-less alias so an OTA URL or script that expects
+          # <role>-sml.bin keeps working; the versioned name is the archive copy.
+          cp "$build_dir/esp32-IR.bin" "$out_dir/${{ matrix.role }}-sml.bin"
           cp "$build_dir/bootloader/bootloader.bin" \
             "$out_dir/bootloader.bin"
           cp "$build_dir/partition_table/partition-table.bin" \
@@ -88,19 +222,86 @@ jobs:
             "$out_dir/flasher_args.json"
           cp partitions.csv "$out_dir/partitions.csv"
 
+          # Ship the freshly generated (empty) SPIFFS image too, so a first-time
+          # full flash can write a valid "storage" partition. It is NOT in
+          # flasher_args.json (stripped below), so flashing the bundle as-is
+          # never touches the partition and keeps the persisted history; write it
+          # to 0x320000 by hand only on the very first deployment.
+          if [[ -s "$build_dir/storage.bin" ]]; then
+            cp "$build_dir/storage.bin" "$out_dir/storage.bin"
+          else
+            echo "::warning::storage.bin missing from $build_dir; first-time full flash cannot initialize storage"
+          fi
+
+          # The aggregate bundle must never write the SPIFFS "storage"
+          # partition: flashing a blank storage.bin wipes the persisted
+          # minute history. Strip the storage entry so flashing this bundle
+          # keeps the data; OTA updates never touch it either.
+          python3 - "$out_dir/flasher_args.json" "${{ matrix.role }}" "$image" <<'PYEOF'
+          import json, os, sys
+          path, role, app_name = sys.argv[1], sys.argv[2], sys.argv[3]
+          with open(path) as fh:
+              args = json.load(fh)
+
+          # The bundle is staged flat (no bootloader/ or partition_table/ subdir),
+          # so rewrite every path to its basename; otherwise `esptool write_flash
+          # @flasher_args.json` cannot find bootloader/bootloader.bin.
+          for off, val in list(args.get("flash_files", {}).items()):
+              if str(val).endswith("storage.bin"):
+                  del args["flash_files"][off]
+                  continue
+              args["flash_files"][off] = os.path.basename(str(val))
+
+          for off, val in args.get("flash_files", {}).items():
+              if val == "esp32-IR.bin":
+                  args["flash_files"][off] = app_name
+          args.get("flash_settings", {}).pop("storage", None)
+          args.pop("storage", None)
+          for key, fname in (("bootloader", "bootloader.bin"),
+                             ("partition-table", "partition-table.bin"),
+                             ("app", app_name)):
+              if key in args:
+                  args[key]["file"] = fname
+          with open(path, "w") as fh:
+              json.dump(args, fh, indent=4)
+          print(f"flasher_args.json: flat paths, storage stripped, app -> {app_name}")
+
+          # flasher_args.json is metadata for idf.py, not an esptool argument
+          # file. Emit the esptool-native flash_project_args (flat paths) so
+          # `esptool write_flash @flash_project_args` works directly.
+          arg_path = os.path.join(os.path.dirname(path), "flash_project_args")
+          parts = list(args.get("write_flash_args", []))
+          for off, val in args["flash_files"].items():
+              parts += [off, val]
+          with open(arg_path, "w") as fh:
+              fh.write(" ".join(parts) + "\n")
+          print("flash_project_args written for direct esptool use")
+          PYEOF
+
+          # Record the firmware version (resolved at the top from
+          # main/build_version.h, written by CMake via git describe) next to the
+          # image so a flash bundle is identifiable without booting the device.
+          printf '%s\n' "$version" > "$out_dir/firmware-version.txt"
+          printf 'firmware version: %s (%s)\n' "$version" "${{ matrix.role }}"
+          if ! grep -a -q "$version" "$build_dir/esp32-IR.bin"; then
+            echo "::error::version '$version' not found in the built image"
+            exit 1
+          fi
+          echo "### Firmware version: \`$version\` (${{ matrix.role }})" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload firmware artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.role }}-sml-firmware
-          path: ${{ runner.temp }}/firmware/${{ matrix.role }}-sml.bin
+          name: ${{ matrix.role }}-sml-firmware-${{ env.FW_VERSION }}
+          path: ${{ runner.temp }}/firmware/${{ env.APP_IMAGE }}
           if-no-files-found: error
           retention-days: 14
 
       
       - name: Upload complete flash files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.role }}-sml-flash-files
+          name: ${{ matrix.role }}-sml-flash-files-${{ env.FW_VERSION }}
           path: ${{ runner.temp }}/firmware/
           if-no-files-found: error
           retention-days: 14

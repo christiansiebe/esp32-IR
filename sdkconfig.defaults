@@ -1,0 +1,66 @@
+# Keep the 240 MHz ESP32 boot clock available and let power management scale the
+# clock down when the CPU is idle. The effective DFS ceiling is
+# CONFIG_ESPNOW_CPU_MAX_MHZ (main/Kconfig.projbuild): 240 MHz for the receiver
+# (the Wi-Fi dashboard and the minute-history backfill are CPU/SPIFFS bound) and
+# 80 MHz for the sender (its radio is held awake for a reliable ESP-NOW link, so
+# the APB lock pins DFS at the ceiling anyway; a low ceiling is the effective
+# "DFS off" setting and avoids the heat/power the clock would otherwise never
+# leave). Power management lowers the boot clock to that ceiling.
+#
+# The receiver never enters light sleep (it has to answer HTTP and receive
+# ESP-NOW broadcasts), so it only scales the clock. The sender may park in
+# light sleep inside its verified quiet window (see CONFIG_ESPNOW_SENDER_LIGHT_SLEEP).
+#
+# On the sender, DFS only steps down once the Wi-Fi driver releases its
+# ESP_PM_APB_FREQ_MAX lock. That needs esp_wifi_set_ps(WIFI_PS_MIN_MODEM) *after*
+# esp_wifi_start() plus an ESP-NOW wake window, but on the ESP32 classic the
+# radio-cycling power save breaks the ESP-NOW link (verified on hardware), so it
+# stays opt-in (CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=n, default) and the sender
+# runs at the 80 MHz ceiling with the radio awake. See AGENTS.md "CPU clock /
+# power".
+#
+# If a board shows brownout resets or instability, lower this (the ceiling in
+# CONFIG_ESPNOW_CPU_MAX_MHZ is already 80 for the sender).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_PM_ENABLE=y
+# DFS at startup: max = DEFAULT_CPU_FREQ_MHZ (240), min = XTAL (40).
+CONFIG_PM_DFS_INIT_AUTO=y
+# Keep the light-sleep and idle paths in IRAM / optimised so the wake overhead
+# (and therefore the average current) is lower.
+CONFIG_PM_SLP_IRAM_OPT=y
+CONFIG_PM_RTOS_IDLE_OPT=y
+# Automatic light sleep ("tickless idle") in FreeRTOS.
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+# Let the firmware register entry/exit callbacks so the on-demand diagnostics can
+# report whether the device actually sleeps in idle (and for how long).
+CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
+# Wi-Fi sleep-related code in IRAM (lower power-save wake latency).
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=y
+
+# Adaptive sender light sleep: ON by default (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
+# defaults to y in main/Kconfig.projbuild), so the sender ships as a single
+# image. The sender parks the CPU in the quiet gaps between SML telegram bursts
+# only: the window starts at 400 ms, is always capped below the shortest
+# inter-telegram gap it has observed, and halves itself if a telegram ever
+# arrives while it slept. An ESP_PM_NO_LIGHT_SLEEP lock keeps the CPU awake for
+# the whole burst, so the UART FIFO is never starved. It also switches the
+# sender to WIFI_PS_MIN_MODEM (required to release the Wi-Fi driver's APB_MAX
+# lock, otherwise light sleep is never entered). See TODO.md for the open bench
+# verification; set CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=n to fall back to DFS only.
+
+# Pull OTA (POST /api/ota-pull): the device downloads a firmware image over
+# HTTPS from a URL the sandbox hosts (work-1-<id>.prod-runtime.all-hands.dev,
+# Let's Encrypt). Trust the public CA bundle so that certificate validates
+# without pinning a key that would rotate. Cleartext HTTP images are refused
+# (ota_url_is_trusted), so the bundle is the only trust path.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+
+# Let the Wi-Fi driver apply the ESP-NOW connectionless wake window even when
+# the station is not associated with an AP. Without this the sender DFS stays
+# pinned at the ceiling ("240 MHz, 0 steps"): per the IDF docs
+# esp_now_set_wake_window() only takes effect at connected status *unless*
+# ESP_WIFI_STA_DISCONNECTED_PM_ENABLE is set. This is the missing piece that made
+# the earlier opt-in wake-window attempt (36d6390) fail. The sender associates
+# with the receiver SoftAP anyway (CONFIG_ESPNOW_SENDER_ASSOCIATE); this flag
+# also covers the window before association and after a drop.
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
