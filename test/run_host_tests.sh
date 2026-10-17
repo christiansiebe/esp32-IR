@@ -322,6 +322,16 @@ python3 "$here/check_dashboard_js.py"
 
 "$out/test_ota_policy"
 
+# AP-off decision: the receiver may drop its SoftAP only on the ESP-NOW
+# fallback channel, and only a disconnect older than the debounce is real.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$here/test_ap_off_policy.c" \
+    -o "$out/test_ap_off_policy"
+
+"$out/test_ap_off_policy"
+
 # Runtime test knobs behind the console's `set` / `reset-config`: clamping and
 # rejection must be exact so a bench run never silently changes the CPU ceiling
 # or the light-sleep flag. Pure C.

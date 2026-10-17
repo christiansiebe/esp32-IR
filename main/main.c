@@ -50,6 +50,7 @@
 #include "crash_journal.h"
 #include "liveness_guard.h"
 #include "ota_policy.h"
+#include "ap_off_policy.h"
 #include "espnow_diag.h"
 #include "sml_transport.h"
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -627,7 +628,7 @@ static void wifi_event_handler(void *arg,
         /* Bring the AP back so the dashboard stays reachable while the station
          * is down. Skip the switch if we only just changed the mode: the mode
          * change itself can emit a disconnect, and reacting to it would flap. */
-        if (esp_timer_get_time() - g_ap_mode_switch_us > 5 * 1000 * 1000) {
+        if (ap_off_disconnect_is_real(esp_timer_get_time() - g_ap_mode_switch_us)) {
             wifi_set_ap_enabled(true);
         }
 #endif
@@ -654,7 +655,7 @@ static void wifi_event_handler(void *arg,
          * when the AP is gone, so this is safe exactly when the home AP sits on
          * ESPNOW_CHANNEL. On any other channel the AP must stay, otherwise a
          * sender that boots after us would never align to the right channel. */
-        if (g_espnow_channel == ESPNOW_CHANNEL) {
+        if (ap_off_allowed_on_channel(g_espnow_channel, ESPNOW_CHANNEL)) {
             wifi_set_ap_enabled(false);
         } else {
             ESP_LOGI(TAG, "SoftAP kept: home WLAN is on channel %u, not the "
