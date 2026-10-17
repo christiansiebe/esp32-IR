@@ -579,6 +579,8 @@ static bool system_time_is_valid(void)
     return time(NULL) >= 1704067200;
 }
 
+static void diag_log_event(uint8_t level, const char *format, ...);
+
 static void wifi_event_handler(void *arg,
                                esp_event_base_t event_base,
                                int32_t event_id,
@@ -596,6 +598,9 @@ static void wifi_event_handler(void *arg,
          * ESP_PM_APB_FREQ_MAX between wake windows, which is what lets DFS step
          * down and light sleep engage ("240 MHz, 0 steps" otherwise). */
         uart_sleep_espnow_power_save_enable();
+        diag_log_event(ESPNOW_DIAG_LEVEL_INFO,
+                       "wake window applied on connect err=%d",
+                       uart_sleep_espnow_last_err());
 #endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *event = event_data;

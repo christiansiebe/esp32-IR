@@ -163,6 +163,11 @@ bool uart_sleep_init_idf(void);
  * driver release ESP_PM_APB_FREQ_MAX so DFS/light sleep can engage. No-op when
  * the feature is compiled out. */
 void uart_sleep_espnow_power_save_enable(void);
+
+/* Result of the last uart_sleep_espnow_power_save_enable() call as an int
+ * (0 == ESP_OK), for diagnostics. Kept as int so the header stays free of
+ * IDF includes (it is also used by the host tests). */
+int uart_sleep_espnow_last_err(void);
 void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t received,
                                bool awaiting);
 void uart_sleep_note_uart_idle(void);

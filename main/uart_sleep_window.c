@@ -43,6 +43,10 @@ static volatile bool s_disabled;     /* link fallback dropped light sleep */
 static volatile int s_pm_max_override;
 static volatile int s_pm_min_override;
 
+/* Result of the last ESP-NOW wake-window setup, for diagnostics (the function
+ * itself only has ESP_LOG, which the sender cannot easily read). */
+static esp_err_t s_last_wake_err = ESP_ERR_INVALID_STATE;
+
 static int sleep_pm_max(void)
 {
     return s_pm_max_override > 0 ? s_pm_max_override : CONFIG_ESPNOW_CPU_MAX_MHZ;
@@ -96,17 +100,20 @@ bool uart_sleep_init_idf(void)
 void uart_sleep_espnow_power_save_enable(void)
 {
 #if CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE
-    esp_err_t wake_err = esp_wifi_connectionless_module_set_wake_interval(
-        (uint16_t)CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS);
-    if (wake_err == ESP_OK) {
-        wake_err = esp_now_set_wake_window(
-            (uint16_t)CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS);
+    /* Order matters: Espressif's own examples set the window first, then the
+     * interval (see issue esp-idf#11714 / the Super-2024 swadge notes). */
+    esp_err_t err = esp_now_set_wake_window(
+        (uint16_t)CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS);
+    if (err == ESP_OK) {
+        err = esp_wifi_connectionless_module_set_wake_interval(
+            (uint16_t)CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS);
     }
-    if (wake_err != ESP_OK) {
+    s_last_wake_err = err;
+    if (err != ESP_OK) {
         ESP_LOGW(UART_SLEEP_TAG,
                  "Could not enable ESP-NOW power save (%s); the CPU may stay at "
                  "the DFS ceiling because the Wi-Fi APB lock is never released",
-                 esp_err_to_name(wake_err));
+                 esp_err_to_name(err));
     } else {
         ESP_LOGI(UART_SLEEP_TAG, "ESP-NOW power save on: radio wakes every %d ms "
                                  "for %d ms, so DFS/light sleep can engage",
@@ -114,6 +121,11 @@ void uart_sleep_espnow_power_save_enable(void)
                  CONFIG_ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS);
     }
 #endif
+}
+
+int uart_sleep_espnow_last_err(void)
+{
+    return (int)s_last_wake_err;
 }
 
 /* Acquire/release exactly once per transition: esp_pm_lock_acquire() is
@@ -280,6 +292,7 @@ void uart_sleep_set_pm_override(int max_mhz, int min_mhz)
 
 bool uart_sleep_init_idf(void) { return false; }
 void uart_sleep_espnow_power_save_enable(void) {}
+int uart_sleep_espnow_last_err(void) { return ESP_ERR_INVALID_STATE; }
 void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t received,
                                bool awaiting)
 {
