@@ -64,7 +64,9 @@ jobs:
 
       - name: Run Odroid CPU hotplug governor tests
         shell: bash
-        run: python3 remote-shell/ha/test_cpu_hotplug.py
+        run: |
+          python3 remote-shell/ha/test_cpu_hotplug.py
+          python3 remote-shell/ha/test_gen_lowfreq_dts.py
 
   build:
     name: Build ${{ matrix.role }}

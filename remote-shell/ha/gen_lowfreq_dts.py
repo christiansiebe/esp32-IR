@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Erzeugt lowfreq.dts: OPP-Eintraege unter 1 GHz fuer beide Cluster."""
+"""Erzeugt lowfreq.dts: OPP-Eintraege unter 1 GHz fuer beide Cluster.
+
+Optional kann fuer die neuen Tief-Takte eine niedrigere Spannung eingetragen
+werden (`--big-mv` / `--little-mv`). Das ist der EINZIGE Weg zu einem
+dauerhaften Undervolt: die OPP-Tabelle ist zur Laufzeit read-only, der
+PWM-Regler laesst sich nur ueber /dev/mem erreichen (nicht reboot-fest), und
+`cpufreq-dt` setzt bei jedem Frequenzwechsel die Spannung des OPP-Punkts neu.
+
+Achtung Boot-Loop-Risiko: seit die Untergrenze dauerhaft auf 15.625 MHz steht,
+erreicht `schedutil` die Tief-Takte schon kurz nach dem Boot. Ist die Spannung
+zu niedrig, haengt das Board, der Watchdog rebootet - und laeuft in dieselbe
+Lage. Deshalb Vorsicht mit dem Wert und immer Reserve lassen.
+"""
+import argparse
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -32,9 +45,12 @@ RATES = [
 
 # Werksspannung bei 1.0 GHz je Cluster (aus dem PWM-Regler gelesen).
 CLUSTERS = [
-    ('opp-table-0', 'little (Cortex-A53, policy0)', 761000),
-    ('opp-table-1', 'big (Cortex-A73, policy2)', 731000),
+    ('opp-table-0', 'little (Cortex-A53, policy0)', 761000, 'little'),
+    ('opp-table-1', 'big (Cortex-A73, policy2)', 731000, 'big'),
 ]
+
+# Regler-Untergrenze (regulator.{2,8}/min_microvolts) - tiefer geht das PWM nicht.
+REG_FLOOR_UV = 680000
 
 HEAD = """\
 /dts-v1/;
@@ -68,9 +84,23 @@ HEAD = """\
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--big-mv', type=int, default=None,
+                    help='Spannung der big-Tief-Takte in mV (Werkswert 731)')
+    ap.add_argument('--little-mv', type=int, default=None,
+                    help='Spannung der little-Tief-Takte in mV (Werkswert 761)')
+    ap.add_argument('--out', default=os.path.join(HERE, 'lowfreq.dts'))
+    args = ap.parse_args()
+
+    want = {'big': args.big_mv, 'little': args.little_mv}
     tbl = '\n'.join(' *   %-11d = %s' % (r, c) for r, c in RATES)
     out = [HEAD % tbl]
-    for i, (node, label, uv) in enumerate(CLUSTERS):
+    for i, (node, label, stock_uv, key) in enumerate(CLUSTERS):
+        uv = want[key] * 1000 if want[key] else stock_uv
+        if uv < REG_FLOOR_UV:
+            raise SystemExit('%s: %d mV liegt unter der Regler-Grenze %d mV'
+                             % (key, uv // 1000, REG_FLOOR_UV // 1000))
         out.append('\n/ {\n\tfragment@%d {\n\t\ttarget-path = "/%s";\n\t\t__overlay__ {\n'
                    % (i, node))
         for r, c in RATES:
@@ -80,10 +110,13 @@ def main():
                        '\t\t\t\tclock-latency-ns = <50000>;\n'
                        '\t\t\t};\n' % (r, r, uv))
         out.append('\t\t};\n\t};\n};\n')
-    with open(os.path.join(HERE, 'lowfreq.dts'), 'w') as f:
+    with open(args.out, 'w') as f:
         f.write(''.join(out))
-    print('lowfreq.dts geschrieben: %d Raten x %d Cluster = %d OPPs'
-          % (len(RATES), len(CLUSTERS), len(RATES) * len(CLUSTERS)))
+    vols = ', '.join('%s %d mV' % (k, (want[k] * 1000 if want[k] else
+                                       [c[2] for c in CLUSTERS if c[3] == k][0]) // 1000)
+                     for k in ('big', 'little'))
+    print('%s geschrieben: %d Raten x %d Cluster = %d OPPs (%s)'
+          % (args.out, len(RATES), len(CLUSTERS), len(RATES) * len(CLUSTERS), vols))
 
 
 if __name__ == '__main__':

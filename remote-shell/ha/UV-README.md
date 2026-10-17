@@ -47,8 +47,21 @@ python3 uv.py revert                                   # zurück auf schedutil
 
 Sicherheitsgrenze: nie unter **700 mV** (`SAFE_MIN_UV`).
 
-## Verifikation am Board (2026-10-15)
+## Undervolt der Tief-Takte (< 1 GHz)
 
+Die 2026-10-17 per Overlay freigeschalteten Punkte (15.625 … 666.666 MHz)
+tragen die Spannung des 1.0-GHz-Punkts und sind bis zum **Regler-Boden 680 mV**
+stabil: big −50 mV, little −83 mV, 60 s Volllast ohne Rechenfehler. Gemessen
+und dokumentiert in `LOWFREQ-README.md` (Skript `uv_lowfreq.py`). Dauerhaft
+geht ein Undervolt nur ueber die OPP-Tabelle im Overlay
+(`gen_lowfreq_dts.py --big-mv/--little-mv`), nicht per `uv.py` — der Regler-Cache
+und `cpufreq-dt` ueberschreiben einen Laufzeit-Wert.
+
+**Wichtig:** `uv.py revert` stellt jetzt die Untergrenze aus
+`/etc/default/cpu-freq-guard` wieder her, nicht mehr hart 1.0 GHz. Frueher haette
+ein `uv.py apply`/`revert` die persistente Tief-Takt-Untergrenze zunichte gemacht.
+
+## Verifikation am Board (2026-10-15)
 - Schreibpfad per No-Op-Write bestätigt.
 - **Feste Frequenz** (1.8 GHz), Volllast (6×25 s): stabil bei -20/-60/-100/-140 mV.
 - **Unter Frequenzwechsel** (`uvstress.py`, ganze OPP-Tabelle, 2 Zyklen, 6 Prozesse,

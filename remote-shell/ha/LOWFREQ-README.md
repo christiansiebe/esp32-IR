@@ -144,6 +144,48 @@ Boot wieder 1.0 GHz. `lowfreq_set_floor.sh` schreibt daher **beide** Dateien.
 Das war ein realer Fehler: der Reboot-Test zeigte `min=1000000`, obwohl
 `cpu-freq-guard` = 15625 war.
 
+## Undervolting der neuen Tief-Takte (2026-10-17, gemessen)
+
+Die neuen OPP-Punkte tragen die **Spannung des 1.0-GHz-Punkts** (big 730 mV,
+little 763 mV), obwohl der Chip bei 24-250 MHz viel weniger braucht. Dort ist
+also Undervolt-Spielraum. Gemessen mit `uv_lowfreq.py` (Rechenergebnisse per
+SHA-256-Hash geprueft - zu wenig Spannung erzeugt zuerst stille Bitfehler):
+
+| Cluster | Werksspannung | stabil bis | Absenkung |
+|---|---|---|---|
+| big (A73) | 730 mV | **680 mV** | -50 mV |
+| little (A53) | 763 mV | **680 mV** | -83 mV |
+
+Geprueft bei 24 / 50 / 100 / 250 MHz, je Stufe 2 s Volllast (6 Prozesse):
+**alle acht Punkte bis zum Regler-Boden 680 mV stabil, 0 Rechenfehler.** Der
+Boden ist keine Instabilitaet, sondern das PWM-Limit
+(`regulator.{2,8}/min_microvolts` = 680 mV) - tiefer kann der Regler nicht.
+
+Harte Nachpruefung:
+
+- **Soak:** 60 s Volllast bei 24 MHz und 680 mV -> **0 Rechenfehler**.
+- **Schnellwechsel** ueber die Tief-Takte (309 Spruenge, 680 mV): 0 Fehler.
+- **Lehre aus einem Fehlversuch:** `--rapid-full` springt die GANZE Tabelle
+  (bis 2.4 GHz) mit 680 mV an - dort braucht der Chip 1040 mV, das Board
+  **haengt** und der Watchdog rebootet. Undervolt muss also **frequenzabhaengig**
+  sein; die Werksspannung der hohen Takte darf nicht angetastet werden.
+
+### Persistenter Weg (Overlay)
+
+Ein Undervolt zur Laufzeit haelt nicht (der Regler-Cache und `cpufreq-dt`
+ueberschreiben ihn). Dauerhaft geht es nur ueber die OPP-Tabelle im Overlay:
+
+```bash
+python3 gen_lowfreq_dts.py --big-mv 690 --little-mv 700   # Reserve lassen!
+sh deploy_lowfreq.sh && reboot
+```
+
+Der Generator lehnt Werte unter 680 mV ab. **Vorsicht Boot-Loop:** seit die
+Untergrenze dauerhaft auf 15.625 MHz steht, erreicht `schedutil` die Tief-Takte
+schon kurz nach dem Boot. Ist die Spannung zu knapp, rebootet der Watchdog in
+dieselbe Lage. Empfehlung: mindestens ~15-20 mV Reserve ueber dem gemessenen
+Boden, also big >= 695, little >= 695.
+
 ## Ablauf
 
 ```bash
@@ -164,6 +206,13 @@ sh /root/ha/lowfreq_set_floor.sh 15625
 
 # 5. Hotplug-Governor installieren (Kerne im Leerlauf aus)
 sh /root/ha/deploy_hotplug.sh
+
+# 6. optional: Undervolt der Tief-Takte (Reserve lassen, s. unten)
+python3 /root/ha/gen_lowfreq_dts.py --big-mv 700 --little-mv 700
+sh /root/ha/deploy_lowfreq.sh && reboot
+
+# 7. Undervolt-Grenze selbst nachmessen
+python3 /root/ha/uv_lowfreq.py --seconds 2 --workers 6 --soak
 ```
 
 ## Messergebnis (2026-10-17)

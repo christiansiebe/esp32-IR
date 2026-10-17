@@ -36,6 +36,7 @@ CLUSTERS = {
 }
 V_MIN, V_MAX = 680000, 1040000
 SAFE_MIN_UV = 700000          # nie unter 700 mV - Schutz vor sofortigem Hang
+FLOOR_FILE = '/etc/default/cpu-freq-guard'   # persistente Untergrenze (kHz)
 STATE = '/run/uv-state.json'
 CPUFREQ = '/sys/devices/system/cpu/cpufreq'
 
@@ -92,6 +93,21 @@ def write_sys(path, val):
     open(path, 'w').write(str(val))
 
 
+def floor_khz():
+    """Persistente Untergrenze aus /etc/default/cpu-freq-guard (Fallback 1 GHz).
+
+    revert() darf sie NICHT auf 1.0 GHz ziehen: das Overlay senkt sie absichtlich
+    ab, und der Hotplug-Governor nimmt ganze Cluster offline (deren cpufreq-Sysfs
+    ist dann EBUSY und wuerde hier ohnehin uebersprungen).
+    """
+    try:
+        with open(FLOOR_FILE) as fh:
+            val = ''.join(ch for ch in fh.read() if ch.isdigit())
+        return int(val) if val else 1000000
+    except OSError:
+        return 1000000
+
+
 def policy(c):
     return os.path.join(CPUFREQ, CLUSTERS[c]['policy'])
 
@@ -111,10 +127,15 @@ def status():
     out = []
     for c in CLUSTERS:
         p = policy(c)
-        out.append(dict(cluster=c, freq=int(read_sys(p + '/scaling_cur_freq')),
-                        governor=read_sys(p + '/scaling_governor'),
-                        duty=read_duty(c), uv=reg_uv(c),
-                        duty_uv=round(duty_to_uv(c, read_duty(c)))))
+        try:
+            out.append(dict(cluster=c, freq=int(read_sys(p + '/scaling_cur_freq')),
+                            governor=read_sys(p + '/scaling_governor'),
+                            duty=read_duty(c), uv=reg_uv(c),
+                            duty_uv=round(duty_to_uv(c, read_duty(c)))))
+        except OSError:
+            out.append(dict(cluster=c, freq=None, governor='offline',
+                            duty=read_duty(c), uv=reg_uv(c),
+                            duty_uv=round(duty_to_uv(c, read_duty(c)))))
     return out
 
 
@@ -142,12 +163,16 @@ def apply(big_freq, little_freq, offset_uv, explicit):
 
 def revert():
     orig = json.load(open(STATE)) if os.path.exists(STATE) else {}
+    floor = floor_khz()
     for c in CLUSTERS:
         p = policy(c)
-        if c in orig:
-            write_sys(p + '/scaling_max_freq', orig[c]['max_freq'])
-            write_sys(p + '/scaling_min_freq', '1000000')
-        write_sys(p + '/scaling_governor', 'schedutil')
+        try:
+            if c in orig:
+                write_sys(p + '/scaling_max_freq', orig[c]['max_freq'])
+                write_sys(p + '/scaling_min_freq', floor)
+            write_sys(p + '/scaling_governor', 'schedutil')
+        except OSError as exc:
+            print('%s offline/EBUSY: %s' % (c, exc), file=sys.stderr)
     time.sleep(0.3)
     if os.path.exists(STATE):
         os.remove(STATE)
