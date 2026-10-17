@@ -140,10 +140,15 @@ static bool web_guard_probe(void)
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
+        ESP_LOGW(TAG, "self-probe: client init failed");
         return false;
     }
     esp_err_t err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "self-probe failed: %s (http %d)", esp_err_to_name(err), status);
+    }
     return err == ESP_OK;
 }
 
