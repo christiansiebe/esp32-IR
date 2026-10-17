@@ -1,0 +1,46 @@
+# Keep the 240 MHz ESP32 ceiling available and let power management scale the
+# clock down (to the 40 MHz XTAL) when the CPU is idle. The device is
+# mains-powered; the Wi-Fi dashboard and the minute-history backfill are
+# CPU/SPIFFS bound, so the top clock keeps the web UI responsive while a full
+# re-sync runs. The ESP-NOW send burst also gets the 240 MHz ceiling and drops
+# to 40 MHz between cycles. Keep this in step with CONFIG_ESPNOW_CPU_MAX_MHZ
+# (main/Kconfig.projbuild), which drives the runtime DFS ceiling for both roles.
+#
+# The receiver never enters light sleep (it has to answer HTTP and receive
+# ESP-NOW broadcasts), so it only scales the clock. The sender may park in
+# light sleep inside its verified quiet window (see CONFIG_ESPNOW_SENDER_LIGHT_SLEEP).
+# If a board shows brownout resets or instability at 240 MHz, lower this (and
+# CONFIG_ESPNOW_CPU_MAX_MHZ) to 160 or 80.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_PM_ENABLE=y
+# DFS at startup: max = DEFAULT_CPU_FREQ_MHZ (240), min = XTAL (40).
+CONFIG_PM_DFS_INIT_AUTO=y
+# Keep the light-sleep and idle paths in IRAM / optimised so the wake overhead
+# (and therefore the average current) is lower.
+CONFIG_PM_SLP_IRAM_OPT=y
+CONFIG_PM_RTOS_IDLE_OPT=y
+# Automatic light sleep ("tickless idle") in FreeRTOS.
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+# Let the firmware register entry/exit callbacks so the on-demand diagnostics can
+# report whether the device actually sleeps in idle (and for how long).
+CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
+# Wi-Fi sleep-related code in IRAM (lower power-save wake latency).
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=y
+
+# Adaptive sender light sleep: ON by default (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
+# defaults to y in main/Kconfig.projbuild), so the sender ships as a single
+# image. The sender parks the CPU in the quiet gaps between SML telegram bursts
+# only: the window starts at 400 ms, is always capped below the shortest
+# inter-telegram gap it has observed, and halves itself if a telegram ever
+# arrives while it slept. An ESP_PM_NO_LIGHT_SLEEP lock keeps the CPU awake for
+# the whole burst, so the UART FIFO is never starved. It also switches the
+# sender to WIFI_PS_MIN_MODEM (required to release the Wi-Fi driver's APB_MAX
+# lock, otherwise light sleep is never entered). See TODO.md for the open bench
+# verification; set CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=n to fall back to DFS only.
+
+# Pull OTA (POST /api/ota-pull): the device downloads a firmware image over
+# HTTPS from a URL the sandbox hosts (work-1-<id>.prod-runtime.all-hands.dev,
+# Let's Encrypt). Trust the public CA bundle so that certificate validates
+# without pinning a key that would rotate. Cleartext HTTP images are refused
+# (ota_url_is_trusted), so the bundle is the only trust path.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y

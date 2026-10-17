@@ -5,4 +5,28 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# Capture the firmware version at configure time. Prefer the FIRMWARE_VERSION
+# environment variable (set by CI after a safe.directory fix), then fall back to
+# git describe. The result is written to main/build_version.h and compiled into
+# the image, so the running firmware reports exactly which commit/tag it is.
+set(GIT_VER "$ENV{FIRMWARE_VERSION}")
+if(NOT GIT_VER)
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
+            WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+            OUTPUT_VARIABLE GIT_VER
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+    endif()
+endif()
+if(NOT GIT_VER)
+    set(GIT_VER "unknown")
+endif()
+file(WRITE ${CMAKE_CURRENT_LIST_DIR}/main/build_version.h
+     "#pragma once\n#define FIRMWARE_VERSION \"${GIT_VER}\"\n")
+message(STATUS "Firmware version: ${GIT_VER}")
+
 project(esp32-IR)
