@@ -310,6 +310,18 @@ python3 "$here/check_dashboard_js.py"
 
 "$out/test_liveness_guard"
 
+# Task-watchdog policy: which workers subscribe in which role, and that the
+# configured timeout covers the longest legitimate blocking interval of every
+# subscribed worker (a healthy idle worker must not trip; a stalled one must).
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/task_wdt_policy.c" \
+    "$here/test_task_wdt_policy.c" \
+    -o "$out/test_task_wdt_policy"
+
+"$out/test_task_wdt_policy"
+
 # OTA safety policy: the update slot must never overlap the storage partition,
 # and a pull-OTA URL must be https. Pure, driven with the real partitions.csv
 # addresses so the guard that protects the measurement history is covered.
