@@ -1,0 +1,22 @@
+#!/bin/sh
+# One-line CPU clock + voltage for the tmux status bar (used by htopv).
+#
+# Voltage exists only per cluster on the Odroid N2+; measured mapping:
+#   VDDCPU_A -> big (policy2), VDDCPU_B -> little (policy0). See htopv-README.md.
+# CPU_SYS/REG_SYS/THERMAL_SYS are overridable for the host test.
+CPU=${CPU_SYS:-/sys/devices/system/cpu}
+REG=${REG_SYS:-/sys/class/regulator}
+THERMAL=${THERMAL_SYS:-/sys/class/thermal}
+
+uv() {
+	for r in "$REG"/regulator*; do
+		[ "$(cat "$r/name" 2>/dev/null)" = "$1" ] && { cat "$r/microvolts" 2>/dev/null; return; }
+	done
+}
+f() { m=$(cat "$CPU/cpufreq/$1/scaling_cur_freq" 2>/dev/null); [ -n "$m" ] && echo $((m/1000)) || echo -; }
+v() { awk -v u="$1" 'BEGIN{ if(u=="") printf "?"; else printf "%.3f", u/1000000 }'; }
+t() { awk -v x="$1" 'BEGIN{ printf "%.0f", x/1000 }'; }
+printf "little %sMHz/%sV  big %sMHz/%sV  cpu %sC" \
+	"$(f policy0)" "$(v "$(uv VDDCPU_B)")" \
+	"$(f policy2)" "$(v "$(uv VDDCPU_A)")" \
+	"$(t "$(cat "$THERMAL"/thermal_zone0/temp 2>/dev/null)")"

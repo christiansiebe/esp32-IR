@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""cpu-live - CPU-Takt, Spannung und Temperatur live, ohne htop-Last.
+
+Warum nicht htop: htop zeichnet den ganzen Bildschirm neu und liest im
+Sekundentakt /proc/<pid>/stat fuer JEDEN Prozess. Auf dem Odroid N2+ kostete das
+gemessen ~40 % eines Kerns - und hielt damit die Kerne davon ab, in den tiefen
+Takt zu fallen (genau der Beobachtungseffekt, den man vermeiden will).
+
+Dieses Werkzeug liest nur eine Handvoll kleiner sysfs-Dateien (kein fork/exec,
+kein /proc-Scan) und schreibt eine einzige, an Ort und Stelle ueberschriebene
+Zeile. Gemessen: < 0,2 % eines Kerns.
+
+    cpu-live                      # eine Zeile, jede Sekunde aktualisiert
+    cpu-live --once               # ein Messwert, dann Ende (skriptbar)
+    cpu-live -i 2 -n 30           # 30 Werte im 2-s-Abstand
+    cpu-live --csv /tmp/cpu.csv   # zusaetzlich als CSV mitschreiben
+
+Rail-Zuordnung wie in htopv-README.md: VDDCPU_A = big (policy2), VDDCPU_B =
+little (policy0). CPU_SYS/REG_SYS/THERMAL_SYS sind ueberschreibbar (Host-Test).
+"""
+import argparse
+import os
+import sys
+import time
+
+CPU = os.environ.get("CPU_SYS", "/sys/devices/system/cpu")
+REG = os.environ.get("REG_SYS", "/sys/class/regulator")
+THERMAL = os.environ.get("THERMAL_SYS", "/sys/class/thermal")
+
+
+def read(path):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+class Reader:
+    """sysfs-Zugriff mit zwischengespeicherten Pfaden: nur open/read/close."""
+
+    def __init__(self):
+        self._rails = None
+
+    def rail_path(self, name):
+        if self._rails is None:
+            self._rails = {}
+            try:
+                for entry in os.listdir(REG):
+                    d = os.path.join(REG, entry)
+                    n = read(os.path.join(d, "name"))
+                    if n:
+                        self._rails[n] = d
+            except OSError:
+                pass
+        return self._rails.get(name, "")
+
+    def mhz(self, policy):
+        v = read(os.path.join(CPU, "cpufreq", policy, "scaling_cur_freq"))
+        return int(v) // 1000 if v.isdigit() else None
+
+    def volts(self, rail):
+        path = self.rail_path(rail)
+        v = read(os.path.join(path, "microvolts")) if path else ""
+        return int(v) / 1e6 if v.isdigit() else None
+
+    def temp(self):
+        v = read(os.path.join(THERMAL, "thermal_zone0/temp"))
+        return int(v) / 1000 if v.lstrip("-").isdigit() else None
+
+    def sample(self):
+        return {
+            "little_mhz": self.mhz("policy0"),
+            "big_mhz": self.mhz("policy2"),
+            "little_uv": self.volts("VDDCPU_B"),
+            "big_uv": self.volts("VDDCPU_A"),
+            "temp_c": self.temp(),
+        }
+
+
+def fmt_mhz(v):
+    return "%d" % v if v is not None else "-"
+
+
+def fmt_v(uv):
+    return "%.3f" % uv if uv is not None else "-"
+
+
+def fmt_c(t):
+    return "%.1f" % t if t is not None else "-"
+
+
+def format_line(s):
+    return "  ".join((
+        time.strftime("%H:%M:%S"),
+        "little %sMHz/%sV" % (fmt_mhz(s["little_mhz"]), fmt_v(s["little_uv"])),
+        "big %sMHz/%sV" % (fmt_mhz(s["big_mhz"]), fmt_v(s["big_uv"])),
+        "cpu %sC" % fmt_c(s["temp_c"]),
+    ))
+
+
+def csv_row(s):
+    def num(v):
+        return "" if v is None else ("%.6g" % v)
+    return "%d,%s,%s,%s,%s,%s" % (
+        int(time.time()), num(s["little_mhz"]), num(s["big_mhz"]),
+        num(s["little_uv"]), num(s["big_uv"]), num(s["temp_c"]))
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="CPU-Takt/Spannung/Temperatur live, ohne htop-Last")
+    ap.add_argument("-i", "--interval", type=float, default=1.0,
+                    help="Sekunden zwischen Messwerten (Default 1)")
+    ap.add_argument("-n", "--count", type=int, default=0,
+                    help="Anzahl Messwerte (0 = unbegrenzt)")
+    ap.add_argument("--once", action="store_true",
+                    help="ein Messwert, dann Ende")
+    ap.add_argument("--csv", metavar="FILE",
+                    help="Messwerte als CSV anhaengen (Zeitstempel + Werte)")
+    args = ap.parse_args()
+
+    if args.once:
+        args.count, args.interval = 1, 0.0
+
+    reader = Reader()
+    csv_fh = None
+    if args.csv:
+        fresh = not os.path.exists(args.csv) or os.path.getsize(args.csv) == 0
+        csv_fh = open(args.csv, "a")
+        if fresh:
+            csv_fh.write("epoch,little_mhz,big_mhz,little_uv,big_uv,temp_c\n")
+            csv_fh.flush()
+
+    # In-place nur an einem echten Terminal; in eine Pipe/Datei volle Zeilen.
+    live = sys.stdout.isatty() and args.count != 1
+    n = 0
+    try:
+        while True:
+            s = reader.sample()
+            if csv_fh:
+                csv_fh.write(csv_row(s) + "\n")
+                csv_fh.flush()
+            if live:
+                sys.stdout.write("\r\033[K" + format_line(s))
+            else:
+                sys.stdout.write(format_line(s) + "\n")
+            sys.stdout.flush()
+            n += 1
+            if args.count and n >= args.count:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if live:
+            sys.stdout.write("\n")
+        if csv_fh:
+            csv_fh.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

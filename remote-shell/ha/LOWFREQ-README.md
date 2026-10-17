@@ -24,23 +24,48 @@ Der Boot-Weg ist verifiziert: `boot.cmd` laedt `armbianEnv.txt`, wertet
 Der Meson-Taktgeber teilt `fclk_div2` (1.0 GHz) bzw. `fclk_div3` (666.67 MHz)
 mit einem 6-Bit-Teiler, kennt aber nur die Teilerfaktoren **2, 4, 5, 8, 10, 16,
 20, 25, 32, 40, 50, 64** - also `2^a * 5^b`. Eine Rate mit Faktor 3 im Teiler
-wird **still abgerundet**, und `scaling_cur_freq` meldet trotzdem die
-Wunschrate. Gemessen:
+ist nicht exakt darstellbar. Gemessen (2026-10-17):
 
-| angefordert | `scaling_cur_freq` | echter Takt (`cpu_clk_dyn`) |
+| angefordert | `scaling_cur_freq` | echtes Signal (`cpu_clk`) |
 |---|---|---|
-| 333333 kHz | 333333 kHz | **250000 kHz** |
-| 33333 kHz | 33333 kHz | **25000 kHz** |
+| 333333 kHz | 500000 kHz | 499999993 Hz |
+| 33333 kHz | 40000 kHz | 40000000 Hz |
 
-Solche Punkte sind in `lowfreq.dts` deshalb **nicht** enthalten: `cpufreq`
-wuerde die falsche Frequenz melden und die Spannung zum falschen OPP-Punkt
-waehlen. Die Liste enthaelt nur Raten, die der Taktgeber exakt erzeugt.
+**Korrektur:** Frueher stand hier, `scaling_cur_freq` melde die Wunschrate,
+waehrend der echte Takt still abgerundet werde. Das war ein Vergleich mit dem
+falschen Signal (`cpu_clk_dyn`, s. oben). Tatsaechlich waehlt `cpufreq` die
+**naechstgelegene darstellbare** Rate und `scaling_cur_freq` gibt sie korrekt
+wieder (hier aufgerundet: 333333 -> 500000).
 
-Der **echte** Takt steht nur in debugfs:
-little -> `/sys/kernel/debug/clk/cpu_clk_dyn/clk_rate`,
-big -> `/sys/kernel/debug/clk/cpub_clk_dyn/clk_rate`.
-(`cpu_clk`/`cpub_clk` sind die Eltern von AXI/ATB/APB; `cpu_clk_dyn` ist der
-CPU-Takt selbst.)
+Solche Punkte sind in `lowfreq.dts` deshalb **nicht** enthalten: eine
+angeforderte Rate, die nicht exakt darstellbar ist, laesst `cpufreq` auf einen
+anderen Punkt springen, als die OPP-Tabelle vorsieht - die Spannung passt dann
+nicht zur Rate. Die Liste enthaelt nur Raten, die der Taktgeber exakt erzeugt.
+
+Der **echte** Takt steht nur in debugfs, und zwar an `cpu_clk` (little) bzw.
+`cpub_clk` (big) - eindeutig erkennbar an der Consumer-Spalte (`cpu0` bzw.
+`cpu2`):
+
+    little -> /sys/kernel/debug/clk/cpu_clk/clk_rate
+    big    -> /sys/kernel/debug/clk/cpub_clk/clk_rate
+
+**Korrektur (2026-10-17):** Frueher stand hier `cpu_clk_dyn`/`cpub_clk_dyn` als
+"der CPU-Takt selbst". Das ist **falsch**: `*_clk_dyn` ist der vom
+System-Controller (dvfs) verwaltete Zweig und traegt oft einen **veralteten**
+Wert. Gegenprobe mit little=2016 MHz, big=1000 MHz:
+
+| Signal | Consumer | Rate |
+|---|---|---|
+| `cpu_clk` | `cpu0` | 2016000000 (little, korrekt) |
+| `cpub_clk` | `cpu2` | 999999985 (big, korrekt) |
+| `cpu_clk_dyn` | `ff63c000.system-controller dvfs` | 249999997 (veraltet) |
+
+**Folge fuer den Monitor:** `armbianmonitor -m` liest `scaling_cur_freq`. Fuer
+**alle 50 verfuegbaren Raten** beider Cluster stimmt dieser Wert mit dem echten
+Signal (`cpu_clk`/`cpub_clk`) innerhalb **< 1 %** ueberein (groesste Abweichung
+0,79 % bei 1512000 kHz -> 1500 MHz, eine PLL-Rundung). Der Monitor zeigt also
+den echten Takt; der frueher vermutete Faktor-2-Fehler war ein Vergleich mit
+dem falschen Signal (`*_clk_dyn`).
 
 ## Dateien
 
@@ -108,18 +133,28 @@ und nicht ohne Risiko aenderbar.
 
 Was stattdessen hilft: **CPU-Hotplug**. `cpu_hotplug.py` + `cpu-hotplug.service`
 nehmen ungenutzte Kerne ueber `/sys/devices/system/cpu/cpuN/online` ganz aus dem
-Takt. Gemessen im Leerlauf: nur cpu0+cpu1 online, cpu2-5 aus; unter Last holt
+Takt. Gemessen im Leerlauf: **nur cpu0 online**, cpu1-5 aus; unter Last holt
 der Dienst sie zurueck. Ein offline genommener Kern verbraucht keinen Takt und
 keine Leckleistung mehr.
 
 Regeln des Dienstes:
 - **cpu0 bleibt immer online** (Boot-CPU; ihr Wieder-Onlinen ist nicht
   garantiert).
-- Stufen: Last < 0.5 -> 2 Kerne, < 1.5 -> 3, < 3 -> 4, sonst alle.
+- Stufen: Last < 0.5 -> **1 Kern**, < 1.5 -> 2, < 3 -> 4, sonst alle.
 - Hysterese: eine Aenderung erst nach 6 Messungen (30 s) mit gleicher Stufe.
 - Beim Beenden (SIGTERM) werden alle Kerne wieder online genommen.
 - Reine Entscheidung `plan_online()`, host-getestet
   (`test_cpu_hotplug.py`, 134 Checks).
+
+Auf dem Board verifiziert (Journal des Dienstes):
+
+    cpu-hotplug: 6 Kerne, Stufen [(0.5, 1), (1.5, 2), (3.0, 4), (6.0, 6)]
+    Last 0.36 -> online [0] (aus: [1, 2, 3, 4, 5])
+    Last 0.53 -> online [0, 1] (aus: -, an: [1])
+    Last 0.38 -> online [0] (aus: [1], an: -)
+
+Ein-Kern-Betrieb ist auch mit Home Assistant + Docker stabil (getestet): das
+Board lief mit `online: 0` weiter, alle Dienste blieben aktiv.
 
 Nicht verwechseln: Hotplug ist kein Schlaf. Ein offline genommener Kern ist
 stromlos, aber das Wieder-Onlinen kostet Zeit (Boot der Sekundaer-CPU), deshalb
@@ -161,6 +196,23 @@ Geprueft bei 24 / 50 / 100 / 250 MHz, je Stufe 2 s Volllast (6 Prozesse):
 Boden ist keine Instabilitaet, sondern das PWM-Limit
 (`regulator.{2,8}/min_microvolts` = 680 mV) - tiefer kann der Regler nicht.
 
+**Grenztest am absoluten Boden (2026-10-17):** `floor2.py` faehrt **alle**
+Raten bis 1.0 GHz auf `duty 0` (Regler-Boden) und prueft mit Hash: **30 Punkte
+(15 je Cluster), 0 Rechenfehler**. Der Boden selbst ist also stabil - begrenzt
+wird er vom Regler, nicht vom Silizium.
+
+**Zwei Fallstricke bei solchen Tests** (beide real passiert):
+
+1. **Spannung NIE vor der Frequenz senken.** Der erste Versuch schrieb `duty 0`
+   (680 mV) schon bei der Kanal-Suche, als noch `schedutil` lief und der Takt
+   bei 2.4 GHz lag - das Board **hing** und der Watchdog rebootete (~43 s).
+   Regel: erst Frequenz per `userspace` festnageln, **dann** Spannung senken;
+   vor jedem Schreibzugriff den Punkt per `fsync` protokollieren.
+2. **ext4 `commit=120`:** `/` ist mit `commit=120` gemountet. Nach einem
+   harten Reset (Watchdog) gehen bis zu **120 s** nicht geflushte
+   Schreibzugriffe **verloren** - ein per `install` deploytes Skript war danach
+   wieder auf dem alten Stand. Nach jedem Deploy `sync` aufrufen.
+
 Harte Nachpruefung:
 
 - **Soak:** 60 s Volllast bei 24 MHz und 680 mV -> **0 Rechenfehler**.
@@ -185,6 +237,34 @@ Untergrenze dauerhaft auf 15.625 MHz steht, erreicht `schedutil` die Tief-Takte
 schon kurz nach dem Boot. Ist die Spannung zu knapp, rebootet der Watchdog in
 dieselbe Lage. Empfehlung: mindestens ~15-20 mV Reserve ueber dem gemessenen
 Boden, also big >= 695, little >= 695.
+
+### Braucht man die Reserve, wenn man unter dem HW-Limit bleibt?
+
+**Fuer die Tief-Takte (< 1 GHz) ist die Reserve nicht noetig, um Stabilitaet zu
+erreichen - aber sie bleibt sinnvoll als Boot-Schutz.** Begruendung aus den
+Messungen:
+
+- Am **absoluten Regler-Boden** (`duty 0`, Modell 680 mV) liefen **alle 30
+  Punkte** bis 1.0 GHz mit **0 Rechenfehlern**. Das Silizium braucht dort also
+  weniger, als der Regler hergibt; die Grenze ist der Regler, nicht der Chip.
+  Eine Reserve *fuer die Rechenstabilitaet* bringt an dieser Stelle nichts.
+- Die Reserve schuetzt vor dem **Boot-Loop**: mit `scaling_min_freq = 15.625 MHz`
+  erreicht `schedutil` die Tief-Takte sofort nach dem Boot. Ist der Punkt dort
+  grenzwertig (Chip-Streuung, Temperatur, Alterung), rebootet der Watchdog in
+  dieselbe Lage - ohne Netz nicht mehr zu retten. Die Reserve deckt also die
+  **Streuung ueber Chips und Temperaturen** ab, nicht den gemessenen Mittelwert.
+- **Versteckte Marge schon vorhanden:** der ADC zeigt am Modell-Boden (680 mV)
+  real **~722-727 mV**. Der Modellwert ist konservativ; zwischen Modell und
+  echter Spannung liegen bereits ~45 mV. Wer im Overlay 695 mV (Modell) setzt,
+  liegt real bei ~730-740 mV.
+
+**Hohe Takte (> 1.9 GHz) sind anders:** dort ist die Grenze das **Silizium**
+(bei 1.908 MHz hing das Board bei ~700 mV). Dort ist eine Reserve zwingend -
+und die Werksspannung darf ohnehin nicht angetastet werden.
+
+Kurz: unter dem HW-Limit (Tief-Takte) ist die Reserve **kein Stabilitaets-,
+sondern ein Boot-Sicherheits-Polster**. Fuer eine unwiederbringliche
+Ferninstallation ist sie trotzdem die richtige Wahl.
 
 ## Undervolting aller Takte (2026-10-17, gemessen)
 

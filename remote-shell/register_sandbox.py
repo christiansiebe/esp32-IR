@@ -43,6 +43,27 @@ def _registry_payload(data):
     return data
 
 
+def prune_sandboxes(data, now, ttl=86400):
+    """Alte Sandbox-Eintraege entfernen (reine Funktion, host-getestet).
+
+    Ohne das waechst das Register mit jeder Sandbox, die es je gab. Der Odroid
+    verbindet sich dann zu lauter toten URLs - jede kostet einen Verbindungs-
+    versuch, hebt die Last und verhindert den tiefen CPU-Takt. Eintraege, die
+    laenger als `ttl` (Default 24 h) nicht aktualisiert wurden, fallen raus."""
+    import calendar
+    keep = {}
+    for rid, meta in (data.get("sandboxes") or {}).items():
+        stamp = meta.get("updated", "")
+        try:
+            age = now - calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+        except Exception:
+            age = ttl + 1  # unlesbarer Zeitstempel -> als alt behandeln
+        if age <= ttl:
+            keep[rid] = meta
+    data["sandboxes"] = keep
+    return data
+
+
 def api(method, path, token, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(API + path, data=data, method=method)
@@ -84,6 +105,7 @@ def main():
             except Exception:
                 pass
         data["sandboxes"][rid] = {"url": url, "updated": data["updated"]}
+        prune_sandboxes(data, time.time())
         _registry_payload(data)
         import base64
         body = {

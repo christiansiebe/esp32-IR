@@ -1,0 +1,17 @@
+[Unit]
+Description=noVNC web frontend for XFCE desktop (websockify 6080 -> VNC 5901)
+After=network-online.target xfce-vnc.service
+PartOf=xfce-vnc.service
+Wants=network-online.target
+Requires=xfce-vnc.service
+
+[Service]
+Type=simple
+# Ziel explizit 127.0.0.1 (nicht "localhost"): TigerVNC laeuft mit
+# -localhost yes nur auf IPv4-Loopback; "localhost" koennte auf ::1 zeigen.
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc 0.0.0.0:6080 127.0.0.1:5901
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

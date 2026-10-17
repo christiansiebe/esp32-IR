@@ -19,6 +19,30 @@ tree (`main/`, `components/`, `tools/`, `test/`). The CI path filter
 All three run **inside** the Home Assistant container so they can read
 `/config/.storage` (gateway credentials, admin token) and the recorder DB.
 
+## Odroid CPU tools (outside the HA container)
+
+- `cpu-live`, `cpu-volt-watch`, `cpu-volt-line`, `htopv`, `htopv.tmux.conf`,
+  `deploy_htopv.sh`, `test_htopv.py`, `test_cpu_live.py` + `htopv-README.md` —
+  live per-core MHz and per-cluster voltage (`VDDCPU_A`/`_B`) on the Odroid N2+.
+  `cpu-live` is the lightweight monitor for continuous use (reads a handful of
+  sysfs files, ~0.3 % of a core at 1 s; htop cost ~11-40 %); `htopv` wraps htop
+  in a tmux status line when you want the full process view. Rail mapping is
+  measured, see `htopv-README.md`.
+- `cpu_hotplug.py`, `cpu-hotplug.service`, `deploy_hotplug.sh`,
+  `lowfreq_set_floor.sh`, `cpu-freq-guard.sh`/`.service`, `test_cpu_hotplug.py`
+  + `LOWFREQ-README.md` — idle CPU hotplug and the persistent clock floor.
+- `uv.py`, `uv_lowfreq.py`, `gen_lowfreq_dts.py`, `uv-opp-table.json` +
+  `UV-README.md` — software undervolt (VDDCPU_A/B, DT floor 680 mV).
+- `odroid-bootstrap.sh`, `odroid-desktop-diagnose.sh`, `odroid-esp32-inspect.sh`,
+  `reverse_ssh.sh`, `test_agent.py` — Odroid/channel helpers that used to live in
+  the firmware tree under `tools/remote-shell/` (moved here; `publish.py` now
+  cleans the old paths).
+- `novnc.service`, `xfce-vnc.service`, `vnc-xstartup`, `deploy_novnc.sh` +
+  `novnc-README.md` — the XFCE desktop in the browser (TigerVNC + noVNC).
+- `vnc_lan_guard.py`, `vnc-lan-guard.service`, `vnc-lan-guard.default`,
+  `deploy_vnc_lan.sh`, `test_vnc_lan_guard.py` — passwordless desktop reachable
+  only from the LAN (TigerVNC on loopback + an iptables source filter on 6080).
+
 ## Gateway backfill
 
 HA only records from the day the `bosch_k40rf` integration was configured, so

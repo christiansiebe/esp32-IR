@@ -3,7 +3,7 @@
 Proxy-URL auf den /agent-Pfad und fuehrt Befehle LOKAL aus.
 
 Nur fuer die Verifikation der Sandbox-Seite gedacht:
-    python3 tools/remote-shell/test_agent.py [url]
+    python3 remote-shell/ha/test_agent.py [url]
 """
 import asyncio
 import json

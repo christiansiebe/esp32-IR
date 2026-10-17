@@ -97,6 +97,12 @@ Vorschlag zur Abstimmung — bitte hier ergaenzen/korrigieren, dann gilt er.
    aktiv (`xfce4-panel`, `xfdesktop`, `Thunar`). Kein fremder "File Explorer":
    8099 = `meter_server.py` (fritz-meter, Live-JPEG), 6080 = noVNC-Verzeichnisliste.
    -> nichts zu deaktivieren. Offen: Doku/PR fuer den Desktop-Auftrag.
+   **Verifiziert (Chat 7a894c13, 2026-10-17):** WebSocket-Handshake auf
+   `:6080/websockify` -> `101 Switching Protocols`, dann RFB-Greeting
+   `RFB 003.00` vom VNC-Server. Kette Browser -> websockify:6080 -> Xtigervnc:5901
+   vollstaendig. Desktop-Screenshot (`scrot`, 1920x1080) zeigt XFCE mit Panel.
+   Der "nur File Explorer"-Eindruck kam vom Aufruf `:6080/` OHNE `/vnc.html`
+   (noVNC-Verzeichnislisting). Richtig ist `:6080/vnc.html`.
 6. **Firmware bleibt auf `cline/power-history-diag`**; nur das Toolkit wird bewusst
    nach `main` publiziert (`remote-shell/publish.py`).
 7. **Vor einem Neustart des Odroid-Agenten** kurz pruefen, ob der andere Chat gerade
@@ -456,6 +462,85 @@ Wichtigste Punkte (sonst scheitert es):
 - Dateien: remote-shell/ha/{uv_lowfreq.py,uv.py,gen_lowfreq_dts.py,
   test_gen_lowfreq_dts.py} + LOWFREQ-README.md, UV-README.md.
 
+
+### Hotplug bis auf 1 Kern + Monitor-/Takt-Korrektur (2026-10-17)
+- `cpu_hotplug.py`: Stufen neu **<0.5 -> 1 Kern**, <1.5 -> 2, <3 -> 4, sonst alle;
+  `MIN_ONLINE = 1`. cpu0 bleibt immer online. Host-Test 134 Checks gruen.
+  Auf dem Board verifiziert (Journal): `Last 0.36 -> online [0]`,
+  `Last 0.53 -> online [0, 1]`. Ein-Kern-Betrieb mit HA+Docker stabil.
+- **Monitor-Mysterium geloest:** das echte Taktsignal ist `cpu_clk` (little,
+  Consumer `cpu0`) bzw. `cpub_clk` (big, Consumer `cpu2`). **Nicht**
+  `cpu_clk_dyn`/`cpub_clk_dyn` - das ist der dvfs-Zweig des System-Controllers und
+  traegt einen **veralteten** Wert. Frueher stand in der Doku das falsche Signal.
+- `armbianmonitor -m` liest `scaling_cur_freq`. Fuer **alle 50 Raten** beider
+  Cluster stimmt das mit dem echten Signal innerhalb **<1 %** (max 0,79 %).
+  Der Monitor zeigt also den echten Takt; der vermutete Faktor-2-Fehler war der
+  Vergleich mit `*_clk_dyn`.
+- **Grenztest `floor2.py`:** alle 30 Punkte bis 1 GHz auf `duty 0` (Regler-Boden
+  680 mV) -> 0 Rechenfehler. Der Boden ist stabil; Grenze ist der Regler, nicht
+  das Silizium.
+- **Fallstricke (real passiert):**
+  1. **Spannung nie vor der Frequenz senken.** Erster Versuch schrieb `duty 0`
+     waehrend schedutil noch bei 2.4 GHz stand -> Board haengt, Watchdog-Reboot.
+     Erst `userspace` + Ziel-Frequenz, dann Spannung.
+  2. **ext4 `/` mit `commit=120`.** Nach einem Hard-Reset gehen bis zu 120 s
+     ungesyncte Schreibzugriffe verloren - ein per `install` deploytes Skript war
+     danach wieder alt. Nach jedem Deploy `sync` (in deploy_*.sh ergaenzt).
+- **Reboots 2026-10-17 (16:33, 17:00, 17:16):** 16:33 = Testfehler (duty 0 bei
+  2.4 GHz). `watchdog bootstatus` ist immer 0 (Amlogic), `/var/log` ist zram ->
+  Journal je Reboot weg, kein Reset-Grund im Log. `dmesg` zeigt
+  `meson_clk_pll_set_rate: pll sys1_pll_dco didn't lock` / `sys_pll_dco didn't
+  lock` bei Taktwechseln - Verdacht: PLL-Lock unter schnellen/extremen
+  Frequenzwechseln (Testlast), nicht der Regler. Nicht abschliessend belegt.
+- Dateien: remote-shell/ha/{cpu_hotplug.py,test_cpu_hotplug.py,deploy_hotplug.sh,
+  deploy_lowfreq.sh} + LOWFREQ-README.md.
+
+
+
+### Boot-Journal: Reset-Zaehler mit Grund (2026-10-17)
+- **Problem:** Amlogic liefert keinen Reset-Grund - `watchdog0/bootstatus`=0
+  (immer), pstore leer, `/var/log`=zram. Das Journal ist persistent
+  (`/var/log/journal -> /var/log.hdd/journal`), bricht aber bei jedem Hard-Reset
+  ab (kein "Reached target Shutdown"). Von 20 Boots hatte **keiner** einen
+  Clean-Marker -> alle waren Hard-Resets.
+- **Loesung:** `boot_journal.py` + `boot_journal_lib.py` (host-getestet, 22
+  Checks) zaehlen Boots persistent und leiten den Grund ab: Clean-Marker
+  (`ExecStop` von boot-journal.service) -> clean-reboot; watchdog bootstatus ->
+  watchdog-reset; "Kernel panic" im prev-Log -> kernel-panic; prev-Lauf <60s ->
+  early-reset; sonst hard-reset-unknown. Zustand in /var/lib/boot-journal/.
+- **Board-verifiziert:** sauberer Reboot -> `clean-reboot` (prev_uptime exakt =
+  letzter Heartbeat). Kernel-Panic (sysrq-trigger, panic=10) -> `early-reset`.
+- **Grenze (ehrlich):** ein Panic schreibt sich NICHT ins Journal (journald
+  flusht nicht vor dem Freeze). Diese Luecke schliesst jetzt ramoops/pstore
+  (siehe naechster Abschnitt) - die primaere Panic-Spur ist pstore.
+- Dateien: remote-shell/ha/{boot_journal.py,boot_journal_lib.py,
+  test_boot_journal_lib.py,test_boot_journal_flow.py,boot-journal*.{service,timer},
+  deploy_boot_journal.sh} + BOOT-JOURNAL-README.md.
+
+### ramoops/pstore: Kernel-Panics ueberleben den Warm-Reset (2026-10-17)
+- **Ziel:** Panics ueberleben den Reset, damit boot_journal den echten Grund
+  (`kernel-panic`) statt nur `early-reset`/`hard-reset-unknown` melden kann.
+- **Loesung:** DT-Overlay `ramoops` reserviert 1 MiB RAM bei **0x50000000** (im
+  freien Fenster 0x40000000-0xdfd2dfff, NICHT mit secmon 0x05000000 verwechseln).
+  `gen_ramoops_dts.py` erzeugt es, `deploy_ramoops.sh` installiert es
+  (`user_overlays=lowfreq ramoops`), `revert_ramoops.sh` nimmt es zurueck.
+  Der Kernel nutzt die Region als pstore; `systemd-pstore` archiviert den Dump
+  nach /var/lib/systemd/pstore/. `boot_journal.py` liest beide Orte.
+- **Dedupe (wichtig):** ramoops/systemd-pstore behalten ALTE Dumps. boot_journal
+  merkt sich die mtime des verbrauchten Dumps MONOTON (`consumed_pstore_mtime`)
+  und ignoriert alles, was nicht juenger ist - sonst klebt ein alter Panic an
+  jedem weiteren Boot. (Real passiert: `dmesg.txt` aelter + `dmesg-ramoops-0`
+  neuer -> der aeltere ueberschrieb die Marke. Fix = `mtime <= exclude`.)
+- **Board-verifiziert:** dmesg `reserved mem ... ramoops@50000000 (1024 KiB)`,
+  ramoops-Modul geladen, Panic (sysrq-trigger) -> dmesg-ramoops-0 enthaelt
+  `Kernel panic - not syncing: sysrq triggered crash` + Call trace -> Boot wird
+  als `kernel-panic` MIT Text klassifiziert. Danach zwei saubere Reboots ->
+  `clean-reboot` ohne Text. **Nur Warm-Reset** (Kaltstart loescht RAM).
+- **Brick-Sicherheit:** boot.cmd stellt bei `fdt apply`-Fehler den Original-DT
+  her -> ein kaputtes Overlay kann das Board nicht bricken.
+- Dateien: remote-shell/ha/{gen_ramoops_dts.py,ramoops.dts,deploy_ramoops.sh,
+  revert_ramoops.sh,test_gen_ramoops_dts.py,test_boot_journal_pstore.py,
+  test_boot_journal_flow.py} + RAMOOPS-README.md.
 ## Lektionen: Odroid-Aktionen sicher ausfuehren (2026-10-17, Chat 7a894c13)
 
 **Teuer gelernt — diese vier Regeln verhindern, dass ein Chat das Board lahmlegt.**

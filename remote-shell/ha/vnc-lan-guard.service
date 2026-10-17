@@ -1,0 +1,27 @@
+[Unit]
+Description=VNC/noVNC LAN guard (only LAN sources reach port 6080)
+# WICHTIG fuer die Reihenfolge: netfilter-persistent laedt beim Boot
+# /etc/iptables/rules.v4 per iptables-restore, was die gesamte Regeltabelle
+# ERSETZT. Die Kette VNC_LAN steht dort absichtlich nicht drin, wird beim Boot
+# also entfernt -> der Guard muss danach starten. `Before=novnc.service` plus
+# der synchrone ExecStartPre sorgen dafuer, dass die Regeln stehen, BEVOR
+# websockify auf 0.0.0.0:6080 lauscht (sonst kurzes offenes Fenster).
+# Sicherheitsnetz: der Guard heilt sich zusaetzlich alle 30 s selbst.
+After=netfilter-persistent.service
+Wants=netfilter-persistent.service
+Before=novnc.service
+
+[Service]
+Type=simple
+# Synchron: Regeln setzen, bevor die Unit als "gestartet" gilt.
+ExecStartPre=/usr/bin/python3 /usr/local/sbin/vnc_lan_guard.py --check
+ExecStart=/usr/bin/python3 /usr/local/sbin/vnc_lan_guard.py
+# Beim Stoppen SIGTERM: der Guard beendet die Schleife, die Regeln BLEIBEN
+# stehen (der Schutz soll einen Dienst-Stopp ueberleben).
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

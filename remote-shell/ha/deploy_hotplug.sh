@@ -28,6 +28,10 @@ sleep 2
 systemctl is-active cpu-hotplug.service
 systemctl is-enabled cpu-hotplug.service
 
+# / ist ext4 mit commit=120: ohne sync kann ein Reset kurz nach dem Deploy die
+# Schreibzugriffe verschlucken (real passiert - Skript war danach wieder alt).
+sync
+
 echo '== 4. Zustand =='
 echo "online: $(cat /sys/devices/system/cpu/online)"
 echo "load:   $(cut -d' ' -f1 /proc/loadavg)"
