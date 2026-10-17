@@ -1,5 +1,39 @@
 # To-do – esp32-IR
 
+## Empfänger „AP aus" (`feat/receiver-ap-off`, 2026-10-17) – PR #13
+**Ergebnis: AP darf aus — aber nur über die Compile-Time-Option
+`CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y`, nie im laufenden Betrieb.**
+- Ein **Laufzeit**-AP-Drop killte den ESP-NOW-Link (`04add16`, zurückgenommen in
+  `71409c8`): die ESP-NOW-Peers des Empfängers liegen auf `WIFI_IF_AP`, ein
+  abgerissenes AP-Interface stoppt jeden Austausch.
+- Der Compile-Time-Weg schaltet `ESPNOW_IF` auf `WIFI_IF_STA` (`WIFI_MODE_STA`),
+  es gibt gar kein AP-Interface zum Abreißen. Dashboard läuft über das Heim-WLAN
+  (DHCP/mDNS).
+- [x] CI-Matrix-Eintrag `receiver-apoff` baut das Image und prüft SoftAP aus +
+      `ESPNOW_CHANNEL=1`.
+- [x] Am Gerät geflasht (`db228f9`): Dashboard über WLAN (`192.168.178.70`),
+      `/healthz` 200, SoftAP `ESP32-IR-Meter` weg, **ESP-NOW-Link lebt**
+      (`caught_up: true`, `errors: 0`, `sender_mac_known: true`, Sender-Roundtrip
+      ok, `sender_rssi_valid: true`), keine Daten verloren.
+- Kanal-Zwang: ohne AP kann der Sender den Kanal nicht mehr entdecken; beide
+  Seiten müssen denselben `CONFIG_ESPNOW_CHANNEL` (Default 1) nutzen, und da die
+  Station an den Heim-AP-Kanal gebunden ist, muss dieser 1 sein (verifiziert:
+  FRITZ!Box „Wohnzimmer" = Kanal 1).
+
+## OFFEN: Empfänger-`web_guard` startet den HTTP-Server im Leerlauf neu
+**Beobachtet am AP-aus-Image (`db228f9`): `restarts` steigt ~1,2/Minute** (13→26
+in ~10 min), auch ohne externe Zugriffe; `last activity` bleibt aber bei ~1 s,
+d. h. die Loopback-Probe **funktioniert** und der Guard startet den Server
+trotzdem neu. **Vorbestehend** — das vorherige Image (`g71409c8`) zeigte
+`restarts 288` bei wenigen Stunden Uptime, gleiche Größenordnung; **kein**
+AP-aus-Regress. Kein Datenverlust (Heap stabil ~107 kB, Backfill ok), aber
+unnötige Churn. Verdacht: die 5-s-Loopback-Probe (`esp_http_client` auf
+`127.0.0.1:80`) schlägt gelegentlich fehl oder kollidiert mit `max_open_sockets`
+→ Guard wertet das als „Server tot". Zu prüfen: Probe-Intervall/Timeout, ob ein
+echter `httpd`-Restart stattfindet (Bootlog ist von SML-Werten überflutet),
+und ob `threshold_ms`/`restart_timeout_ms` für den Leerlauf zu knapp sind.
+**Nicht im AP-aus-Scope; separat zu untersuchen.**
+
 ## Fix „Sender 240 MHz, 0 Steps" (`feat/sender-associate-dfs`, 2026-10-17)
 **Ergebnis: Auf dem ESP32 classic (IDF v6.1) sind ein zuverlässiger ESP-NOW-Link
 und Funk-Powersave/DFS nicht gleichzeitig zu haben.** Am Gerät verifiziert.

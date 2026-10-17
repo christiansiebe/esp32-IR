@@ -245,6 +245,23 @@ Two firmware roles are built from one source tree.
   reverted (`71409c8`) for exactly this reason. The SoftAP stays on; only the
   compile-time `CONFIG_ESPNOW_RECEIVER_DISABLE_AP` path (which uses
   `WIFI_IF_STA` and never has an AP to drop) is safe.
+  **Deployed and verified (2026-10-17, `feat/receiver-ap-off`, PR #13):** the
+  CI matrix now builds a `receiver-apoff` image; flashed to the receiver
+  (`db228f9`) the dashboard came up over the WLAN (`192.168.178.70`, `/healthz`
+  200), the `ESP32-IR-Meter` SoftAP was gone and the ESP-NOW link stayed alive
+  (`history-pull`: `caught_up: true`, `errors: 0`, `sender_mac_known: true`;
+  sender round-trip via `/api/sender-diag` ok). The home AP "Wohnzimmer" runs on
+  channel 1, which is why `CONFIG_ESPNOW_CHANNEL=1` still matches.
+- **Open (pre-existing): the receiver's `web_guard` restarts the HTTP server
+  while idle.** On `db228f9` the `status` counter `web health: … restarts N`
+  climbs ~1.2/min with no external traffic, while `last activity` stays ~1 s
+  (so the loopback probe *is* working, yet the guard still restarts the server).
+  The previous image (`g71409c8`) already showed `restarts 288`, so this is not
+  an AP-off regression; no data is lost (heap steady, backfill fine) but the
+  churn is wasteful. Suspect the 5 s loopback probe against `127.0.0.1:80`
+  occasionally fails or contends with `max_open_sockets`. The boot log is
+  flooded with SML lines, so the `web_guard` messages rotate out; investigate
+  separately (probe interval/timeout, whether a real `httpd` restart happens).
 - Adaptive sender light sleep (`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP`, default
   **on**, sender ships as a single image): `main/uart_sleep_window.{h,c}` parks
   the CPU only in the quiet gap between SML telegram bursts. The window starts at
