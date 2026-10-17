@@ -62,6 +62,10 @@ jobs:
           python3 test/test_idf_monitor_web.py
           python3 remote-shell/idf-monitor-web/test_smoke.py
 
+      - name: Run Odroid CPU hotplug governor tests
+        shell: bash
+        run: python3 remote-shell/ha/test_cpu_hotplug.py
+
   build:
     name: Build ${{ matrix.role }}
     runs-on: ubuntu-24.04
