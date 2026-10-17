@@ -68,24 +68,29 @@ config ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS
         dropping ESP-NOW requests from the receiver.
 
 config ESPNOW_SENDER_ESPNOW_POWER_SAVE
-    bool "Sender: ESP-NOW connectionless power save"
-    default y
-    depends on ESPNOW_SENDER_LIGHT_SLEEP
+    bool "Sender: ESP-NOW power save + DFS (experimental)"
+    default n
 
     help
-        Enable the periodic ESP-NOW wake window above so the Wi-Fi driver
-        releases its ESP_PM_APB_FREQ_MAX lock and the sender can actually
-        DFS down / light-sleep. ESP-NOW is a Wi-Fi connectionless module and
-        keeps the radio (and the APB lock) on until a wake window is set, which
-        pins DFS at the ceiling ("240 MHz, 0 steps").
+        Let the sender's Wi-Fi radio sleep between ESP-NOW wake windows so the
+        driver releases ESP_PM_APB_FREQ_MAX and DFS can step down. OFF by
+        default: on the ESP32 classic the wake window is accepted (err=0) but
+        the radio still cycles, ESP-NOW requests are missed and the link
+        watchdog disables the power saving again. Keeping the radio on (this
+        option off) is what keeps the ESP-NOW link reliable, which matters more
+        than the clock: the sender's data must not be lost.
 
-        This needs CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y (set in
-        sdkconfig.defaults): per the IDF docs esp_now_set_wake_window() only
-        takes effect at connected status *unless* that option is enabled. The
-        window is applied from esp_now_init() and re-applied on every
-        association. The radio is awake for ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS
-        out of every interval; a request that arrives while the radio is off is
-        retried by the receiver. Turn this off to fall back to the pinned clock.
+        What this option does when on (verified on hardware):
+          - esp_wifi_set_ps(WIFI_PS_MIN_MODEM) after esp_wifi_start(), and
+          - esp_now_set_wake_window() + esp_wifi_connectionless_module_set_wake_interval(),
+            applied from esp_now_init() and re-applied on every association.
+        Both are needed: without the wake window the connectionless module holds
+        the APB lock; without the explicit set_ps() call (after esp_wifi_start())
+        the driver holds it too. With both, the radio does cycle - but on the
+        ESP32 classic that breaks the ESP-NOW link, so expect the fallback.
+
+        Requires CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y (set in
+        sdkconfig.defaults) for the window to apply without an association.
 
 config ESPNOW_SENDER_ASSOCIATE
     bool "Sender: also associate with the receiver SoftAP (optional)"

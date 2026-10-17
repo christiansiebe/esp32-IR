@@ -11,11 +11,11 @@
 # light sleep inside its verified quiet window (see CONFIG_ESPNOW_SENDER_LIGHT_SLEEP).
 #
 # On the sender, DFS only steps down once the Wi-Fi driver releases its
-# ESP_PM_APB_FREQ_MAX lock. ESP-NOW is a Wi-Fi connectionless module and keeps
-# the radio (and the lock) on until an ESP-NOW wake window is set, so the sender
-# sets one (CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE, default y) together with
-# CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE (below). See AGENTS.md "CPU clock /
-# power".
+# ESP_PM_APB_FREQ_MAX lock. That needs esp_wifi_set_ps(WIFI_PS_MIN_MODEM) *after*
+# esp_wifi_start() plus an ESP-NOW wake window, but on the ESP32 classic the
+# radio-cycling power save breaks the ESP-NOW link (verified on hardware), so it
+# stays opt-in (CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=n, default) and the clock
+# remains pinned for a reliable link. See AGENTS.md "CPU clock / power".
 #
 # If a board shows brownout resets or instability at 240 MHz, lower this (and
 # CONFIG_ESPNOW_CPU_MAX_MHZ) to 160 or 80.

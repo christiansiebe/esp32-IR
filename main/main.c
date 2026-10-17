@@ -806,14 +806,17 @@ static void initialize_wifi_and_espnow(void)
     ESP_ERROR_CHECK(esp_wifi_start());
 
 #if CONFIG_ESPNOW_ROLE_SENDER
+#if CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE
     /* Wi-Fi modem sleep must be set *after* esp_wifi_start(): before it,
      * esp_wifi_set_ps() returns ESP_ERR_WIFI_NOT_INIT and is silently ignored.
-     * Without modem sleep the driver never releases ESP_PM_APB_FREQ_MAX, so DFS
-     * stays pinned at 240 MHz (0 steps) and light sleep never engages. This was
-     * the real cause of "Sender 240 MHz, 0 steps". */
+     * It is opt-in (ESPNOW_SENDER_ESPNOW_POWER_SAVE): with modem sleep on, the
+     * sender's radio sleeps between wake windows and misses ESP-NOW requests, so
+     * the link watchdog fires and disables the power saving again. Keeping the
+     * radio on (the default) is what keeps the link reliable. */
     esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "wifi_ps_mode set after start err=%d",
                    (int)ps_err);
+#endif
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER

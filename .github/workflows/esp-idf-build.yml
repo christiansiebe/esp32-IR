@@ -160,15 +160,17 @@ jobs:
           test -s "build/sender/esp32-IR.bin"
           grep -a -q 'adaptive sleep path compiled in' "build/sender/esp32-IR.bin"
           echo "Sender image contains the adaptive light-sleep path"
-          # The ESP-NOW connectionless wake window is what lets the Wi-Fi driver
-          # release ESP_PM_APB_FREQ_MAX so DFS can step down (else the clock is
-          # pinned at 240 MHz, 0 steps). Assert the flag and the compiled-in call
-          # site, plus the STA_DISCONNECTED_PM_ENABLE that makes the window take
-          # effect without an association.
-          grep -q '^CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=y$' sdkconfig
+          # The ESP-NOW wake window / modem sleep that would let DFS step down is
+          # opt-in: on the ESP32 classic it breaks the ESP-NOW link (verified on
+          # hardware), so the sender keeps the radio on for a reliable link.
+          # Assert it stays OFF by default so a sender image never ships with the
+          # radio cycling.
+          ! grep -q '^CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=y$' sdkconfig
+          # The option must be wired to the post-start modem-sleep call and the
+          # wake window; the STA_DISCONNECTED_PM_ENABLE default is what makes the
+          # window apply without an association when the option is turned on.
           grep -q '^CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y$' sdkconfig
-          grep -a -q 'ESP-NOW power save on: radio wakes every' "build/sender/esp32-IR.bin"
-          echo "Sender image enables the ESP-NOW wake window for DFS"
+          echo "Sender image keeps the ESP-NOW radio on (power save opt-in, off)"
 
       - name: Stage firmware and flash files
         shell: bash

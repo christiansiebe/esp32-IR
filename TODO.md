@@ -1,27 +1,31 @@
 # To-do – esp32-IR
 
-## 🆕 Fix „Sender 240 MHz, 0 Steps" (`feat/sender-associate-dfs`, 2026-10-17)
-Ursache: ESP-NOW ist ein WLAN-„Connectionless"-Modul und hält das Funkmodul (und
-damit `ESP_PM_APB_FREQ_MAX`) dauerhaft an, solange kein Wake-Window gesetzt ist
-→ DFS klebte bei 240 MHz (`cpu_freq_changes: 0`, `hist_min: 240`).
-- [x] **Der fehlende Baustein ist `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y`**
-      (in `sdkconfig.defaults`). Laut IDF-Doku wirkt `esp_now_set_wake_window()`
-      nur bei assoziiertem Status, **außer** dieses Flag ist gesetzt. Genau das
-      fehlte beim früheren Versuch (`36d6390`) → dort nur Funk-Zyklus + Link-Bruch.
-- [x] Das Wake-Window wird jetzt nach `esp_now_init()` gesetzt (und bei
-      Assoziation erneut), nicht mehr vorher (wirkungslos) →
-      `uart_sleep_espnow_power_save_enable()`, `CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE`
-      (Default **an**).
-- [x] Assoziation mit dem Empfänger-SoftAP ist **optional** (Default **aus**):
-      der Gerätetest zeigte, dass `associated: connected` allein den Takt **nicht**
-      skaliert. Bleibt als Experiment (`CONFIG_ESPNOW_SENDER_ASSOCIATE`).
-- [x] Relay-OTA validiert jetzt das geschriebene Sender-Image (`esp_app_desc_t`,
-      `project_name == "esp32-IR"`) **vor** der Aktivierung – der Sender hat kein USB,
-      ein kaputtes Image wäre nicht wiederherstellbar.
-- [ ] **Am Gerät verifizieren:** Nach dem Flashen müssen `cpu_freq_changes > 0` /
-      `hist_min < 240` werden, während `sender-diag` und der Backfill weiterlaufen.
-      Falls das Wake-Window den Link bricht: `CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=n`
-      (Takt bleibt dann gepinnt), per ESP-NOW-Relay reflashbar.
+## Fix „Sender 240 MHz, 0 Steps" (`feat/sender-associate-dfs`, 2026-10-17)
+**Ergebnis: Auf dem ESP32 classic (IDF v6.1) sind ein zuverlässiger ESP-NOW-Link
+und Funk-Powersave/DFS nicht gleichzeitig zu haben.** Am Gerät verifiziert.
+- Ursache gefunden: `esp_wifi_set_ps(WIFI_PS_MIN_MODEM)` stand in
+  `uart_sleep_init_idf()` **vor** `esp_wifi_init()` → Rückgabe
+  `ESP_ERR_WIFI_NOT_INIT`, still ignoriert. Ohne Modem-Sleep hält der Treiber
+  `ESP_PM_APB_FREQ_MAX` dauerhaft → DFS klebt bei 240 MHz.
+- Der ESP-NOW-Wake-Window-Aufruf wurde von der IDF akzeptiert (`err=0`), half
+  aber allein nicht.
+- Mit **beidem** korrekt aktiv (`ESPNOW_SENDER_ESPNOW_POWER_SAVE=y`):
+  Funk zykelt, DFS könnte skalieren — **aber der ESP-NOW-Link bricht**
+  (Link-Watchdog: `sleep_fallback:1`, Light-Sleep aus).
+- [x] Beide Aufrufe korrekt verdrahtet: `esp_wifi_set_ps()` **nach**
+      `esp_wifi_start()`, Wake-Window (`esp_now_set_wake_window()` vor
+      `esp_wifi_connectionless_module_set_wake_interval()`) ab `esp_now_init()`
+      und bei jeder Assoziation. Ergebnis-Code landet im Diag-Event-Ring.
+- [x] `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y` in `sdkconfig.defaults`
+      (nötig, damit das Wake-Window auch ohne Assoziation wirkt).
+- [x] **Default: Funk bleibt an** (`ESPNOW_SENDER_ESPNOW_POWER_SAVE=n`,
+      Assoziation `ESPNOW_SENDER_ASSOCIATE=n`). „Keine Daten verloren" hat
+      Vorrang: der Takt bleibt gepinnt (240 MHz, 0 Steps) — bewusster Trade-off.
+- [x] Relay-OTA validiert das Sender-Image vor der Aktivierung (kein USB → sonst
+      nicht wiederherstellbar).
+- Hinweis: Mit `test sleep pin 80` läuft der Takt manuell auf 80 MHz; mit
+      `test sleep restore` zurück auf 240. `test cpu` zeigt weiter 0 Steps
+      (der Takt folgt der Last und bleibt mangels Funk-Freigabe oben).
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
 Letzter Commit: `f5239c7` – CI **grün** (Push-Run `38466461726`, PR-Run `38466468521`:

@@ -177,20 +177,30 @@ Two firmware roles are built from one source tree.
   `SENDER_DIAG_ATTEMPTS` (4); a command uses the single-shot
   `sender_diag_exchange_once()` so it cannot run twice. See Espressif issue
   esp-idf#11714 ("ESP-NOW does not release the WiFi module and APB_FREQ_MAX").
-  **The missing piece was `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y`**
-  (in `sdkconfig.defaults`): per the IDF docs `esp_now_set_wake_window()` only
-  takes effect *at connected status* **unless** that option is enabled. Without
-  it the sender's wake window is accepted but never releases the APB lock, so
-  DFS stayed pinned ("240 MHz, 0 steps"). The window is now applied from
-  `esp_now_init()` (after it, where the API is valid) and re-applied from the
-  sender's `WIFI_EVENT_STA_CONNECTED` handler. This is why the earlier opt-in
-  attempt (`36d6390`) failed — it lacked the option.
+  **Two things are needed together, and both are opt-in
+  (`CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE`, default off):**
+  1. `esp_wifi_set_ps(WIFI_PS_MIN_MODEM)` **after `esp_wifi_start()`**. The old
+     call lived in `uart_sleep_init_idf()`, which runs *before* `esp_wifi_init()`,
+     so it returned `ESP_ERR_WIFI_NOT_INIT` and was silently ignored — the
+     driver then holds `ESP_PM_APB_FREQ_MAX` forever and DFS is pinned.
+  2. `esp_now_set_wake_window()` + `esp_wifi_connectionless_module_set_wake_interval()`
+     (window first, then interval), applied from `esp_now_init()` and re-applied
+     from the sender's `WIFI_EVENT_STA_CONNECTED` handler.
+  **Verified on hardware (ESP32 classic, IDF v6.1):** with both on, the API
+  accepts the calls (`err=0`) and the radio does cycle — but the ESP-NOW link
+  then breaks (the link watchdog fires: `sleep_fallback:1`, light sleep off). So
+  the radio-cycling power save and a reliable ESP-NOW link are **not both
+  available on the ESP32 classic**. Since "no data may be lost" wins, the option
+  is **off by default**: the radio stays on and DFS stays pinned at 240 MHz
+  (0 steps). This is a deliberate trade-off, not a bug.
+  `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y` (in `sdkconfig.defaults`) is
+  required for the wake window to apply without an association, should the
+  option be turned on for experiments.
 - **Sender association is optional and OFF by default
   (`CONFIG_ESPNOW_SENDER_ASSOCIATE`, `ESPNOW_SENDER_ASSOC_{SSID,PASSWORD}`).** A
   bench test showed that associating the sender with the receiver SoftAP (station
-  reports `associated: connected`) does **not** by itself make DFS step down —
-  the wake window + `STA_DISCONNECTED_PM_ENABLE` is the actual fix. Association
-  is kept as an experiment only. When on, the sender re-associates on
+  reports `associated: connected`) does **not** by itself make DFS step down.
+  Association is kept as an experiment only. When on, the sender re-associates on
   `STA_DISCONNECTED`; the ESP-NOW broadcast to the receiver AP's BSSID works
   either way.
 - **Relayed sender images are validated before activation.** The sender has no
