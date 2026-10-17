@@ -4,10 +4,14 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "crash_journal.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "mqtt_client.h"
 #include "nvs.h"
+#include "mqtt_events.h"
 #include "mqtt_topics.h"
+#include "version.h"
 
 static const char *TAG = "mqtt";
 
@@ -23,6 +27,27 @@ static esp_mqtt_client_handle_t s_client;
 static bool s_connected;
 static bool s_started;
 static char s_prefix[80];
+
+/* Captured once at start (before anything could change it) so every reconnect
+ * republishes the same boot event. The crash journal is the previous session's
+ * record; on a plain receiver no journal is written, so it is usually absent. */
+static int s_reset_reason;
+static bool s_journal_valid;
+static crash_journal_t s_journal;
+
+/* Publish the retained reboot event to <base>/event/reboot so Home Assistant
+ * can show why the device (re)started. Retained, so a late subscriber still
+ * sees the last boot; republished on every connect. */
+static void mqtt_publish_reboot_event(const mqtt_topics_t *topics)
+{
+    char payload[512];
+    if (mqtt_reboot_event_payload(s_reset_reason, fw_version(), s_journal_valid,
+                                  &s_journal, payload, sizeof(payload)) != 0) {
+        ESP_LOGW(TAG, "Could not build the reboot event payload");
+        return;
+    }
+    esp_mqtt_client_publish(s_client, topics->event_reboot, payload, 0, 0, 1);
+}
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t event_id, void *event_data)
@@ -72,6 +97,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 esp_mqtt_client_publish(s_client, topic, value_payload, 0, 0, 1);
             }
         }
+        mqtt_publish_reboot_event(&topics);
         break;
     }
     case MQTT_EVENT_DISCONNECTED:
@@ -123,6 +149,14 @@ void mqtt_bridge_start(void)
         ESP_LOGE(TAG, "invalid MQTT prefix; MQTT disabled");
         return;
     }
+
+    /* Snapshot the boot facts the reboot event reports. esp_reset_reason() is
+     * stable for the whole session, and the crash journal (when present) is the
+     * previous session's record. */
+    s_reset_reason = (int)esp_reset_reason();
+    bool journal_found = false;
+    s_journal_valid = crash_journal_load(&s_journal, &journal_found) == ESP_OK &&
+                      journal_found;
 
     nvs_handle_t handle;
     char uri[160] = {0};
