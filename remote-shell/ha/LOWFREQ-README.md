@@ -246,6 +246,55 @@ Governor zurueck auf `schedutil` (-> 2.4 GHz), waehrend die andere die Spannung
 noch abgesenkt hat - das Board haengt und der Watchdog rebootet. Genau so ist es
 zweimal passiert (10:18 und 10:37), bevor die Sperre eingebaut war.
 
+## PWM-Periode als Spannungshebel? (2026-10-17, gemessen: NEIN)
+
+Frage: laesst sich die Ausgangsspannung ueber die PWM-**Periode** senken (analog
+zum CPU-Takt, wo der Teiler die Ausgabe ist)? Antwort: **nein, gemessen.**
+
+Die Periode ist beschreibbar (250…15984, Faktor 64, Board stabil), aber sie
+aendert nur die **Schaltfrequenz**, nicht die Spannung. Bei duty=0 gemessen:
+
+| Periode | PWM-Frequenz | gemessene Spannung (ADC ch4) |
+|---|---|---|
+| 999 | 667 kHz | 733,9 mV |
+| 1998 | 334 kHz | 733,0 mV |
+| 3996 | 167 kHz | 735,2 mV |
+| 7992 | 83 kHz | 729,1 mV |
+| 15984 | 42 kHz | 733,4 mV |
+
+Periode 16-fach variiert -> Spannung im Rauschen (±3 mV). Auch bei festem
+Tastverhaeltnis identisch. Der Grund: die Spannung folgt `duty/period`, und bei
+duty=0 ist dieser Bruch 0, unabhaengig von der Periode.
+
+**Nebenbefund (wichtig):** der Test bei 1.908 MHz mit wachsender Periode und
+festem duty (222) **hing das Board** bei P=5994 (Modellwert 693 mV), waehrend
+P=3996 (700 mV) noch stabil war. Das ist aber die bekannte **Silizium-Grenze**
+des hohen Takts, kein Perioden-Effekt (die Periode aendert die Spannung nicht).
+Werkzeuge: `pwm_period_test.py`, `pwm_shift_test.py` (nicht persistent).
+
+## Spannung erstmals MESSBAR (ADC, 2026-10-17)
+
+Es gibt keinen Spannungsregler-Sensor, aber der SARADC (`meson-g12a-saradc`) hat
+einen Kanal, der VDDCPU_A monoton folgt: **ch4**. Selbstkalibrierend ueber die
+Kanaele `gnd`=0, `0.25vdd`=449,6, `0.5vdd`=900,0, `0.75vdd`=1349,6 mV
+(1,8 V Referenz, `scale` = 0,439453125 mV/LSB). Werkzeug: `adc_voltage.py`.
+
+Gemessene Kennlinie (big, 15,625 MHz, Periode 999):
+
+| Ziel (Modell) | duty | gemessen |
+|---|---|---|
+| 731 mV | 142 | 766,8 mV |
+| 700 mV | 56 | 746,6 mV |
+| 680 mV | 0 | 722,0 mV |
+| 675 mV (geklemmt) | 0 | 728,2 mV |
+| 660 mV (geklemmt) | 0 | 733,9 mV |
+| 640 mV (geklemmt) | 0 | 720,3 mV |
+
+**Der echte Boden liegt bei ~730 mV, nicht bei den 680 mV aus dem DT.** Die
+DT-Angabe ist konservativ. Alle Ziele unter 680 mV klemmen auf duty 0 und
+aendern die gemessene Spannung nicht. Die Absenkung 731 -> 680 mV (Modell) ist
+real ~767 -> 722 mV, also **~45 mV echte Ersparnis** - mehr geht nicht.
+
 ## Ablauf
 
 ```bash
