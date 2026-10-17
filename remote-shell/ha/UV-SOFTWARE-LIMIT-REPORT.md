@@ -1,0 +1,285 @@
+# Software-Grenze der CPU-Versorgungsspannung (ODROID-N2+) - Host-Bericht
+
+> **Geltungsbereich.** Reine Host-/Repo-Analyse. **Kein Board angefasst**, kein
+> remote-shell-Kanal, keine Register/PWM/OPP/Spannung geschrieben, keine
+> laufenden Dienste oder Systemdateien geaendert, keine PRs veraendert.
+> Alle Kernel-Zitate stammen aus `torvalds/linux` `master` (Stand 2026-10-17),
+> die DT-Werte aus denselben Quellen. Repo-Messwerte werden nur zitiert, nicht
+> neu erhoben. **Hypothesen sind als solche markiert.**
+
+## 1. Kurzantwort
+
+**Der Treiber erzeugt bereits den kleinsten gueltigen PWM-Wert (LOW-Feld = 0);
+eine reine Softwareaenderung innerhalb der vorhandenen Ansteuerung reicht nach
+aktuellem Nachweis nicht aus, um tiefer als ~680-730 mV zu kommen.**
+
+Begruendung in einem Satz: Der `pwm-regulator` ist ein **invertierter
+Continuous-Mode-Regler**; bei `regulator-min-microvolt` (= 680000 uV) ist der
+relative Tastgrad **100** und das meson-Register-**LOW-Feld 0**. Niedriger geht
+der Registerwert nicht (`lo` ist ein Zaehler `0..cnt`). Ein Absenken von
+`regulator-min-microvolt` **benennt den Boden nur um**, es erzeugt keinen
+kleineren Registerwert (Kapitel 4). Das ist die Klasse **B** aus der
+Aufgabenstellung. Ob die **reale** Ausgangsspannung am Boden schon das
+Bauteil-/Schaltungsminimum ist, bleibt **hypothetisch** (Kapitel 5/6), weil die
+einzige Messquelle (SARADC) die PWM-Welligkeit mittelt und die Bauteilkennlinie
+(MP8756GD) nicht im Repo vermessen ist.
+
+## 2. Vollstaendiger Spannungssteuerpfad (mit Zeilenbelegen)
+
+Quellen: `drivers/cpufreq/cpufreq-dt.c`, `drivers/regulator/core.c`,
+`drivers/regulator/pwm-regulator.c`, `include/linux/pwm.h`,
+`drivers/pwm/pwm-meson.c`.
+
+| # | Stufe | Datei / Funktion / Zeile | Wirkung |
+|---|---|---|---|
+| 1 | OPP -> Zielspannung | `cpufreq-dt.c:56` `dev_pm_opp_set_rate()` | setzt Takt **und** `opp-microvolt` der OPP |
+| 2 | Regler-Core: Klemmen | `core.c:442-457` `regulator_check_voltage()` | `if (*min_uV < rdev->constraints->min_uV) *min_uV = ...->min_uV;` -> **Anforderung < 680 mV wird nach OBEN auf 680 mV geklemmt** (nicht abgelehnt) |
+| 3 | Regler-Core: Dispatch | `core.c:4056-4094` `regulator_set_voltage_unlocked()`; `core.c:4195` / `core.c:4782` `_regulator_do_set_voltage()` | reicht `min_uV/max_uV` weiter; `core.c:3928-3929` addiert `uV_offset` (hier 0, nicht gesetzt) |
+| 4 | Regler-Core: Ops-Wahl | `core.c:3740` / `1273` `continuous_voltage_range` | Continuous-Modus -> `.set_voltage` (nicht `.set_voltage_sel`) |
+| 5 | `pwm-regulator` | `pwm-regulator.c:190-233` `pwm_regulator_set_voltage()` | `min_uV = rdev->constraints->min_uV` (680000); `diff_uV = 1040000-680000 = 360000`; `dutycycle = DIV_ROUND_CLOSEST_ULL((req-min)*100, diff)`; `max_uV_duty(0) < min_uV_duty(100)` -> `dutycycle = 100 - dutycycle`; dann `pwm_set_relative_duty_cycle(&pstate, dutycycle, 100)` (Z. 227) und `pwm_apply_might_sleep()` (Z. 229) |
+| 6 | Continuous-Init | `pwm-regulator.c:298-323` `pwm_regulator_init_continuous()` | liest `pwm-dutycycle-range` -> `min_uV_dutycycle=100`, `max_uV_dutycycle=0`; `pwm-dutycycle-unit` nicht gesetzt -> Default **100** (Prozent) |
+| 7 | PWM-API | `pwm.h:255-265` `pwm_set_relative_duty_cycle()` | `duty_cycle[ns] = DIV_ROUND_CLOSEST_ULL(duty*period, scale)`; lehnt `duty_cycle > scale` mit `-EINVAL` ab (Z. 258) |
+| 8 | meson-PWM | `pwm-meson.c:159-222` `meson_pwm_calc()` | `cnt = fin_freq*period/1e9`; `duty==period` -> `hi=cnt, lo=0`; `duty==0` -> `hi=0, lo=cnt`; sonst `hi=duty_cnt, lo=cnt-duty_cnt` |
+| 9 | Register | `pwm-meson.c:241-242` | `value = FIELD_PREP(PWM_HIGH_MASK, hi) | FIELD_PREP(PWM_LOW_MASK, lo)` -> `(hi<<16)|lo`; `PWM_HIGH_MASK=GENMASK(31,16)`, `PWM_LOW_MASK=GENMASK(15,0)` (`pwm-meson.c:47-48`) |
+
+**Antworten auf die Leitfragen**
+
+- *Wo wird eine Anforderung < 680 mV begrenzt?* In `core.c:454`
+  (`regulator_check_voltage`) - geklemmt, **nicht** abgelehnt. `-EINVAL` gaebe es
+  nur, wenn nach dem Klemmen `min_uV > max_uV` waere.
+- *Welche Spannung erreicht `pwm_regulator_set_voltage()`?* Immer
+  `[max(req,680000), min(req,1040000)]` - der geklemmte Wert.
+- *Wie wird der Tastgrad berechnet?* `dutycycle = 100 - round((req-680000)*100/360000)`
+  (invertierte Logik, `max_uV_duty < min_uV_duty`).
+- *Wie ins Register?* `pwm.h` rechnet in ns, `pwm-meson` in Zaehler `cnt`;
+  `hi` = High-Anteil (Bits 31..16), `lo` = Low-Anteil (Bits 15..0).
+- *Ist Tastgrad 0 der kleinste Ausgangswert?* **Ja.** Relativer Tastgrad 0
+  entspricht `max_uV`; das **Low-Feld** ist dann `cnt` (maximal). Der kleinste
+  *Register*-Wert (`lo=0`) tritt bei relativem Tastgrad 100 = `min_uV` = 680 mV
+  auf. Genau das ist die Untergrenze.
+- *Weitere Begrenzungen?* Ja, aber sie verschaerfen nur nach oben:
+  `pwm_set_relative_duty_cycle` lehnt `duty>scale` ab (`pwm.h:258`); die
+  meson-Registermaske fasst nur 16+16 Bit; `cnt>0xffff` wird abgelehnt
+  (`pwm-meson.c:196`). Keine davon erlaubt einen kleineren Wert als `lo=0`.
+
+### 2.1 Numerische Gegenprobe (Host, `verify_chain.py`-Logik)
+
+Modell `LOW = round((1 - duty_rel/100) * period)` gegen die **Repo-Messwerte**
+(`LOWFREQ-README.md`, big, Periode 999):
+
+| req | Modell LOW | Repo LOW | Repo gemessen |
+|---|---|---|---|
+| 731 mV | 140 | 142 | 766,8 mV |
+| 700 mV | 60 | 56 | 746,6 mV |
+| 680 mV | 0 | 0 | 722,0 mV |
+
+Die Uebereinstimmung (Abweichung <= 4 Zaehler = 1,4 mV) **bestaetigt die Kette**:
+die Repo-`duty`-Werte sind das Register-LOW-Feld, und die Klemme sitzt genau an
+`regulator-min-microvolt`.
+
+## 3. Die 680-mV-Grenze: Software oder Hardware?
+
+| Groesse | Wert | Herkunft | Art |
+|---|---|---|---|
+| `regulator-min-microvolt` | 680000 | `meson-g12b-odroid-n2-plus.dts:19,26` (Overlay ueber Basis-N2: 721000) | **Software-Klemme** (Regler-Core) |
+| `regulator-max-microvolt` | 1040000 | ebd. | **Software-Klemme** |
+| `pwm-dutycycle-range` | `<100 0>` | `meson-g12b-odroid.dtsi:149,168` | **Abbildung** (invertierte Logik) |
+| PWM-Periode (DT) | 1500 ns (N2+), 1250 ns (N2) | `-n2-plus.dts:22,29` / `-odroid.dtsi:148,167` | **Anforderung**, Treiber rundet auf `cnt` (Repo: 999/333) |
+| `pwm-dutycycle-unit` | nicht gesetzt -> 100 | Default `pwm-regulator.c:302` | **Abbildung** |
+| OPP-Spannungen | big 731000..1011000, little 761000..1001000 | `meson-g12b-a311d.dtsi` | **Software-Sollwerte** (Mainline autoritativ) |
+
+**Reine Softwaregrenzen:** `regulator-min/max-microvolt`, `pwm-dutycycle-range`,
+die OPP-Spannungen. Sie sind im DT frei aenderbar.
+**Aus der Beschaltung abgeleitet:** die *Bedeutung* von Tastgrad 0..100 als
+Spannung. Der DT sagt: Tastgrad 100 <-> 680 mV, Tastgrad 0 <-> 1040 mV. Das ist
+die Werkskalibrierung des Bauteils, nicht durch Linux messbar.
+
+**Herkunft der 680000 (Commit-/Quellenlage):**
+- Der Mainline-DT **nennt die Bauteile** im Kommentar:
+  `VDDCPU_A` = **MP8756GD** (`meson-g12b-odroid.dtsi:136-140`),
+  `VDDCPU_B` = **Silergy SY8120B1ABC** (Z. 155-159). Der "pwm-regulator" ist also
+  ein per PWM gefilterter **Feedback-Eingang** eines Buck-Converters.
+- Commit `d14734a04a8a` ("enable DVFS", N2) nennt den Bereich
+  *"0.73V to 1.01V using 2 distinct PWM outputs ... with an inverse duty-cycle"* -
+  das sind die **Basis-N2**-Werte (721000..1022000).
+- Commit `98d24896ee11` (N2+): *"The rev. C support a slightly higher VDDCPU_A &
+  VDDCPU_B voltages"* -> setzt **680000..1040000**.
+- **Ein Commit/Beleg, der 680 mV als Bauteil-Minimum *begruendet*, wurde nicht
+  gefunden.** Der N2+ erweitert den Bereich gegenueber dem N2 nach **unten**
+  (721 -> 680) und nach **oben** (1022 -> 1040); die Untergrenze ist damit eine
+  **plausible, aber unbelegte** Werksangabe. Ob 680 mV die FB-Kennlinie oder nur
+  eine konservative Rundung ist, ist aus den Quellen **nicht** entscheidbar.
+
+**Drei Begriffe sauber getrennt:**
+1. niedrigste *zulaessige Anforderung* = 680000 uV (Software-Klemme),
+2. niedrigster *vom Treiber erzeugbarer PWM-Wert* = LOW-Feld 0 (rel. Tastgrad 100),
+3. niedrigste *reale Ausgangsspannung* = **unbekannt**; gemessen ~722-730 mV,
+   aber durch die ADC-Mittelung nach oben verzerrt (Kapitel 5).
+
+## 4. Voltage-Table-Modus: umgeht er die Grenze?
+
+Im Table-Modus (`pwm-regulator.c:72-95` `pwm_regulator_set_voltage_sel()`) ist
+`pwm_set_relative_duty_cycle(&pstate, duty_cycle_table[sel].dutycycle, 100)` (Z. 90)
+gesetzt - der Tabellen-Tastgrad ist **direkt** der relative Wert (Prozent).
+
+- `.map_voltage = regulator_map_voltage_iterate` (`pwm-regulator.c:242`): waehlt
+  nur **vorhandene** Tabelleneintraege; kein Eintrag -> `-EINVAL`, **kein Klemmen**.
+- `regulator-min/max-microvolt` wirken im Table-Modus **nur als Zulassigkeits-
+  klemme** (`core.c:1273`, `3740`), **nicht** als Abbildung.
+- **Entscheidend:** Der kleinste gueltige Tabellen-Tastgrad ist 0
+  (`pwm.h:258` lehnt `duty > 100` ab, negative Werte existieren nicht). Bei
+  Tastgrad 0 ist das LOW-Feld aber `cnt` - also **maximal**, nicht minimal. Ein
+  Tabelleneintrag mit *noch kleinerem* LOW-Feld gibt es strukturell nicht.
+- Ein Tabellenwert wie `(600000, 100)` wuerde nominal 600 mV behaupten, aber
+  erzeugt **denselben Registerwert (LOW=0)** wie `(680000, 100)` - dieselbe
+  "Boden umbenennen"-Falle.
+
+**Fazit Kapitel 4:** Der Table-Modus **entkoppelt** zwar die Kalibrierung von
+`regulator-min/max` (nuetzlich, um einzelne OPP-Punkte unabhaengig zu setzen),
+**durchbricht aber nicht die `lo=0`-Untergrenze**. Er kann keinen Registerwert
+unter 0 erzeugen. (Hypothese: Ein Table-Modus mit *echter* Hardware-Stufe
+zwischen 680 und 1040 mV koennte die 3,6-mV-Quantisierung des Prozent-Rasters
+verbessern - das ist aber eine **Auflosungs**-, keine **Bodens**-Frage.)
+
+## 5. ADC-Messung: was sie belegt und was nicht
+
+Messpfad: SARADC `meson-g12a-saradc` (`drivers/iio/adc/meson_saradc.c`),
+IIO-Kanal **ch4** (physischer Kanal `NUM_CHAN_4`).
+
+- **Kanalzuordnung:** ch8..12 sind die internen MUX-Kanaele `NUM_MUX_0_VSS`,
+  `_1_VDD_DIV4`, `_2_VDD_DIV2`, `_3_VDD_MUL3_DIV4`, `_4_VDD`
+  (`meson_saradc.c:296-300`). Die Selbstkalibrierung nutzt VDD_DIV4 und
+  VDD_MUL3_DIV4 (`meson_saradc.c:1146-1171`, `nominal0 = 2^res/4`,
+  `nominal1 = 2^res*3/4`). **ch4 selbst ist ein externer Eingang**; dass er
+  VDDCPU_A folgt, ist eine **empirische Repo-Feststellung**, keine dokumentierte
+  Schaltungszusicherung.
+- **Aufloesung/Referenz:** 12 Bit (`meson_saradc.c:1267`), `vref_voltage = 1`
+  (Z. 1257, `VREF_VDDA`) -> ~1,8 V Vollausschlag, `scale = 0.439453125 mV/LSB`.
+- **Mittelung:** `read_raw()` nutzt `MEAN_AVERAGING, EIGHT_SAMPLES`
+  (`meson_saradc.c:689`) und **leert vorher das FIFO** (Z. 651). Die angezeigten
+  `*_mean_raw`-Kanaele sind also das **Mittel ueber 8 Wandlungen**.
+- **Konsequenz fuer die Aussagekraft:** Ein solcher Mittelwert erfasst **keine
+  kurzfristigen Einbrueche** und mittelt die **PWM-Restwelligkeit** (667 kHz)
+  nicht zuverlaessig weg - die reale Spannung schwankt pro PWM-Periode. Die
+  gemessenen ~722 mV bei Tastgrad 0 sind daher eine **obere Schranke** der
+  mittleren Ausgangsspannung, nicht die Spitzen-/Minimalspannung.
+- **Wiederholbarkeit:** In `LOWFREQ-README.md` streuen die Tastgrad-0-Werte
+  zwischen **720,3 und 733,9 mV** (5 Messreihen) - also **~14 mV Spanne**. Das
+  ist **groesser** als die reklamierte Restspanne zum DT-Boden. Die Werte belegen
+  damit **einen Boden**, aber **nicht** dessen exakte Hoehe.
+- **VDDCPU_B:** Es gibt **keinen** unabhaengigen Softwarekanal, der
+  nachweislich VDDCPU_B folgt (im Repo ist ch5 konstant 907 mV). Fuer den
+  little-Cluster existiert **keine** ADC-Verifikation - nur die Regler-Klemme.
+
+## 6. Clustervergleich VDDCPU_A vs. VDDCPU_B
+
+| | VDDCPU_A (big, A73) | VDDCPU_B (little, A53) |
+|---|---|---|
+| Regler-Knoten | `regulator-vddcpu-a` | `regulator-vddcpu-b` |
+| Bauteil (DT-Kommentar) | MP8756GD | Silergy SY8120B1ABC |
+| PWM | `pwm_ab` Kanal 0, 1500 ns | `pwm_AO_cd` Kanal 1, 1500 ns |
+| min/max | 680000 / 1040000 | 680000 / 1040000 |
+| Periode (Register, Repo) | 999 | 333 |
+| ADC-Kanal | ch4 (empirisch) | **keiner** |
+| Gemessener Boden | ~722-734 mV | nicht messbar |
+
+Beide Cluster haben **dieselbe Software-Klemme** und **denselben `lo=0`-Boden**.
+Der Unterschied ist die **Periode** (999 vs. 333) -> Registerauflosung 0,36 mV
+(big) vs. 1,08 mV (little). Der little-Cluster hat **keine** Messbestaetigung;
+jede Aussage ueber seine reale Untergrenze ist **Hypothese**.
+
+## 7. Grenzentabelle
+
+| Mechanismus | Beleg | Verhindert niedrigere Spannung? | Softwareseitig aenderbar? | Risiko/Unsicherheit |
+|---|---|---|---|---|
+| `regulator-min-microvolt = 680000` | `-n2-plus.dts:19,26`; `core.c:454` | **Ja** (klemmt Anforderungen nach oben) | Ja (DT/Overlay) - **aber wirkungslos** (s. u.) | Kein Gewinn, siehe naechste Zeile |
+| `lo = 0`-Boden des meson-Registers | `pwm-meson.c:205-207,241` | **Ja** (kein Registerwert < 0) | **Nein** | Harte Abbildungsgrenze |
+| Invertierte Abbildung `<100 0>` | `-odroid.dtsi:149,168`; `pwm-regulator.c:223` | Nur als Definition des Bodens | Ja, aber verschiebt alle Punkte | Kalibrierfehler, wenn willkuerlich |
+| Prozent-Raster (`unit=100`) | `pwm-regulator.c:302`; `pwm.h:258` | Nein (nur 3,6-mV-Auflosung) | Ja (`pwm-dutycycle-unit`) | Feineres Raster moeglich, **Boden bleibt** |
+| Voltage-Table-Modus | `pwm-regulator.c:90,242` | **Nein** (entkoppelt nur Kalibrierung) | Ja | Kein `lo<0`; Zwischenwerte entfallen |
+| OPP-Spannungen | `meson-g12b-a311d.dtsi` | Nur obere Punkte | Ja (Overlay) | Werte unter 680 mV klemmen auf `lo=0` |
+| `cpu-freq-guard` / `cpufrequtils` | `remote-shell/ha/cpu-freq-guard.sh` | **Nein** (nur Frequenz) | Ja | Frequenz-, nicht Spannungsgrenze |
+| ADC-Mittelung (8 Samples, FIFO-Clear) | `meson_saradc.c:689,651` | **Nein** (Messartefakt) | Nein | Verzerrt gemessenen Boden nach oben |
+
+## 8. Messbewertung
+
+- Die ADC-Werte **belegen einen Boden** (Tastgrad 0 ist reproduzierbar der
+  tiefste Punkt) und **bestatigen die Regler-Klemme** bei 680 mV nominal.
+- Sie **belegen nicht**, dass die *reale* Ausgangsspannung bei 680 mV liegt:
+  gemessen ~722-734 mV, Streuung ~14 mV, und die 8-Sample-Mittelung mittelt die
+  PWM-Welligkeit nicht weg. Der DT-Wert ist damit **konservativ**, der reale
+  Boden liegt **darueber** - aber **wie weit**, ist aus den vorhandenen Daten
+  **nicht** belastbar ableitbar.
+- Fuer VDDCPU_B existiert **keine** Messung.
+
+## 9. Naechster sicherer Schritt (rein lesend)
+
+Die aussagekraeftigste **nicht-invasive** Pruefung, die noch fehlt, ist eine
+**Korrelationsmessung ADC gegen einen unabhängigen Spannungsreferenzpunkt** -
+aber ohne Boardzugriff (Vorgabe) bleibt als *naechster* Schritt:
+
+1. **Statische Aufloesung des Registers pruefen:** an einer Kopie des laufenden
+   DT/Overlays (`/proc/device-tree`) verifizieren, dass `pwm-dutycycle-unit`
+   wirklich Default 100 ist und `pwm-dutycycle-range` exakt `<100 0>` - das
+   entscheidet, ob das 3,6-mV-Raster greift (rein lesend, kein Schreiben).
+2. **Bauteilkennlinie beschaffen:** Datenblatt MP8756GD / SY8120B1ABC
+   (FB-Referenzspannung, min. Ausgang) - damit laesst sich pruefen, ob 680 mV
+   bereits die Bauteil-Untergrenze ist. **Ohne dieses Datenblatt bleibt die
+   Hardware-/Softwaregrenze nicht unterscheidbar.**
+3. Erst danach (mit Freigabe, **nicht** in diesem Auftrag) eine einzige
+   kontrollierte Messreihe Tastgrad 0 vs. 1-5, um zu sehen, ob das Register-LOW
+   unterhalb des bisherigen Minimums ueberhaupt noch die Spannung senkt.
+
+## 10. Einordnung
+
+- **B: Der Treiber erzeugt bereits den kleinsten gueltigen PWM-Wert.** Der
+  Register-Boden (`lo=0`) ist nach Quellcode nachgewiesen; eine Softwareaenderung
+  innerhalb der vorhandenen Ansteuerung erzeugt **keinen** kleineren Wert.
+- **A: Eine softwareseitige Begrenzung ist nachgewiesen** (die 680-mV-Klemme in
+  `core.c:454` und `regulator-min-microvolt`), **aber ihre Aufhebung erweitert den
+  realen Bereich nicht** - sie benennt den Boden nur um.
+- **C: Die Unterscheidung Software- vs. Hardwaregrenze fuer die *reale*
+  Ausgangsspannung ist offen.** Die ADC-Daten reichen dafuer nicht
+  (Mittelung, ~14 mV Streuung, kein VDDCPU_B-Kanal).
+- **Eine Hardwareaenderung ist NICHT bewiesen** und wird hier nicht empfohlen.
+
+**Gesamtfazit:** Innerhalb der bestehenden PWM-Ansteuerung ist das Minimum
+erreicht (Klasse **B**). Der einzige verbleibende Hebel waere eine **andere
+Hardwarebeschaltung** (andere FB-Kennlinie) - das ist aber **unbewiesen** und
+setzt das Datenblatt der genannten Bauteile voraus.
+
+## 11. Reproduktion (Host)
+
+```bash
+# Reglerkette 1:1 gegen die Repo-Messwerte nachrechnen (kein Board):
+python3 /tmp/verify_chain.py
+# Quellen (nur lesend geladen):
+#   drivers/regulator/pwm-regulator.c, drivers/regulator/core.c,
+#   drivers/pwm/pwm-meson.c, include/linux/pwm.h,
+#   arch/arm64/boot/dts/amlogic/meson-g12b-odroid-n2-plus.dts,
+#   arch/arm64/boot/dts/amlogic/meson-g12b-odroid.dtsi,
+#   drivers/iio/adc/meson_saradc.c
+```
+
+## 12. Quellen
+
+1. `drivers/regulator/pwm-regulator.c` (Continuous/Table, Zeilen wie zitiert)
+2. `drivers/regulator/core.c` (`regulator_check_voltage` 442-457,
+   `regulator_set_voltage_unlocked` 4056-4094, `_regulator_do_set_voltage` 110ff.)
+3. `include/linux/pwm.h` (`pwm_set/get_relative_duty_cycle` 212-265)
+4. `drivers/pwm/pwm-meson.c` (`meson_pwm_calc` 159-222, Register 241-242)
+5. `drivers/cpufreq/cpufreq-dt.c` (`dev_pm_opp_set_rate`)
+6. `drivers/iio/adc/meson_saradc.c` (Kanaele 287-301, Kalibrierung 1140-1185,
+   Mittelung 689, Param g12a 1263-1268)
+7. `arch/arm64/boot/dts/amlogic/meson-g12b-odroid-n2-plus.dts` (680000..1040000)
+8. `arch/arm64/boot/dts/amlogic/meson-g12b-odroid.dtsi` (Bauteilnamen, `<100 0>`)
+9. `arch/arm64/boot/dts/amlogic/meson-g12b-a311d.dtsi` (OPP-Tabellen)
+10. Commit `d14734a04a8a` "arm64: dts: meson-g12b-odroid-n2: enable DVFS"
+11. Commit `98d24896ee11` "arm64: dts: meson: add support for the ODROID-N2+"
+12. Commit `f7d933388f11` "arm64: dts: meson: odroid-n2 plus: fix vddcpu_a pwm"
+13. Repo (nur zitiert): `remote-shell/ha/LOWFREQ-README.md`,
+    `remote-shell/ha/UV-README.md`, `remote-shell/ha/PWM-REGULATOR-NOTES.md`,
+    `remote-shell/ha/pwm_reg_model.py`, `remote-shell/ha/adc_voltage.py`,
+    `remote-shell/ha/gen_lowfreq_dts.py`, `remote-shell/ha/cpu-freq-guard.sh`
+
+Stand: 2026-10-17. Host-Analyse, kein Boardzugriff.
