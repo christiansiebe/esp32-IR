@@ -68,21 +68,27 @@ config ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS
         dropping ESP-NOW requests from the receiver.
 
 config ESPNOW_SENDER_ESPNOW_POWER_SAVE
-    bool "Sender: ESP-NOW connectionless power save (experimental)"
-    default n
+    bool "Sender: ESP-NOW connectionless power save"
+    default y
     depends on ESPNOW_SENDER_LIGHT_SLEEP
+    depends on ESPNOW_SENDER_ASSOCIATE
 
     help
         Enable the periodic ESP-NOW wake window above so the Wi-Fi driver
         releases its ESP_PM_APB_FREQ_MAX lock and the sender can actually
-        DFS down / light-sleep. OFF by default: on the original ESP32 a wake
-        window smaller than the interval turns the radio off part of every
-        cycle and was observed to break the ESP-NOW link to the receiver
-        ("sender connects no more"), even though the docs list the API as
-        supported. Leave this off (the sender then keeps the Wi-Fi radio on,
-        exactly as before this option existed) unless you can bench-verify the
-        link while it is on. When enabled, keep the window well below the
-        interval and expect diag/history requests to rely on the retry path.
+        DFS down / light-sleep. The window is applied from the sender's
+        WIFI_EVENT_STA_CONNECTED handler, i.e. only once the station is
+        associated with the receiver SoftAP: per the IDF docs
+        esp_now_set_wake_window() only takes effect at connected status, and on
+        an unassociated station it only cycles the radio without releasing the
+        APB lock (and was observed to break the ESP-NOW link). So this option
+        requires ESPNOW_SENDER_ASSOCIATE and is on by default together with it.
+
+        The radio is awake for ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS out of every
+        interval; a request that arrives while the radio is off is retried by
+        the receiver. Turn this off (keeping the association) to fall back to
+        DFS-only power saving, where the clock scales but light sleep never
+        engages.
 
 config ESPNOW_SENDER_ASSOCIATE
     bool "Sender: associate with the receiver SoftAP for Wi-Fi modem sleep"

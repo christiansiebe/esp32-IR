@@ -590,6 +590,13 @@ static void wifi_event_handler(void *arg,
         g_wifi_connected = true;
         g_espnow_channel = event->channel;
         ESP_LOGI(TAG, "Connected to configured Wi-Fi on channel %u", event->channel);
+#if CONFIG_ESPNOW_ROLE_SENDER
+        /* Now that the station is associated, enable the ESP-NOW connectionless
+         * wake window: only at connected status does the Wi-Fi driver release
+         * ESP_PM_APB_FREQ_MAX between wake windows, which is what lets DFS step
+         * down and light sleep engage ("240 MHz, 0 steps" otherwise). */
+        uart_sleep_espnow_power_save_enable();
+#endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *event = event_data;
         g_wifi_connected = false;

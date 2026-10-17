@@ -156,6 +156,13 @@ static inline void uart_sleep_note_short_sleep(uart_sleep_ctrl_t *s)
  * Declared unconditionally so the sender call sites need no #if; the functions
  * are no-ops when CONFIG_ESPNOW_SENDER_LIGHT_SLEEP is off. */
 bool uart_sleep_init_idf(void);
+
+/* Enable the ESP-NOW connectionless wake window. Call once the station is
+ * associated (from WIFI_EVENT_STA_CONNECTED): esp_now_set_wake_window() only
+ * takes effect at connected status, and the wake window is what lets the Wi-Fi
+ * driver release ESP_PM_APB_FREQ_MAX so DFS/light sleep can engage. No-op when
+ * the feature is compiled out. */
+void uart_sleep_espnow_power_save_enable(void);
 void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t received,
                                bool awaiting);
 void uart_sleep_note_uart_idle(void);

@@ -166,12 +166,13 @@ jobs:
           grep -q '^CONFIG_ESPNOW_SENDER_ASSOCIATE=y$' sdkconfig
           grep -a -q 'for Wi-Fi modem sleep' "build/sender/esp32-IR.bin"
           echo "Sender image associates with the receiver AP for modem sleep"
-          # The ESP-NOW connectionless wake window would let the Wi-Fi driver
-          # release its APB lock, but on the original ESP32 it was observed to
-          # break the link, so it is opt-in and OFF by default. Assert the
-          # default stays off so a sender image never ships with the radio
-          # cycling unless someone deliberately enables it.
-          ! grep -q '^CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=y$' sdkconfig
+          # The ESP-NOW connectionless wake window is enabled together with the
+          # association: only at connected status does the Wi-Fi driver release
+          # ESP_PM_APB_FREQ_MAX, so without it the clock stays pinned at 240 MHz
+          # (0 DFS steps). Assert both the flag and the compiled-in call site.
+          grep -q '^CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=y$' sdkconfig
+          grep -a -q 'ESP-NOW power save on: radio wakes every' "build/sender/esp32-IR.bin"
+          echo "Sender image enables the ESP-NOW wake window once associated"
 
       - name: Stage firmware and flash files
         shell: bash
