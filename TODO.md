@@ -1,5 +1,21 @@
 # To-do – esp32-IR
 
+## NEU (2026-10-17): Laufzeit-Knöpfe überleben Reboot + OTA (NVS)
+**Bisher waren `set cpu|freq|cpu-min|sleep|retries` RAM-only** — ein Reboot warf
+sie auf die Compile-Time-Defaults zurück, also musste man zum dauerhaften Ändern
+des Takts doch flashen. Jetzt liegen sie in NVS (Namespace `rtcfg`, versionierter
+Blob):
+- `set …` schreibt den Blob; `reset-config` löscht ihn.
+- `runtime_config_load()` liest ihn in `active_runtime_config()` und klemmt ihn
+  mit `runtime_config_clamp()` auf den Decken-Wert des laufenden Builds — ein
+  Image mit kleinerem `CONFIG_ESPNOW_CPU_MAX_MHZ` kann keinen zu hohen Takt
+  wiederherstellen.
+- `apply_power_management()` wendet die geladene Config beim Boot an (Sender über
+  `uart_sleep_set_pm_override`/`_set_enabled`, Empfänger direkt via `esp_pm_configure`).
+- Host-Test `test/test_runtime_config.c` um die clamp-Fälle erweitert (36 Checks).
+- [ ] Am Empfänger verifizieren: `set freq 80` → `reboot` → `config` zeigt
+      `cpu=80/80` (ohne Neubau).
+
 ## Empfänger „AP aus" (`feat/receiver-ap-off`, 2026-10-17) – PR #13
 **Ergebnis: AP darf aus — aber nur über die Compile-Time-Option
 `CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y`, nie im laufenden Betrieb.**

@@ -113,6 +113,34 @@ int main(void)
     CHECK(!runtime_config_set(&cfg, "retries", "99", 240, err, sizeof(err)),
           "out-of-range retries rejected");
 
+    /* clamp(): a value restored from NVS is forced into what this build allows.
+     * This is the guard that lets a persisted 'set' survive an OTA into an image
+     * with a different ceiling. */
+    runtime_config_t stored = {.cpu_mhz = 240, .cpu_min_mhz = 40,
+                               .light_sleep = false, .espnow_retries = 3};
+    runtime_config_clamp(&stored, 80);
+    CHECK(stored.cpu_mhz == 80 && stored.cpu_min_mhz == 40,
+          "a 240 MHz value restored into an 80 MHz build clamps to 80");
+    stored.cpu_mhz = 240;
+    stored.cpu_min_mhz = 240;
+    runtime_config_clamp(&stored, 80);
+    CHECK(stored.cpu_mhz == 80 && stored.cpu_min_mhz == 80,
+          "a pinned 240 MHz value clamps the floor down with the ceiling");
+    stored.cpu_mhz = 200; /* not a DFS step */
+    stored.cpu_min_mhz = 0;
+    runtime_config_clamp(&stored, 240);
+    CHECK(stored.cpu_mhz == 160 && stored.cpu_min_mhz == 40,
+          "a non-step value snaps and the floor is raised to 40");
+    stored.cpu_mhz = 0;
+    stored.cpu_min_mhz = 0;
+    runtime_config_clamp(&stored, 240);
+    CHECK(stored.cpu_mhz == 80, "a zeroed value clamps up to the 80 MHz minimum");
+    stored.cpu_mhz = 240;
+    stored.cpu_min_mhz = 40;
+    stored.espnow_retries = 99;
+    runtime_config_clamp(&stored, 240);
+    CHECK(stored.espnow_retries == 10, "retries above 10 clamp to 10");
+
     /* reset restores the defaults. */
     cfg = runtime_config_reset(&cfg);
     runtime_config_t defaults = runtime_config_defaults();

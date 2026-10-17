@@ -1,9 +1,11 @@
 /* Runtime test knobs for the firmware test console.
  *
- * These are RAM-only overrides so a new run can be started (and a threshold
- * changed) without reflashing; a reboot restores the compile-time defaults.
- * The parsing/clamping core is pure C and host-tested (test_runtime_config.c);
- * applying the values to the hardware lives in the IDF glue. */
+ * Changed through the console ('set' / 'reset-config') and persisted in NVS, so
+ * a value survives a reboot and an OTA (no reflash needed). A build with a
+ * different ceiling clamps a restored value back into range; 'reset-config'
+ * erases the stored blob and returns to the compile-time defaults. The
+ * parsing/clamping core is pure C and host-tested (test_runtime_config.c);
+ * applying the values to the hardware and the NVS glue live in the IDF side. */
 #ifndef RUNTIME_CONFIG_H
 #define RUNTIME_CONFIG_H
 
@@ -51,6 +53,13 @@ bool runtime_config_parse_bool(const char *text, bool *out);
  * valid. *cfg is only modified on success. */
 bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *value,
                         uint32_t ceiling_mhz, char *err, size_t err_size);
+
+/* Clamp every field into the range the current build allows: the CPU ceiling to
+ * [80, min(240, ceiling_mhz)] snapped to a real DFS step, the floor to
+ * [40, ceiling], and the retries to 0..10. Used when a persisted config is
+ * loaded back, so an image built with a different ceiling cannot restore an
+ * out-of-range clock. */
+void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz);
 
 /* Render the current values into out. */
 void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_size);

@@ -176,6 +176,43 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
     return true;
 }
 
+void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz)
+{
+    if (cfg == NULL) {
+        return;
+    }
+    uint32_t ceiling = ceiling_mhz;
+    if (ceiling < RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ) {
+        ceiling = RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ;
+    }
+    if (ceiling > RUNTIME_CONFIG_CPU_MAX_MHZ) {
+        ceiling = RUNTIME_CONFIG_CPU_MAX_MHZ;
+    }
+    uint32_t max_mhz = snap_cpu_mhz(cfg->cpu_mhz);
+    /* Snap first, then clamp into [80, ceiling]. A value below the ceiling is
+     * legal and may be intentional (e.g. a pinned 80 MHz receiver); only a
+     * value the build cannot go that low is raised to the 80 MHz Wi-Fi floor. */
+    if (max_mhz < RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ) {
+        max_mhz = RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ;
+    }
+    if (max_mhz > ceiling) {
+        max_mhz = ceiling;
+    }
+    cfg->cpu_mhz = max_mhz;
+
+    uint32_t min_mhz = cfg->cpu_min_mhz;
+    if (min_mhz < RUNTIME_CONFIG_CPU_MIN_MHZ) {
+        min_mhz = RUNTIME_CONFIG_CPU_MIN_MHZ;
+    }
+    if (min_mhz > max_mhz) {
+        min_mhz = max_mhz;
+    }
+    cfg->cpu_min_mhz = min_mhz;
+    if (cfg->espnow_retries > 10u) {
+        cfg->espnow_retries = 10u;
+    }
+}
+
 void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_size)
 {
     if (cfg == NULL || out == NULL || out_size == 0) {

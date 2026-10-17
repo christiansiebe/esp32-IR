@@ -139,6 +139,13 @@ Two firmware roles are built from one source tree.
   History: the sender was pinned at 80 MHz (commits `40baea3`/`fa24b5e`/
   `c53b028`), then moved to 240 MHz; it is back at 80 MHz now that the radio is
   known to be held awake on this chip.
+- The console `set cpu|freq|cpu-min|sleep|retries` knobs are **persisted in NVS**
+  (namespace `rtcfg`, blob versioned): a value survives a reboot **and** an OTA,
+  so the clock can be pinned from the dashboard without reflashing.
+  `runtime_config_load()` reads it in `active_runtime_config()` and clamps it to
+  the running build's ceiling, so an image with a lower `CONFIG_ESPNOW_CPU_MAX_MHZ`
+  can never restore an out-of-range clock. `reset-config` erases the blob and
+  returns to the compile-time defaults. Host-tested (`test/test_runtime_config.c`).
 - **Generated `sdkconfig*` files are git-ignored** (only `sdkconfig.defaults` is
   tracked). `sdkconfig`, `sdkconfig.receiver`, `sdkconfig.sender` are local
   artefacts; an old local `sdkconfig.*` pins `CONFIG_ESPNOW_CPU_MAX_MHZ` and
