@@ -12,18 +12,26 @@ endchoice
 
 config ESPNOW_CPU_MAX_MHZ
     int "Maximum CPU frequency (MHz) for the DFS ceiling"
-    range 80 240
+    range 40 240
+    default 80 if ESPNOW_ROLE_SENDER
     default 240
     help
-        Upper clock for dynamic frequency scaling. The device is mains-powered
+        Upper clock for dynamic frequency scaling. The receiver is mains-powered
         and both the Wi-Fi dashboard and the minute-history backfill are
-        CPU/SPIFFS bound, so a higher ceiling keeps the web UI responsive while
-        a full re-sync runs. DFS still drops to the 40 MHz XTAL when idle (the
-        receiver never enters light sleep; the sender may inside its quiet
-        window). 240 MHz is the ESP32 maximum; lower it to 160 or 80 if a board
-        proves unstable or shows brownout resets at 240 MHz. Keep
-        CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ in sdkconfig.defaults in step with this
-        value.
+        CPU/SPIFFS bound, so its default stays at 240 MHz to keep the web UI
+        responsive during a full re-sync.
+
+        The sender defaults to 80 MHz: its Wi-Fi radio is held awake for a
+        reliable ESP-NOW link (CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE is off by
+        default), so the Wi-Fi driver holds ESP_PM_APB_FREQ_MAX and DFS cannot
+        step below the ceiling anyway. Pinning the ceiling at 80 MHz is
+        therefore the effective "DFS off, run at 80 MHz" setting and avoids the
+        240 MHz heat/power the clock would otherwise never leave. The floor
+        stays at the 40 MHz XTAL, so if the APB lock is ever released (e.g. the
+        modem-sleep experiment) the clock can still drop to 40 MHz.
+
+        Keep CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ in sdkconfig.defaults at or above
+        this value; power management lowers the boot clock to the ceiling.
 
 config ESPNOW_SENDER_LIGHT_SLEEP
     bool "Sender: adaptive light sleep between SML telegram bursts"

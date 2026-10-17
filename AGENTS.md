@@ -121,25 +121,31 @@ Two firmware roles are built from one source tree.
   corruption). When bumping a version, add the migration step and a host test.
 
 ## CPU clock / power
-- CPU ceiling is **240 MHz** (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y` in
-  `sdkconfig.defaults`), scaled down by DFS to the 40 MHz XTAL when idle. The
-  ceiling is **single-sourced** in `CONFIG_ESPNOW_CPU_MAX_MHZ`
-  (`main/Kconfig.projbuild`, range 80..240, default 240): `apply_power_management()`
-  in `main.c` applies it for **both** roles (light sleep off for the receiver,
-  which must stay responsive for HTTP + ESP-NOW) and `uart_sleep_window.c`
-  re-applies it with light sleep on for the sender. Keep
-  `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ` in `sdkconfig.defaults` in step with it.
-  History: it was pinned at 80 MHz (commits `40baea3`/`fa24b5e`/`c53b028`); the
-  device is mains-powered and the dashboard/backfill are CPU/SPIFFS bound, so the
-  top clock buys responsiveness while a re-sync runs. If a board shows brownout
-  resets at 240 MHz, lower both knobs to 160 or 80.
+- The DFS ceiling is **single-sourced** in `CONFIG_ESPNOW_CPU_MAX_MHZ`
+  (`main/Kconfig.projbuild`, range 40..240) and is **role-specific**: the
+  receiver defaults to **240 MHz** (the dashboard and the minute-history
+  backfill are CPU/SPIFFS bound), the sender defaults to **80 MHz**. The sender's
+  radio is held awake for a reliable ESP-NOW link (see the power-save note
+  below), so the Wi-Fi driver holds `ESP_PM_APB_FREQ_MAX` and DFS can never step
+  below the ceiling anyway; a low ceiling is the effective "DFS off, run at
+  80 MHz" setting and avoids the heat/power the clock would otherwise never
+  leave. The floor stays at the 40 MHz XTAL, so if the APB lock is ever released
+  (the opt-in modem-sleep experiment) the clock can still drop to 40 MHz.
+  `apply_power_management()` in `main.c` applies the ceiling for **both** roles
+  (light sleep off for the receiver, which must stay responsive for HTTP +
+  ESP-NOW) and `uart_sleep_window.c` re-applies it with light sleep on for the
+  sender. Keep `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ` (240, `sdkconfig.defaults`) at
+  or above the ceiling; power management lowers the boot clock to it.
+  History: the sender was pinned at 80 MHz (commits `40baea3`/`fa24b5e`/
+  `c53b028`), then moved to 240 MHz; it is back at 80 MHz now that the radio is
+  known to be held awake on this chip.
 - **Generated `sdkconfig*` files are git-ignored** (only `sdkconfig.defaults` is
   tracked). `sdkconfig`, `sdkconfig.receiver`, `sdkconfig.sender` are local
-  artefacts; an old local `sdkconfig.*` pins `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80`
-  and **overrides** `sdkconfig.defaults`, so after changing the ceiling re-run
+  artefacts; an old local `sdkconfig.*` pins `CONFIG_ESPNOW_CPU_MAX_MHZ` and
+  **overrides** `sdkconfig.defaults`, so after changing the ceiling re-run
   `idf.py reconfigure` (or delete the local `sdkconfig.*`) or the build keeps
-  80 MHz. The CI matrix regenerates `sdkconfig` from `sdkconfig.defaults` + role
-  defaults, so CI is unaffected by stale local files.
+  the old value. The CI matrix regenerates `sdkconfig` from `sdkconfig.defaults`
+  + role defaults, so CI is unaffected by stale local files.
 - The sender reports its live clock and sleep state in the `counters`
   diagnostic section: `cpu_freq_mhz` (from `esp_clk_cpu_freq()`, i.e. the DFS
   clock as it is right now), `cpu_freq_max_mhz`/`cpu_freq_min_mhz` (the
@@ -154,7 +160,7 @@ Two firmware roles are built from one source tree.
   air is pulled from the sender's own SPIFFS history afterwards. If ESP-NOW ever
   proves unreliable on the bench, drop `CONFIG_PM_ENABLE` to get the old fixed
   behaviour; the CI job "Verify the variable CPU clock is in effect" checks the
-  four PM options and the 240 MHz ceiling.
+  four PM options and the role-specific ceiling (sender 80, receiver 240).
 - Wi-Fi power save stays at the default `WIFI_PS_MIN_MODEM`; `WIFI_PS_NONE`
   would burn power and power save beyond the default hurts ESP-NOW reliability.
 - **ESP-NOW connectionless power save (`CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE`,

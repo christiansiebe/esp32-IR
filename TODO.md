@@ -20,12 +20,20 @@ und Funk-Powersave/DFS nicht gleichzeitig zu haben.** Am Gerät verifiziert.
       (nötig, damit das Wake-Window auch ohne Assoziation wirkt).
 - [x] **Default: Funk bleibt an** (`ESPNOW_SENDER_ESPNOW_POWER_SAVE=n`,
       Assoziation `ESPNOW_SENDER_ASSOCIATE=n`). „Keine Daten verloren" hat
-      Vorrang: der Takt bleibt gepinnt (240 MHz, 0 Steps) — bewusster Trade-off.
+      Vorrang.
+- [x] **Sender-DFS praktisch aus: Obergrenze 80 MHz, Untergrenze 40 MHz.**
+      `CONFIG_ESPNOW_CPU_MAX_MHZ` hat jetzt `default 80 if ESPNOW_ROLE_SENDER`
+      (Empfänger bleibt 240). Da der Funk im Default dauerhaft an ist, hält der
+      Treiber `ESP_PM_APB_FREQ_MAX` und DFS kann ohnehin nicht unter die
+      Obergrenze — die Obergrenze selbst auf 80 zu legen ist also das
+      wirksame „DFS aus, 80 MHz laufen". Die 40-MHz-Untergrenze bleibt: wird
+      der APB-Lock je freigegeben (Modem-Sleep-Experiment), darf der Takt auf
+      40 fallen. CI prüft das pro Rolle (Sender 80, Empfänger 240).
 - [x] Relay-OTA validiert das Sender-Image vor der Aktivierung (kein USB → sonst
       nicht wiederherstellbar).
 - Hinweis: Mit `test sleep pin 80` läuft der Takt manuell auf 80 MHz; mit
-      `test sleep restore` zurück auf 240. `test cpu` zeigt weiter 0 Steps
-      (der Takt folgt der Last und bleibt mangels Funk-Freigabe oben).
+      `test sleep restore` zurück auf die Obergrenze. `test cpu` zeigt jetzt
+      „40-80 MHz … 0 steps" (Takt bleibt oben, weil der Funk den APB-Lock hält).
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
 Letzter Commit: `f5239c7` – CI **grün** (Push-Run `38466461726`, PR-Run `38466468521`:

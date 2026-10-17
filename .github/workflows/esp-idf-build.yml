@@ -127,9 +127,12 @@ jobs:
         run: |
           set -euo pipefail
           conf="sdkconfig"
-          # 240 MHz ceiling, scaled down by dynamic frequency scaling (DFS),
-          # with automatic light sleep on the sender. assert() so all mismatches
-          # are reported.
+          # Common: power management with dynamic frequency scaling and tickless
+          # idle on both roles. The ceiling is role-specific: the receiver keeps
+          # 240 MHz (dashboard + backfill), the sender uses 80 MHz (its radio is
+          # held awake for a reliable ESP-NOW link, so the APB lock pins DFS at
+          # the ceiling anyway - "DFS off" is a low ceiling). assert() so all
+          # mismatches are reported.
           fail=0
           assert() {
             if ! grep -q "^$1$" "$conf"; then
@@ -142,8 +145,13 @@ jobs:
           assert 'CONFIG_PM_ENABLE=y'
           assert 'CONFIG_PM_DFS_INIT_AUTO=y'
           assert 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y'
+          if [ "${{ matrix.role }}" = "sender" ]; then
+            assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=80'
+          else
+            assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=240'
+          fi
           [ "$fail" -eq 0 ]
-          echo "CPU clock: 240 MHz ceiling with DFS + tickless idle"
+          echo "CPU clock: role ceiling with DFS (sender 80, receiver 240), 40 MHz floor"
 
       - name: Verify adaptive sleep config (sender)
         if: matrix.role == 'sender'

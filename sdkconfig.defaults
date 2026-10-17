@@ -1,10 +1,11 @@
-# Keep the 240 MHz ESP32 ceiling available and let power management scale the
-# clock down (to the 40 MHz XTAL) when the CPU is idle. The device is
-# mains-powered; the Wi-Fi dashboard and the minute-history backfill are
-# CPU/SPIFFS bound, so the top clock keeps the web UI responsive while a full
-# re-sync runs. The ESP-NOW send burst also gets the 240 MHz ceiling and drops
-# to 40 MHz between cycles. Keep this in step with CONFIG_ESPNOW_CPU_MAX_MHZ
-# (main/Kconfig.projbuild), which drives the runtime DFS ceiling for both roles.
+# Keep the 240 MHz ESP32 boot clock available and let power management scale the
+# clock down when the CPU is idle. The effective DFS ceiling is
+# CONFIG_ESPNOW_CPU_MAX_MHZ (main/Kconfig.projbuild): 240 MHz for the receiver
+# (the Wi-Fi dashboard and the minute-history backfill are CPU/SPIFFS bound) and
+# 80 MHz for the sender (its radio is held awake for a reliable ESP-NOW link, so
+# the APB lock pins DFS at the ceiling anyway; a low ceiling is the effective
+# "DFS off" setting and avoids the heat/power the clock would otherwise never
+# leave). Power management lowers the boot clock to that ceiling.
 #
 # The receiver never enters light sleep (it has to answer HTTP and receive
 # ESP-NOW broadcasts), so it only scales the clock. The sender may park in
@@ -14,11 +15,12 @@
 # ESP_PM_APB_FREQ_MAX lock. That needs esp_wifi_set_ps(WIFI_PS_MIN_MODEM) *after*
 # esp_wifi_start() plus an ESP-NOW wake window, but on the ESP32 classic the
 # radio-cycling power save breaks the ESP-NOW link (verified on hardware), so it
-# stays opt-in (CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=n, default) and the clock
-# remains pinned for a reliable link. See AGENTS.md "CPU clock / power".
+# stays opt-in (CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=n, default) and the sender
+# runs at the 80 MHz ceiling with the radio awake. See AGENTS.md "CPU clock /
+# power".
 #
-# If a board shows brownout resets or instability at 240 MHz, lower this (and
-# CONFIG_ESPNOW_CPU_MAX_MHZ) to 160 or 80.
+# If a board shows brownout resets or instability, lower this (the ceiling in
+# CONFIG_ESPNOW_CPU_MAX_MHZ is already 80 for the sender).
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_PM_ENABLE=y
 # DFS at startup: max = DEFAULT_CPU_FREQ_MHZ (240), min = XTAL (40).
