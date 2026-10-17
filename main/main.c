@@ -4618,6 +4618,20 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
         (unsigned int)web_guard_restart_count());
     if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
         snprintf(out, out_size, "status: output truncated\n");
+        return;
+    }
+    written += extra;
+    uint32_t probe_err = 0;
+    int probe_status = 0;
+    uint32_t probe_fails = 0;
+    web_guard_probe_stats(&probe_err, &probe_status, &probe_fails);
+    extra = snprintf(
+        out + written, out_size - (size_t)written,
+        "web probe: last err %u (%s), http %d, failures %u\n",
+        (unsigned)probe_err, esp_err_to_name((esp_err_t)probe_err), probe_status,
+        (unsigned)probe_fails);
+    if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
     }
 #endif
 }

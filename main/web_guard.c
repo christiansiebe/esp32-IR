@@ -76,7 +76,12 @@ web_guard_action_t web_guard_tick(web_guard_t *guard, uint64_t now_ms)
     }
 
     uint64_t last = web_guard_last_activity_ms(guard);
-    if (now_ms - last <= guard->policy.threshold_ms) {
+    /* Saturating: the probe's /healthz handler can stamp last_request_ms a few
+     * ms past a now_ms captured before the probe, and `now_ms - last` on
+     * uint64_t then wraps to a near-2^64 value that reads as an endless
+     * silence. Clamp instead of trusting the subtraction. */
+    uint64_t silence = now_ms >= last ? now_ms - last : 0;
+    if (silence <= guard->policy.threshold_ms) {
         guard->dead_since_ms = 0;
         guard->dead = false;
         return WEB_GUARD_OK;
@@ -101,7 +106,7 @@ web_guard_action_t web_guard_tick(web_guard_t *guard, uint64_t now_ms)
         now_ms - guard->last_attempt_ms >= guard->policy.restart_timeout_ms) {
         return WEB_GUARD_REBOOT;
     }
-    if (now_ms - last >= guard->policy.threshold_ms &&
+    if (silence >= guard->policy.threshold_ms &&
         now_ms - guard->last_attempt_ms >= guard->policy.restart_timeout_ms) {
         return WEB_GUARD_RESTART;
     }
@@ -123,6 +128,9 @@ static web_guard_t s_guard;
 static httpd_handle_t *s_server;
 static httpd_config_t s_config;
 static void (*s_register_handlers)(httpd_handle_t);
+static uint32_t s_probe_err;    /* esp_err_t of the last self-probe */
+static int s_probe_status;      /* HTTP status of the last self-probe */
+static uint32_t s_probe_fails;  /* self-probes that returned false */
 
 /* One cheap round-trip to our own server. The status code is irrelevant; a
  * completed connection+request proves the httpd task still answers. */
@@ -140,10 +148,18 @@ static bool web_guard_probe(void)
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
+        ESP_LOGW(TAG, "self-probe: client init failed");
         return false;
     }
     esp_err_t err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
+    s_probe_err = (uint32_t)err;
+    s_probe_status = status;
+    if (err != ESP_OK) {
+        ++s_probe_fails;
+        ESP_LOGW(TAG, "self-probe failed: %s (http %d)", esp_err_to_name(err), status);
+    }
     return err == ESP_OK;
 }
 
@@ -222,6 +238,19 @@ uint32_t web_guard_last_activity_age_ms(void)
         return 0;
     }
     return (uint32_t)(now_ms - last);
+}
+
+void web_guard_probe_stats(uint32_t *err, int *status, uint32_t *fails)
+{
+    if (err != NULL) {
+        *err = s_probe_err;
+    }
+    if (status != NULL) {
+        *status = s_probe_status;
+    }
+    if (fails != NULL) {
+        *fails = s_probe_fails;
+    }
 }
 
 void web_guard_start(httpd_handle_t *server, const httpd_config_t *config,
