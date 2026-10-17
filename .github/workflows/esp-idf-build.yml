@@ -206,6 +206,25 @@ jobs:
           grep -q '^CONFIG_ESPNOW_CHANNEL=1$' sdkconfig
           echo "Station-only receiver: SoftAP off, ESP-NOW on WIFI_IF_STA, channel 1"
 
+      - name: Verify the task watchdog is armed (both roles)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The long-running workers (the minute-history writer on both roles,
+          # plus the sender's UART workers) subscribe to the TWDT and feed it
+          # every loop; task_wdt_guard_init() adopts the IDF watchdog with a
+          # generous timeout + panic. The strings below live in task_wdt_guard.c
+          # and the worker bodies only, so grepping the built app proves the
+          # registration is compiled in for this role. The sdkconfig still shows
+          # the IDF default (5 s, no panic) because the policy is applied at
+          # runtime by reconfigure.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Task watchdog armed: timeout' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'subscribed to the task watchdog' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image registers workers with the task watchdog"
+
       - name: Stage firmware and flash files
         shell: bash
         run: |

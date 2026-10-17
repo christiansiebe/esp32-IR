@@ -230,9 +230,20 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       `power_history_import_sorted()` an. Dedupe pro Minute, **vorhandene Daten werden nie
       überschrieben**, kein Evict im vollen Ring. Tests: `test/test_history_csv_import.c`
       (28 Checks) + `test/test_history_csv_import_store.c` (23 Checks, echter Store).
-- [ ] **TWDT explizit**: Worker (`power_history_worker`, `uart_event_worker`) beim
-      Task-Watchdog anmelden (`esp_task_wdt_init(120,true); esp_task_wdt_add(...)`) —
-      statt IDF-Default. Aktuell **0 Treffer** für `esp_task_wdt`. (In `health_*` angelegt.)
+- [x] **TWDT explizit** (erledigt): Die langlaufenden Worker sind beim Task-Watchdog
+      angemeldet. Neues, kleines Modul `main/task_wdt_policy.{h,c}` (rein, host-getestet)
+      hält die Policy (welche Worker je Rolle, wie lange sie legitim blockieren dürfen,
+      welche Timeout-Math das abdeckt); `main/task_wdt_guard.{h,c}` ist der IDF-Kleber
+      (`esp_task_wdt_init`/`_reconfigure` mit großzügigem Timeout + `trigger_panic`,
+      `esp_task_wdt_add`/`_reset`). `power_history_worker` (beide Rollen) und die
+      Sender-UART-Worker `uart_event_worker`/`uart_capture_worker` abonnieren sich selbst und
+      füttern den Wächter pro Schleife; der 60-s-Batch-Wait des Writers ist jetzt begrenzt
+      (nicht mehr `portMAX_DELAY`), damit ein idle (aber gesunder) Writer füttert und **nicht**
+      als Stall gilt. Timeout 120 s (deckt 60 s-Batch mit 2x-Marge), Panic an → ein
+      festhängender Worker rebootet statt still zu hängen. Der `status`-Konsolenbefehl zeigt
+      „task watchdog: armed, timeout … , panic on, N worker(s)". Host-Test
+      `test/test_task_wdt_policy.c` (115 Checks, im Runner). CI prüft beide Rollen-Images auf
+      die Registrierungs-Strings.
 - [x] **Post-OTA-Rollback-Bestätigung, Empfänger** (integriert): `boot_policy.c/.h`
       (reine, host-testbare Entscheidung) + `boot_confirm.c/.h` (Kleber) ersetzen das
       unbedingte `esp_ota_mark_app_valid_cancel_rollback()` im Empfänger. Bestätigung erst
