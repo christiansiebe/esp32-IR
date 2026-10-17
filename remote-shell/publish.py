@@ -48,6 +48,17 @@ FILES[".openhands/setup.sh"] = f"{PROJ}/.openhands/setup.sh"
 
 # Alte Pfade, die aus dem Firmware-Baum verschwinden muessen.
 OLD_PATHS = [f"tools/remote-shell/{n}" for n in TOOLS]
+# Bei der Migration vergessene Odroid-Helfer (lagen noch im Firmware-Baum,
+# gehoeren unter remote-shell/ha/). Hier mit aufraeumen, falls sie zurueckkommen.
+OLD_PATHS += [
+    "tools/remote-shell/odroid-bootstrap.sh",
+    "tools/remote-shell/odroid-desktop-diagnose.sh",
+    "tools/remote-shell/odroid-esp32-inspect.sh",
+    "tools/remote-shell/odroid-novnc-setup.sh",
+    "tools/remote-shell/odroid-setup-desktop.sh",
+    "tools/remote-shell/reverse_ssh.sh",
+    "tools/remote-shell/test_agent.py",
+]
 OLD_PATHS += ["AGENTS.md", "memory/SHARED.md", "memory/sandboxes.json"]
 
 

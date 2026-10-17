@@ -30,6 +30,12 @@ All three run **inside** the Home Assistant container so they can read
   + `LOWFREQ-README.md` — idle CPU hotplug and the persistent clock floor.
 - `uv.py`, `uv_lowfreq.py`, `gen_lowfreq_dts.py`, `uv-opp-table.json` +
   `UV-README.md` — software undervolt (VDDCPU_A/B, DT floor 680 mV).
+- `odroid-bootstrap.sh`, `odroid-desktop-diagnose.sh`, `odroid-esp32-inspect.sh`,
+  `reverse_ssh.sh`, `test_agent.py` — Odroid/channel helpers that used to live in
+  the firmware tree under `tools/remote-shell/` (moved here; `publish.py` now
+  cleans the old paths).
+- `novnc.service`, `xfce-vnc.service`, `vnc-xstartup`, `deploy_novnc.sh` +
+  `novnc-README.md` — the XFCE desktop in the browser (TigerVNC + noVNC).
 
 ## Gateway backfill
 
