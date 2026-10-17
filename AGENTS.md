@@ -220,6 +220,19 @@ Two firmware roles are built from one source tree.
   Verify health with the *live* signals instead: `last_rx_ago_ms` stays low,
   `sml_send_fail` is low, the receiver's `sender_rssi_valid` is true and the
   history sync reports `caught_up: true` / `errors: 0`.
+- **The watchdog decision is role-specific (`sender_role`).** The sender judges
+  only its acknowledged-send clock (`last_ok_ms`); its inbound path is
+  legitimately silent for long stretches (the receiver talks on demand), so the
+  old `max(last_rx, last_ok)` rule fired ~60 s after every boot on a link that
+  was broadcasting every 5 s (the fallback event logs `ok=<s>s rx=<s>s`). The
+  receiver still accepts either direction because it pings. `last_ok_ago_s` /
+  `last_rx_ago_s` in the `counters` section expose both ages for diagnosis.
+- **Do not drain `g_send_done` before a send.** A late broadcast completion is
+  harmless when taken as the current telegram's result, but draining it turns
+  the tail of a burst into hard send timeouts: `sml_sent_ok` stalls, `last_ok`
+  ages out and the watchdog fires on a healthy link. The ESP-NOW broadcast send
+  callback reports the driver hand-off, not a MAC ACK, so the retry path only
+  bites for genuine driver errors.
 - **Sender association is optional and OFF by default
   (`CONFIG_ESPNOW_SENDER_ASSOCIATE`, `ESPNOW_SENDER_ASSOC_{SSID,PASSWORD}`).** A
   bench test showed that associating the sender with the receiver SoftAP (station
