@@ -55,3 +55,12 @@ bool link_fallback_should_fallback(link_fallback_t *fb, uint64_t now_ms,
     }
     return false;
 }
+
+bool link_keepalive_due(uint64_t last_ok_ms, uint64_t now_ms,
+                        uint32_t silence_timeout_ms)
+{
+    if (now_ms < last_ok_ms) {
+        return false; /* clock went backwards; wait for it to catch up */
+    }
+    return (now_ms - last_ok_ms) >= (uint64_t)silence_timeout_ms / 2u;
+}

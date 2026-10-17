@@ -8,6 +8,9 @@
 #ifndef CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
 #define CONFIG_ESPNOW_SENDER_LIGHT_SLEEP 0
 #endif
+#ifndef CONFIG_ESPNOW_RECEIVER_LIGHT_SLEEP
+#define CONFIG_ESPNOW_RECEIVER_LIGHT_SLEEP 0
+#endif
 #ifndef CONFIG_ESPNOW_CPU_MAX_MHZ
 #define CONFIG_ESPNOW_CPU_MAX_MHZ 240
 #endif
@@ -18,12 +21,16 @@ static uint32_t snap_cpu_mhz(uint32_t mhz);
 
 runtime_config_t runtime_config_defaults(void)
 {
-    runtime_config_t cfg = {
-#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
-        .light_sleep = true,
+    /* Each role mirrors its own compile-time light-sleep default, so the
+     * persisted knob starts in step with the image and 'set sleep' only ever
+     * overrides an explicit choice. */
+#if CONFIG_ESPNOW_ROLE_SENDER
+    const bool light_sleep_default = CONFIG_ESPNOW_SENDER_LIGHT_SLEEP;
 #else
-        .light_sleep = false,
+    const bool light_sleep_default = CONFIG_ESPNOW_RECEIVER_LIGHT_SLEEP;
 #endif
+    runtime_config_t cfg = {
+        .light_sleep = light_sleep_default,
         .cpu_mhz = snap_cpu_mhz(CONFIG_ESPNOW_CPU_MAX_MHZ),
         .cpu_min_mhz = 40u,
         .espnow_retries = 3u,
@@ -174,6 +181,43 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
     }
     *cfg = next;
     return true;
+}
+
+void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz)
+{
+    if (cfg == NULL) {
+        return;
+    }
+    uint32_t ceiling = ceiling_mhz;
+    if (ceiling < RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ) {
+        ceiling = RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ;
+    }
+    if (ceiling > RUNTIME_CONFIG_CPU_MAX_MHZ) {
+        ceiling = RUNTIME_CONFIG_CPU_MAX_MHZ;
+    }
+    uint32_t max_mhz = snap_cpu_mhz(cfg->cpu_mhz);
+    /* Snap first, then clamp into [80, ceiling]. A value below the ceiling is
+     * legal and may be intentional (e.g. a pinned 80 MHz receiver); only a
+     * value the build cannot go that low is raised to the 80 MHz Wi-Fi floor. */
+    if (max_mhz < RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ) {
+        max_mhz = RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ;
+    }
+    if (max_mhz > ceiling) {
+        max_mhz = ceiling;
+    }
+    cfg->cpu_mhz = max_mhz;
+
+    uint32_t min_mhz = cfg->cpu_min_mhz;
+    if (min_mhz < RUNTIME_CONFIG_CPU_MIN_MHZ) {
+        min_mhz = RUNTIME_CONFIG_CPU_MIN_MHZ;
+    }
+    if (min_mhz > max_mhz) {
+        min_mhz = max_mhz;
+    }
+    cfg->cpu_min_mhz = min_mhz;
+    if (cfg->espnow_retries > 10u) {
+        cfg->espnow_retries = 10u;
+    }
 }
 
 void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_size)

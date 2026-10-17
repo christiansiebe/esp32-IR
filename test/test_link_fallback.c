@@ -98,6 +98,22 @@ int main(void)
     /* NULL is safe. */
     CHECK(!link_fallback_should_fallback(NULL, 1, 1), "NULL state -> false");
 
+    /* Keep-alive: the receiver pings once its own *outbound* traffic has been
+     * quiet for half the silence timeout. This is the regression that made the
+     * ping never fire on device: gating on the inbound clock (last_rx_ms) is
+     * always fresh because the receiver hears the sender's broadcasts, so the
+     * sender's watchdog tripped despite a healthy link. */
+    CHECK(!link_keepalive_due(0, T_MS / 2 - 1, T_MS),
+          "outbound quiet below half the timeout -> no ping yet");
+    CHECK(link_keepalive_due(0, T_MS / 2, T_MS),
+          "outbound quiet reaches half the timeout -> ping");
+    CHECK(link_keepalive_due(1000, 1000 + T_MS, T_MS),
+          "long outbound silence -> ping");
+    CHECK(!link_keepalive_due(50000, 40000, T_MS),
+          "now before last_ok -> no ping (clock went backwards)");
+    CHECK(!link_keepalive_due(T_MS, T_MS + T_MS / 2 - 1, T_MS),
+          "one ms before half the timeout -> no ping");
+
     printf("link fallback: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
