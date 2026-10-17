@@ -338,7 +338,42 @@ enthaelt die **Sub-1-GHz-Punkte** (100/250/500/667 MHz) mit `opp-microvolt =
 - **U-Boot-Doku** [17] - `bl30_new.bin` = `bl30.bin` + `bl301.bin` (DVFS-Plugin).
 - **TF-A-Doku** [16] - Meson-Ports: PSCI + SCPI + SIP, kein CPU-DVFS.
 
-## 6. Bezug zu diesem Repo (ohne neue Messwerte)
+## 7. Praktische Anwendung: Host-Modell (`pwm_reg_model.py`)
+
+`remote-shell/ha/pwm_reg_model.py` rechnet die beiden Modi **ohne Board** nach
+(kein `/dev/mem`, kein Netz). `test_pwm_reg_model.py` prueft 157 Punkte, u. a.
+gegen die im Repo am Board gemessenen Eckwerte (`UV-README.md`): bei 680 mV ist
+das Register-LOW-Feld 0, bei 1040 mV gleich der Periodenlaenge, und die lineare
+Form `V = 680000 + duty*360000/period` gilt mit dem **Register**-Tastgrad.
+
+```bash
+python3 remote-shell/ha/pwm_reg_model.py        # Demo/Tabellen
+python3 remote-shell/ha/test_pwm_reg_model.py   # 157 Checks
+```
+
+Zwei Dinge, die das Modell praktisch sichtbar macht:
+
+**a) Falle "Boden umbenennen".** Der Registerwert `reg_duty == 0` ist der
+**eine** physikalische Boden. Welche Spannung dieser Zustand *traegt*, entscheidet
+allein die DT-Abbildung: mit `regulator-min-microvolt = 680000` meldet der
+Treiber 680 mV, mit `600000` meldet er 600 mV - **bei identischem Registerwert**.
+Ein kleineres `regulator-min-microvolt` senkt die Spannung also **nicht** ab, es
+benennt nur den Boden um (und die OPP-Tabelle wuerde eine tiefere Spannung
+behaupten, die die Hardware nicht liefert). Das ist der harte Grund, warum
+"DT-Untergrenze senken" hier kein Undervolt ist.
+
+**b) Quantisierung: Treiber ist groeber als das Roh-Register.** Der Treiber
+rechnet in `pwm-dutycycle-unit` (hier Default **100 = Prozent**), es gibt also
+nur **101** verschiedene relative Tastgrade -> Spannungsschritt **3,6 mV**.
+`uv.py` schreibt dagegen das **Roh-Register** (Periode 999 bzw. 333) und erreicht
+damit **0,36 mV** (big) bzw. **1,08 mV** (little) pro Schritt. Cross-Check des
+Modells gegen `uv.py.uv_to_duty`/`duty_to_uv`: die Abweichung ist immer
+**<= halber Treiber-Schritt (1,8 mV)** - genau die erwartete Rundung des
+Prozent-Rasters, kein Widerspruch. Praktische Folge: ein DT-Overlay kann die
+Spannung nur in 3,6-mV-Stufen setzen; die feinere Laufzeit-Aufloesung von
+`uv.py` laesst sich im DT **nicht** abbilden.
+
+## 8. Bezug zu diesem Repo (ohne neue Messwerte)
 
 - Der laufende Kernel (`7.1.8-edge-meson64`, Armbian) ist ein **Mainline**-Kernel
   -> es greift der Pfad aus 4.2b: `cpufreq-dt` + meson-Clock + `pwm-regulator`.
@@ -360,7 +395,7 @@ enthaelt die **Sub-1-GHz-Punkte** (100/250/500/667 MHz) mit `opp-microvolt =
   dessen CPU-Mux genau diese Eltern (`xtal`, `fclk_div2`, `fclk_div3`) und einen
   Teiler anbietet [4][19].
 
-## 7. Quellen
+## 9. Quellen
 
 1. pwm-regulator DT-Binding (YAML) -
    https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/regulator/pwm-regulator.yaml

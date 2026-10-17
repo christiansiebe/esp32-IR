@@ -103,11 +103,50 @@ def main():
           == m.table_select(900000, 900000, table)[1],
           'Table: duty je Eintrag fest (entkoppelt von min/max)')
 
+    # --- Falle "Boden umbenennen": min senken aendert die Hardware nicht ---
+    check(m.nominal_at_reg_duty(m.N2P, 0, 999) == 680000,
+          'reg_duty 0 meldet bei min 680 mV genau 680 mV')
+    check(m.nominal_at_reg_duty(dict(m.N2P, min_uv=600000), 0, 999) == 600000,
+          'reg_duty 0 meldet bei min 600 mV dann 600 mV (nur Etikett)')
+    # Der Registerwert (der physikalische Zustand) ist in beiden Faellen 0:
+    # einmal bei 680 mV (min 680), einmal bei 600 mV (min 600) - dieselbe
+    # Hardwarestellung, nur anders benannt.
+    check(m.rel_to_reg_duty(m.continuous_rel_duty(
+              680000, **m.N2P), 999) == 0,
+          'min 680 mV: 680 mV -> reg_duty 0')
+    check(m.rel_to_reg_duty(m.continuous_rel_duty(
+              600000, **dict(m.N2P, min_uv=600000)), 999) == 0,
+          'min 600 mV: 600 mV -> reg_duty 0 (derselbe Registerzustand)')
+
+    # --- Overlay-Plan: unter dem Boden wird ok=False ---
+    plan = {uv: ok for _f, uv, _r, _d, ok in m.overlay_plan(
+        [(24000000, 700000), (24000000, 680000), (24000000, 660000)])}
+    check(plan[700000] and plan[680000], 'Overlay-Plan: 700/680 mV sind ok')
+    check(not plan[660000], 'Overlay-Plan: 660 mV wird als unmoeglich markiert')
+    # Ein gueltiger Plan trifft fuer 1.0 GHz den reg_duty des Werkswerts.
+    one = m.overlay_plan([(1000000000, 731000)])[0]
+    check(one[4] and 0 <= one[3] <= 999, 'Overlay-Plan: 731 mV -> gueltig')
+
     # --- Beide Modi enden bei duty 0 -> unter 680 mV geht es nicht ---
     check(m.continuous_rel_duty(680000, **m.N2P) == 100,
           'Continuous-Boden: 680 mV ist rel_duty 100 (reg_duty 0)')
     check(m.table_select(679000, 679000, table) is None,
           'Table-Boden: < 680 mV hat keinen Eintrag')
+
+    # --- Quantisierung: Treiber (Prozent) ist groeber als das Roh-Register ---
+    # Der Treiber rechnet in `pwm-dutycycle-unit` (=100, Prozent), also gibt es
+    # nur 101 verschiedene rel_duty-Werte -> Spannungsschritt 360/100 = 3.6 mV.
+    achievable = {m.continuous_rel_duty(uv, **m.N2P)
+                  for uv in range(680000, 1040001, 1000)}
+    check(achievable <= set(range(0, 101)),
+          'Treiber: rel_duty ist immer ganzzahlig 0..100')
+    check(len(achievable) <= 101, 'Treiber: hoechstens 101 Stufen')
+    # Ein 1-mV-Sollwert-Schritt aendert den Registerwert um <= 1 Roh-Einheit
+    # (Roh-Aufloesung 360/999 = 0.36 mV), NICHT um einen Prozent-Schritt.
+    d1 = m.rel_to_reg_duty(m.continuous_rel_duty(900000, **m.N2P), 999)
+    d2 = m.rel_to_reg_duty(m.continuous_rel_duty(901000, **m.N2P), 999)
+    check(abs(d2 - d1) <= 1,
+          'Treiber: 1 mV Sollwertschritt -> <= 1 Registereinheit')
 
     print('%d Checks, %d Fehler' % (CHECKS, FAILURES))
     return 1 if FAILURES else 0

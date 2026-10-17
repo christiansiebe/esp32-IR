@@ -102,6 +102,57 @@ def step_mv(node):
     return (p['max_uv'] - p['min_uv']) / abs(p['duty_max'] - p['duty_min']) / 1000.0
 
 
+def nominal_at_reg_duty(node, reg_duty, period):
+    """Welche Spannung MELDET der DT fuer einen gegebenen Registerwert?
+
+    Der Registerwert ist der physikalische Zustand. Die Zuordnung Register ->
+    Nominalspannung haengt aber an `regulator-min/max-microvolt`. Damit laesst
+    sich zeigen, dass ein Absenken von `regulator-min-microvolt` den Boden nur
+    UMBENENNT, nicht absenkt.
+    """
+    rel = reg_to_rel_duty(reg_duty, period, node['unit'])
+    return continuous_uv(rel, **node)
+
+
+def relabel_floor_demo(period=999):
+    """Zeigt die Falle: min_uv senken benennt den Boden um, senkt ihn nicht.
+
+    Physikalisch ist `reg_duty == 0` der Boden (kleiner geht das LOW-Feld
+    nicht). Welche Spannung dieser Zustand TRAEGT, entscheidet allein die
+    DT-Abbildung. Ein Overlay mit kleinerem `regulator-min-microvolt` laesst
+    die OPP-Tabelle eine tiefere Spannung behaupten, waehrend die Hardware
+    unveraendert am Boden bleibt.
+    """
+    print('Falle "Boden umbenennen" (big, P=%d):' % period)
+    print('  node min/max[mV]   gemeldete Spannung bei reg_duty=0')
+    for node in (N2P, dict(N2P, min_uv=600000), dict(N2P, min_uv=720000)):
+        print('  %4d/%-4d         %6d mV'
+              % (node['min_uv'] // 1000, node['max_uv'] // 1000,
+                 nominal_at_reg_duty(node, 0, period) // 1000))
+    print('  -> reg_duty=0 ist EIN Hardwarezustand; die gemeldete Zahl ist')
+    print('     reine Etikettierung. Tiefer wird die Spannung dadurch nicht.')
+
+
+def overlay_plan(rates_uv, node=N2P, period=None):
+    """Praktisch: Wunschspannungen je Takt auf Registerwerte abbilden.
+
+    `rates_uv` ist eine Liste von (freq_hz, uV). Rueckgabe: Liste von
+    (freq_hz, uV, rel_duty, reg_duty, ok). `ok` ist False, wenn der Wert unter
+    dem Regler-Boden (duty 0) oder ueber dem Maximum liegt - so sieht man VOR
+    dem Overlay-Bau, was gar nicht geht.
+    """
+    if period is None:
+        period = PERIOD['big']
+    out = []
+    for freq, uv in rates_uv:
+        rel = continuous_rel_duty(uv, **node)
+        reg = rel_to_reg_duty(rel, period, node['unit'])
+        ok = (node['min_uv'] <= uv <= node['max_uv']
+              and 0 <= rel <= node['unit'] and 0 <= reg <= period)
+        out.append((freq, uv, rel, reg, ok))
+    return out
+
+
 # --- Praktische Anwendung --------------------------------------------------
 
 def demo_continuous_coupling(node=N2P):
@@ -161,9 +212,21 @@ def main():
     print()
     demo_table_decoupling()
     print()
+    relabel_floor_demo()
+    print()
+
+    print('=== Overlay-Plan: Wunschspannung je Takt -> Registerwert ===')
+    print('  freq[MHz]  uV      rel   reg_duty  ok')
+    plan = overlay_plan([(1000000000, 731000), (24000000, 690000),
+                         (24000000, 660000)])
+    for freq, uv, rel, reg, ok in plan:
+        print('  %9d  %6d  %4d  %8d  %s'
+              % (freq // 1000, uv, rel, reg, 'ja' if ok else 'NEIN (<Boden)'))
+    print()
     print('Fazit: Continuous koppelt alle Sollwerte an regulator-min/max;')
     print('       eine voltage-table entkoppelt sie (duty je Eintrag fest).')
-    print('       Beide Modi enden bei duty 0 -> unter 680 mV geht es NICHT.')
+    print('       Beide Modi enden bei duty 0 -> unter 680 mV geht es NICHT;')
+    print('       ein kleineres regulator-min-microvolt benennt den Boden nur um.')
 
 
 if __name__ == '__main__':
