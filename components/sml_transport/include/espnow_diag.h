@@ -193,7 +193,14 @@ typedef struct __attribute__((packed)) {
     uint32_t cpu_freq_hist_160;
     uint32_t cpu_freq_hist_240;
     uint8_t cpu_freq_below_ceiling_seen; /* 1 = live clock seen below the ceiling */
-    uint8_t reserved4[3];
+    uint8_t reserved4;
+    /* Link-fallback diagnosis (seconds): age of the last acknowledged send and
+     * of the last inbound frame, both sampled when these counters were built.
+     * They pin down *which* clock tripped the watchdog - outbound silence
+     * (last_ok) versus a dead receive path (last_rx) - and whether the send
+     * clock really went stale while telegrams were still being sent. */
+    uint16_t last_ok_ago_s;
+    uint16_t last_rx_ago_s;
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {

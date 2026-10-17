@@ -1632,6 +1632,34 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     wifi_ps_type_t wifi_ps = WIFI_PS_NONE;
     (void)esp_wifi_get_ps(&wifi_ps);
 
+    /* Which link clock is stale, sampled now: outbound (last_ok) vs inbound
+     * (last_rx). Surfaces the fallback's trigger reason without a reboot. */
+    uint32_t last_ok_ago_s = 0;
+    uint32_t last_rx_ago_s = 0;
+#if CONFIG_ESPNOW_LINK_FALLBACK
+    {
+        uint64_t now_ms = now_us / 1000ULL;
+        uint64_t last_ok_ms;
+        uint64_t last_rx_ms;
+        portENTER_CRITICAL(&g_link_fallback_lock);
+        last_ok_ms = g_link_fallback.last_ok_ms;
+        last_rx_ms = g_link_fallback.last_rx_ms;
+        portEXIT_CRITICAL(&g_link_fallback_lock);
+        if (now_ms > last_ok_ms) {
+            last_ok_ago_s = (uint32_t)((now_ms - last_ok_ms) / 1000ULL);
+        }
+        if (now_ms > last_rx_ms) {
+            last_rx_ago_s = (uint32_t)((now_ms - last_rx_ms) / 1000ULL);
+        }
+        if (last_ok_ago_s > 65535u) {
+            last_ok_ago_s = 65535u;
+        }
+        if (last_rx_ago_s > 65535u) {
+            last_rx_ago_s = 65535u;
+        }
+    }
+#endif
+
     *counters = (espnow_diag_counters_t) {
         .uptime_ms = (uint64_t)(esp_timer_get_time() / 1000),
         .uart_rx_bytes = rx_bytes,
@@ -1695,6 +1723,8 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .cpu_freq_hist_160 = g_cpu_freq_hist[2],
         .cpu_freq_hist_240 = g_cpu_freq_hist[3],
         .cpu_freq_below_ceiling_seen = g_cpu_freq_below_ceiling_seen ? 1 : 0,
+        .last_ok_ago_s = (uint16_t)last_ok_ago_s,
+        .last_rx_ago_s = (uint16_t)last_rx_ago_s,
 #if CONFIG_ESPNOW_LINK_FALLBACK
         .sleep_fallback_active = g_link_fallback_active ? 1 : 0,
         .link_fallback_stage = g_link_fallback_stage,
@@ -6517,7 +6547,8 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
                        "\"sender_fw_version\":\"%s\","
                        "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
-                       "\"sleep_fallback\":%u,\"fallback_stage\":%u}%s%s}",
+                       "\"sleep_fallback\":%u,\"fallback_stage\":%u,"
+                       "\"last_ok_ago_s\":%u,\"last_rx_ago_s\":%u}%s%s}",
                        mac_known ? "true" : "false",
                        (int)sender_rssi,
                        sender_rssi_valid ? "true" : "false",
@@ -6578,6 +6609,8 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        (unsigned int)counters.boot_marker_reason,
                        (unsigned int)counters.sleep_fallback_active,
                        (unsigned int)counters.link_fallback_stage,
+                       (unsigned int)counters.last_ok_ago_s,
+                       (unsigned int)counters.last_rx_ago_s,
                        crash_json[0] != '\0' ? "," : "",
                        crash_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
@@ -7641,8 +7674,18 @@ static void link_fallback_worker(void *arg)
         /* Drop the adaptive light sleep for good: the radio stays awake. */
         uart_sleep_disable_idf();
         g_link_fallback_stage = 2;
-        diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
-                       "link fallback: light sleep off, radio stays awake");
+        {
+            /* Log both clocks so the trigger is unambiguous: which one went
+             * stale (send vs receive) and how long it had been quiet. */
+            uint64_t now_ms2 = (uint64_t)(esp_timer_get_time() / 1000);
+            uint64_t ok_ago = now_ms2 > g_link_fallback.last_ok_ms
+                                  ? now_ms2 - g_link_fallback.last_ok_ms : 0;
+            uint64_t rx_ago = now_ms2 > g_link_fallback.last_rx_ms
+                                  ? now_ms2 - g_link_fallback.last_rx_ms : 0;
+            diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
+                           "link fallback ok=%us rx=%us",
+                           (unsigned)(ok_ago / 1000u), (unsigned)(rx_ago / 1000u));
+        }
         ESP_LOGW(TAG, "Link fallback: no peer traffic for %u ms; light sleep "
                       "disabled, CPU stays awake", (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
 #else
