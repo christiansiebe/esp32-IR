@@ -628,3 +628,16 @@ die eigene Konversation). Der verbindliche, persistente Austausch läuft über
 **`docs/CHAT-THREAD.md`** (nur anhängen, ein Commit pro Nachricht, sofort pushen). Bitte
 Status/Fragen/SHA **dort** melden und vor der Arbeit einmal pullen, um die neuesten
 Nachrichten zu sehen.
+
+## Reverse-Kanal: Sandbox -> Odroid -> ESP32 (Geraet testen/flashen)
+Der Sandbox hat keine LAN-Route (DS-Lite) und kein /dev/ttyUSB*; er kann das
+Geraet nie direkt erreichen. Umgekehrt geht es: der Sandbox ist oeffentlich
+(Port 12001 -> https://work-2-<RUNTIME_ID>.prod-runtime.all-hands.dev), der
+Odroid pollt und fuehrt aus. Implementierung: /workspace/remote-shell/
+(channel_server.py im Sandbox, odroid_agent.sh + install_odroid_agent.sh auf
+dem Odroid, Key in KEY, Doku in README.md).
+- Agent: CID=$(python3 /workspace/remote-shell/channel.py send "<cmd>"); python3 /workspace/remote-shell/channel.py wait $CID 30
+- Odroid einmalig: sudo CHANNEL_KEY=<key> ./install_odroid_agent.sh (systemd
+  esp32-channel, pollt alle 5 s). Skripte auch unter /files/odroid_agent.sh.
+- Damit ist der serielle Web-Monitor (/console, POST /api/console) und der
+  OTA-Pull (POST /api/ota-pull) am echten Geraet aus dem Chat bedienbar.
