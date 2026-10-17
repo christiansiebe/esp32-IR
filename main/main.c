@@ -51,6 +51,7 @@
 #include "liveness_guard.h"
 #include "ota_policy.h"
 #include "ap_off_policy.h"
+#include "task_wdt_guard.h"
 #include "espnow_diag.h"
 #include "sml_transport.h"
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -2722,6 +2723,11 @@ static void uart_capture_worker(void *arg)
     (void)arg;
     uint8_t rx_buffer[UART_PACKET_BYTES];
 
+    /* Subscribe to the task watchdog: this loop blocks on the UART read (50 ms
+     * timeout) and may then park the CPU for the adaptive light-sleep window, so
+     * a wedged UART driver or a stuck parser must reboot the sender. */
+    task_wdt_guard_subscribe(TASK_WDT_NAME_UART_CAPTURE);
+
     /* Explain the gap log once so a "mid-telegram" line is not misread as data
      * loss: only gap_loss (a telegram that then fails its checksum) is a loss. */
     diag_log_event(ESPNOW_DIAG_LEVEL_INFO,
@@ -2730,6 +2736,7 @@ static void uart_capture_worker(void *arg)
     while (1) {
         int received = uart_read_bytes(UART_PORT_NUM, rx_buffer, sizeof(rx_buffer),
                                        pdMS_TO_TICKS(50));
+        task_wdt_guard_feed();
 
         uint64_t now_us = (uint64_t)esp_timer_get_time();
         uint64_t last_us;
@@ -2921,8 +2928,13 @@ static void uart_event_worker(void *arg)
     uart_event_t event;
     int64_t next_stats_us = esp_timer_get_time() + 10000000LL;
 
+    /* Subscribe to the task watchdog: a wedged UART event queue would otherwise
+     * silently stop the error/statistics worker. */
+    task_wdt_guard_subscribe(TASK_WDT_NAME_UART_EVENT);
+
     while (1) {
         liveness_note_alive();
+        task_wdt_guard_feed();
         if (xQueueReceive(g_uart_event_queue, &event, pdMS_TO_TICKS(1000)) == pdTRUE) {
             switch (event.type) {
             case UART_FIFO_OVF:
@@ -4575,6 +4587,19 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
         return;
     }
     written += live;
+    task_wdt_guard_status_t twdt;
+    task_wdt_guard_get_status(&twdt);
+    int wdt = snprintf(out + written, out_size - (size_t)written,
+                       "task watchdog: %s, timeout %u ms, panic %s, %u worker(s)\n",
+                       twdt.armed ? "armed" : "off",
+                       (unsigned)twdt.timeout_ms,
+                       twdt.panic ? "on" : "off",
+                       (unsigned)twdt.subscribed);
+    if (wdt < 0 || (size_t)wdt >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+        return;
+    }
+    written += wdt;
 #if !CONFIG_ESPNOW_ROLE_SENDER
     int extra = snprintf(
         out + written, out_size - (size_t)written,
@@ -7604,6 +7629,10 @@ void app_main(void)
     boot_log_init();
     initialize_wifi_and_espnow();
     apply_power_management();
+    /* Arm the task watchdog (generous timeout + panic) before any worker starts,
+     * so the long-running workers can subscribe themselves and a wedged one
+     * reboots the device instead of hanging. */
+    (void)task_wdt_guard_init();
 #if CONFIG_ESPNOW_ROLE_SENDER
     g_espnow_ota_rx_queue = xQueueCreate(4, sizeof(espnow_ota_rx_item_t));
     if (g_espnow_ota_rx_queue == NULL) {
