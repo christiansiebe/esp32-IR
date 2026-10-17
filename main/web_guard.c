@@ -76,7 +76,12 @@ web_guard_action_t web_guard_tick(web_guard_t *guard, uint64_t now_ms)
     }
 
     uint64_t last = web_guard_last_activity_ms(guard);
-    if (now_ms - last <= guard->policy.threshold_ms) {
+    /* Saturating: the probe's /healthz handler can stamp last_request_ms a few
+     * ms past a now_ms captured before the probe, and `now_ms - last` on
+     * uint64_t then wraps to a near-2^64 value that reads as an endless
+     * silence. Clamp instead of trusting the subtraction. */
+    uint64_t silence = now_ms >= last ? now_ms - last : 0;
+    if (silence <= guard->policy.threshold_ms) {
         guard->dead_since_ms = 0;
         guard->dead = false;
         return WEB_GUARD_OK;
@@ -101,7 +106,7 @@ web_guard_action_t web_guard_tick(web_guard_t *guard, uint64_t now_ms)
         now_ms - guard->last_attempt_ms >= guard->policy.restart_timeout_ms) {
         return WEB_GUARD_REBOOT;
     }
-    if (now_ms - last >= guard->policy.threshold_ms &&
+    if (silence >= guard->policy.threshold_ms &&
         now_ms - guard->last_attempt_ms >= guard->policy.restart_timeout_ms) {
         return WEB_GUARD_RESTART;
     }
@@ -187,13 +192,6 @@ static void web_guard_task(void *arg)
 
         web_guard_action_t action = web_guard_tick(&s_guard, now_ms);
         if (action == WEB_GUARD_RESTART) {
-            ESP_LOGW(TAG, "tick=RESTART last=%llu now=%llu thr=%u dead_since=%llu "
-                          "probe_err=%u(%s) status=%d fails=%u",
-                     (unsigned long long)web_guard_last_activity_ms(&s_guard),
-                     (unsigned long long)now_ms, (unsigned)s_guard.policy.threshold_ms,
-                     (unsigned long long)s_guard.dead_since_ms, (unsigned)s_probe_err,
-                     esp_err_to_name((esp_err_t)s_probe_err), s_probe_status,
-                     (unsigned)s_probe_fails);
             bool ok = web_guard_restart_server();
             web_guard_note_restart_attempt(&s_guard, now_ms, ok);
         } else if (action == WEB_GUARD_REBOOT) {

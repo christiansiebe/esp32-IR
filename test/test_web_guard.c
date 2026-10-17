@@ -88,12 +88,32 @@ static void test_successful_restart_resets(void)
           web_guard_tick(&g, 110000) == WEB_GUARD_OK);
 }
 
+static void test_probe_timestamp_ahead_of_now(void)
+{
+    web_guard_t g;
+    web_guard_policy_t p;
+    web_guard_default_policy(&p);
+    web_guard_init(&g, &p, 0);
+    web_guard_note_probe(&g, 1000, true);
+
+    /* The probe's /healthz handler stamps last_request_ms while the tick's
+     * now_ms was captured before the probe, so the "last activity" can be a few
+     * ms in the future. `now_ms - last` then wraps on uint64_t and looks like an
+     * endless silence; the guard must treat it as healthy, not restart. */
+    web_guard_note_request(&g, 50010); /* stamped 10 ms after the tick's now */
+    check("future activity stamp is not read as silence",
+          web_guard_tick(&g, 50000) == WEB_GUARD_OK);
+    check("no restart when the activity stamp is ahead",
+          g.restarts == 0);
+}
+
 int main(void)
 {
     test_inactive_until_probe_proven();
     test_healthy_traffic_stays_ok();
     test_restart_then_reboot();
     test_successful_restart_resets();
+    test_probe_timestamp_ahead_of_now();
 
     if (failures != 0) {
         printf("web_guard: %d failure(s)\n", failures);
