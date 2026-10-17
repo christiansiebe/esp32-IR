@@ -21,7 +21,6 @@
  * POWER_HISTORY_MOUNT_PATH/POWER_HISTORY_FILE also come from the header (they
  * are overridable there for the reboot-persistence host test). */
 #define POWER_HISTORY_VERSION_MAX POWER_HISTORY_VERSION
-#define POWER_HISTORY_PARTITION "storage"
 #define POWER_HISTORY_QUEUE_LENGTH 16u
 #define POWER_HISTORY_TASK_STACK 4096u
 #define POWER_HISTORY_BATCH_RECORDS 5u

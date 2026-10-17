@@ -4,6 +4,9 @@ set(main_requires
     esp_driver_uart
     esp_event
     esp_http_client
+    esp_https_ota
+    esp-tls
+    mbedtls
     esp_http_server
     esp_netif
     esp_pm
@@ -25,7 +28,7 @@ set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "crash_journal.c" "crash_journal_store.c"
               "mqtt_topics.c" "history_backfill.c" "history_sync.c"
               "history_csv_import.c"
-              "link_fallback.c"
+              "link_fallback.c" "liveness_guard.c"
               "json_escape.c" "version.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
     list(APPEND main_srcs "mqtt_bridge.c" "web_guard.c")
@@ -39,6 +42,10 @@ idf_component_register(SRCS ${main_srcs}
                     REQUIRES ${main_requires})
 
 # Generate a valid, empty SPIFFS image for the power-history "storage"
-# partition and include it in the flash targets, so a freshly flashed device
-# already has a mountable partition and needs no first-boot formatting.
-spiffs_create_partition_image(storage ${CMAKE_CURRENT_SOURCE_DIR}/spiffs_root FLASH_IN_PROJECT)
+# partition so it can be flashed explicitly if ever needed. It is deliberately
+# NOT added to FLASH_IN_PROJECT: a plain `idf.py flash` (or any full flash)
+# must never overwrite the partition that holds the measurement history. The
+# device formats a blank partition on first boot (format_if_mount_failed), so
+# nothing is required here for a fresh board. To (re)create it on purpose, use
+# `idf.py storage-flash` after checking that the stored minutes are backed up.
+spiffs_create_partition_image(storage ${CMAKE_CURRENT_SOURCE_DIR}/spiffs_root)

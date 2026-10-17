@@ -310,6 +310,29 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   `esp32-meter.local` and advertises `_http._tcp`, started on `WIFI_EVENT_AP_START`
   and `IP_EVENT_STA_GOT_IP` (idempotent). Only the receiver advertises a name.
 
+## OTA from the sandbox (pull OTA, no LAN route needed)
+- The sandbox has **no route into the LAN** (DS-Lite); it can never open a
+  connection to the device. But **port 12000 is served publicly** as
+  `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/` (Let's Encrypt), and
+  the device *can* pull from there. That is the whole trick.
+- Firmware side: `POST /api/ota-pull` (JSON `{"url":"https://..."}` or a raw URL,
+  header `X-OTA-Key` = Wi-Fi/AP key). It runs in its own task (a TLS handshake
+  needs more stack than the HTTP task has), accepts **https only**
+  (`ota_url_is_trusted`), refuses a target that would overlap the `storage`
+  measurement partition (`ota_target_is_safe`), validates the image
+  (`esp_https_ota_get_img_desc` / `esp_https_ota_finish`) and reboots to apply.
+  The `/update` page also has a URL field that calls it.
+- Sandbox side: `tools/ota-publish.sh <bin> [device-ip]` copies the built image
+  into `/workspace/uploads/` (served at `/files/<name>`), starts the upload
+  server if needed, verifies the public URL returns HTTP 200, and prints the
+  exact `curl` that triggers the update.
+- To actually reach the device, run that `curl` on a LAN host. With the Odroid
+  command channel up (`remote-shell/cmd_send.sh`), the sandbox can drive it:
+  `bash /workspace/remote-shell/cmd_send.sh "<printed curl>"`.
+- `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` (sdkconfig.defaults) is required: the
+  front-door cert is Let's Encrypt, so the public CA bundle is the trust path.
+- ESP-NOW path unchanged: `/update-sender` still relays to the sender.
+
 ## Post-OTA rollback confirmation (receiver)
 - A freshly flashed image starts in `ESP_OTA_IMG_PENDING_VERIFY`
   (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`). Until it is confirmed, any reset

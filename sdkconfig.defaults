@@ -37,3 +37,10 @@ CONFIG_ESP_WIFI_SLP_IRAM_OPT=y
 # sender to WIFI_PS_MIN_MODEM (required to release the Wi-Fi driver's APB_MAX
 # lock, otherwise light sleep is never entered). See TODO.md for the open bench
 # verification; set CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=n to fall back to DFS only.
+
+# Pull OTA (POST /api/ota-pull): the device downloads a firmware image over
+# HTTPS from a URL the sandbox hosts (work-1-<id>.prod-runtime.all-hands.dev,
+# Let's Encrypt). Trust the public CA bundle so that certificate validates
+# without pinning a key that would rotate. Cleartext HTTP images are refused
+# (ota_url_is_trusted), so the bundle is the only trust path.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y

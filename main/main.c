@@ -16,6 +16,9 @@
 #include "esp_netif_sntp.h"
 #include "esp_now.h"
 #include "esp_ota_ops.h"
+#include "esp_https_ota.h"
+#include "esp_crt_bundle.h"
+#include "esp_partition.h"
 #include "esp_pm.h"
 #include "esp_private/esp_clk.h"
 #include "esp_system.h"
@@ -26,6 +29,7 @@
 #include "freertos/task.h"
 #include "mdns.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "boot_confirm.h"
 #include "boot_log.h"
 #include "history_backfill.h"
@@ -44,6 +48,7 @@
 #include "mqtt_bridge.h"
 #endif
 #include "crash_journal.h"
+#include "liveness_guard.h"
 #include "espnow_diag.h"
 #include "sml_transport.h"
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -146,7 +151,7 @@ static const char *TAG = "espnow_meter";
 #define WIFI_SSID_MAX_LEN      32
 #define WIFI_PASSWORD_MAX_LEN  64
 
-#define METER_HTML_HEADER "<!doctype html><html><head><meta charset=\"utf-8\"><title>ESP32 IR Meter</title><style>body{font-family:Arial,sans-serif;margin:24px;background:#10151f;color:#e5edf7} .card{background:#182330;padding:20px;border-radius:12px;max-width:100%} .value{font-size:2rem;font-weight:700;color:#78d6ff} .small{font-size:0.8rem;color:#9fb4c8}.nav{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}.nav a,.action{display:inline-block;padding:10px 14px;border:0;border-radius:7px;background:#176b91;color:#fff;text-decoration:none;font:inherit;cursor:pointer}.nav a:hover,.action:hover{background:#2086b2}</style></head><body><div class=\"card\"><h1>ESP32 IR Meter</h1>"
+#define METER_HTML_HEADER "<!doctype html><html><head><meta charset=\"utf-8\"><title>ESP32 IR Meter</title><style>body{font-family:Arial,sans-serif;margin:24px;background:#10151f;color:#e5edf7} .card{background:#182330;padding:20px;border-radius:12px;max-width:100%} .value{font-size:2rem;font-weight:700;color:#78d6ff} .small{font-size:0.8rem;color:#9fb4c8}.menu{display:flex;flex-wrap:wrap;gap:22px;margin-top:18px}.menu .group{min-width:150px}.menu .group h3{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;color:#9fb4c8;margin:0 0 8px}.menu a,.action{display:inline-block;padding:8px 12px;margin:4px 0;border:0;border-radius:7px;background:#176b91;color:#fff;text-decoration:none;font:inherit;cursor:pointer}.menu a{display:block}.menu a:hover,.action:hover{background:#2086b2}</style></head><body><div class=\"card\"><h1>ESP32 IR Meter</h1>"
 
 #define METER_HTML_FOOTER "</div></body></html>"
 
@@ -669,6 +674,36 @@ static uint8_t espnow_align_channel_from_receiver_ap(void)
 }
 #endif
 
+/* The measurement store lives in its own data partition. An OTA image must
+ * never be allowed to land there: a bad partitions.csv (e.g. a fat app slot
+ * overlapping the data partition) would otherwise silently erase minutes of
+ * power history. This asserts the next update slot cannot overlap the data
+ * partition at all. Cheap and always on; called before every esp_ota_begin. */
+static bool ota_target_is_safe(const esp_partition_t *target)
+{
+    if (target == NULL) {
+        return false;
+    }
+    const esp_partition_t *store = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
+        POWER_HISTORY_PARTITION);
+    if (store == NULL) {
+        return true; /* no measurement partition configured */
+    }
+    uint32_t target_start = target->address;
+    uint32_t target_end = target->address + target->size;
+    uint32_t store_start = store->address;
+    uint32_t store_end = store->address + store->size;
+    if (target_start < store_end && store_start < target_end) {
+        ESP_LOGE(TAG, "Refusing OTA: update partition %s [0x%x..0x%x] overlaps "
+                      "the measurement partition %s [0x%x..0x%x]",
+                 target->label, (unsigned)target_start, (unsigned)target_end,
+                 store->label, (unsigned)store_start, (unsigned)store_end);
+        return false;
+    }
+    return true;
+}
+
 static void initialize_wifi_and_espnow(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -864,6 +899,8 @@ static void espnow_ota_worker(void *arg)
                 update_partition = esp_ota_get_next_update_partition(NULL);
                 if (update_partition == NULL || request.total_size > update_partition->size) {
                     status = ESP_ERR_INVALID_SIZE;
+                } else if (!ota_target_is_safe(update_partition)) {
+                    status = ESP_ERR_INVALID_ARG;
                 } else {
                     status = esp_ota_begin(update_partition, request.total_size, &ota_handle);
                     if (status == ESP_OK) {
@@ -960,6 +997,19 @@ static void espnow_ota_worker(void *arg)
     }
 }
 #endif
+
+/* Global liveness watchdog. Declared early so the UART worker, the HTTP
+ * handlers and the console can feed it; the worker itself is defined further
+ * down, near the other long-running tasks. Role-neutral: the console status
+ * line reads it in both roles. */
+static void liveness_note_alive(void);
+static uint32_t liveness_silence_now(void);
+
+/* Shared state of the global liveness watchdog. Defined early (not next to the
+ * worker) so console_cmd_status can read it. g_liveness_ready flips true only
+ * after the guard worker is running, so every feed is a no-op before that. */
+static liveness_guard_t g_liveness;
+static volatile bool g_liveness_ready;
 
 #if CONFIG_ESPNOW_ROLE_SENDER
 static void crash_journal_persist(uint8_t level);
@@ -1770,6 +1820,9 @@ static void espnow_diag_worker(void *arg)
             diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "diag response confirmed flags=0x%04x",
                            request.flags);
         }
+        /* The sender answers tunneled console/diagnostic requests here, so this
+         * counts as progress for the liveness watchdog. */
+        liveness_note_alive();
     }
 }
 
@@ -1814,6 +1867,7 @@ static void time_sync_worker(void *arg)
 {
     (void)arg;
     while (1) {
+        liveness_note_alive();
         uint8_t destination[ESP_NOW_ETH_ALEN];
         portENTER_CRITICAL(&g_time_sync_lock);
         bool known = g_receiver_mac_valid;
@@ -1946,6 +2000,7 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         ESP_LOGW(TAG, "Received an invalid ESP-NOW packet");
         return;
     }
+    liveness_note_alive();
 
 #if CONFIG_ESPNOW_LINK_FALLBACK
     /* Any inbound frame proves the peer is alive: re-arm the silence timer so a
@@ -2812,6 +2867,7 @@ static void uart_event_worker(void *arg)
     int64_t next_stats_us = esp_timer_get_time() + 10000000LL;
 
     while (1) {
+        liveness_note_alive();
         if (xQueueReceive(g_uart_event_queue, &event, pdMS_TO_TICKS(1000)) == pdTRUE) {
             switch (event.type) {
             case UART_FIFO_OVF:
@@ -2886,7 +2942,7 @@ static void uart_event_worker(void *arg)
 
 static esp_err_t root_handler(httpd_req_t *req)
 {
-    char html[768];
+    char html[1024];
     int len = snprintf(html, sizeof(html), "%s<p>FRITZ!Box: %s</p>",
                        METER_HTML_HEADER,
                        g_wifi_connected ? "connected" : "not connected");
@@ -3181,12 +3237,20 @@ static esp_err_t root_handler(httpd_req_t *req)
 #endif
 
     static const char page_footer[] =
-        "<nav class=\"nav\"><a href=\"/log\">SML logger</a>"
-        "<a href=\"/api\">JSON API</a><a href=\"/config\">Wi-Fi settings</a>"
+        "<nav class=\"menu\">"
+        "<div class=\"group\"><h3>Zähler</h3>"
+        "<a href=\"/log\">SML-Logger</a>"
+        "<a href=\"/api\">JSON-API</a></div>"
+        "<div class=\"group\"><h3>Sender &amp; Link</h3>"
         "<a href=\"/sender\">Sender (tunnelled)</a>"
-        "<a href=\"/diag\">Sender diagnostics</a>"
-        "<a href=\"/console\">Debug console</a>"
-        "<a href=\"/update\">Firmware update</a></nav>" METER_HTML_FOOTER;
+        "<a href=\"/diag\">Diagnose</a></div>"
+        "<div class=\"group\"><h3>System</h3>"
+        "<a href=\"/console\">Debug-Konsole</a>"
+        "<a href=\"/bootlog\">Boot-Log</a>"
+        "<a href=\"/simulate\">Neustart-Simulation</a>"
+        "<a href=\"/config\">WLAN</a>"
+        "<a href=\"/update\">Firmware-Update</a></div>"
+        "</nav>" METER_HTML_FOOTER;
     err = httpd_resp_sendstr_chunk(req, page_footer);
     if (err != ESP_OK) {
         return err;
@@ -4353,22 +4417,45 @@ static esp_err_t ota_page_handler(httpd_req_t *req)
     static const char page[] =
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Firmware update</title>"
         "<style>body{font-family:Arial;margin:24px;background:#10151f;color:#e5edf7}"
-        "input,button{display:block;margin:12px 0;padding:8px}</style></head><body>"
-        "<h1>Local firmware update</h1><p>Select the matching role firmware: "
-        "receiver-sml.bin for this device or sender-sml.bin for the sender. "
-        "Do not close this page during upload.</p>"
-        "<label>Wi-Fi key (FRITZ!Box password when connected there; otherwise AP password)</label>"
-        "<input id=\"key\" type=\"password\"><label>Target</label><select id=\"target\">"
-        "<option value=\"/update\">Receiver (this device)</option>"
-        "<option value=\"/update-sender\">Sender via ESP-NOW</option></select>"
+        "input,button{display:block;margin:12px 0;padding:8px}"
+        ".note{color:#9fb4c8;font-size:0.85rem;max-width:460px}</style></head><body>"
+        "<h1>Lokales Firmware-Update</h1><p>Passende Rollen-Firmware wählen: "
+        "receiver-sml.bin für dieses Gerät oder sender-sml.bin für den Sender. "
+        "Diese Seite während des Uploads nicht schließen.</p>"
+        "<p class=\"note\">Nur die Firmware-Partition wird geschrieben — die "
+        "Messdaten-Partition (storage) und die Einstellungen bleiben unberührt.</p>"
+        "<label>Wi-Fi/OTA-Key (FRITZ!Box-Passwort, sonst AP-Passwort)</label>"
+        "<input id=\"key\" type=\"password\"><label>Ziel</label><select id=\"target\">"
+        "<option value=\"/update\">Empfänger (dieses Gerät)</option>"
+        "<option value=\"/update-sender\">Sender über ESP-NOW</option></select>"
         "<input id=\"file\" type=\"file\" accept=\".bin\">"
-        "<button onclick=\"upload()\">Upload and reboot</button><p id=\"status\"></p>"
-        "<script>async function upload(){const f=document.getElementById('file').files[0];"
-        "if(!f){alert('Select a firmware .bin file');return;}const s=document.getElementById('status');"
-        "s.textContent='Uploading…';try{const r=await fetch(document.getElementById('target').value,{method:'POST',"
-        "headers:{'X-OTA-Key':document.getElementById('key').value},body:f});"
+        "<button onclick=\"upload()\">Hochladen und neu starten</button><p id=\"status\"></p>"
+        "<h2>Update aus dem Netz ziehen</h2>"
+        "<p class=\"note\">Die Sandbox kann das Image öffentlich bereitstellen "
+        "(tools/ota-publish.sh). Hier die HTTPS-URL einfügen; das Gerät lädt und "
+        "installiert sie selbst.</p>"
+        "<input id=\"url\" type=\"url\" placeholder=\"https://…/esp32-IR.bin\">"
+        "<button onclick=\"pull()\">Vom Server laden und neu starten</button>"
+        "<script>const keyEl=document.getElementById('key');"
+        "try{keyEl.value=sessionStorage.getItem('consoleKey')||'';}catch(e){}"
+        "async function upload(){const f=document.getElementById('file').files[0];"
+        "if(!f){alert('Firmware-.bin-Datei wählen');return;}"
+        "try{sessionStorage.setItem('consoleKey',keyEl.value);}catch(e){}"
+        "const s=document.getElementById('status');"
+        "s.textContent='Lade hoch…';try{const r=await fetch(document.getElementById('target').value,{method:'POST',"
+        "headers:{'X-OTA-Key':keyEl.value},body:f});"
         "s.textContent=await r.text();if(!r.ok)throw new Error('HTTP '+r.status);}"
-        "catch(e){s.textContent='Update failed: '+e;}}</script><p><a href=\"/\">Back</a></p>"
+        "catch(e){s.textContent='Update fehlgeschlagen: '+e;}}"
+        "async function pull(){const u=document.getElementById('url').value.trim();"
+        "if(!u){alert('HTTPS-URL des Images einfügen');return;}"
+        "try{sessionStorage.setItem('consoleKey',keyEl.value);}catch(e){}"
+        "const s=document.getElementById('status');s.textContent='Starte Pull-OTA…';"
+        "try{const r=await fetch('/api/ota-pull',{method:'POST',"
+        "headers:{'X-OTA-Key':keyEl.value,'Content-Type':'application/json'},"
+        "body:JSON.stringify({url:u})});"
+        "s.textContent=await r.text();if(!r.ok)throw new Error('HTTP '+r.status);}"
+        "catch(e){s.textContent='Pull-OTA fehlgeschlagen: '+e;}}</script>"
+        "<p><a href=\"/\">Zurück</a></p>"
         "</body></html>";
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -4424,6 +4511,15 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
         snprintf(out, out_size, "status: output truncated\n");
         return;
     }
+    int live = snprintf(out + written, out_size - (size_t)written,
+                        "liveness: %s, last progress %u ms ago\n",
+                        g_liveness_ready ? "guarded" : "starting",
+                        (unsigned)liveness_silence_now());
+    if (live < 0 || (size_t)live >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+        return;
+    }
+    written += live;
 #if !CONFIG_ESPNOW_ROLE_SENDER
     int extra = snprintf(
         out + written, out_size - (size_t)written,
@@ -4777,6 +4873,23 @@ static runtime_config_t *active_runtime_config(void)
     return &g_runtime_config;
 }
 
+/* Append NVS partition usage to out. Shared by the `test storage` console
+ * command and the /diag page so both report the same numbers. NVS is where the
+ * Wi-Fi credentials, the crash journal and the history cursor live. */
+static void nvs_stats_append(char *out, size_t out_size)
+{
+    nvs_stats_t stats;
+    esp_err_t err = nvs_get_stats(NULL, &stats);
+    if (err != ESP_OK) {
+        snprintf(out, out_size, "  nvs: unavailable (%s)\n", esp_err_to_name(err));
+        return;
+    }
+    snprintf(out, out_size,
+             "  nvs: %u/%u entries used (%u free), %u namespaces\n",
+             (unsigned)stats.used_entries, (unsigned)stats.total_entries,
+             (unsigned)stats.free_entries, (unsigned)stats.namespace_count);
+}
+
 static void console_cmd_test(const char *args, char *out, size_t out_size)
 {
     char what[24] = {0};
@@ -4786,7 +4899,12 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
     if (parsed < 1) {
         snprintf(out, out_size,
                  "usage: test sleep [<ms>|pin <mhz>|restore|stats] | test cpu | "
-                 "test sml | test espnow | test storage\n");
+                 "test sml | test espnow | test storage | test nvs\n");
+        return;
+    }
+    if (strcmp(what, "nvs") == 0) {
+        snprintf(out, out_size, "nvs partition:\n");
+        nvs_stats_append(out + strlen(out), out_size - strlen(out));
         return;
     }
     if (strcmp(what, "sml") == 0) {
@@ -4919,7 +5037,7 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
         int64_t oldest = 0;
         int64_t latest = 0;
         (void)power_history_time_range(&oldest, &latest);
-        snprintf(out, out_size,
+        int written = snprintf(out, out_size,
                  "storage: %s\n"
                  "  records: %u  sequences: %u..%u\n"
                  "  range: %lld..%lld UTC\n"
@@ -4928,6 +5046,9 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  (unsigned)s.oldest_sequence, (unsigned)s.latest_sequence,
                  (long long)oldest, (long long)latest,
                  (unsigned)s.queue_drops, (unsigned)s.write_errors);
+        if (written > 0 && (size_t)written < out_size) {
+            nvs_stats_append(out + written, out_size - (size_t)written);
+        }
         return;
     }
     if (strcmp(what, "espnow") == 0) {
@@ -5032,7 +5153,7 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
 static void web_console_register_commands(void)
 {
     web_console_register("help", "list available commands", console_cmd_help);
-    web_console_register("test", "run a self-test: sleep|cpu|sml|espnow|storage",
+    web_console_register("test", "run a self-test: sleep|cpu|sml|espnow|storage|nvs",
                          console_cmd_test);
     web_console_register("set", "change a runtime knob: cpu|freq|cpu-min|sleep|retries",
                          console_cmd_set);
@@ -5072,6 +5193,7 @@ static esp_err_t console_api_handler(httpd_req_t *req)
         return send_http_error_status(req, "401 Unauthorized",
                                       "X-OTA-Key missing or wrong");
     }
+    liveness_note_alive();
     char line[192];
     size_t total = 0;
     int timeouts = 0;
@@ -5524,6 +5646,7 @@ static void history_backfill_worker(void *arg)
         if (system_time_is_valid() && (forced || due)) {
             (void)history_backfill_run_session(HISTORY_BACKFILL_MAX_PAGES, NULL, NULL);
         }
+        liveness_note_alive();
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
@@ -6168,6 +6291,7 @@ static esp_err_t sender_console_api_handler(httpd_req_t *req)
         return send_http_error_status(req, "401 Unauthorized",
                                       "X-OTA-Key missing or wrong");
     }
+    liveness_note_alive();
     char line[ESPNOW_DIAG_CMD_LINE_LEN];
     if (req->content_len <= 0 || req->content_len >= (int)sizeof(line)) {
         return send_http_error_status(req, "400 Bad Request",
@@ -6371,6 +6495,11 @@ static esp_err_t relay_sender_firmware(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Firmware exceeds sender OTA partition size");
         return ESP_FAIL;
     }
+    if (!ota_target_is_safe(partition)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "OTA target would overlap the measurement partition");
+        return ESP_FAIL;
+    }
 
     if (xSemaphoreTake(g_espnow_ota_mutex, 0) != pdTRUE) {
         send_http_error_status(req, "409 Conflict", "Another OTA transfer is active");
@@ -6475,6 +6604,173 @@ static esp_err_t ota_sender_update_handler(httpd_req_t *req)
 }
 #endif
 
+/* --- Pull OTA --------------------------------------------------------------
+ * The normal update path is a browser upload (POST /update). That needs a
+ * human with the .bin on their machine. For automated work the sandbox that
+ * built the image can instead *host* it: this device then pulls it over HTTPS
+ * from a URL and installs it. The URL is given per request (POST
+ * /api/ota-pull) so nothing is persisted; the very same OTA partition guard
+ * (ota_target_is_safe) and the same image validation (esp_ota_end / the
+ * rollback safety net) apply as for an upload. Nothing here can touch the
+ * "storage" measurement partition: esp_https_ota writes only the next update
+ * slot, which ota_target_is_safe has already proven disjoint.
+ *
+ * The download runs in its own task: a TLS handshake plus esp_https_ota needs
+ * far more stack than the HTTP server task has, so doing it inline would risk
+ * a stack overflow mid-flash. The request only validates and starts the task;
+ * the device reboots itself when the image is installed. */
+#define OTA_PULL_MAX_URL 320
+#define OTA_PULL_TIMEOUT_MS 15000
+#define OTA_PULL_TASK_STACK 8192
+
+static char s_ota_pull_url[OTA_PULL_MAX_URL];
+static volatile bool s_ota_pull_busy;
+
+static bool ota_url_is_trusted(const char *url)
+{
+    /* https only: an image pulled over cleartext HTTP could be swapped on the
+     * wire and brick the device. The sandbox front door presents a Let's
+     * Encrypt certificate that the ESP certificate bundle already trusts. */
+    return strncmp(url, "https://", 8) == 0;
+}
+
+static void ota_pull_task(void *arg)
+{
+    (void)arg;
+    /* Refuse an image that would land on the measurement partition *before* we
+     * download a single byte. esp_https_ota uses the same next-update slot, so
+     * this is the authoritative check. */
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if (update_partition == NULL || !ota_target_is_safe(update_partition)) {
+        ESP_LOGE(TAG, "Pull OTA refused: no safe update partition");
+        s_ota_pull_busy = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Pull OTA from %s into %s", s_ota_pull_url, update_partition->label);
+
+    esp_http_client_config_t http = {
+        .url = s_ota_pull_url,
+        .timeout_ms = OTA_PULL_TIMEOUT_MS,
+        .keep_alive_enable = true,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    esp_https_ota_config_t ota_config = {
+        .http_config = &http,
+    };
+    esp_https_ota_handle_t handle = NULL;
+    esp_err_t err = esp_https_ota_begin(&ota_config, &handle);
+    if (err != ESP_OK || handle == NULL) {
+        ESP_LOGE(TAG, "esp_https_ota_begin failed: %s", esp_err_to_name(err));
+        s_ota_pull_busy = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* Validate the image header before flashing anything, so a truncated file
+     * or a wrong-role .bin is rejected while the running app and the
+     * measurement partition stay untouched. */
+    esp_app_desc_t new_app;
+    err = esp_https_ota_get_img_desc(handle, &new_app);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Downloaded file is not a valid firmware image: %s",
+                 esp_err_to_name(err));
+        esp_https_ota_abort(handle);
+        s_ota_pull_busy = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while ((err = esp_https_ota_perform(handle)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+        /* keep pulling until done */
+    }
+    if (err != ESP_OK || !esp_https_ota_is_complete_data_received(handle)) {
+        ESP_LOGE(TAG, "Firmware download failed: %s", esp_err_to_name(err));
+        esp_https_ota_abort(handle);
+        s_ota_pull_busy = false;
+        vTaskDelete(NULL);
+        return;
+    }
+    err = esp_https_ota_finish(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Firmware image failed validation: %s", esp_err_to_name(err));
+        s_ota_pull_busy = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Pull OTA complete (%s -> %s), restarting",
+             new_app.version[0] ? new_app.version : "?", update_partition->label);
+    vTaskDelay(pdMS_TO_TICKS(800));
+    esp_restart();
+}
+
+static esp_err_t ota_pull_handler(httpd_req_t *req)
+{
+    if (!ota_key_is_valid(req)) {
+        return send_http_error_status(req, "401 Unauthorized",
+                                      "X-OTA-Key missing or wrong");
+    }
+
+    /* Accept the URL either as a raw body or as a JSON object
+     * {"url":"https://..."} (what the sandbox helper sends). */
+    char body[OTA_PULL_MAX_URL + 16];
+    if (req->content_len <= 0 || req->content_len >= (int)sizeof(body)) {
+        return send_http_error_status(req, "400 Bad Request", "Missing or oversized URL");
+    }
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int count = httpd_req_recv(req, body + received,
+                                   (size_t)req->content_len - received);
+        if (count <= 0) {
+            return send_http_error_status(req, "400 Bad Request", "Could not read URL");
+        }
+        received += (size_t)count;
+    }
+    body[received] = '\0';
+
+    const char *url = body;
+    char *json = strstr(body, "\"url\"");
+    if (json != NULL) {
+        char *colon = strchr(json, ':');
+        char *open = colon != NULL ? strchr(colon, '"') : NULL;
+        if (open != NULL) {
+            char *start = open + 1;
+            char *end = strchr(start, '"');
+            if (end != NULL) {
+                *end = '\0';
+                url = start;
+            }
+        }
+    }
+    if (!ota_url_is_trusted(url)) {
+        return send_http_error_status(req, "400 Bad Request",
+                                      "Only https:// firmware URLs are accepted");
+    }
+    if (strlen(url) >= sizeof(s_ota_pull_url)) {
+        return send_http_error_status(req, "400 Bad Request", "URL too long");
+    }
+    if (s_ota_pull_busy) {
+        return send_http_error_status(req, "409 Conflict",
+                                      "Another OTA pull is already running");
+    }
+
+    strlcpy(s_ota_pull_url, url, sizeof(s_ota_pull_url));
+    s_ota_pull_busy = true;
+    if (xTaskCreate(ota_pull_task, "ota_pull", OTA_PULL_TASK_STACK, NULL, 5, NULL) !=
+        pdPASS) {
+        s_ota_pull_busy = false;
+        return send_http_error_status(req, "500 Internal Server Error",
+                                      "Could not start the OTA task");
+    }
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_sendstr(req,
+                              "Pull OTA started. The device downloads and installs "
+                              "the image, then restarts.\n");
+}
+
 static esp_err_t ota_update_handler(httpd_req_t *req)
 {
     if (!ota_key_is_valid(req)) {
@@ -6489,6 +6785,11 @@ static esp_err_t ota_update_handler(httpd_req_t *req)
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
     if (update_partition == NULL || (size_t)req->content_len > update_partition->size) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Firmware exceeds OTA partition size");
+        return ESP_FAIL;
+    }
+    if (!ota_target_is_safe(update_partition)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "OTA target would overlap the measurement partition");
         return ESP_FAIL;
     }
 
@@ -6576,16 +6877,18 @@ static bool decode_form_value(const char *source, char *destination, size_t capa
 static esp_err_t config_handler(httpd_req_t *req)
 {
     static const char page[] =
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Wi-Fi settings</title>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>WLAN</title>"
         "<style>body{font-family:Arial;margin:24px;background:#10151f;color:#e5edf7}"
-        "input{display:block;margin:8px 0 16px;padding:8px;width:280px}</style></head>"
-        "<body><h1>FRITZ!Box Wi-Fi</h1><p>Leave empty to disable the station connection. "
-        "The ESP32 remains available through its setup access point.</p>"
+        "input{display:block;margin:8px 0 16px;padding:8px;width:280px}"
+        ".note{color:#9fb4c8;font-size:0.85rem;max-width:420px}</style></head>"
+        "<body><h1>FRITZ!Box WLAN</h1><p class=\"note\">Hier wird nur die SSID "
+        "geändert; das gespeicherte WLAN-Passwort bleibt erhalten. Leer lassen, um "
+        "die Station-Verbindung zu trennen — der ESP32 bleibt über sein Setup-"
+        "Access-Point erreichbar.</p>"
         "<form method=\"post\" action=\"/save\">"
-        "<label>2.4 GHz Wi-Fi SSID</label><input name=\"ssid\" maxlength=\"32\" required>"
-        "<label>Wi-Fi password</label><input name=\"password\" type=\"password\" maxlength=\"64\">"
-        "<button type=\"submit\">Save and connect</button></form>"
-        "<p><a href=\"/\">Back to meter</a></p></body></html>";
+        "<label>2.4 GHz WLAN-SSID</label><input name=\"ssid\" maxlength=\"32\" required>"
+        "<button type=\"submit\">Speichern und verbinden</button></form>"
+        "<p><a href=\"/\">Zurück zum Zähler</a></p></body></html>";
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req, page);
@@ -6644,9 +6947,16 @@ static esp_err_t save_wifi_handler(httpd_req_t *req)
         field = next;
     }
 
+    /* The Wi-Fi form no longer asks for the password (it is useless to retype
+     * it to change the SSID). When the field is absent, keep the stored one. */
+    if (!have_password) {
+        strlcpy(password, g_wifi_password, sizeof(password));
+    }
+
     size_t password_len = strlen(password);
-    if (!have_ssid || !have_password || ssid[0] == '\0' ||
-        (password_len != 0 && (password_len < 8 || password_len > 64))) {
+    if (!have_ssid || ssid[0] == '\0' ||
+        (have_password && password_len != 0 &&
+         (password_len < 8 || password_len > 64))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID or password length is invalid");
         return ESP_FAIL;
     }
@@ -6826,6 +7136,11 @@ static void register_webserver_handlers(httpd_handle_t server)
         .method = HTTP_POST,
         .handler = ota_update_handler,
     };
+    httpd_uri_t ota_pull = {
+        .uri = "/api/ota-pull",
+        .method = HTTP_POST,
+        .handler = ota_pull_handler,
+    };
 #if !CONFIG_ESPNOW_ROLE_SENDER
     httpd_uri_t update_sender = {
         .uri = "/update-sender",
@@ -6909,6 +7224,7 @@ static void register_webserver_handlers(httpd_handle_t server)
     web_console_register_commands();
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &ota_pull));
 #if !CONFIG_ESPNOW_ROLE_SENDER
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update_sender));
     /* /healthz must be (re)registered here, not only at first start: the guard
@@ -6994,6 +7310,90 @@ static void link_fallback_worker(void *arg)
 }
 #endif /* CONFIG_ESPNOW_LINK_FALLBACK */
 
+/* --- Global liveness watchdog --------------------------------------------
+ * The per-subsystem guards (web_guard on the dashboard, link_fallback on the
+ * ESP-NOW peer) each watch one path. This is the backstop for a *global* stall:
+ * every loop that proves the device is still working feeds it, and only when
+ * none of them makes progress does it escalate. The staged policy is pure and
+ * host-tested (liveness_guard.c); this glue only performs the actions.
+ *
+ * Feeds come from the UART worker, every HTTP request, the web console and the
+ * tunneled sender console. A deadlock that also blocks the HTTP task (mutex /
+ * SPIFFS) therefore trips it; a build whose workers are merely idle does not. */
+#define LIVENESS_TICK_MS 5000
+
+static void liveness_note_alive(void)
+{
+    if (g_liveness_ready) {
+        liveness_feed(&g_liveness, (uint64_t)(esp_timer_get_time() / 1000));
+    }
+}
+
+static uint32_t liveness_silence_now(void)
+{
+    if (!g_liveness_ready) {
+        return 0;
+    }
+    return liveness_silence_ms(&g_liveness, (uint64_t)(esp_timer_get_time() / 1000));
+}
+
+static void liveness_guard_worker(void *arg)
+{
+    (void)arg;
+    uint64_t started_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    liveness_policy_t policy;
+    liveness_default_policy(&policy);
+    liveness_init(&g_liveness, &policy, started_ms);
+    g_liveness_ready = true;
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(LIVENESS_TICK_MS));
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        uint32_t silence = liveness_silence_ms(&g_liveness, now_ms);
+        switch (liveness_tick(&g_liveness, now_ms)) {
+        case LIVENESS_WARN:
+#if CONFIG_ESPNOW_ROLE_SENDER
+            diag_log_event(ESPNOW_DIAG_LEVEL_WARN,
+                           "liveness: no progress for %ums", (unsigned)silence);
+#endif
+            ESP_LOGW(TAG, "liveness watchdog: no worker progress for %u ms",
+                     (unsigned)silence);
+            break;
+        case LIVENESS_PANIC:
+            /* Breadcrumb first, so the crash journal names the stall; then
+             * reboot to a known-good state. */
+#if CONFIG_ESPNOW_ROLE_SENDER
+            diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
+                           "liveness: stalled %ums, rebooting", (unsigned)silence);
+#endif
+            ESP_LOGE(TAG, "liveness watchdog: stalled %u ms, rebooting",
+                     (unsigned)silence);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_restart();
+            break;
+        case LIVENESS_REBOOT:
+            /* The panic reboot did not take: force it once more. */
+            ESP_LOGE(TAG, "liveness watchdog: still stalled %u ms, forcing reboot",
+                     (unsigned)silence);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            esp_restart();
+            break;
+        case LIVENESS_OK:
+        default:
+            break;
+        }
+    }
+}
+
+static void liveness_guard_start(void)
+{
+    BaseType_t ok = xTaskCreate(liveness_guard_worker, "liveness",
+                                3072, NULL, 3, NULL);
+    if (ok != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the liveness watchdog");
+    }
+}
+
 
 
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -7062,6 +7462,10 @@ static void run_sender(void)
              (unsigned int)UART_BUFFER_SIZE, (unsigned int)SML_TX_BATCH_CAPACITY,
              SML_TX_CYCLE_MS, (unsigned int)SML_TX_BURST);
     ESP_LOGI(TAG, "Only CRC-checked SML values and telegram status are transmitted");
+
+    /* Backstop for a global stall on the sender too (it has no web server, but
+     * the UART worker and the tunneled console keep it fed). */
+    liveness_guard_start();
 
     BaseType_t task_result = xTaskCreate(uart_event_worker, "uart_events",
                                          4096, NULL, 6, NULL);
@@ -7223,6 +7627,9 @@ void app_main(void)
     run_sender();
 #else
     start_webserver();
+    /* Backstop for a global stall: fed by every worker and by HTTP/console
+     * traffic, it reboots the device if nothing makes progress. */
+    liveness_guard_start();
     /* Same command set on the USB serial monitor (UART0), so the receiver can
      * be driven locally even if the dashboard is unreachable. */
     serial_console_start();

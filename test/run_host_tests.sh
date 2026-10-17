@@ -299,6 +299,17 @@ python3 "$here/check_dashboard_js.py"
 
 "$out/test_web_guard"
 
+# Global liveness watchdog: the staged escalation that reboots a device whose
+# workers have all stalled (the "refuses service" backstop).
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/liveness_guard.c" \
+    "$here/test_liveness_guard.c" \
+    -o "$out/test_liveness_guard"
+
+"$out/test_liveness_guard"
+
 # Runtime test knobs behind the console's `set` / `reset-config`: clamping and
 # rejection must be exact so a bench run never silently changes the CPU ceiling
 # or the light-sleep flag. Pure C.

@@ -34,6 +34,13 @@
 #define POWER_HISTORY_FILE POWER_HISTORY_MOUNT_PATH "/quarters.bin"
 #endif
 
+/* The SPIFFS partition label holding the measurement store (partitions.csv).
+ * Public so the OTA path in main.c can assert an update image never overlaps
+ * it; that guard is what keeps an OTA from ever erasing the history. */
+#ifndef POWER_HISTORY_PARTITION
+#define POWER_HISTORY_PARTITION "storage"
+#endif
+
 /* On-disk record/header format version. v1 stored the slot generation in
  * `reserved`; v2 left `reserved` at 0; v3 uses `reason` to mark a minute the
  * sender could not measure (it was offline: restart/OTA/battery). Bumping the
