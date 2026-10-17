@@ -203,7 +203,15 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
 - [x] **MQTT-Availability (LWT)**: `main/mqtt_bridge.c` setzt ein LWT auf
       `<prefix>/status` (retained, offline) und veroeffentlicht beim Connect `online`;
       der Discovery-Hub verweist per `availability_topic` darauf.
-- [ ] **MQTT-Service-Events (Reboot-Grund)** — ergänzt Crash-Journal (noch offen).
+- [x] **MQTT-Service-Events (Reboot-Grund)**: `main/mqtt_bridge.c` veroeffentlicht beim
+      Connect ein **retained** Event auf `<prefix>/event/reboot` (Topic aus
+      `main/mqtt_topics.c`): `{"event":"reboot","reason":<code>,"reason_name":"<name>",
+      "version":"<fw>","deliberate":<bool>}`. Ist ein Crash-Journal vorhanden (Sender-Record
+      in NVS), kommt `"journal":{...}` mit Reset-Grund, `boot_count`, `clean_shutdown` und
+      `uptime_ms` dazu. Die Reset-Grund→Text-Abbildung ist **single-sourced** in
+      `crash_journal_reset_reason_name()` (Boot-Log und MQTT koennen nicht auseinanderlaufen).
+      Payload-Bauer `main/mqtt_events.{c,h}` (rein, host-getestet `test/test_mqtt_events.c`,
+      33 Checks). Nur Empfaenger (in der `CONFIG_ESPNOW_ROLE_RECEIVER`-Quellliste).
 - [ ] Optional: konfigurierbares Reboot-Intervall (nächtlich), Deckelung wie AMS.
 
 ### SPIFFS-Historie auch im Sender (gleiche Speicherung wie Empfänger)
@@ -765,6 +773,7 @@ und tunnelt jede Anfrage ueber den bestehenden Diag-Kanal (`sender_diag_exchange
         `{"t":<utc>,"w":<avg>,"n":<count>}`
       - Verfuegbarkeit: `<prefix>/status` (online/offline via LWT, retained)
       - Discovery-Hub: `<prefix>/state` (retained)
+      - Service-Event Reboot: `<prefix>/event/reboot` (retained, s. o.)
       Web-Konsole: Befehl `mqtt`. **CI gruen** (Run 38319709982, Receiver+Sender+Host).
       Grammatik/Format der Topics kommt aus `main/mqtt_topics.c` (host-getestet).
 - [x] **Home-Assistant-Discovery** (`homeassistant/sensor/.../config`): als
