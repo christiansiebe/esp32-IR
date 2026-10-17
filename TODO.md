@@ -1,5 +1,26 @@
 # To-do – esp32-IR
 
+## 🆕 Fix „Sender 240 MHz, 0 Steps" (`feat/sender-associate-dfs`, 2026-10-17)
+Ursache: Der Sender war eine **unassoziierte Station** (`WIFI_MODE_STA`, nie
+`esp_wifi_connect()`), darum hielt der WLAN-Treiber `ESP_PM_APB_FREQ_MAX` dauerhaft
+→ DFS klebte bei 240 MHz (`cpu_freq_changes: 0`, `hist_min: 240`). Das opt-in
+Wake-Window half nicht, weil `esp_now_set_wake_window()` laut IDF-Doku **nur bei
+assoziiertem Status** wirkt (sonst nur mit `ESP_WIFI_STA_DISCONNECTED_PM_ENABLE`)
+– es zyklierte nur das Funkmodul und brach den Link (`36d6390`).
+- [x] `CONFIG_ESPNOW_SENDER_ASSOCIATE` (Default **an**): Der Sender assoziiert sich
+      nach dem Boot-Kanalscan mit dem Empfänger-SoftAP (`ESP32-IR-Meter`). Dann weckt
+      das Connectionless-Modul im DTIM-Intervall, der Treiber gibt den APB-Lock frei
+      → DFS/Light-Sleep greifen. Reconnect über `WIFI_EVENT`-Handler.
+- [x] Sicher: fehlgeschlagene Assoziation lässt nur den Takt gepinnt (altes Verhalten);
+      ESP-NOW-Broadcast an die AP-BSSID bleibt. Voraussetzung: Empfänger behält SoftAP.
+- [x] Relay-OTA validiert jetzt das geschriebene Sender-Image (`esp_app_desc_t`,
+      `project_name == "esp32-IR"`) **vor** der Aktivierung – der Sender hat kein USB,
+      ein kaputtes Image wäre nicht wiederherstellbar.
+- [ ] **Am Gerät verifizieren:** Nach dem Flashen muss `wifi: associated: connected`
+      erscheinen und `cpu_freq_changes > 0` / `hist_min < 240` werden, während
+      `sender-diag` und der Backfill weiterlaufen. Sonst zurückrollen (Image ist per
+      ESP-NOW-Relay reflashbar, solange der Link lebt).
+
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
 Letzter Commit: `f5239c7` – CI **grün** (Push-Run `38466461726`, PR-Run `38466468521`:
 Host-Tests, Sender, Receiver). Neu: JSON-Escaping der Sender-Diagnose-

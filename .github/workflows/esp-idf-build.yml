@@ -160,6 +160,12 @@ jobs:
           test -s "build/sender/esp32-IR.bin"
           grep -a -q 'adaptive sleep path compiled in' "build/sender/esp32-IR.bin"
           echo "Sender image contains the adaptive light-sleep path"
+          # The sender associates with the receiver SoftAP so Wi-Fi modem sleep
+          # releases the APB lock and DFS can actually step down. Assert the
+          # config is on and the association path is compiled in.
+          grep -q '^CONFIG_ESPNOW_SENDER_ASSOCIATE=y$' sdkconfig
+          grep -a -q 'for Wi-Fi modem sleep' "build/sender/esp32-IR.bin"
+          echo "Sender image associates with the receiver AP for modem sleep"
           # The ESP-NOW connectionless wake window would let the Wi-Fi driver
           # release its APB lock, but on the original ESP32 it was observed to
           # break the link, so it is opt-in and OFF by default. Assert the

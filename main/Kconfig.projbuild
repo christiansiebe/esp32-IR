@@ -71,6 +71,7 @@ config ESPNOW_SENDER_ESPNOW_POWER_SAVE
     bool "Sender: ESP-NOW connectionless power save (experimental)"
     default n
     depends on ESPNOW_SENDER_LIGHT_SLEEP
+
     help
         Enable the periodic ESP-NOW wake window above so the Wi-Fi driver
         releases its ESP_PM_APB_FREQ_MAX lock and the sender can actually
@@ -82,6 +83,40 @@ config ESPNOW_SENDER_ESPNOW_POWER_SAVE
         exactly as before this option existed) unless you can bench-verify the
         link while it is on. When enabled, keep the window well below the
         interval and expect diag/history requests to rely on the retry path.
+
+config ESPNOW_SENDER_ASSOCIATE
+    bool "Sender: associate with the receiver SoftAP for Wi-Fi modem sleep"
+    default y
+    depends on ESPNOW_ROLE_SENDER
+    help
+        The sender's station never associates with an AP, so the Wi-Fi driver
+        keeps ESP_PM_APB_FREQ_MAX asserted: DFS is pinned at the ceiling
+        ("240 MHz, 0 steps") and light sleep never engages. A periodic ESP-NOW
+        wake window does NOT help here: per the ESP-IDF docs it only takes
+        effect at connected status (or with ESP_WIFI_STA_DISCONNECTED_PM_ENABLE),
+        and enabling it on an unassociated station was observed to break the
+        link.
+
+        Associate with the receiver's SoftAP instead. Then the connectionless
+        module wakes in the AP's DTIM interval, the driver releases the APB lock
+        between beacons and the CPU can DFS down / light-sleep. This is the
+        documented modem-sleep path. The sender uses the receiver AP's
+        credentials (receiver AP SSID + password below) on its station.
+
+        Safe: a failed association only leaves the clock pinned (the old
+        behaviour); the ESP-NOW broadcast to the receiver AP's BSSID still
+        works. The only prerequisite is that the receiver keeps its SoftAP on
+        (do not set ESPNOW_RECEIVER_DISABLE_AP).
+
+config ESPNOW_SENDER_ASSOC_SSID
+    string "Receiver SoftAP SSID for the sender to associate with"
+    default "ESP32-IR-Meter"
+    depends on ESPNOW_SENDER_ASSOCIATE
+
+config ESPNOW_SENDER_ASSOC_PASSWORD
+    string "Receiver SoftAP password for the sender to associate with"
+    default "12345678"
+    depends on ESPNOW_SENDER_ASSOCIATE
 
 config ESPNOW_CHANNEL
     int "ESP-NOW channel"

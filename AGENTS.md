@@ -177,6 +177,30 @@ Two firmware roles are built from one source tree.
   `SENDER_DIAG_ATTEMPTS` (4); a command uses the single-shot
   `sender_diag_exchange_once()` so it cannot run twice. See Espressif issue
   esp-idf#11714 ("ESP-NOW does not release the WiFi module and APB_FREQ_MAX").
+  **Why the wake window alone did not help:** per the IDF docs
+  `esp_now_set_wake_window()` only takes effect *at connected status* (or with
+  `ESP_WIFI_STA_DISCONNECTED_PM_ENABLE`), so on the sender's unassociated station
+  it does not release the APB lock — it only cycles the radio and breaks the link.
+- **Sender associates with the receiver SoftAP (`CONFIG_ESPNOW_SENDER_ASSOCIATE`,
+  default on) — the fix for "240 MHz, 0 steps".** Since the wake window needs an
+  association, the sender now associates with the receiver's `ESP32-IR-Meter`
+  SoftAP (SSID/password in `CONFIG_ESPNOW_SENDER_ASSOC_{SSID,PASSWORD}`) right
+  after the boot channel scan in `initialize_wifi_and_espnow()`. The
+  connectionless module then wakes in the AP's DTIM interval and the Wi-Fi driver
+  releases `ESP_PM_APB_FREQ_MAX` between beacons, so DFS can actually step down.
+  This is the documented modem-sleep path and is **safe**: a failed association
+  only leaves the clock pinned (the old behaviour), the ESP-NOW broadcast to the
+  receiver AP's BSSID is unaffected, and the sender registers a `WIFI_EVENT`
+  handler (no `IP_EVENT`) that re-associates on `STA_DISCONNECTED`. The sender
+  still gets its time over ESP-NOW, not SNTP. Prerequisite: the receiver keeps
+  its SoftAP on (`ESPNOW_RECEIVER_DISABLE_AP` must stay off). The sender console
+  `wifi` command shows `associated: connected/not connected`.
+- **Relayed sender images are validated before activation.** The sender has no
+  USB and is reachable only over ESP-NOW, so a bad image would be unrecoverable
+  (its `boot_confirm.c` is a no-op stub). `relay_sender_firmware()` reads the
+  freshly written partition's `esp_app_desc_t` (offset 0x20) and refuses to
+  `esp_ota_set_boot_partition()` it unless `project_name == "esp32-IR"`, pointing
+  the boot partition back at the running image on failure.
 - **Receiver without the SoftAP (`CONFIG_ESPNOW_RECEIVER_DISABLE_AP`, default
   off).** Station-only mode: no `ESP32-IR-Meter` AP, dashboard over the home
   WLAN only (DHCP/mDNS). ESP-NOW runs on `ESPNOW_IF` (station when the AP is off,

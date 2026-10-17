@@ -16,6 +16,7 @@
 #include "esp_netif_sntp.h"
 #include "esp_now.h"
 #include "esp_ota_ops.h"
+#include "esp_app_desc.h"
 #include "esp_https_ota.h"
 #include "esp_crt_bundle.h"
 #include "esp_partition.h"
@@ -593,12 +594,24 @@ static void wifi_event_handler(void *arg,
         const wifi_event_sta_disconnected_t *event = event_data;
         g_wifi_connected = false;
         ESP_LOGW(TAG, "Wi-Fi station disconnected (reason %u)", event->reason);
+#if CONFIG_ESPNOW_ROLE_SENDER
+#if CONFIG_ESPNOW_SENDER_ASSOCIATE
+        /* Re-associate with the receiver AP so Wi-Fi modem sleep keeps the APB
+         * lock released (the sender has no home WLAN credentials). */
+        esp_err_t err = esp_wifi_connect();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Re-association with the receiver AP failed: %s",
+                     esp_err_to_name(err));
+        }
+#endif
+#else
         if (g_wifi_configured) {
             esp_err_t err = esp_wifi_connect();
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Wi-Fi reconnect failed: %s", esp_err_to_name(err));
             }
         }
+#endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
         /* AP-only fallback (no home WLAN configured): the dashboard is reachable
          * at http://192.168.4.1/, and mDNS works here too. */
@@ -728,6 +741,14 @@ static void initialize_wifi_and_espnow(void)
         ESP_ERROR_CHECK(ESP_FAIL);
     }
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+#if CONFIG_ESPNOW_SENDER_ASSOCIATE
+    /* The station handler only reconnects the sender to the receiver AP after a
+     * drop, so modem sleep keeps working. The IP_EVENT handler is deliberately
+     * NOT registered here: the sender gets its time over ESP-NOW from the
+     * receiver, not from SNTP/mDNS. */
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                               wifi_event_handler, NULL));
+#endif
 #else
 #if !CONFIG_ESPNOW_RECEIVER_DISABLE_AP
     g_ap_netif = esp_netif_create_default_wifi_ap();
@@ -790,6 +811,33 @@ static void initialize_wifi_and_espnow(void)
                       "re-checking if the link stays silent", g_espnow_channel);
         ESP_ERROR_CHECK(esp_wifi_set_channel(g_espnow_channel, WIFI_SECOND_CHAN_NONE));
     }
+#if CONFIG_ESPNOW_SENDER_ASSOCIATE
+    /* Associate with the receiver SoftAP so Wi-Fi modem sleep releases the APB
+     * lock: this is what lets DFS actually step down ("240 MHz, 0 steps" was the
+     * unassociated-station symptom). Best effort - a failure only leaves the
+     * clock pinned (the previous behaviour); the ESP-NOW broadcast to the
+     * receiver AP's BSSID still works. */
+    wifi_config_t assoc_config = {0};
+    strlcpy((char *)assoc_config.sta.ssid, CONFIG_ESPNOW_SENDER_ASSOC_SSID,
+            sizeof(assoc_config.sta.ssid));
+    strlcpy((char *)assoc_config.sta.password, CONFIG_ESPNOW_SENDER_ASSOC_PASSWORD,
+            sizeof(assoc_config.sta.password));
+    if (detected_channel != 0) {
+        assoc_config.sta.channel = detected_channel;
+    }
+    esp_err_t assoc_err = esp_wifi_set_config(WIFI_IF_STA, &assoc_config);
+    if (assoc_err == ESP_OK) {
+        assoc_err = esp_wifi_connect();
+    }
+    if (assoc_err == ESP_OK) {
+        ESP_LOGI(TAG, "Associating with receiver AP \"%s\" for Wi-Fi modem sleep",
+                 CONFIG_ESPNOW_SENDER_ASSOC_SSID);
+    } else {
+        ESP_LOGW(TAG, "Could not associate with receiver AP \"%s\" (%s); the CPU "
+                      "clock stays pinned at the ceiling",
+                 CONFIG_ESPNOW_SENDER_ASSOC_SSID, esp_err_to_name(assoc_err));
+    }
+#endif
     wifi_interface_t espnow_interface = WIFI_IF_STA;
 #else
 #if !CONFIG_ESPNOW_RECEIVER_DISABLE_AP
@@ -4604,6 +4652,15 @@ static void console_cmd_time(const char *args, char *out, size_t out_size)
 static void console_cmd_wifi(const char *args, char *out, size_t out_size)
 {
     (void)args;
+#if CONFIG_ESPNOW_ROLE_SENDER
+    int written = snprintf(out, out_size,
+                           "receiver ap: %s\n"
+                           "associated: %s\n"
+                           "esp-now channel: %u\n",
+                           CONFIG_ESPNOW_SENDER_ASSOC_SSID,
+                           g_wifi_connected ? "connected" : "not connected",
+                           (unsigned int)g_espnow_channel);
+#else
     int written = snprintf(out, out_size,
                            "configured ssid: %s\n"
                            "fritzbox: %s\n"
@@ -4611,6 +4668,7 @@ static void console_cmd_wifi(const char *args, char *out, size_t out_size)
                            g_wifi_configured ? g_wifi_ssid : "(none)",
                            g_wifi_connected ? "connected" : "not connected",
                            (unsigned int)g_espnow_channel);
+#endif
     if (written < 0 || (size_t)written >= out_size) {
         snprintf(out, out_size, "wifi: output truncated\n");
     }
@@ -6563,6 +6621,22 @@ static esp_err_t relay_sender_firmware(httpd_req_t *req)
         }
         offset += (uint32_t)received_total;
         ++sequence;
+    }
+
+    /* The sender has no USB and is reachable only over ESP-NOW, so a bad image
+     * would be unrecoverable. Validate the fully written partition BEFORE
+     * activating it: the app descriptor sits at offset 0x20. On failure send
+     * ABORT so the sender discards the transfer instead of booting it. */
+    {
+        esp_app_desc_t desc;
+        if (esp_ota_get_partition_description(partition, &desc) != ESP_OK ||
+            strcmp(desc.project_name, "esp32-IR") != 0) {
+            ESP_LOGE(TAG, "Relayed image failed validation; aborting the sender update");
+            send_http_error_status(req, "502 Bad Gateway",
+                                   "Relayed image failed validation; sender not updated");
+            goto abort_transfer;
+        }
+        ESP_LOGI(TAG, "Sender image validated: %s %s", desc.project_name, desc.version);
     }
 
     command.type = ESPNOW_OTA_END;

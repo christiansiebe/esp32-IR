@@ -9,6 +9,13 @@
 # The receiver never enters light sleep (it has to answer HTTP and receive
 # ESP-NOW broadcasts), so it only scales the clock. The sender may park in
 # light sleep inside its verified quiet window (see CONFIG_ESPNOW_SENDER_LIGHT_SLEEP).
+#
+# On the sender, DFS only steps down once the Wi-Fi driver releases its
+# ESP_PM_APB_FREQ_MAX lock. An unassociated station never does ("240 MHz,
+# 0 steps"), and the ESP-NOW wake window only works at connected status, so the
+# sender associates with the receiver SoftAP (CONFIG_ESPNOW_SENDER_ASSOCIATE,
+# default y). Keep the receiver SoftAP on for the sender to scale down.
+#
 # If a board shows brownout resets or instability at 240 MHz, lower this (and
 # CONFIG_ESPNOW_CPU_MAX_MHZ) to 160 or 80.
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
