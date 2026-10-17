@@ -29,10 +29,10 @@ def check(cond, msg):
 
 def main():
     # Stufen greifen bei der jeweiligen Last.
-    check(ch.plan_online(0.10, CPUS6, CPUS6) == [0, 1], 'idle -> 2 Kerne')
-    check(ch.plan_online(0.49, CPUS6, CPUS6) == [0, 1], 'knapp unter 0.5 -> 2')
-    check(ch.plan_online(0.50, CPUS6, CPUS6) == [0, 1, 2], '0.5 -> 3 Kerne')
-    check(ch.plan_online(1.49, CPUS6, CPUS6) == [0, 1, 2], '1.49 -> 3 Kerne')
+    check(ch.plan_online(0.10, CPUS6, CPUS6) == [0], 'idle -> 1 Kern')
+    check(ch.plan_online(0.49, CPUS6, CPUS6) == [0], 'knapp unter 0.5 -> 1')
+    check(ch.plan_online(0.50, CPUS6, CPUS6) == [0, 1], '0.5 -> 2 Kerne')
+    check(ch.plan_online(1.49, CPUS6, CPUS6) == [0, 1], '1.49 -> 2 Kerne')
     check(ch.plan_online(1.50, CPUS6, CPUS6) == [0, 1, 2, 3], '1.5 -> 4 Kerne')
     check(ch.plan_online(2.99, CPUS6, CPUS6) == [0, 1, 2, 3], '2.99 -> 4')
     check(ch.plan_online(3.00, CPUS6, CPUS6) == [0, 1, 2, 3, 4, 5], '3.0 -> alle')

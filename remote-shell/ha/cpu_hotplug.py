@@ -14,7 +14,7 @@ holt sie bei Bedarf zurueck. Die Entscheidung selbst ist eine reine Funktion
 Sicherheitsregeln:
 - cpu0 bleibt **immer** online. Der Boot-Prozessor ist der einzige, dessen
   Wieder-Onlinen nicht garantiert ist; ausserdem haengen Timer an ihm.
-- Es bleiben mindestens `MIN_ONLINE` Kerne online.
+- Im Leerlauf bleibt nur cpu0 online; `MIN_ONLINE` ist die Untergrenze.
 - Hysterese: eine Aenderung passiert erst, wenn die Last `STABLE_SAMPLES`
   Messungen in Folge dieselbe Stufe verlangt. Das verhindert Flattern.
 - Beim Beenden (Signal) werden **alle** Kerne wieder online genommen.
@@ -30,12 +30,12 @@ CPU_SYS = '/sys/devices/system/cpu'
 # (Last-Schwelle, gewuenschte Kernzahl). Die erste passende Zeile gewinnt.
 # Aufwaermend sortiert; die letzte Stufe ist die Gesamtzahl der Kerne.
 STEPS = [
-    (0.50, 2),
-    (1.50, 3),
+    (0.50, 1),
+    (1.50, 2),
     (3.00, 4),
     (6.00, 6),
 ]
-MIN_ONLINE = 2
+MIN_ONLINE = 1
 STABLE_SAMPLES = 6      # 6 x INTERVAL = 30 s stabile Last vor einer Aenderung
 INTERVAL = 5.0
 
