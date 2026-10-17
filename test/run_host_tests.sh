@@ -102,6 +102,21 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_mqtt_topics"
 
+# MQTT reboot/service event payload (no esp-mqtt): the retained reset-reason
+# message Home Assistant parses. Reuses the crash-journal reason mapping and the
+# JSON escaper, so it is host-tested together with them.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/mqtt_events.c" \
+    "$repo/main/crash_journal.c" \
+    "$repo/main/json_escape.c" \
+    "$here/test_mqtt_events.c" \
+    -o "$out/test_mqtt_events"
+
+"$out/test_mqtt_events"
+
 # Sender-side batching ring + backfill arithmetic (no radio): batching,
 # oldest-eviction and the gap count the receiver reconciles against.
 "$cc" -std=c11 -Wall -Wextra -O2 \

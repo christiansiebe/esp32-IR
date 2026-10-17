@@ -58,7 +58,9 @@ int mqtt_topics_build(const char *prefix, mqtt_topics_t *out)
     if (join(base, "power", tmp.power, sizeof(tmp.power)) != 0 ||
         join(base, "history", tmp.history, sizeof(tmp.history)) != 0 ||
         join(base, "status", tmp.status, sizeof(tmp.status)) != 0 ||
-        join(base, "state", tmp.state, sizeof(tmp.state)) != 0) {
+        join(base, "state", tmp.state, sizeof(tmp.state)) != 0 ||
+        join(base, "event/reboot", tmp.event_reboot,
+             sizeof(tmp.event_reboot)) != 0) {
         return -1;
     }
     *out = tmp;
