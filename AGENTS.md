@@ -253,6 +253,25 @@ Two firmware roles are built from one source tree.
   task. The wire response is a single ESP-NOW payload (243 bytes, guarded by a
   `_Static_assert` in `main.c`).
 
+## MQTT reboot event (receiver)
+- The receiver publishes a **retained** MQTT message on every connect to
+  `<prefix>/event/reboot` (topic built in `mqtt_topics.c`, payload by the pure
+  `main/mqtt_events.c`), so Home Assistant can show why the device restarted:
+  `{"event":"reboot","reason":<code>,"reason_name":"<name>","version":"<fw>",
+  "deliberate":<bool>}` plus `"journal":{...}` when a crash journal exists.
+- The reset-reason→string mapping is **single-sourced** in
+  `crash_journal_reset_reason_name()`; the boot log and the MQTT event can never
+  disagree. `deliberate` reuses `crash_journal_reset_is_deliberate()`.
+- The receiver itself writes no crash journal (that is the sender's), so on a
+  plain receiver `crash_journal_load()` finds nothing and the `journal` object is
+  omitted. The event still reports the receiver's own `esp_reset_reason()` and
+  the firmware version, which is the point (an unexplained reboot is visible).
+- Both facts are captured once in `mqtt_bridge_start()` before the client
+  connects, so a reconnect republishes the same boot event (not the live state).
+- Receiver-only: `mqtt_events.c` sits in the `CONFIG_ESPNOW_ROLE_RECEIVER`
+  source list, so the sender build is untouched. Host test:
+  `test/test_mqtt_events.c` (in `run_host_tests.sh`).
+
 ## UART receive-gap diagnosis (sender)
 - The read head (IR diode UART) delivers bytes in bursts; silent gaps between
   telegrams are normal. `uart_capture_worker` measures the gap between byte
