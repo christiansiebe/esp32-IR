@@ -6,8 +6,8 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from boot_journal_lib import (  # noqa: E402
-    classify_reset, default_state, load_state, record_boot, save_state,
-    summarize, EARLY_RESET_MAX_UPTIME_S,
+    classify_reset, default_state, extract_panic_summary, load_state,
+    record_boot, save_state, summarize, EARLY_RESET_MAX_UPTIME_S,
 )
 
 checks = 0
@@ -48,6 +48,44 @@ ok(classify_reset(clean_marker=False, watchdog_bootstatus=False,
                   kernel_panic=False,
                   prev_uptime_s=EARLY_RESET_MAX_UPTIME_S - 0.1) == "early-reset",
    "knapp unter der Grenze -> early")
+
+# --- pstore-Panic schlaegt early, aber nicht clean/watchdog ---
+ok(classify_reset(clean_marker=False, watchdog_bootstatus=False,
+                  kernel_panic=False, prev_uptime_s=5,
+                  pstore_panic="Kernel panic - not syncing: x") == "kernel-panic",
+   "pstore-Panic schlaegt early-reset")
+ok(classify_reset(clean_marker=True, watchdog_bootstatus=False,
+                  kernel_panic=False, prev_uptime_s=5,
+                  pstore_panic="Kernel panic") == "clean-reboot",
+   "clean schlaegt pstore-Panic")
+ok(classify_reset(clean_marker=False, watchdog_bootstatus=True,
+                  kernel_panic=False, prev_uptime_s=5,
+                  pstore_panic="Kernel panic") == "watchdog-reset",
+   "watchdog schlaegt pstore-Panic")
+ok(classify_reset(clean_marker=False, watchdog_bootstatus=False,
+                  kernel_panic=False, prev_uptime_s=3600,
+                  pstore_panic=None) == "hard-reset-unknown",
+   "ohne pstore-Panic -> hard-reset-unknown")
+
+# --- extract_panic_summary ---
+SAMPLE = "\n".join([
+    "<6>[    0.000000] Booting Linux on physical CPU 0x0",
+    "<4>[   50.070434] Call trace:",
+    "<0>[   50.049214] Kernel panic - not syncing: sysrq triggered crash",
+    "<4>[   50.080139]  dump_stack+0x18/0x24",
+])
+ok(extract_panic_summary(SAMPLE) ==
+   "Kernel panic - not syncing: sysrq triggered crash",
+   "extract_panic_summary findet die Panic-Zeile ohne Praefix")
+ok(extract_panic_summary("nur harmloses Zeug\n") is None,
+   "extract_panic_summary: keine Panic -> None")
+ok(extract_panic_summary("<4>[  1.0] Unable to handle kernel NULL pointer") ==
+   "Unable to handle kernel NULL pointer", "Ooops-Marker erkannt")
+ok(extract_panic_summary("<2>[  2.0] Internal error: Oops") ==
+   "Internal error: Oops", "Internal-error-Marker erkannt")
+ok(extract_panic_summary("") is None, "leerer Text -> None")
+long_line = "Kernel panic - not syncing: " + "x" * 500
+ok(len(extract_panic_summary(long_line)) == 200, "Panic-Text auf 200 gekappt")
 
 # --- Zustand: Defaults, Round-Trip, Zaehler ---
 st = default_state()
@@ -95,6 +133,21 @@ st = default_state()
 st = record_boot(st, boot_id="zzz", start_epoch=1, reason="early-reset",
                  prev_uptime_s=4.2, uptime_at_boot_s=0.9)
 ok("early-reset" in summarize(st), "summarize nennt Grund")
+
+# --- panic_summary landet im Eintrag und im Bericht ---
+st = default_state()
+st = record_boot(st, boot_id="p1", start_epoch=1, reason="kernel-panic",
+                 prev_uptime_s=50.0, uptime_at_boot_s=1.0,
+                 panic_summary="Kernel panic - not syncing: sysrq triggered crash")
+ok(st["last"].get("panic") ==
+   "Kernel panic - not syncing: sysrq triggered crash", "panic im Eintrag")
+ok("Panic:" in summarize(st), "summarize zeigt Panic")
+# Ohne Panic kein Schluessel (schmales Zustandsformat).
+st2 = default_state()
+st2 = record_boot(st2, boot_id="p2", start_epoch=1, reason="clean-reboot",
+                  prev_uptime_s=10.0, uptime_at_boot_s=1.0)
+ok("panic" not in st2["last"], "ohne Panic kein panic-Feld")
+ok("Panic:" not in summarize(st2), "summarize ohne Panic")
 
 print("boot_journal_lib: %d Checks, %d Fehler" % (checks, len(fails)))
 for f in fails:

@@ -511,8 +511,33 @@ Wichtigste Punkte (sonst scheitert es):
 - **Board-verifiziert:** sauberer Reboot -> `clean-reboot` (prev_uptime exakt =
   letzter Heartbeat). Kernel-Panic (sysrq-trigger, panic=10) -> `early-reset`.
 - **Grenze (ehrlich):** ein Panic schreibt sich NICHT ins Journal (journald
-  flusht nicht vor dem Freeze) -> landet als early-reset, nicht kernel-panic.
-  Fuer echte Panic-Zuordnung braeuchte es ramoops/pstore (fehlt).
+  flusht nicht vor dem Freeze). Diese Luecke schliesst jetzt ramoops/pstore
+  (siehe naechster Abschnitt) - die primaere Panic-Spur ist pstore.
 - Dateien: remote-shell/ha/{boot_journal.py,boot_journal_lib.py,
-  test_boot_journal_lib.py,boot-journal*.{service,timer},deploy_boot_journal.sh}
-  + BOOT-JOURNAL-README.md.
+  test_boot_journal_lib.py,test_boot_journal_flow.py,boot-journal*.{service,timer},
+  deploy_boot_journal.sh} + BOOT-JOURNAL-README.md.
+
+### ramoops/pstore: Kernel-Panics ueberleben den Warm-Reset (2026-10-17)
+- **Ziel:** Panics ueberleben den Reset, damit boot_journal den echten Grund
+  (`kernel-panic`) statt nur `early-reset`/`hard-reset-unknown` melden kann.
+- **Loesung:** DT-Overlay `ramoops` reserviert 1 MiB RAM bei **0x50000000** (im
+  freien Fenster 0x40000000-0xdfd2dfff, NICHT mit secmon 0x05000000 verwechseln).
+  `gen_ramoops_dts.py` erzeugt es, `deploy_ramoops.sh` installiert es
+  (`user_overlays=lowfreq ramoops`), `revert_ramoops.sh` nimmt es zurueck.
+  Der Kernel nutzt die Region als pstore; `systemd-pstore` archiviert den Dump
+  nach /var/lib/systemd/pstore/. `boot_journal.py` liest beide Orte.
+- **Dedupe (wichtig):** ramoops/systemd-pstore behalten ALTE Dumps. boot_journal
+  merkt sich die mtime des verbrauchten Dumps MONOTON (`consumed_pstore_mtime`)
+  und ignoriert alles, was nicht juenger ist - sonst klebt ein alter Panic an
+  jedem weiteren Boot. (Real passiert: `dmesg.txt` aelter + `dmesg-ramoops-0`
+  neuer -> der aeltere ueberschrieb die Marke. Fix = `mtime <= exclude`.)
+- **Board-verifiziert:** dmesg `reserved mem ... ramoops@50000000 (1024 KiB)`,
+  ramoops-Modul geladen, Panic (sysrq-trigger) -> dmesg-ramoops-0 enthaelt
+  `Kernel panic - not syncing: sysrq triggered crash` + Call trace -> Boot wird
+  als `kernel-panic` MIT Text klassifiziert. Danach zwei saubere Reboots ->
+  `clean-reboot` ohne Text. **Nur Warm-Reset** (Kaltstart loescht RAM).
+- **Brick-Sicherheit:** boot.cmd stellt bei `fdt apply`-Fehler den Original-DT
+  her -> ein kaputtes Overlay kann das Board nicht bricken.
+- Dateien: remote-shell/ha/{gen_ramoops_dts.py,ramoops.dts,deploy_ramoops.sh,
+  revert_ramoops.sh,test_gen_ramoops_dts.py,test_boot_journal_pstore.py,
+  test_boot_journal_flow.py} + RAMOOPS-README.md.
