@@ -61,3 +61,12 @@ void link_fallback_note_send_ok(link_fallback_t *fb, uint64_t now_ms);
  * passed. Latches on first true (sticky) so the caller cannot flap. */
 bool link_fallback_should_fallback(link_fallback_t *fb, uint64_t now_ms,
                                    uint64_t uptime_ms);
+
+/* Receiver -> sender keep-alive decision: true when our own outbound traffic
+ * (last acknowledged send) has been quiet for half the silence timeout, so we
+ * should ping and keep the peer's watchdog fed. Deliberately keyed off the
+ * *outbound* clock only - the receiver hears the sender's broadcasts
+ * continuously, so the inbound clock is always fresh and would suppress the
+ * ping on exactly the idle link it exists to keep alive. */
+bool link_keepalive_due(uint64_t last_ok_ms, uint64_t now_ms,
+                        uint32_t silence_timeout_ms);

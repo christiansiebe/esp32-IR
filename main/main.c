@@ -7584,19 +7584,19 @@ static void link_fallback_worker(void *arg)
 #if !CONFIG_ESPNOW_ROLE_SENDER
         /* Keep the sender's watchdog fed on an idle link: the sender only hears
          * from us when we send something, and it has no way to know that "no
-         * request" is normal. Ping once the link has been quiet for half the
-         * silence timeout, so the sender never sees a full silence window and
-         * its adaptive light sleep stays on. */
+         * request" is normal. Ping once our own outbound traffic has been quiet
+         * for half the silence timeout (link_keepalive_due). Keyed off
+         * last_ok_ms (our confirmed sends), NOT last_rx_ms: we hear the
+         * sender's broadcasts continuously, so last_rx_ms is always fresh and
+         * would suppress the ping - which is exactly how the sender's watchdog
+         * tripped anyway. */
         {
-            uint64_t last_heard;
+            uint64_t last_ok;
             portENTER_CRITICAL(&g_link_fallback_lock);
-            last_heard = g_link_fallback.last_rx_ms > g_link_fallback.last_ok_ms
-                             ? g_link_fallback.last_rx_ms
-                             : g_link_fallback.last_ok_ms;
+            last_ok = g_link_fallback.last_ok_ms;
             portEXIT_CRITICAL(&g_link_fallback_lock);
-            if (now_ms >= last_heard &&
-                (now_ms - last_heard) >=
-                    (uint64_t)CONFIG_ESPNOW_LINK_FALLBACK_MS / 2u) {
+            if (link_keepalive_due(last_ok, now_ms,
+                                   CONFIG_ESPNOW_LINK_FALLBACK_MS)) {
                 sender_link_ping();
             }
         }
