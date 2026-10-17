@@ -80,9 +80,8 @@ bool uart_sleep_init_idf(void)
         return false;
     }
 
-    /* Wi-Fi modem sleep releases the APB_MAX lock the Wi-Fi driver holds while
-     * both interfaces are up; without it the CPU could never enter light sleep. */
-    (void)esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    /* Wi-Fi modem sleep is set after esp_wifi_start() (see initialize_wifi_and_espnow):
+     * calling esp_wifi_set_ps() here, before esp_wifi_init(), silently failed. */
 
     esp_pm_lock_acquire(s_no_light_sleep);
     /* Compiled in only when this real branch is active (not the stub), so the
