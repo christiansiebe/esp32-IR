@@ -25,17 +25,17 @@ echo "Webroot: $WEBROOT"
 echo "=== 3. systemd-Dienst novnc.service ==="
 cat > /etc/systemd/system/novnc.service <<EOF
 [Unit]
-Description=noVNC (websockify: HTTP 6080 -> VNC 5901)
-Documentation=https://github.com/novnc/noVNC
+Description=noVNC web frontend for XFCE desktop (websockify 6080 -> VNC 5901)
 After=network-online.target xfce-vnc.service
-Wants=network-online.target xfce-vnc.service
+PartOf=xfce-vnc.service
+Wants=network-online.target
+Requires=xfce-vnc.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/websockify --web=$WEBROOT 6080 localhost:5901
+ExecStart=/usr/bin/websockify --web=$WEBROOT 0.0.0.0:6080 localhost:5901
 Restart=always
 RestartSec=3
-User=root
 
 [Install]
 WantedBy=multi-user.target
@@ -43,6 +43,9 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now novnc.service
+# / ist ext4 mit commit=120: ohne sync kann ein Reset kurz nach dem Deploy die
+# Schreibzugriffe verschlucken. Nach jedem Deploy flushen.
+sync
 sleep 3
 systemctl --no-pager --lines=5 status novnc.service || true
 
@@ -51,3 +54,6 @@ ss -ltnp 2>/dev/null | grep -E ':(5901|6080)\b' || true
 
 echo "=== 5. HTTP-Test ==="
 curl -sS -o /dev/null -w "vnc.html -> HTTP %{http_code}\n" http://127.0.0.1:6080/vnc.html || true
+echo "Aufruf im Browser: http://odroidn2.local:6080/vnc.html"
+echo "HINWEIS: /vnc.html nicht weglassen - :6080/ allein zeigt nur die"
+echo "         noVNC-Verzeichnisliste (sieht wie ein Datei-Explorer aus)."
