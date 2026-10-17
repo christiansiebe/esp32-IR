@@ -1,0 +1,25 @@
+# vnc-lan-guard: nur diese Quellen duerfen den noVNC-Port erreichen.
+#
+# Der XFCE-Desktop laeuft ohne VNC-Passwort (siehe xfce-vnc.service,
+# -SecurityTypes None). Damit ist die Paketfilterung die einzige Grenze:
+# alles ausserhalb LAN_CIDR wird auf PORT verworfen.
+#
+# Aenderung hier wirkt nach `systemctl restart vnc-lan-guard.service`.
+# Notausgang (Regeln entfernen):  python3 /usr/local/sbin/vnc_lan_guard.py --remove
+# Zustand anzeigen:               python3 /usr/local/sbin/vnc_lan_guard.py --print
+
+# TCP-Port von websockify (noVNC-Weboberflaeche).
+PORT=6080
+
+# Dein LAN. Alle Geraete hier kommen ohne Passwort rein.
+LAN_CIDR=192.168.178.0/24
+
+# Zusaetzlich erlaubte Quellen (kommagetrennt). Loopback ist fuer den
+# websockify->VNC-Weg auf demselben Host noetig.
+LO_SOURCES=127.0.0.0/8
+
+# Name der iptables-Kette (nicht aendern, wenn nicht noetig).
+CHAIN=VNC_LAN
+
+# Pruefintervall in Sekunden (Selbstheilung, kein Flush im Normalbetrieb).
+CHECK_INTERVAL=30

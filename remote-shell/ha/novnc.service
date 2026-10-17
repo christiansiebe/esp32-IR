@@ -7,7 +7,9 @@ Requires=xfce-vnc.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/websockify --web=/usr/share/novnc 0.0.0.0:6080 localhost:5901
+# Ziel explizit 127.0.0.1 (nicht "localhost"): TigerVNC laeuft mit
+# -localhost yes nur auf IPv4-Loopback; "localhost" koennte auf ::1 zeigen.
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc 0.0.0.0:6080 127.0.0.1:5901
 Restart=always
 RestartSec=3
 

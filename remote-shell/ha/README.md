@@ -36,6 +36,9 @@ All three run **inside** the Home Assistant container so they can read
   cleans the old paths).
 - `novnc.service`, `xfce-vnc.service`, `vnc-xstartup`, `deploy_novnc.sh` +
   `novnc-README.md` — the XFCE desktop in the browser (TigerVNC + noVNC).
+- `vnc_lan_guard.py`, `vnc-lan-guard.service`, `vnc-lan-guard.default`,
+  `deploy_vnc_lan.sh`, `test_vnc_lan_guard.py` — passwordless desktop reachable
+  only from the LAN (TigerVNC on loopback + an iptables source filter on 6080).
 
 ## Gateway backfill
 

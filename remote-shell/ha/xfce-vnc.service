@@ -1,5 +1,5 @@
 [Unit]
-Description=XFCE VNC Server (TigerVNC, display :1)
+Description=XFCE VNC Server (TigerVNC, display :1, loopback only, no password)
 After=network-online.target
 Wants=network-online.target
 
@@ -8,7 +8,11 @@ Type=forking
 User=root
 Environment=HOME=/root
 ExecStartPre=-/usr/bin/vncserver -kill :1
-ExecStart=/usr/bin/vncserver :1 -geometry 1920x1080 -depth 24 -localhost no -SecurityTypes VncAuth
+# -localhost yes: TigerVNC bindet nur an 127.0.0.1, Port 5901 ist von aussen
+# nicht erreichbar. Nur websockify auf demselben Host kommt dran.
+# -SecurityTypes None: kein VNC-Passwort. Die Grenze ist damit der Paketfilter
+# (vnc-lan-guard.service laesst nur LAN + Loopback auf Port 6080).
+ExecStart=/usr/bin/vncserver :1 -geometry 1920x1080 -depth 24 -localhost yes -SecurityTypes None
 ExecStop=/usr/bin/vncserver -kill :1
 Restart=on-failure
 RestartSec=5
