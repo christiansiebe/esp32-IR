@@ -2803,6 +2803,12 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
     g_sml_last_sequence = sequence;
     portEXIT_CRITICAL(&g_uart_stats_lock);
 
+    /* Drop a stale completion from the previous telegram before sending: the
+     * callback gives g_send_done from the Wi-Fi task, and a late give (e.g. a
+     * previous send that only completed now) would otherwise be taken as this
+     * telegram's result. */
+    (void)xSemaphoreTake(g_send_done, 0);
+
     size_t packet_length = sizeof(packet.header) +
                            item->value_count * sizeof(packet.values[0]);
     esp_err_t err = esp_now_send(broadcast_mac, (const uint8_t *)&packet,
@@ -6148,7 +6154,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
                        "\"sender_fw_version\":\"%s\","
                        "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
-                       "\"sleep_fallback\":%u,\"fallback_stage\":%u}",
+                       "\"sleep_fallback\":%u,\"fallback_stage\":%u,"
+                       "\"last_ok_ago_s\":%u,\"last_rx_ago_s\":%u}",
                        fw_version(),
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
@@ -6206,7 +6213,9 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.boot_marker_count,
                        (unsigned int)counters.boot_marker_reason,
                        (unsigned int)counters.sleep_fallback_active,
-                       (unsigned int)counters.link_fallback_stage);
+                       (unsigned int)counters.link_fallback_stage,
+                       (unsigned int)counters.last_ok_ago_s,
+                       (unsigned int)counters.last_rx_ago_s);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -7636,7 +7645,13 @@ static void link_fallback_worker(void *arg)
 #endif
         bool fallback;
         portENTER_CRITICAL(&g_link_fallback_lock);
-        fallback = link_fallback_should_fallback(&g_link_fallback, now_ms, uptime_ms);
+        fallback = link_fallback_should_fallback(&g_link_fallback, now_ms,
+                                                 uptime_ms,
+#if CONFIG_ESPNOW_ROLE_SENDER
+                                                 true);
+#else
+                                                 false);
+#endif
         portEXIT_CRITICAL(&g_link_fallback_lock);
         if (!fallback) {
             continue;

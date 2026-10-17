@@ -30,7 +30,7 @@ void link_fallback_note_send_ok(link_fallback_t *fb, uint64_t now_ms)
 }
 
 bool link_fallback_should_fallback(link_fallback_t *fb, uint64_t now_ms,
-                                   uint64_t uptime_ms)
+                                   uint64_t uptime_ms, bool sender_role)
 {
     if (fb == NULL) {
         return false;
@@ -41,11 +41,24 @@ bool link_fallback_should_fallback(link_fallback_t *fb, uint64_t now_ms,
     if (uptime_ms < fb->min_uptime_ms) {
         return false;
     }
-    /* The link is up while either direction shows life. Requiring both to go
-     * quiet avoids tripping on a half-dead link that still carries a healthy
-     * direction (e.g. unicast requests arrive but broadcasts do not). */
-    uint64_t last_heard = fb->last_rx_ms > fb->last_ok_ms ? fb->last_rx_ms
-                                                          : fb->last_ok_ms;
+    /* What counts as "the link is up" depends on the role:
+     *
+     * - Sender: only its *outbound* path matters. The receiver talks to it on
+     *   demand (dashboard poll, hourly time sync, history sync), so the sender's
+     *   inbound path is legitimately silent for long stretches even on a
+     *   perfectly healthy link. Judging the link by the inbound clock made the
+     *   watchdog fire ~60 s after every boot on a link that was sending fine
+     *   (the fallback event logged "ok=1s rx=67s"). The fallback exists to fix a
+     *   broken *send* path (light sleep dropping frames / wrong channel), so the
+     *   acknowledged-send clock is the right signal.
+     *
+     * - Receiver: either direction counts. It has no reason to stop sending to
+     *   the sender (it pings to keep the sender's watchdog fed), so a stale
+     *   inbound clock there really does mean the link is down. */
+    uint64_t last_heard = sender_role
+                              ? fb->last_ok_ms
+                              : (fb->last_rx_ms > fb->last_ok_ms ? fb->last_rx_ms
+                                                                 : fb->last_ok_ms);
     if (now_ms < last_heard) {
         return false; /* clock went backwards; wait for it to catch up */
     }
