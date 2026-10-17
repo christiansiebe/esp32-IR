@@ -861,6 +861,17 @@ static void initialize_wifi_and_espnow(void)
 #endif
     ESP_ERROR_CHECK(esp_now_init());
 
+#if CONFIG_ESPNOW_ROLE_SENDER
+#if CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE
+    /* ESP-NOW is a Wi-Fi connectionless module and keeps the radio (and the
+     * ESP_PM_APB_FREQ_MAX lock) on until a wake window is set, which pins DFS at
+     * the ceiling ("240 MHz, 0 steps"). Set it now that esp_now_init() has run.
+     * With CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y it also takes effect
+     * before/without association; the STA_CONNECTED handler re-applies it. */
+    uart_sleep_espnow_power_save_enable();
+#endif
+#endif
+
     esp_now_peer_info_t peer = {0};
     memcpy(peer.peer_addr, broadcast_mac, sizeof(broadcast_mac));
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -4660,6 +4671,7 @@ static void console_cmd_wifi(const char *args, char *out, size_t out_size)
 {
     (void)args;
 #if CONFIG_ESPNOW_ROLE_SENDER
+#if CONFIG_ESPNOW_SENDER_ASSOCIATE
     int written = snprintf(out, out_size,
                            "receiver ap: %s\n"
                            "associated: %s\n"
@@ -4667,6 +4679,12 @@ static void console_cmd_wifi(const char *args, char *out, size_t out_size)
                            CONFIG_ESPNOW_SENDER_ASSOC_SSID,
                            g_wifi_connected ? "connected" : "not connected",
                            (unsigned int)g_espnow_channel);
+#else
+    int written = snprintf(out, out_size,
+                           "receiver ap: (association disabled)\n"
+                           "esp-now channel: %u\n",
+                           (unsigned int)g_espnow_channel);
+#endif
 #else
     int written = snprintf(out, out_size,
                            "configured ssid: %s\n"

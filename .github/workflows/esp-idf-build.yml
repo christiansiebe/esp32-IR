@@ -160,19 +160,15 @@ jobs:
           test -s "build/sender/esp32-IR.bin"
           grep -a -q 'adaptive sleep path compiled in' "build/sender/esp32-IR.bin"
           echo "Sender image contains the adaptive light-sleep path"
-          # The sender associates with the receiver SoftAP so Wi-Fi modem sleep
-          # releases the APB lock and DFS can actually step down. Assert the
-          # config is on and the association path is compiled in.
-          grep -q '^CONFIG_ESPNOW_SENDER_ASSOCIATE=y$' sdkconfig
-          grep -a -q 'for Wi-Fi modem sleep' "build/sender/esp32-IR.bin"
-          echo "Sender image associates with the receiver AP for modem sleep"
-          # The ESP-NOW connectionless wake window is enabled together with the
-          # association: only at connected status does the Wi-Fi driver release
-          # ESP_PM_APB_FREQ_MAX, so without it the clock stays pinned at 240 MHz
-          # (0 DFS steps). Assert both the flag and the compiled-in call site.
+          # The ESP-NOW connectionless wake window is what lets the Wi-Fi driver
+          # release ESP_PM_APB_FREQ_MAX so DFS can step down (else the clock is
+          # pinned at 240 MHz, 0 steps). Assert the flag and the compiled-in call
+          # site, plus the STA_DISCONNECTED_PM_ENABLE that makes the window take
+          # effect without an association.
           grep -q '^CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=y$' sdkconfig
+          grep -q '^CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y$' sdkconfig
           grep -a -q 'ESP-NOW power save on: radio wakes every' "build/sender/esp32-IR.bin"
-          echo "Sender image enables the ESP-NOW wake window once associated"
+          echo "Sender image enables the ESP-NOW wake window for DFS"
 
       - name: Stage firmware and flash files
         shell: bash

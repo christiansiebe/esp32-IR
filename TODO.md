@@ -1,25 +1,27 @@
 # To-do – esp32-IR
 
 ## 🆕 Fix „Sender 240 MHz, 0 Steps" (`feat/sender-associate-dfs`, 2026-10-17)
-Ursache: Der Sender war eine **unassoziierte Station** (`WIFI_MODE_STA`, nie
-`esp_wifi_connect()`), darum hielt der WLAN-Treiber `ESP_PM_APB_FREQ_MAX` dauerhaft
-→ DFS klebte bei 240 MHz (`cpu_freq_changes: 0`, `hist_min: 240`). Das opt-in
-Wake-Window half nicht, weil `esp_now_set_wake_window()` laut IDF-Doku **nur bei
-assoziiertem Status** wirkt (sonst nur mit `ESP_WIFI_STA_DISCONNECTED_PM_ENABLE`)
-– es zyklierte nur das Funkmodul und brach den Link (`36d6390`).
-- [x] `CONFIG_ESPNOW_SENDER_ASSOCIATE` (Default **an**): Der Sender assoziiert sich
-      nach dem Boot-Kanalscan mit dem Empfänger-SoftAP (`ESP32-IR-Meter`). Dann weckt
-      das Connectionless-Modul im DTIM-Intervall, der Treiber gibt den APB-Lock frei
-      → DFS/Light-Sleep greifen. Reconnect über `WIFI_EVENT`-Handler.
-- [x] Sicher: fehlgeschlagene Assoziation lässt nur den Takt gepinnt (altes Verhalten);
-      ESP-NOW-Broadcast an die AP-BSSID bleibt. Voraussetzung: Empfänger behält SoftAP.
+Ursache: ESP-NOW ist ein WLAN-„Connectionless"-Modul und hält das Funkmodul (und
+damit `ESP_PM_APB_FREQ_MAX`) dauerhaft an, solange kein Wake-Window gesetzt ist
+→ DFS klebte bei 240 MHz (`cpu_freq_changes: 0`, `hist_min: 240`).
+- [x] **Der fehlende Baustein ist `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y`**
+      (in `sdkconfig.defaults`). Laut IDF-Doku wirkt `esp_now_set_wake_window()`
+      nur bei assoziiertem Status, **außer** dieses Flag ist gesetzt. Genau das
+      fehlte beim früheren Versuch (`36d6390`) → dort nur Funk-Zyklus + Link-Bruch.
+- [x] Das Wake-Window wird jetzt nach `esp_now_init()` gesetzt (und bei
+      Assoziation erneut), nicht mehr vorher (wirkungslos) →
+      `uart_sleep_espnow_power_save_enable()`, `CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE`
+      (Default **an**).
+- [x] Assoziation mit dem Empfänger-SoftAP ist **optional** (Default **aus**):
+      der Gerätetest zeigte, dass `associated: connected` allein den Takt **nicht**
+      skaliert. Bleibt als Experiment (`CONFIG_ESPNOW_SENDER_ASSOCIATE`).
 - [x] Relay-OTA validiert jetzt das geschriebene Sender-Image (`esp_app_desc_t`,
       `project_name == "esp32-IR"`) **vor** der Aktivierung – der Sender hat kein USB,
       ein kaputtes Image wäre nicht wiederherstellbar.
-- [ ] **Am Gerät verifizieren:** Nach dem Flashen muss `wifi: associated: connected`
-      erscheinen und `cpu_freq_changes > 0` / `hist_min < 240` werden, während
-      `sender-diag` und der Backfill weiterlaufen. Sonst zurückrollen (Image ist per
-      ESP-NOW-Relay reflashbar, solange der Link lebt).
+- [ ] **Am Gerät verifizieren:** Nach dem Flashen müssen `cpu_freq_changes > 0` /
+      `hist_min < 240` werden, während `sender-diag` und der Backfill weiterlaufen.
+      Falls das Wake-Window den Link bricht: `CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=n`
+      (Takt bleibt dann gepinnt), per ESP-NOW-Relay reflashbar.
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
 Letzter Commit: `f5239c7` – CI **grün** (Push-Run `38466461726`, PR-Run `38466468521`:

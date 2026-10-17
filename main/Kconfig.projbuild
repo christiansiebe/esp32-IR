@@ -71,48 +71,37 @@ config ESPNOW_SENDER_ESPNOW_POWER_SAVE
     bool "Sender: ESP-NOW connectionless power save"
     default y
     depends on ESPNOW_SENDER_LIGHT_SLEEP
-    depends on ESPNOW_SENDER_ASSOCIATE
 
     help
         Enable the periodic ESP-NOW wake window above so the Wi-Fi driver
         releases its ESP_PM_APB_FREQ_MAX lock and the sender can actually
-        DFS down / light-sleep. The window is applied from the sender's
-        WIFI_EVENT_STA_CONNECTED handler, i.e. only once the station is
-        associated with the receiver SoftAP: per the IDF docs
-        esp_now_set_wake_window() only takes effect at connected status, and on
-        an unassociated station it only cycles the radio without releasing the
-        APB lock (and was observed to break the ESP-NOW link). So this option
-        requires ESPNOW_SENDER_ASSOCIATE and is on by default together with it.
+        DFS down / light-sleep. ESP-NOW is a Wi-Fi connectionless module and
+        keeps the radio (and the APB lock) on until a wake window is set, which
+        pins DFS at the ceiling ("240 MHz, 0 steps").
 
-        The radio is awake for ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS out of every
-        interval; a request that arrives while the radio is off is retried by
-        the receiver. Turn this off (keeping the association) to fall back to
-        DFS-only power saving, where the clock scales but light sleep never
-        engages.
+        This needs CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y (set in
+        sdkconfig.defaults): per the IDF docs esp_now_set_wake_window() only
+        takes effect at connected status *unless* that option is enabled. The
+        window is applied from esp_now_init() and re-applied on every
+        association. The radio is awake for ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS
+        out of every interval; a request that arrives while the radio is off is
+        retried by the receiver. Turn this off to fall back to the pinned clock.
 
 config ESPNOW_SENDER_ASSOCIATE
-    bool "Sender: associate with the receiver SoftAP for Wi-Fi modem sleep"
-    default y
-    depends on ESPNOW_ROLE_SENDER
+    bool "Sender: also associate with the receiver SoftAP (optional)"
+    default n
+
     help
-        The sender's station never associates with an AP, so the Wi-Fi driver
-        keeps ESP_PM_APB_FREQ_MAX asserted: DFS is pinned at the ceiling
-        ("240 MHz, 0 steps") and light sleep never engages. A periodic ESP-NOW
-        wake window does NOT help here: per the ESP-IDF docs it only takes
-        effect at connected status (or with ESP_WIFI_STA_DISCONNECTED_PM_ENABLE),
-        and enabling it on an unassociated station was observed to break the
-        link.
-
-        Associate with the receiver's SoftAP instead. Then the connectionless
-        module wakes in the AP's DTIM interval, the driver releases the APB lock
-        between beacons and the CPU can DFS down / light-sleep. This is the
-        documented modem-sleep path. The sender uses the receiver AP's
-        credentials (receiver AP SSID + password below) on its station.
-
-        Safe: a failed association only leaves the clock pinned (the old
-        behaviour); the ESP-NOW broadcast to the receiver AP's BSSID still
-        works. The only prerequisite is that the receiver keeps its SoftAP on
-        (do not set ESPNOW_RECEIVER_DISABLE_AP).
+        Associate the sender's station with the receiver's ESP32-IR-Meter
+        SoftAP. This is optional: the DFS fix is the ESP-NOW wake window plus
+        CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE (see
+        ESPNOW_SENDER_ESPNOW_POWER_SAVE). Association on its own did NOT make
+        the clock scale in a bench test, so it is off by default and kept only
+        as an experiment. The station is otherwise unassociated (it just scans
+        for the AP's channel). If enabled, the sender uses the receiver AP
+        credentials below and re-associates after a drop; the ESP-NOW broadcast
+        to the receiver AP's BSSID still works either way.
+    depends on ESPNOW_ROLE_SENDER
 
 config ESPNOW_SENDER_ASSOC_SSID
     string "Receiver SoftAP SSID for the sender to associate with"

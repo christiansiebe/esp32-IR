@@ -11,10 +11,11 @@
 # light sleep inside its verified quiet window (see CONFIG_ESPNOW_SENDER_LIGHT_SLEEP).
 #
 # On the sender, DFS only steps down once the Wi-Fi driver releases its
-# ESP_PM_APB_FREQ_MAX lock. An unassociated station never does ("240 MHz,
-# 0 steps"), and the ESP-NOW wake window only works at connected status, so the
-# sender associates with the receiver SoftAP (CONFIG_ESPNOW_SENDER_ASSOCIATE,
-# default y). Keep the receiver SoftAP on for the sender to scale down.
+# ESP_PM_APB_FREQ_MAX lock. ESP-NOW is a Wi-Fi connectionless module and keeps
+# the radio (and the lock) on until an ESP-NOW wake window is set, so the sender
+# sets one (CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE, default y) together with
+# CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE (below). See AGENTS.md "CPU clock /
+# power".
 #
 # If a board shows brownout resets or instability at 240 MHz, lower this (and
 # CONFIG_ESPNOW_CPU_MAX_MHZ) to 160 or 80.
@@ -51,3 +52,13 @@ CONFIG_ESP_WIFI_SLP_IRAM_OPT=y
 # without pinning a key that would rotate. Cleartext HTTP images are refused
 # (ota_url_is_trusted), so the bundle is the only trust path.
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+
+# Let the Wi-Fi driver apply the ESP-NOW connectionless wake window even when
+# the station is not associated with an AP. Without this the sender DFS stays
+# pinned at the ceiling ("240 MHz, 0 steps"): per the IDF docs
+# esp_now_set_wake_window() only takes effect at connected status *unless*
+# ESP_WIFI_STA_DISCONNECTED_PM_ENABLE is set. This is the missing piece that made
+# the earlier opt-in wake-window attempt (36d6390) fail. The sender associates
+# with the receiver SoftAP anyway (CONFIG_ESPNOW_SENDER_ASSOCIATE); this flag
+# also covers the window before association and after a drop.
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
