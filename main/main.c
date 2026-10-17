@@ -321,6 +321,17 @@ static uint32_t g_cpu_freq_sum_mhz;
 static uint32_t g_cpu_freq_samples;
 static uint32_t g_cpu_freq_changes;
 static uint8_t g_cpu_freq_last_mhz;
+/* DFS histogram: how many 1 Hz samples saw each supported clock. The 1 Hz
+ * sampler can miss short dips, so this plus the "stepped down" event below
+ * answer "did the clock ever leave the ceiling?" over a whole session. Index
+ * maps to {40, 80, 160, 240} MHz. */
+static const uint8_t k_cpu_freq_steps[] = {40u, 80u, 160u, 240u};
+#define CPU_FREQ_STEP_COUNT (sizeof(k_cpu_freq_steps) / sizeof(k_cpu_freq_steps[0]))
+static uint32_t g_cpu_freq_hist[CPU_FREQ_STEP_COUNT];
+static bool g_cpu_freq_below_ceiling_seen;
+/* The configured ceiling, mirrored from the active runtime config so the sampler
+ * can tell "at the ceiling" from "DFS stepped down". */
+static uint8_t g_cpu_freq_ceiling_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ;
 static esp_timer_handle_t g_power_sample_timer;
 static int64_t g_power_bucket_start_utc;
 static int64_t g_power_bucket_first_sample_utc;
@@ -2463,6 +2474,23 @@ static void cpu_freq_sample(void)
     g_cpu_freq_last_mhz = mhz;
     g_cpu_freq_sum_mhz += mhz;
     ++g_cpu_freq_samples;
+
+    for (size_t i = 0; i < CPU_FREQ_STEP_COUNT; ++i) {
+        if (k_cpu_freq_steps[i] == mhz) {
+            ++g_cpu_freq_hist[i];
+            break;
+        }
+    }
+    /* The ceiling is whatever the console/build pinned; a sample below it is
+     * proof that DFS (or modem sleep) actually let the clock drop. */
+    if (mhz < g_cpu_freq_ceiling_mhz) {
+        if (!g_cpu_freq_below_ceiling_seen) {
+            g_cpu_freq_below_ceiling_seen = true;
+            diag_log_event(ESPNOW_DIAG_LEVEL_INFO,
+                           "CPU clock stepped down to %u MHz (ceiling %u)",
+                           (unsigned)mhz, (unsigned)g_cpu_freq_ceiling_mhz);
+        }
+    }
 }
 
 static void power_sample_timer_callback(void *arg)
@@ -5183,13 +5211,19 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
             snprintf(out, out_size, "cpu: could not read the power config\n");
             return;
         }
-        snprintf(out, out_size,
+        (void)snprintf(out, out_size,
                  "cpu: %d-%d MHz  light sleep %s  avg %u MHz  %lu steps\n"
+                 "  min %u MHz  histogram(1 Hz): 40:%lu 80:%lu 160:%lu 240:%lu\n"
+                 "  clock below ceiling seen: %s\n"
                  "usage: test cpu | test sleep pin <mhz> | test sleep restore\n",
                  pm.min_freq_mhz, pm.max_freq_mhz,
                  pm.light_sleep_enable ? "on" : "off",
                  (unsigned)(g_cpu_freq_samples ? g_cpu_freq_sum_mhz / g_cpu_freq_samples : 0),
-                 (unsigned long)g_cpu_freq_changes);
+                 (unsigned long)g_cpu_freq_changes,
+                 (unsigned)g_cpu_freq_min_mhz,
+                 (unsigned long)g_cpu_freq_hist[0], (unsigned long)g_cpu_freq_hist[1],
+                 (unsigned long)g_cpu_freq_hist[2], (unsigned long)g_cpu_freq_hist[3],
+                 g_cpu_freq_below_ceiling_seen ? "yes" : "no");
         return;
     }
 #else
@@ -5254,6 +5288,8 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     bool applied = runtime_config_apply(cfg);
     /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only). */
     runtime_config_store(cfg);
+    /* Keep the DFS sampler's notion of "the ceiling" in step with the config. */
+    g_cpu_freq_ceiling_mhz = (uint8_t)cfg->cpu_mhz;
 
     /* Say so when the stored value differs from what was asked for (a value
      * below the Wi-Fi minimum or off the DFS grid is snapped, not rejected). */
@@ -5301,6 +5337,7 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
     runtime_config_reset(cfg);
     runtime_config_erase();
     runtime_config_apply(cfg);
+    g_cpu_freq_ceiling_mhz = (uint8_t)cfg->cpu_mhz;
 #if CONFIG_ESPNOW_ROLE_SENDER
     uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
     uart_sleep_set_enabled(cfg->light_sleep);
@@ -7707,6 +7744,7 @@ static void run_sender(void)
 static void apply_power_management(void)
 {
     runtime_config_t *cfg = active_runtime_config();
+    g_cpu_freq_ceiling_mhz = (uint8_t)cfg->cpu_mhz;
 #if CONFIG_ESPNOW_ROLE_SENDER
     /* uart_sleep_init_idf() already configured PM during Wi-Fi init with the
      * compile-time ceiling; push the persisted range into the module and mirror
