@@ -185,6 +185,17 @@ Two firmware roles are built from one source tree.
   roles built with the same `CONFIG_ESPNOW_CHANNEL` (now configurable); the
   sender falls back to it when the scan finds nothing, and a station-connected
   receiver cannot leave its home AP's channel, so pick that channel.
+- **Do NOT drop the SoftAP at runtime while ESP-NOW is on the AP interface.**
+  The receiver's ESP-NOW peers use `ESPNOW_IF = WIFI_IF_AP` in the default
+  APSTA build (see `2ec4d36`), so calling `esp_wifi_set_mode(WIFI_MODE_STA)` to
+  save power tears the AP interface down and silently kills the whole ESP-NOW
+  link (diag, history backfill, OTA target, broadcast). Symptom: after
+  `STA_GOT_IP`, `/api/rssi` reports `active:false`, `/api/sender-diag` answers
+  "Sender did not answer", and `/api/history-pull` shows `errors` climbing.
+  A runtime "AP off once the station is up" feature was tried (`04add16`) and
+  reverted (`71409c8`) for exactly this reason. The SoftAP stays on; only the
+  compile-time `CONFIG_ESPNOW_RECEIVER_DISABLE_AP` path (which uses
+  `WIFI_IF_STA` and never has an AP to drop) is safe.
 - Adaptive sender light sleep (`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP`, default
   **on**, sender ships as a single image): `main/uart_sleep_window.{h,c}` parks
   the CPU only in the quiet gap between SML telegram bursts. The window starts at
