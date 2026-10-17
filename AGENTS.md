@@ -197,11 +197,22 @@ Two firmware roles are built from one source tree.
   then breaks (the link watchdog fires: `sleep_fallback:1`, light sleep off). So
   the radio-cycling power save and a reliable ESP-NOW link are **not both
   available on the ESP32 classic**. Since "no data may be lost" wins, the option
-  is **off by default**: the radio stays on and DFS stays pinned at 240 MHz
+  is **off by default**: the radio stays on and DFS stays pinned at the ceiling
   (0 steps). This is a deliberate trade-off, not a bug.
   `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y` (in `sdkconfig.defaults`) is
   required for the wake window to apply without an association, should the
   option be turned on for experiments.
+- **`sleep_fallback:1` right after a reboot is normally benign.** The receiver
+  only talks to the sender on demand (dashboard / OTA) or every 30 min (history
+  sync); the sender's own link watchdog (`link_fallback`, `ESPNOW_LINK_FALLBACK_MS`
+  = 60 s + `ESPNOW_LINK_FALLBACK_GRACE_MS` = 30 s ≈ 90 s after boot) latches when
+  nothing arrives in that window. With the radio held awake the sender still
+  *receives*, so this only drops light sleep — which the default image no longer
+  relies on for the link anyway. It is sticky until the next boot, so a reboot
+  that no poll follows will always show `sleep_fallback:1`; that is not a fault.
+  Verify health with the *live* signals instead: `last_rx_ago_ms` stays low,
+  `sml_send_fail` is low, the receiver's `sender_rssi_valid` is true and the
+  history sync reports `caught_up: true` / `errors: 0`.
 - **Sender association is optional and OFF by default
   (`CONFIG_ESPNOW_SENDER_ASSOCIATE`, `ESPNOW_SENDER_ASSOC_{SSID,PASSWORD}`).** A
   bench test showed that associating the sender with the receiver SoftAP (station
