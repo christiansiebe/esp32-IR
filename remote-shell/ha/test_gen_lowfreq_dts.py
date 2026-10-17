@@ -4,10 +4,13 @@
 Der Generator ist die einzige Stelle, an der eine Spannung dauerhaft in die
 OPP-Tabelle geschrieben wird. Ein zu niedriger Wert hier kann das Board in
 einen Boot-Loop schicken, deshalb wird die Spannungslogik geprueft: Werkswert
-ohne Argument, expliziter Wert je Cluster, Ablehnung unter dem Regler-Boden und
-die Rueckwaerts-Kompatibilitaet des Standardausgabe.
+ohne Argument, expliziter Wert je Cluster, die Spannungs-KURVE je Takt
+(inline und JSON), Ablehnung unter dem Regler-Boden, die Reserve-Warnung unter
+695 mV, Ablehnung unbekannter Raten / zu vieler Raten und die
+Rueckwaerts-Kompatibilitaet des Standardausgabe.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -40,6 +43,15 @@ def volts(text, node):
     import re
     frags = text.split('fragment@')
     return [re.findall(r'opp-microvolt = <(\d+)>;', f) for f in frags[1:]]
+
+
+def rate_volts(text, frag):
+    """{rate_hz: uv} fuer ein Fragment (0 = little, 1 = big)."""
+    import re
+    body = text.split('fragment@')[frag + 1]
+    return {int(h): int(u) for h, u in
+            re.findall(r'opp-hz = /bits/ 64 <(\d+)>;\s*\n\s*'
+                       r'opp-microvolt = <(\d+)>;', body)}
 
 
 def main():
@@ -97,6 +109,90 @@ def main():
         # Jede Rate des Overlays traegt die Zielspannung.
         v = volts(t, None)
         check(len(v[0]) == 14 and len(v[1]) == 14, '14 Raten je Cluster')
+
+        # --- Spannungs-KURVE je Takt -------------------------------------
+        # Inline: eine eigene Spannung pro Rate, nicht genannte Raten bleiben
+        # auf Werksspannung. little bekommt 761, big eine echte Kurve.
+        o6 = os.path.join(d, 'curve.dts')
+        r, t = gen(['--big-table', '24000=700,50000=690,666666=730'], o6)
+        check(r.returncode == 0, 'Inline-Kurve ok')
+        b = rate_volts(t, 1)
+        l = rate_volts(t, 0)
+        check(b[24000000] == 700000, 'Kurve 24 MHz -> 700 mV')
+        check(b[50000000] == 690000, 'Kurve 50 MHz -> 690 mV')
+        check(b[666666666] == 730000, 'Kurve 666 MHz -> 730 mV')
+        check(b[100000000] == 731000, 'nicht genannte Rate bleibt Werksspannung')
+        check(set(l.values()) == {761000}, 'little unberuehrt von --big-table')
+        check('Kurve' in r.stdout, 'Kurve in der Ausgabe')
+
+        # JSON-Datei, flach.
+        flat = os.path.join(d, 'flat.json')
+        with open(flat, 'w') as f:
+            json.dump({'24000': 705, '50000': 695}, f)
+        o7 = os.path.join(d, 'flat.dts')
+        r, t = gen(['--big-table', '@' + flat], o7)
+        check(r.returncode == 0, 'JSON-Kurve (flach) ok')
+        b = rate_volts(t, 1)
+        check(b[24000000] == 705000 and b[50000000] == 695000,
+              'JSON-Werte greifen')
+
+        # JSON-Datei, nach Cluster verschachtelt: jede Tabelle zieht nur ihren
+        # Cluster.
+        nest = os.path.join(d, 'nest.json')
+        with open(nest, 'w') as f:
+            json.dump({'big': {'24000': 710}, 'little': {'24000': 720}}, f)
+        o8 = os.path.join(d, 'nest.dts')
+        r, t = gen(['--big-table', '@' + nest, '--little-table', '@' + nest], o8)
+        check(r.returncode == 0, 'JSON-Kurve (verschachtelt) ok')
+        check(rate_volts(t, 1)[24000000] == 710000, 'big aus verschachteltem JSON')
+        check(rate_volts(t, 0)[24000000] == 720000, 'little aus verschachteltem JSON')
+
+        # Kurve unter dem Boden: ablehnen, keine Datei.
+        o9 = os.path.join(d, 'curvebad.dts')
+        r, t = gen(['--big-table', '24000=670'], o9)
+        check(r.returncode != 0, 'Kurve unter Boden abgelehnt')
+        check('Regler-Grenze' in (r.stdout + r.stderr), 'Grund genannt')
+        check(not os.path.exists(o9), 'keine Datei bei Kurven-Fehler')
+
+        # Genau der Boden in der Kurve ist erlaubt.
+        o10 = os.path.join(d, 'curvefloor.dts')
+        r, t = gen(['--big-table', '24000=680'], o10)
+        check(r.returncode == 0, 'Kurve genau am Boden erlaubt')
+
+        # Reserve-Warnung: < 695 mV erlaubt, aber Warnung auf stderr.
+        o11 = os.path.join(d, 'warn.dts')
+        r, t = gen(['--big-table', '24000=690'], o11)
+        check(r.returncode == 0, '690 mV in Kurve erlaubt')
+        check('WARNUNG' in r.stderr and 'Reserve' in r.stderr,
+              'Reserve-Warnung bei <695 mV')
+        # 695 mV ist die Grenze - keine Warnung mehr.
+        o12 = os.path.join(d, 'nowarn.dts')
+        r, t = gen(['--big-table', '24000=695'], o12)
+        check(r.returncode == 0, '695 mV erlaubt')
+        check('WARNUNG' not in r.stderr, 'keine Warnung bei 695 mV')
+        # Die alte --mv-Variante warnt genauso.
+        o13 = os.path.join(d, 'mvwarn.dts')
+        r, t = gen(['--big-mv', '690'], o13)
+        check('WARNUNG' in r.stderr, 'Warnung auch bei --big-mv')
+
+        # Unbekannte Rate: ablehnen.
+        o14 = os.path.join(d, 'unknown.dts')
+        r, t = gen(['--big-table', '12345=700'], o14)
+        check(r.returncode != 0, 'unbekannte Rate abgelehnt')
+        check('unbekannte Rate' in (r.stdout + r.stderr), 'Grund genannt')
+        check(not os.path.exists(o14), 'keine Datei bei unbekannter Rate')
+
+        # Mehr als 14 Raten: ablehnen.
+        many = ','.join('%d=700' % (i * 1000) for i in range(1, 16))
+        o15 = os.path.join(d, 'many.dts')
+        r, t = gen(['--big-table', many], o15)
+        check(r.returncode != 0, '15 Raten abgelehnt')
+        check('hoechstens 14' in (r.stdout + r.stderr), 'Grund genannt')
+
+        # --mv und --table zusammen: ablehnen.
+        o16 = os.path.join(d, 'both.dts')
+        r, t = gen(['--big-mv', '700', '--big-table', '24000=700'], o16)
+        check(r.returncode != 0, '--mv und --table zusammen abgelehnt')
 
     print('%d Checks, %d Fehler' % (CHECKS, FAILURES))
     return 1 if FAILURES else 0
