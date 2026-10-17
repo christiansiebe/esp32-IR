@@ -27,9 +27,30 @@ import uv        # noqa: E402
 import uvstress as us   # noqa: E402  (Hash-Last aus dem bestehenden Stresstest)
 
 LOW_FREQS = [24000, 50000, 100000, 250000]
-STEPS_MV = [0, 20, 40, 60, 80, 100, 120]
+STEPS_MV = [0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260,
+            280, 300, 320, 340, 360, 380]
 MIN_UV = 680000          # Regler-Boden (V_MIN) - tiefer geht das PWM nicht
 LOG = '/root/uv_lowfreq.jsonl'
+LOCK = '/root/uv_lowfreq.lock'   # verhindert zwei gleichzeitige Laeufe
+
+
+def take_lock():
+    """Nur EIN Lauf darf Spannung/Frequenz schreiben.
+
+    Zwei gleichzeitige Instanzen sind gefaehrlich: die eine setzt beim
+    `revert()` den Governor zurueck auf schedutil (-> 2.4 GHz), waehrend die
+    andere die Spannung noch abgesenkt hat. Genau so ist das Board schon
+    zweimal gehangen und vom Watchdog rebootet worden.
+    """
+    fh = open(LOCK, 'w')
+    try:
+        import fcntl
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (ImportError, OSError):
+        raise SystemExit('Es laeuft bereits ein uv_lowfreq-Lauf (%s)' % LOCK)
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
 
 
 def note(rec):
@@ -38,6 +59,43 @@ def note(rec):
         fh.write(json.dumps(rec) + '\n')
         fh.flush()
         os.fsync(fh.fileno())
+
+
+def done_points():
+    """Bereits fertig gemessene (cluster, freq) aus dem Log - fuer den Resume."""
+    out = {}
+    if not os.path.exists(LOG):
+        return out
+    with open(LOG) as fh:
+        for line in fh:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get('event') == 'result':
+                out[(r['cluster'], r['freq'])] = r
+    return out
+
+
+def failed_points():
+    """Punkte, bei denen eine Stufe Rechenfehler zeigte (aus dem Log)."""
+    out = set()
+    if not os.path.exists(LOG):
+        return out
+    with open(LOG) as fh:
+        for line in fh:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get('ok') is False:
+                out.add((r['cluster'], r['freq']))
+    return out
+
+
+def steps_for(stock_uv):
+    """Stufen bis zum Regler-Boden - die hohen Takte brauchen mehr als 120 mV."""
+    return [mv for mv in STEPS_MV if stock_uv - mv * 1000 >= MIN_UV] or [0]
 
 
 def iters_for(c, seconds):
@@ -68,8 +126,12 @@ def find_min_uv(c, freq, seconds, workers):
     iters = iters_for(c, seconds)
     ref = us.load(iters, workers)       # Referenz bei Werksspannung, gleicher Takt
     best = None
-    for step in STEPS_MV:
+    for step in steps_for(stock_uv):
         target = max(MIN_UV, stock_uv - step * 1000)
+        # VOR dem Setzen protokollieren: haengt das Board an genau dieser Stufe,
+        # steht sie schon auf Platte (der naechste Lauf weiss es dann).
+        note(dict(event='try', cluster=c, freq=freq, step_mv=step,
+                  target_uv=target, iters=iters))
         uv.write_duty(c, uv.uv_to_duty(c, target))
         time.sleep(0.05)
         res = us.load(iters, workers)
@@ -102,18 +164,55 @@ def main():
                          '(inkl. hoher Takte), nicht nur die Tief-Takte')
     ap.add_argument('--soak', action='store_true',
                     help='am Regler-Boden laenger und mit mehr Last nachpruefen')
+    ap.add_argument('--all', action='store_true',
+                    help='alle Takte beider Cluster statt nur die Tief-Takte')
+    ap.add_argument('--resume', action='store_true',
+                    help='bereits im Log stehende Punkte ueberspringen')
+    ap.add_argument('--stop-on-fail', action='store_true',
+                    help='nach dem ersten Punkt mit Rechenfehlern abbrechen')
+    ap.add_argument('--summary', action='store_true',
+                    help='nur das Log auswerten und die Tabelle zeigen')
     args = ap.parse_args()
 
-    freqs = [int(f) for f in args.freqs.split(',')]
+    if args.summary:
+        res = {}
+        for (c, f), r in done_points().items():
+            res['%s@%d' % (c, f)] = dict(stock_uv=r['stock_uv'],
+                                         min_uv=r['min_uv'])
+        print_summary(res)
+        bad = failed_points()
+        if bad:
+            print('Punkte mit Rechenfehlern: %s'
+                  % ', '.join('%s@%d' % p for p in sorted(bad)))
+        return
+
+    _lock = take_lock()                  # bis Prozessende halten
+
+    if args.all:
+        freqs = None                     # je Cluster die volle Tabelle
+    else:
+        freqs = [int(f) for f in args.freqs.split(',')]
     for c in uv.CLUSTERS:
         uv.pin(c, None)
-    note(dict(event='start', freqs=freqs, seconds=args.seconds))
+    note(dict(event='start', freqs=freqs or 'all', seconds=args.seconds))
+
+    have = done_points() if args.resume else {}
+    if have:
+        print('Resume: %d Punkte bereits gemessen' % len(have), flush=True)
 
     results = {}
     for c in uv.CLUSTERS:
-        for f in freqs:
+        pool = us.freqs(c) if freqs is None else freqs
+        for f in pool:
             if f not in us.freqs(c):
                 print('%s %d nicht verfuegbar' % (c, f), flush=True)
+                continue
+            if (c, f) in have:
+                r = have[(c, f)]
+                results['%s@%d' % (c, f)] = dict(stock_uv=r['stock_uv'],
+                                                 min_uv=r['min_uv'])
+                print('=> %s %d kHz: uebersprungen (schon gemessen)' % (c, f),
+                      flush=True)
                 continue
             stock_uv, best = find_min_uv(c, f, args.seconds, args.workers)
             results['%s@%d' % (c, f)] = dict(stock_uv=stock_uv, min_uv=best)
@@ -122,16 +221,24 @@ def main():
             print('=> %s %d kHz: Werksspannung %d mV, stabil bis %s mV' %
                   (c, f, stock_uv // 1000,
                    best // 1000 if best else 'n/a'), flush=True)
+            if args.stop_on_fail and best is None:
+                print('Abbruch nach erstem Fehlerpunkt.', flush=True)
+                break
 
     if not args.skip_rapid:
-        # Schneller Frequenzwechsel ueber die Tief-Takte mit dem gefundenen
-        # sicheren Undervolt: cpufreq setzt bei jedem Sprung die Werksspannung,
-        # danach senken wir wieder auf den absoluten Zielwert ab.
-        safe = min((r['min_uv'] for r in results.values() if r['min_uv']),
-                   default=None)
+        # Schneller Frequenzwechsel mit dem je Takt gefundenen Undervolt.
+        # WICHTIG: die Spannung ist frequenzabhaengig - eine einzige Spannung
+        # fuer die ganze Tabelle hat das Board schon einmal gehaengt (2.4 GHz
+        # braucht 1040 mV, 24 MHz kommt mit 680 mV aus).
+        safe = {}
+        for k, r in results.items():
+            c, f = k.split('@')
+            if r['min_uv']:
+                safe[(c, int(f))] = r['min_uv']
         if safe:
-            print('--- Schnellwechsel-Test bei %d mV ---' % (safe // 1000),
-                  flush=True)
+            lo = min(safe.values()) // 1000
+            print('--- Schnellwechsel-Test, je Takt eigene Spannung (min %d mV) ---'
+                  % lo, flush=True)
             for c in uv.CLUSTERS:
                 uv.write_sys(uv.policy(c) + '/scaling_governor', 'userspace')
             # Referenz bei hoechstem Takt, Werksspannung (gleiche Iterationen).
@@ -143,14 +250,16 @@ def main():
             i = 0
             while time.time() < end:
                 for c in uv.CLUSTERS:
-                    pool = us.freqs(c) if args.rapid_full else \
+                    pool = us.freqs(c) if (args.rapid_full or freqs is None) else \
                         [f for f in freqs if f in us.freqs(c)]
                     if not pool:
                         continue
-                    uv.write_sys(uv.policy(c) + '/scaling_setspeed',
-                                 pool[i % len(pool)])
+                    f = pool[i % len(pool)]
+                    uv.write_sys(uv.policy(c) + '/scaling_setspeed', f)
                     time.sleep(0.02)
-                    uv.write_duty(c, uv.uv_to_duty(c, safe))
+                    tgt = safe.get((c, f))
+                    if tgt:              # nur gemessene Punkte absenken
+                        uv.write_duty(c, uv.uv_to_duty(c, tgt))
                 i += 1
             res = us.load(it, args.workers)
             bad = [s for s, h in res.items() if h != ref.get(s)]
@@ -187,6 +296,25 @@ def main():
     print('--- Ergebnis ---')
     print(json.dumps(results, indent=2))
     note(dict(event='done', results=results))
+    print_summary(results)
+
+
+def print_summary(results):
+    """Tabelle: je Takt Werksspannung, stabile Spannung und Absenkung."""
+    print('--- Uebersicht ---')
+    print('%-7s %9s %10s %10s %9s' %
+          ('Cluster', 'kHz', 'Werks-mV', 'stabil-mV', 'Absenk-mV'))
+    for c in uv.CLUSTERS:
+        keys = [k for k in results if k.startswith(c + '@')]
+        keys.sort(key=lambda k: int(k.split('@')[1]))
+        for k in keys:
+            r = results[k]
+            f = int(k.split('@')[1])
+            stock = r['stock_uv'] // 1000
+            mn = r['min_uv'] // 1000 if r['min_uv'] else None
+            print('%-7s %9d %10d %10s %9s' %
+                  (c, f, stock, mn if mn else 'FEHLER',
+                   stock - mn if mn else 'n/a'))
 
 
 if __name__ == '__main__':

@@ -186,6 +186,66 @@ schon kurz nach dem Boot. Ist die Spannung zu knapp, rebootet der Watchdog in
 dieselbe Lage. Empfehlung: mindestens ~15-20 mV Reserve ueber dem gemessenen
 Boden, also big >= 695, little >= 695.
 
+## Undervolting aller Takte (2026-10-17, gemessen)
+
+`uv_lowfreq.py --all` faehrt jeden Taktpunkt beider Cluster an, senkt die
+Spannung in 20-mV-Stufen und prueft die Rechenergebnisse per SHA-256-Hash
+(zu wenig Spannung erzeugt zuerst stille Bitfehler, nicht sofort einen Hang).
+
+| Cluster | Takt | Werksspannung | stabil bis | Absenkung |
+|---|---|---|---|---|
+| big (A73) | 15.625 - 1.000.000 kHz | 730 mV | 680 mV (Boden) | -50 mV |
+| big | 1.200.000 | 752 mV | 691 mV | -61 mV |
+| big | 1.398.000 - 1.512.000 | 770 mV | 690 mV | -80 mV |
+| big | 1.608.000 | 780 mV | 681 mV | -99 mV |
+| big | 1.704.000 | 791 mV | 691 mV | -100 mV |
+| big | 1.800.000 | 831 mV | 711 mV | -120 mV |
+| big | 1.908.000 | 860 mV | **~720 mV (Grenze)** | ~-140 mV |
+| big | 2.016.000 - 2.400.000 | 910-1040 mV | nicht sauber messbar | s. unten |
+| little (A53) | 15.625 - 1.000.000 kHz | 763 mV | 680 mV (Boden) | -83 mV |
+| little | 1.200.000 | 781 mV | 682 mV | -99 mV |
+| little | 1.398.000 | 809 mV | 689 mV | -120 mV |
+| little | 1.512.000 - 2.016.000 | 860-1040 mV | -120 mV noch stabil | >= -120 mV |
+
+Zwei Muster:
+
+- **Tief-Takte (bis 1.0 GHz): der Regler-Boden 680 mV ist die Grenze, nicht das
+  Silizium.** Am Boden liefen alle Punkte mit 0 Fehlern, auch 8 Wiederholungen
+  bei 24 und 666 MHz - die Kerne haben dort noch Reserve, nur kann der PWM-Regler
+  nicht tiefer (s. "Koennte man unter 680 mV?").
+- **Hohe Takte: echte Silizium-Grenze.** Sie steigt mit dem Takt. Bei 1.908 MHz
+  hing das Board bei ~700 mV und der Watchdog rebootete - dort ist die
+  Absenkung also durch das Silizium begrenzt, nicht durch den Regler.
+
+## Koennte man unter 680 mV?
+
+**Nein, nicht ohne Hardware-Eingriff - aber die Grenze ist weich, nicht das
+Silizium.** Zwei Gruende:
+
+1. Der PWM-Regler bildet die Spannung als Tastverhaeltnis ab:
+   `V = 680 mV + duty * 360 mV / period`. Bei 680 mV ist `duty = 0` (gemessen:
+   `uv_to_duty('big', 680000) == 0`, `('little', ...) == 0`) - weniger Tastgrad
+   gibt es nicht, also ist 680 mV das untere Ende des Reglers.
+2. 680 mV steht zusaetzlich als `regulator-min-microvolt = <0xa6040>` im
+   Device Tree (Node `regulator-vddcpu-a`/`-b`). Das ist eine Software-Schranke,
+   die man im Overlay senken koennte - sie wuerde aber nichts bringen, weil
+   Punkt 1 greift: der Regler selbst endet bei duty 0.
+
+Fuer die **Tief-Takte** ist das schade: sie liefen am Boden mit 0 Fehlern, ein
+Teil der Reserve bleibt also ungenutzt. Um wirklich tiefer zu kommen, muesste
+man die Regler-Hardware aendern (andere PWM-Periode oder ein anderer
+VDDCPU-Zweig) - das ist ein Eingriff an der Platine und wird hier nicht
+empfohlen. Die **hohen** Takte sind ohnehin durch das Silizium begrenzt und
+nicht durch den Regler, dort aendert der Boden nichts.
+
+## Sicherheit: nur ein Lauf gleichzeitig
+
+`uv_lowfreq.py` nimmt eine `flock`-Sperre (`/root/uv_lowfreq.lock`). Ohne sie
+sind zwei gleichzeitige Instanzen gefaehrlich: die eine setzt beim `revert()` den
+Governor zurueck auf `schedutil` (-> 2.4 GHz), waehrend die andere die Spannung
+noch abgesenkt hat - das Board haengt und der Watchdog rebootet. Genau so ist es
+zweimal passiert (10:18 und 10:37), bevor die Sperre eingebaut war.
+
 ## Ablauf
 
 ```bash
