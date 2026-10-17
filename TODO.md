@@ -13,8 +13,11 @@ Blob):
 - `apply_power_management()` wendet die geladene Config beim Boot an (Sender über
   `uart_sleep_set_pm_override`/`_set_enabled`, Empfänger direkt via `esp_pm_configure`).
 - Host-Test `test/test_runtime_config.c` um die clamp-Fälle erweitert (36 Checks).
-- [ ] Am Empfänger verifizieren: `set freq 80` → `reboot` → `config` zeigt
-      `cpu=80/80` (ohne Neubau).
+- [x] Am Empfänger verifiziert (`efa49fb`, 2026-10-17): `set freq 80` → `reboot`
+      → `config` zeigt `cpu=80/80`, live `cpu_freq_mhz=80`; `reset-config` → wieder
+      `240/40`. Und `set freq 80` → **OTA** auf dasselbe Image → nach dem
+      OTA-Reboot weiterhin `cpu=80/80`. Backfill danach sauber
+      (`backfill: 1 record merged`, `write errors: 0`, `queue drops: 0`).
 
 ## Empfänger „AP aus" (`feat/receiver-ap-off`, 2026-10-17) – PR #13
 **Ergebnis: AP darf aus — aber nur über die Compile-Time-Option
