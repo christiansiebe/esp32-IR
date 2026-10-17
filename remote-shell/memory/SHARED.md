@@ -456,3 +456,36 @@ Wichtigste Punkte (sonst scheitert es):
 - Dateien: remote-shell/ha/{uv_lowfreq.py,uv.py,gen_lowfreq_dts.py,
   test_gen_lowfreq_dts.py} + LOWFREQ-README.md, UV-README.md.
 
+## Lektionen: Odroid-Aktionen sicher ausfuehren (2026-10-17, Chat 7a894c13)
+
+**Teuer gelernt — diese vier Regeln verhindern, dass ein Chat das Board lahmlegt.**
+
+1. **Niemals `find /` oder `grep -r /etc` aus dem Kanal heraus.** Der
+   `odroid-cmd-agent` fuehrt Befehle **sequenziell** in EINEM Prozess aus. Ein
+   langsamer Befehl (rekursives `find`/`grep` ueber `/`) blockiert den Kanal
+   ~20 min. In der Zeit geht bei **allen** Sandboxes nichts (ein Agent, viele
+   Sandboxen). Fuer die Dateisuche immer `locate`, gezielte Pfade oder
+   `find <pfad> -maxdepth N` benutzen.
+2. **`scaling_max_freq` hat KEINEN Verwalter.** `cpu-freq-guard`/`rc.local`
+   setzen nur `scaling_min_freq` und den Governor. Ein Test, der
+   `scaling_max_freq` senkt (z. B. fuer einen Rail-Mapping-Test), MUSS es danach
+   auf `cpuinfo_max_freq` zuruecksetzen. Sonst bleibt der Cluster gedeckelt:
+   Little auf 250 MHz -> alles staut sich, Load 7+, alle Kerne 100 %.
+   Ist der Cluster per Hotplug offline, ist sein Sysfs EBUSY -> zum
+   Zuruecksetzen erst `systemctl stop cpu-hotplug`, Kern online, Wert setzen,
+   Hotplug wieder starten.
+3. **Rail-Mapping ist vermessen, nicht geraten:** `VDDCPU_A` = **big**
+   (policy2, cpu2-5, A73), `VDDCPU_B` = **little** (policy0, cpu0-1, A53).
+   Kontrollierter Test (Governor eingefroren, Hotplug gestoppt):
+   nur policy0 MAX -> VDDCPU_B steigt; nur policy2 MAX -> VDDCPU_A steigt.
+   Die Anzeige `cpu-volt-watch`/`cpu-volt-line` war zuvor vertauscht.
+4. **Kanal-Artefakte sind NICHT Kanalschuld.** Die 2 Zombies auf dem Odroid
+   gehoeren `mosquitto` und `matter-server` (HA-Addons) — fremd, nicht anfassen.
+   In der Sandbox sind alle Zombies PPID 1 (`openhands-agent`), der sie nicht
+   reapt; man kann sie nicht killen, nur der Elternprozess. `sync-memory.sh loop`
+   (PID wechselnd) ist **legitim** (haelt /workspace/MEMORY.md aktuell).
+
+**Werkzeug:** `remote-shell/ha/{cpu-volt-watch,cpu-volt-line,htopv,htopv.tmux.conf,
+deploy_htopv.sh,test_htopv.py}` + `htopv-README.md`. `htopv` zeigt htop mit
+per-Kern-MHz und per-Cluster-Spannung in der tmux-Statuszeile.
+
