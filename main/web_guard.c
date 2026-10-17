@@ -123,6 +123,9 @@ static web_guard_t s_guard;
 static httpd_handle_t *s_server;
 static httpd_config_t s_config;
 static void (*s_register_handlers)(httpd_handle_t);
+static uint32_t s_probe_err;    /* esp_err_t of the last self-probe */
+static int s_probe_status;      /* HTTP status of the last self-probe */
+static uint32_t s_probe_fails;  /* self-probes that returned false */
 
 /* One cheap round-trip to our own server. The status code is irrelevant; a
  * completed connection+request proves the httpd task still answers. */
@@ -146,7 +149,10 @@ static bool web_guard_probe(void)
     esp_err_t err = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
+    s_probe_err = (uint32_t)err;
+    s_probe_status = status;
     if (err != ESP_OK) {
+        ++s_probe_fails;
         ESP_LOGW(TAG, "self-probe failed: %s (http %d)", esp_err_to_name(err), status);
     }
     return err == ESP_OK;
@@ -181,6 +187,13 @@ static void web_guard_task(void *arg)
 
         web_guard_action_t action = web_guard_tick(&s_guard, now_ms);
         if (action == WEB_GUARD_RESTART) {
+            ESP_LOGW(TAG, "tick=RESTART last=%llu now=%llu thr=%u dead_since=%llu "
+                          "probe_err=%u(%s) status=%d fails=%u",
+                     (unsigned long long)web_guard_last_activity_ms(&s_guard),
+                     (unsigned long long)now_ms, (unsigned)s_guard.policy.threshold_ms,
+                     (unsigned long long)s_guard.dead_since_ms, (unsigned)s_probe_err,
+                     esp_err_to_name((esp_err_t)s_probe_err), s_probe_status,
+                     (unsigned)s_probe_fails);
             bool ok = web_guard_restart_server();
             web_guard_note_restart_attempt(&s_guard, now_ms, ok);
         } else if (action == WEB_GUARD_REBOOT) {
@@ -227,6 +240,19 @@ uint32_t web_guard_last_activity_age_ms(void)
         return 0;
     }
     return (uint32_t)(now_ms - last);
+}
+
+void web_guard_probe_stats(uint32_t *err, int *status, uint32_t *fails)
+{
+    if (err != NULL) {
+        *err = s_probe_err;
+    }
+    if (status != NULL) {
+        *status = s_probe_status;
+    }
+    if (fails != NULL) {
+        *fails = s_probe_fails;
+    }
 }
 
 void web_guard_start(httpd_handle_t *server, const httpd_config_t *config,
