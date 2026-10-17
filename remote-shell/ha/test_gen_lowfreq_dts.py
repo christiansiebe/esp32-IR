@@ -55,8 +55,15 @@ def main():
         check(set(v[1]) == {'731000'}, 'big-Werksspannung 731 mV')
 
         # Rueckwaerts-Kompatibilitaet: Standardlauf == die committete Datei.
-        committed = open(os.path.join(HERE, 'lowfreq.dts')).read()
-        check(open(o1).read() == committed, 'Standardlauf identisch zur Datei')
+        # Auf dem Board liegt lowfreq.dts nicht neben dem Skript; dann entfaellt
+        # nur dieser eine Vergleich, die Spannungspruefungen laufen weiter.
+        dts = os.path.join(HERE, 'lowfreq.dts')
+        if os.path.exists(dts):
+            check(open(o1).read() == open(dts).read(),
+                  'Standardlauf identisch zur Datei')
+        else:
+            print('  Hinweis: lowfreq.dts nicht neben dem Skript - '
+                  'Dateivergleich uebersprungen')
 
         # Explizite Werte je Cluster.
         o2 = os.path.join(d, 'uv.dts')
