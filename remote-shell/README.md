@@ -66,6 +66,10 @@ systemctl daemon-reload && systemctl restart odroid-cmd-agent.service
 - **Taegliches inkrementelles Backup**: `backup-daily.timer` → `/root/backup-daily.sh`
   (rsync `--link-dest`, nur geaenderte Daten, 14 Tage, `/mnt/ssd/backups/rsync/`).
 - **Desktop im Browser (noVNC)**: `novnc.service` (websockify `6080` → VNC `5901`),
-  `xfce-vnc.service` (TigerVNC `:1`). Aufruf: `http://192.168.178.71:6080/vnc.html`.
+  `xfce-vnc.service` (TigerVNC `:1`). Aufruf: `http://192.168.178.71:6080/vnc.html`
+  (bzw. `http://odroidn2.local:6080/vnc.html`).
+  **Wichtig:** `/vnc.html` nicht weglassen. `:6080/` allein zeigt die
+  noVNC-**Verzeichnisliste** von `/usr/share/novnc/` - das sieht wie ein
+  Datei-Explorer aus, ist aber nicht der Desktop.
 
 Details/Historie: gemeinsames Gedaechtnis `remote-shell/memory/SHARED.md` (live: `/workspace/MEMORY.md`).
