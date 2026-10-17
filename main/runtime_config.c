@@ -8,6 +8,9 @@
 #ifndef CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
 #define CONFIG_ESPNOW_SENDER_LIGHT_SLEEP 0
 #endif
+#ifndef CONFIG_ESPNOW_RECEIVER_LIGHT_SLEEP
+#define CONFIG_ESPNOW_RECEIVER_LIGHT_SLEEP 0
+#endif
 #ifndef CONFIG_ESPNOW_CPU_MAX_MHZ
 #define CONFIG_ESPNOW_CPU_MAX_MHZ 240
 #endif
@@ -18,12 +21,16 @@ static uint32_t snap_cpu_mhz(uint32_t mhz);
 
 runtime_config_t runtime_config_defaults(void)
 {
-    runtime_config_t cfg = {
-#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
-        .light_sleep = true,
+    /* Each role mirrors its own compile-time light-sleep default, so the
+     * persisted knob starts in step with the image and 'set sleep' only ever
+     * overrides an explicit choice. */
+#if CONFIG_ESPNOW_ROLE_SENDER
+    const bool light_sleep_default = CONFIG_ESPNOW_SENDER_LIGHT_SLEEP;
 #else
-        .light_sleep = false,
+    const bool light_sleep_default = CONFIG_ESPNOW_RECEIVER_LIGHT_SLEEP;
 #endif
+    runtime_config_t cfg = {
+        .light_sleep = light_sleep_default,
         .cpu_mhz = snap_cpu_mhz(CONFIG_ESPNOW_CPU_MAX_MHZ),
         .cpu_min_mhz = 40u,
         .espnow_retries = 3u,

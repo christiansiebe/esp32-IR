@@ -15,13 +15,14 @@
  */
 
 #define ESPNOW_DIAG_MAGIC   0x44494147u /* "DIAG" */
-/* 2: the counters section carries the sender firmware version (fw_version), so
- * the receiver can show which sender build is running. */
-#define ESPNOW_DIAG_VERSION 2u
+/* 3: adds the ESP-NOW ping (SECTION_PING) that keeps the peer's link watchdog
+ * alive while the link is otherwise idle (no data traffic), and the DFS clock
+ * histogram in the counters tail. */
+#define ESPNOW_DIAG_VERSION 3u
 /* Oldest version still accepted. The header layout never changed and the
- * counters payload only grew at the tail, so a receiver on version 1 keeps
- * working against a version 2 sender (and vice versa). Without this, bumping
- * the version silently broke an un-reflashed peer: its requests were dropped. */
+ * counters payload only grew at the tail, so an older receiver keeps working
+ * against a newer sender (and vice versa). Without this, bumping the version
+ * silently broke an un-reflashed peer: its requests were dropped. */
 #define ESPNOW_DIAG_VERSION_MIN 1u
 
 #define ESPNOW_DIAG_TYPE_REQUEST  1u
@@ -53,6 +54,14 @@
 #define ESPNOW_DIAG_SECTION_CMD 0x0020u
 #define ESPNOW_DIAG_CMD_LINE_LEN 96u
 #define ESPNOW_DIAG_CMD_OUTPUT_LEN 192u
+
+/* Keep-alive ping: an empty request the peer answers with an empty response.
+ * Its only purpose is to make each side *receive* a frame periodically, so the
+ * link watchdog (link_fallback) sees the link alive even when no data traffic
+ * flows (e.g. the sender only listens between history pulls). Without it the
+ * sender's watchdog trips on a healthy but quiet link and needlessly disables
+ * its adaptive light sleep. */
+#define ESPNOW_DIAG_SECTION_PING 0x0040u
 
 /* Sender firmware version (from version.c's fw_version(), e.g. "v0.1.0-3-gabc"
  * or "unknown"). Length includes the terminating NUL. */
@@ -174,6 +183,17 @@ typedef struct __attribute__((packed)) {
      * re-aligned, 2 = light sleep also dropped. Reuses the second reserved
      * byte, so the struct still keeps its size. */
     uint8_t link_fallback_stage;
+    /* DFS clock histogram over the 1 Hz samples: how many samples landed on the
+     * 40/80/160/240 MHz steps. `cpu_freq_mhz` above is the live value and
+     * `cpu_freq_hist_min/max_mhz` the observed range; the histogram shows
+     * whether the clock actually stepped down or sat pinned at the ceiling for
+     * the whole session (the min/max alone cannot tell a short dip from none). */
+    uint32_t cpu_freq_hist_40;
+    uint32_t cpu_freq_hist_80;
+    uint32_t cpu_freq_hist_160;
+    uint32_t cpu_freq_hist_240;
+    uint8_t cpu_freq_below_ceiling_seen; /* 1 = live clock seen below the ceiling */
+    uint8_t reserved4[3];
 } espnow_diag_counters_t;
 
 typedef struct __attribute__((packed)) {

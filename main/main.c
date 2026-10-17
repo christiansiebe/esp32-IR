@@ -39,6 +39,7 @@
 #include "json_escape.h"
 #include "link_fallback.h"
 #include "power_history.h"
+#include "receiver_sleep.h"
 #include "runtime_config.h"
 #include "sml_selftest.h"
 #include "version.h"
@@ -1689,6 +1690,11 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .boot_marker_count = g_boot_marker_count,
         .boot_marker_reason = g_boot_marker_reason,
         .build_profile = BUILD_PROFILE_ID,
+        .cpu_freq_hist_40 = g_cpu_freq_hist[0],
+        .cpu_freq_hist_80 = g_cpu_freq_hist[1],
+        .cpu_freq_hist_160 = g_cpu_freq_hist[2],
+        .cpu_freq_hist_240 = g_cpu_freq_hist[3],
+        .cpu_freq_below_ceiling_seen = g_cpu_freq_below_ceiling_seen ? 1 : 0,
 #if CONFIG_ESPNOW_LINK_FALLBACK
         .sleep_fallback_active = g_link_fallback_active ? 1 : 0,
         .link_fallback_stage = g_link_fallback_stage,
@@ -1888,6 +1894,20 @@ static void espnow_diag_worker(void *arg)
         } else if (request.flags & ESPNOW_DIAG_SECTION_CMD) {
             build_diag_cmd_response(&request, frame, &frame_len);
 #endif
+        } else if (request.flags & ESPNOW_DIAG_SECTION_PING) {
+            /* Keep-alive: answer with a header-only frame. The requester only
+             * needs to *receive* something so its link watchdog stays quiet on
+             * an otherwise idle link. */
+            espnow_diag_header_t *ping = (espnow_diag_header_t *)frame;
+            *ping = (espnow_diag_header_t) {
+                .magic = ESPNOW_DIAG_MAGIC,
+                .version = request.version,
+                .type = ESPNOW_DIAG_TYPE_RESPONSE,
+                .flags = ESPNOW_DIAG_SECTION_PING,
+                .request_id = request.request_id,
+                .page = 0,
+            };
+            frame_len = sizeof(*ping);
         } else {
             continue;
         }
@@ -2114,6 +2134,10 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 #endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
+    /* An inbound frame is real work: keep the receiver awake briefly so the
+     * reply path (diagnostics, history pages) is not interrupted by a sleep
+     * window. */
+    receiver_sleep_note_espnow();
     /* Bootstrap the sender MAC from any inbound frame, whatever its type. The
      * receiver needs the MAC to send diagnostics/history requests, but gating
      * that on a fully valid SML packet means a silent SML path (no meter head,
@@ -2504,6 +2528,11 @@ static void power_sample_timer_callback(void *arg)
 {
     (void)arg;
     cpu_freq_sample();
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Receiver: release/re-acquire the light-sleep lock once per second based on
+     * how long the dashboard has been idle. A no-op unless `sleep on` was set. */
+    receiver_sleep_tick();
+#endif
     const uint64_t now_us = (uint64_t)esp_timer_get_time();
     const int64_t wall_clock = current_utc_seconds();
     power_history_record_t completed_interval = {0};
@@ -5235,10 +5264,16 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
     }
 #else
     if (strcmp(what, "sleep") == 0) {
-        /* The receiver has no SML light-sleep path; it is sender-only. Say so
-         * instead of reporting 'unknown test'. */
+        /* Receiver: idle light sleep, opt-in via `set sleep on`. Report the
+         * latch and how long the dashboard has been quiet. */
         snprintf(out, out_size,
-                 "sleep: not available on the receiver (sender-only test)\n");
+                 "sleep: idle light sleep %s\n"
+                 "  state: %s  idle for %u ms (sleeps after %u ms)\n"
+                 "usage: set sleep on|off\n",
+                 receiver_sleep_enabled() ? "enabled" : "disabled",
+                 receiver_sleep_is_sleeping() ? "sleeping" : "awake",
+                 (unsigned)receiver_sleep_idle_age_ms(),
+                 (unsigned)RECEIVER_SLEEP_IDLE_MS);
         return;
     }
     if (strcmp(what, "storage") == 0) {
@@ -5329,6 +5364,14 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         uart_sleep_set_enabled(cfg->light_sleep);
     }
 #endif
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Receiver: mirror the sleep knob onto the idle-sleep latch. Enabling it
+     * holds the CPU awake until the idle window passes, so the switch is safe
+     * mid-session. */
+    if (sleep_key) {
+        receiver_sleep_init(cfg->light_sleep);
+    }
+#endif
     int written = snprintf(out, out_size,
                            "%s=%s%s%s\n", key, value, note,
                            applied ? "" : " (hardware rejected the change)");
@@ -5348,6 +5391,9 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
 #if CONFIG_ESPNOW_ROLE_SENDER
     uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
     uart_sleep_set_enabled(cfg->light_sleep);
+#endif
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    receiver_sleep_init(cfg->light_sleep);
 #endif
     size_t used = (size_t)snprintf(out, out_size, "config reset to defaults\n");
     if (used < out_size) {
@@ -5600,6 +5646,48 @@ static esp_err_t sender_diag_exchange(uint16_t flags, uint32_t page,
     return sender_diag_exchange_raw(&request, sizeof(request), request_id,
                                     response, response_len);
 }
+
+/* Receiver -> sender keep-alive: one empty request the sender answers with an
+ * empty response. The receiver sends it only while the sender MAC is known and
+ * the link has been quiet for most of the silence timeout, so each side sees an
+ * inbound frame before its own watchdog fires. Without this the sender's
+ * watchdog trips on a healthy but idle link (the receiver only talks during the
+ * 30-minute backfill) and needlessly drops its adaptive light sleep. */
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static void sender_link_ping(void)
+{
+    uint8_t sender_mac[ESP_NOW_ETH_ALEN];
+    portENTER_CRITICAL(&g_sender_mac_lock);
+    bool known = g_sender_mac_valid;
+    memcpy(sender_mac, g_sender_mac, ESP_NOW_ETH_ALEN);
+    portEXIT_CRITICAL(&g_sender_mac_lock);
+    if (!known) {
+        return;
+    }
+    uint32_t request_id = (uint32_t)esp_random();
+    if (request_id == 0) {
+        request_id = 1;
+    }
+    espnow_diag_header_t request = {
+        .magic = ESPNOW_DIAG_MAGIC,
+        .version = ESPNOW_DIAG_VERSION,
+        .type = ESPNOW_DIAG_TYPE_REQUEST,
+        .flags = ESPNOW_DIAG_SECTION_PING,
+        .request_id = request_id,
+        .page = 0,
+    };
+    if (add_espnow_peer(sender_mac, ESPNOW_IF) != ESP_OK) {
+        return;
+    }
+    if (esp_now_send(sender_mac, (const uint8_t *)&request, sizeof(request)) == ESP_OK) {
+        /* Our own confirmed send also proves the link from our side. */
+        portENTER_CRITICAL(&g_link_fallback_lock);
+        link_fallback_note_send_ok(&g_link_fallback,
+                                   (uint64_t)(esp_timer_get_time() / 1000));
+        portEXIT_CRITICAL(&g_link_fallback_lock);
+    }
+}
+#endif /* !CONFIG_ESPNOW_ROLE_SENDER */
 
 /* Send one command line to the sender over ESP-NOW and return its captured
  * output. This is the transport behind the receiver-hosted sender web console:
@@ -6558,10 +6646,10 @@ static esp_err_t sender_page_handler(httpd_req_t *req)
         "<h2>Previous session / last crash</h2><pre id=\"crash\"></pre>"
         "<h2>Recent events</h2><pre id=\"events\"></pre>"
         "<h2>CPU / power</h2>"
-        "<p class=\"note\">Pins the sender CPU in RAM (a reboot restores the "
-        "defaults). Use 80, 160 or 240 MHz (40 MHz is not allowed with Wi-Fi and "
-        "would abort it). 'Set fixed' turns DFS off and holds exactly that clock; "
-        "'Set ceiling' only caps the DFS ceiling.</p>"
+        "<p class=\"note\">Pins the sender CPU and is saved in NVS, so it "
+        "survives a reboot and an OTA. Use 80, 160 or 240 MHz (40 MHz is not "
+        "allowed with Wi-Fi and would abort it). 'Set fixed' turns DFS off and "
+        "holds exactly that clock; 'Set ceiling' only caps the DFS ceiling.</p>"
         "<select id=\"cpuval\"><option>80</option>"
         "<option>160</option><option>240</option></select>"
         "<button id=\"pin\" type=\"button\">Set fixed</button>"
@@ -7237,6 +7325,12 @@ static void start_webserver(void)
      * the ESP_ERROR_CHECK below would then abort and boot-loop. Derive the value
      * from the LWIP cap so it can never drift past it again. */
     config.max_open_sockets = CONFIG_LWIP_MAX_SOCKETS - 3;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Note a real dashboard connection as activity for the idle light sleep.
+     * The web-health self-probe runs over loopback and is filtered out inside
+     * receiver_sleep, so it does not keep the receiver awake. */
+    config.open_fn = receiver_sleep_http_open;
+#endif
 
     /* Static: the web-health guard keeps this pointer across restarts, so it
      * must outlive start_webserver()'s stack frame. */
@@ -7487,6 +7581,26 @@ static void link_fallback_worker(void *arg)
         }
         uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
         uint64_t uptime_ms = now_ms - started_ms;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        /* Keep the sender's watchdog fed on an idle link: the sender only hears
+         * from us when we send something, and it has no way to know that "no
+         * request" is normal. Ping once the link has been quiet for half the
+         * silence timeout, so the sender never sees a full silence window and
+         * its adaptive light sleep stays on. */
+        {
+            uint64_t last_heard;
+            portENTER_CRITICAL(&g_link_fallback_lock);
+            last_heard = g_link_fallback.last_rx_ms > g_link_fallback.last_ok_ms
+                             ? g_link_fallback.last_rx_ms
+                             : g_link_fallback.last_ok_ms;
+            portEXIT_CRITICAL(&g_link_fallback_lock);
+            if (now_ms >= last_heard &&
+                (now_ms - last_heard) >=
+                    (uint64_t)CONFIG_ESPNOW_LINK_FALLBACK_MS / 2u) {
+                sender_link_ping();
+            }
+        }
+#endif
         bool fallback;
         portENTER_CRITICAL(&g_link_fallback_lock);
         fallback = link_fallback_should_fallback(&g_link_fallback, now_ms, uptime_ms);
@@ -7777,6 +7891,9 @@ static void apply_power_management(void)
     ESP_LOGI(TAG, "CPU config: %u-%u MHz, light sleep %s",
              (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
              cfg->light_sleep ? "on" : "off");
+    /* Idle light sleep: opt-in via `sleep on`. Starts held awake and parks the
+     * CPU only once the dashboard has been idle for RECEIVER_SLEEP_IDLE_MS. */
+    receiver_sleep_init(cfg->light_sleep);
 #endif
 }
 
