@@ -2803,12 +2803,6 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
     g_sml_last_sequence = sequence;
     portEXIT_CRITICAL(&g_uart_stats_lock);
 
-    /* Drop a stale completion from the previous telegram before sending: the
-     * callback gives g_send_done from the Wi-Fi task, and a late give (e.g. a
-     * previous send that only completed now) would otherwise be taken as this
-     * telegram's result. */
-    (void)xSemaphoreTake(g_send_done, 0);
-
     size_t packet_length = sizeof(packet.header) +
                            item->value_count * sizeof(packet.values[0]);
     esp_err_t err = esp_now_send(broadcast_mac, (const uint8_t *)&packet,
