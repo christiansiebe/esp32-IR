@@ -219,6 +219,104 @@ nur messtechnisch zu bestimmen.
 **Ein N2±spezifischer Plan ist nicht archiviert** (nur `odroid-n2_*` bis rev0.6).
 Der Rev-0.6-Plan ist der des Boards; N2 und N2+ teilen ihn.
 
+## 3c. Software-Workarounds: geprueft und verworfen
+
+Frage: gibt es einen reinen Softwareweg unter die 680 mV? **Nein.**
+
+| Software-Move | Erreicht tiefer? | Grund |
+|---|---|---|
+| `regulator-min-microvolt` senken (z. B. 600000) | **Nein** | Benennt den Boden nur um; der Tastgrad bleibt bei 100 % gedeckelt. Die reale Spannung ist identisch. |
+| Voltage-Table mit Tastgrad > 100 | **Nein** | `pwm.h:258` lehnt `duty > unit` ab; physisch ist der Tastgrad bei der Periode zu Ende. |
+| Klemme in `core.c:454` patchen | **Nein** | Der Treiber kann trotzdem keinen kleineren PWM-Wert erzeugen - er klemmt auf 100 % (gleiche Spannung). |
+| PWM-Periode/Frequenz aendern | **Nein** | Der Gleichanteil eines PWM ist `Tastgrad * Vcc`, frequenzunabhaengig. Am Board gemessen: Periode 999..15984 -> Spannung im Rauschen (Kapitel "PWM-Periode" in `LOWFREQ-README.md`). |
+| `pwm-dutycycle-unit` feiner stellen | **Nein** | Aendert nur die Aufloesung (3,6-mV-Raster), nicht den Anschlag. |
+
+Kern: der Boden 680 mV liegt **genau auf dem physikalischen Extremwert** des PWM
+(LOW-Feld 0, Tastgrad 100). Ein Softwareeingriff kann nur *bis* zu diesem Extrem,
+nie darueber hinaus.
+
+**Gefaehrlicher Schein-Workaround:** `regulator-min-microvolt` auf z. B. 600 mV
+setzen. Dann rechnet `cpufreq` mit "600 mV verfuegbar" und waehlt **hoehere
+Frequenzen bei angeblich niedriger Spannung** - die Hardware bleibt aber bei
+680 mV stehen. Ergebnis: **entfernte Sicherheitsmarge**, kein Minderverbrauch.
+Das Datenblatt fordert ausdruecklich Mindestwert + 20 mV (>= 0,701 V).
+
+## 3d. Hardware-Eingriffe: Aufwand und Bewertung
+
+Ein Hardware-Eingriff ist der **einzige** Weg unter 680 mV - und damit per
+Definition **ausserhalb der Spezifikation**.
+
+| # | Eingriff | Aufwand | Wirkung | Bewertung |
+|---|---|---|---|---|
+| 1 | Widerstand **parallel zum oberen FB-Zweig** | **am einfachsten** (1 Bauteil, nichts ausloeten, reversibel) | senkt die ganze Kennlinie | ausserhalb Spec |
+| 2 | Oberen FB-Widerstand tauschen | einfach (1 SMD) | dito | ausserhalb Spec |
+| 3 | PWM-Injektionswiderstand (R81/R87 = 127k) aendern | einfach | aendert den PWM-Hub, nicht den Boden | begrenzt |
+| 4 | Regler tauschen (andere Vref) | schwer | volle Freiheit | unverhaeltnismaessig |
+| 5 | IR-Drop verbessern (Kupfer, Caps) | mittel | holt Marge, nicht Spannung | nutzlos fuer das Ziel |
+
+**Warum #1 der einfachste ist:** `Vout = Vref * (1 + Rtop/Rbot)`. Tiefer geht es
+nur ueber kleineres `Rtop` oder groesseres `Rbot`; ein **zusaetzlicher paralleler
+Widerstand ueber den oberen Zweig** senkt `Rtop` wirksam, ohne dass etwas
+ausgeloetet werden muss.
+
+**Warum trotzdem nicht empfohlen:**
+
+- **Die ganze Kurve verschiebt sich**, nicht nur der Boden. Ein Mod verlangt eine
+  **komplette Neukalibrierung der OPP-Tabelle** (Kapitel 3e), sonst wird oben
+  untervoltet - genau das fuehrte am Board schon zu einem Hang (s. u.).
+- **Unter 0,681 V** liegt man ausserhalb der SoC-Spezifikation. Der Fehlermodus
+  ist **stille Bitfehler im Datenpfad**, keine saubere Abschaltung.
+- Das FB-Netz ist eine **PWM-Injektion**, kein einfacher Teiler. Welcher
+  Widerstand genau der obere Zweig ist, liess sich aus dem PDF **nicht** eindeutig
+  festnageln (Kapitel 3b) - ein Mod waere Blindflug plus Messtisch.
+
+Die einzige fachlich vertretbare Hardware-Richtung zeigt **nach oben**: den Boden
+von 680 mV auf >= 701 mV **anheben** (Datenblatt-Marge). Das kostet minimal
+Leistung und kauft Sicherheit - lohnt aber kaum, weil 680 mV nominal nur 1 mV
+unter der Spec liegt.
+
+## 3e. Was bereits am Board gemessen und eingebaut wurde
+
+Diese Analyse steht **nicht** allein; am Board wurde 2026-10-17 bereits real
+gemessen und umgesetzt (Details: `LOWFREQ-README.md`, `UV-README.md`).
+
+**Eingebaut und reboot-fest:**
+
+- **Tief-Takt-Overlay** (`lowfreq.dts`): 14 neue OPP-Punkte je Cluster unter
+  1 GHz (15.625 MHz ... 666.666 MHz), per `user_overlays` in `armbianEnv.txt`.
+  Nur Teiler der Form `2^a*5^b` (der Meson-Taktgeber kennt nichts anderes; andere
+  Raten werden still abgerundet und `cpufreq` melde die falsche Rate).
+- **`cpu-freq-guard.service`**: setzt nach `sysinit` Untergrenze + `schedutil`
+  (gewinnt gegen Armbians `MIN_SPEED`; Reihenfolge im Journal verifiziert).
+- **`cpu-hotplug.service`**: nimmt ungenutzte Kerne im Leerlauf offline
+  (Stufen + 6-Messungen-Hysterese, `plan_online()` host-getestet). Hintergrund:
+  `cpuidle`-Treiber ist `none` (kein DT-`idle-states`) - Kerne schlafen nicht,
+  nur der Takt faellt.
+- **Sicherheitsnetz**: `cpufreq.default_governor=performance` als Boot-Arg,
+  Hardware-Watchdog `RuntimeWatchdogSec=60`, `kernel.panic=10`,
+  `watchdog-guard.timer`.
+
+**Gemessen (alle Punkte unter Last, Rechenergebnisse per SHA-256 geprueft):**
+
+- Alle 14 neuen Raten je Cluster: **stabil, 0 Rechenfehler**.
+- Undervolt-Spielraum der Tief-Takte: **big -50 mV, little -83 mV bis zum
+  Regler-Boden 680 mV** (dort 0 Fehler, auch im 60-s-Soak).
+- Hohe Takte: echte **Silizium-Grenze**, steigt mit dem Takt; 1.908 MHz hing bei
+  ~700 mV (Watchdog-Reboot). Undervolt muss also **frequenzabhaengig** sein.
+- PWM-**Periode** als Hebel: **widerlegt** (nur Schaltfrequenz, nicht Spannung).
+- Leistungseffekt ehrlich: **nur der Idle-Anteil** ist belastbar (schedutil
+  waehlt 250 MHz statt 1 GHz). Unter Volllast ~1 °C, im Rauschen. Kein
+  Stromsensor am Board, Temperatur ist nur ein Proxy.
+
+**Noch NICHT eingebaut:**
+
+- Das **Undervolt steckt nicht** in der committeten `lowfreq.dts`: die Punkte
+  tragen die **Werksspannung** (little 761000, big 731000 uV). Der per
+  `gen_lowfreq_dts.py --big-mv/--little-mv` erzeugte Undervolt wurde **gemessen**,
+  aber **nicht** in die Datei uebernommen. Der Generator lehnt Werte unter
+  680 mV ab; empfohlen sind >= 695 mV (Reserve gegen Boot-Loop).
+- Kein abschliessender **Dauer-Soak** ueber alle Takte mit eingebautem Undervolt.
+
 ## 4. Voltage-Table-Modus: umgeht er die Grenze?
 Im Table-Modus (`pwm-regulator.c:72-95` `pwm_regulator_set_voltage_sel()`) ist
 `pwm_set_relative_duty_cycle(&pstate, duty_cycle_table[sel].dutycycle, 100)` (Z. 90)
