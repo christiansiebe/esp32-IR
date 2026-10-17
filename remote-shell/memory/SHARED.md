@@ -495,3 +495,24 @@ Wichtigste Punkte (sonst scheitert es):
 - Dateien: remote-shell/ha/{cpu_hotplug.py,test_cpu_hotplug.py,deploy_hotplug.sh,
   deploy_lowfreq.sh} + LOWFREQ-README.md.
 
+
+
+### Boot-Journal: Reset-Zaehler mit Grund (2026-10-17)
+- **Problem:** Amlogic liefert keinen Reset-Grund - `watchdog0/bootstatus`=0
+  (immer), pstore leer, `/var/log`=zram. Das Journal ist persistent
+  (`/var/log/journal -> /var/log.hdd/journal`), bricht aber bei jedem Hard-Reset
+  ab (kein "Reached target Shutdown"). Von 20 Boots hatte **keiner** einen
+  Clean-Marker -> alle waren Hard-Resets.
+- **Loesung:** `boot_journal.py` + `boot_journal_lib.py` (host-getestet, 22
+  Checks) zaehlen Boots persistent und leiten den Grund ab: Clean-Marker
+  (`ExecStop` von boot-journal.service) -> clean-reboot; watchdog bootstatus ->
+  watchdog-reset; "Kernel panic" im prev-Log -> kernel-panic; prev-Lauf <60s ->
+  early-reset; sonst hard-reset-unknown. Zustand in /var/lib/boot-journal/.
+- **Board-verifiziert:** sauberer Reboot -> `clean-reboot` (prev_uptime exakt =
+  letzter Heartbeat). Kernel-Panic (sysrq-trigger, panic=10) -> `early-reset`.
+- **Grenze (ehrlich):** ein Panic schreibt sich NICHT ins Journal (journald
+  flusht nicht vor dem Freeze) -> landet als early-reset, nicht kernel-panic.
+  Fuer echte Panic-Zuordnung braeuchte es ramoops/pstore (fehlt).
+- Dateien: remote-shell/ha/{boot_journal.py,boot_journal_lib.py,
+  test_boot_journal_lib.py,boot-journal*.{service,timer},deploy_boot_journal.sh}
+  + BOOT-JOURNAL-README.md.
