@@ -430,3 +430,29 @@ Wichtigste Punkte (sonst scheitert es):
 - Dateien: remote-shell/ha/{cpu_hotplug.py,cpu-hotplug.service,deploy_hotplug.sh,
   lowfreq_set_floor.sh,power_probe.sh,test_cpu_hotplug.py} + LOWFREQ-README.md.
 
+
+### Undervolt der neuen Tief-Takte (2026-10-17, gemessen)
+- Die neuen OPP-Punkte (< 1 GHz) tragen die Spannung des 1.0-GHz-Punkts:
+  big 730 mV, little 763 mV. Dort ist der Undervolt-Spielraum.
+- `uv_lowfreq.py` senkt je Takt stufenweise (20 mV) und prueft die
+  Rechenergebnisse per SHA-256-Hash. **Alle 8 Punkte (24/50/100/250 MHz, beide
+  Cluster) stabil bis 680 mV** - das ist der **Regler-Boden**
+  (`regulator.{2,8}/min_microvolts`), KEINE Instabilitaet. big -50 mV, little -83 mV.
+- Soak 60 s Volllast bei 24 MHz / 680 mV: 0 Rechenfehler. Schnellwechsel ueber die
+  Tief-Takte (309 Spruenge): 0 Fehler.
+- **Undervolt muss frequenzabhaengig sein:** die ganze Tabelle (bis 2.4 GHz) mit
+  680 mV laufen zu lassen haengt das Board (2.4 GHz braucht 1040 mV) -> Watchdog-
+  Reboot. Nur die Tief-Takte absenken.
+- **Testfalle:** der Hash haengt von (Seed, Iterationen) ab; die Iterationszahl
+  wird je Takt gewaehlt. Eine globale Referenz erzeugt falsche Fehler. Referenz
+  je Takt bei Werksspannung messen.
+- **Persistenz:** nur ueber die OPP-Tabelle im Overlay
+  (`gen_lowfreq_dts.py --big-mv/--little-mv`, lehnt < 680 mV ab). Laufzeit-UV
+  haelt nicht. Boot-Loop-Risiko, weil schedutil die Tief-Takte gleich nach dem
+  Boot erreicht -> Reserve lassen (Empfehlung >= 700 mV).
+- `uv.py revert()` setzte frueher `scaling_min_freq` hart auf 1000000 und haette
+  die persistente 15,6-MHz-Untergrenze geloescht; liest sie jetzt aus
+  `/etc/default/cpu-freq-guard`.
+- Dateien: remote-shell/ha/{uv_lowfreq.py,uv.py,gen_lowfreq_dts.py,
+  test_gen_lowfreq_dts.py} + LOWFREQ-README.md, UV-README.md.
+
