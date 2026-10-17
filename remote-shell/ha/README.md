@@ -21,10 +21,13 @@ All three run **inside** the Home Assistant container so they can read
 
 ## Odroid CPU tools (outside the HA container)
 
-- `cpu-volt-watch`, `cpu-volt-line`, `htopv`, `htopv.tmux.conf`,
-  `deploy_htopv.sh`, `test_htopv.py` + `htopv-README.md` — live per-core MHz
-  and per-cluster voltage (`VDDCPU_A`/`_B`) on the Odroid N2+, shown in a tmux
-  status line next to htop. Rail mapping is measured, see `htopv-README.md`.
+- `cpu-live`, `cpu-volt-watch`, `cpu-volt-line`, `htopv`, `htopv.tmux.conf`,
+  `deploy_htopv.sh`, `test_htopv.py`, `test_cpu_live.py` + `htopv-README.md` —
+  live per-core MHz and per-cluster voltage (`VDDCPU_A`/`_B`) on the Odroid N2+.
+  `cpu-live` is the lightweight monitor for continuous use (reads a handful of
+  sysfs files, ~0.3 % of a core at 1 s; htop cost ~11-40 %); `htopv` wraps htop
+  in a tmux status line when you want the full process view. Rail mapping is
+  measured, see `htopv-README.md`.
 - `cpu_hotplug.py`, `cpu-hotplug.service`, `deploy_hotplug.sh`,
   `lowfreq_set_floor.sh`, `cpu-freq-guard.sh`/`.service`, `test_cpu_hotplug.py`
   + `LOWFREQ-README.md` — idle CPU hotplug and the persistent clock floor.

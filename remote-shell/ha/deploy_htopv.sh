@@ -24,6 +24,7 @@ command -v tmux >/dev/null 2>&1 || { echo "FEHLER: tmux fehlt (apt install tmux)
 command -v htop >/dev/null 2>&1 || { echo "FEHLER: htop fehlt (apt install htop)"; exit 1; }
 
 echo '== 1. Skripte installieren =='
+install -m 0755 "$HERE/cpu-live"        /usr/local/bin/cpu-live
 install -m 0755 "$HERE/cpu-volt-watch" /usr/local/bin/cpu-volt-watch
 install -m 0755 "$HERE/cpu-volt-line"  /usr/local/bin/cpu-volt-line
 install -m 0755 "$HERE/htopv"          /usr/local/bin/htopv
