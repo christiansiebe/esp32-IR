@@ -874,6 +874,8 @@ static void initialize_wifi_and_espnow(void)
      * With CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y it also takes effect
      * before/without association; the STA_CONNECTED handler re-applies it. */
     uart_sleep_espnow_power_save_enable();
+    diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "wake window set at init err=%d",
+                   uart_sleep_espnow_last_err());
 #endif
 #endif
 
