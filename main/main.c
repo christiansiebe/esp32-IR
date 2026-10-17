@@ -329,6 +329,9 @@ static const uint8_t k_cpu_freq_steps[] = {40u, 80u, 160u, 240u};
 #define CPU_FREQ_STEP_COUNT (sizeof(k_cpu_freq_steps) / sizeof(k_cpu_freq_steps[0]))
 static uint32_t g_cpu_freq_hist[CPU_FREQ_STEP_COUNT];
 static bool g_cpu_freq_below_ceiling_seen;
+#if CONFIG_ESPNOW_ROLE_SENDER
+static bool g_cpu_freq_below_ceiling_event_logged;
+#endif
 /* The configured ceiling, mirrored from the active runtime config so the sampler
  * can tell "at the ceiling" from "DFS stepped down". */
 static uint8_t g_cpu_freq_ceiling_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ;
@@ -2482,14 +2485,18 @@ static void cpu_freq_sample(void)
         }
     }
     /* The ceiling is whatever the console/build pinned; a sample below it is
-     * proof that DFS (or modem sleep) actually let the clock drop. */
+     * proof that DFS (or modem sleep) actually let the clock drop. The event
+     * ring is sender-only, so the receiver just keeps the histogram. */
     if (mhz < g_cpu_freq_ceiling_mhz) {
-        if (!g_cpu_freq_below_ceiling_seen) {
-            g_cpu_freq_below_ceiling_seen = true;
+        g_cpu_freq_below_ceiling_seen = true;
+#if CONFIG_ESPNOW_ROLE_SENDER
+        if (!g_cpu_freq_below_ceiling_event_logged) {
+            g_cpu_freq_below_ceiling_event_logged = true;
             diag_log_event(ESPNOW_DIAG_LEVEL_INFO,
                            "CPU clock stepped down to %u MHz (ceiling %u)",
                            (unsigned)mhz, (unsigned)g_cpu_freq_ceiling_mhz);
         }
+#endif
     }
 }
 
