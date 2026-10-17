@@ -15,6 +15,8 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "task_wdt_guard.h"
+
 #define POWER_HISTORY_MAGIC 0x50484C31u
 /* Format versions live in power_history.h so the host tests and the migration
  * helper agree on them. The header version is the current record version.
@@ -412,13 +414,26 @@ static void power_history_worker(void *arg)
 {
     (void)arg;
     power_history_record_t records[POWER_HISTORY_BATCH_RECORDS];
-    while (xQueueReceive(g_history_queue, &records[0], portMAX_DELAY) == pdTRUE) {
+    /* Prove liveness to the task watchdog: a wedged writer (mutex deadlock, a
+     * SPIFFS call that never returns) must reboot the device instead of
+     * silently stopping the minute history. */
+    task_wdt_guard_subscribe(TASK_WDT_NAME_POWER_HISTORY);
+    while (1) {
+        /* Bounded wait, not portMAX_DELAY: an idle writer still wakes to feed
+         * the watchdog, so a healthy-but-idle worker is never mistaken for a
+         * stall. Still a blocking wait (no busy loop). */
+        if (xQueueReceive(g_history_queue, &records[0],
+                          pdMS_TO_TICKS(POWER_HISTORY_BATCH_TIMEOUT_MS)) != pdTRUE) {
+            task_wdt_guard_feed();
+            continue;
+        }
         size_t record_count = 1;
         while (record_count < POWER_HISTORY_BATCH_RECORDS &&
                xQueueReceive(g_history_queue, &records[record_count],
                              pdMS_TO_TICKS(POWER_HISTORY_BATCH_TIMEOUT_MS)) == pdTRUE) {
             ++record_count;
         }
+        task_wdt_guard_feed();
         if (xSemaphoreTake(g_history_mutex, portMAX_DELAY) != pdTRUE) {
             ESP_LOGE(TAG, "Could not lock persistent history");
             portENTER_CRITICAL(&g_stats_lock);
@@ -464,6 +479,7 @@ static void power_history_worker(void *arg)
             }
         }
         xSemaphoreGive(g_history_mutex);
+        task_wdt_guard_feed();
     }
 }
 
