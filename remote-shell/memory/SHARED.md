@@ -403,3 +403,30 @@ Wichtigste Punkte (sonst scheitert es):
   Deshalb stock_duties() einmal messen und Zielwert absolut setzen.
 - Ersparnis nur moderat: P~V^2*f, Kerne ~5-10% der Board-Leistung. Idle wird
   SCHLECHTER (userspace nagelt Frequenz fest). Kein Leistungsmesser vorhanden.
+
+### CPU-Takt unter 1 GHz + CPU-Hotplug (2026-10-17, Chat 7a894c13)
+- Werk-DTB startet bei 1.0 GHz; Overlay `lowfreq.dtbo` (user_overlays=lowfreq)
+  ergaenzt 14 Raten je Cluster (15.625 ... 666.666 MHz). **Nur Teiler der Form
+  2^a*5^b sind echt** (2,4,5,8,10,16,20,25,32,40,50,64). Eine Rate mit Faktor 3
+  (333333, 33333 kHz) wird STILL abgerundet, `scaling_cur_freq` meldet aber die
+  Wunschrate -> falsche Spannung. Immer per `cpu_clk_dyn`/`cpub_clk_dyn`
+  (debugfs) pruefen, nicht per `scaling_cur_freq`.
+- Alle 28 Punkte unter Last stabil, 0 Rechenfehler. `schedutil` waehlt mit
+  gesenkter Untergrenze selbst tiefe Takte (idle little 250 MHz, big 200-1000).
+- **Stromfrage:** Overlay uebernimmt die Spannung des 1.0-GHz-Punkts, die
+  Spannung faellt NICHT mit dem Takt. Bei gleicher Dauerlast 1.0 GHz vs 24 MHz
+  nur ~1 °C Unterschied (Temperatur als Proxy, kein Stromsensor am Board).
+  Nutzen also im **Leerlauf**, nicht unter Volllast.
+- **cpuidle = none**, DTB ohne idle-states -> Kerne SCHLAFEN NICHT. Ersatz:
+  Hotplug (`cpu_hotplug.py` + `cpu-hotplug.service`, enabled). Idle nur cpu0+1
+  online, unter Last alle. cpu0 nie offline. Reine `plan_online()` host-getestet
+  (test_cpu_hotplug.py, 134 Checks).
+- **Peripherie (SD/USB/Ethernet) haengt an fclk_div2, NICHT am CPU-Takt** ->
+  tiefe Raten verlangsamen SD/USB/Netz nicht.
+- **Falle:** Armbians armbian-hardware-optimization setzt `MIN_SPEED` aus
+  `/etc/default/cpufrequtils` NOCH NACH cpu-freq-guard.service. Untergrenze
+  dauerhaft nur mit BEIDEN Dateien (`lowfreq_set_floor.sh` macht das). Reboot-Test
+  bestaetigt: min=15625 auf beiden Clustern, beide Dienste aktiv.
+- Dateien: remote-shell/ha/{cpu_hotplug.py,cpu-hotplug.service,deploy_hotplug.sh,
+  lowfreq_set_floor.sh,power_probe.sh,test_cpu_hotplug.py} + LOWFREQ-README.md.
+

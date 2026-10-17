@@ -72,6 +72,78 @@ Die neuen Punkte sind damit nur durch einen **ausdruecklichen** Laufzeit-Test
 erreichbar; ein Reset stellt die Untergrenze wieder her. Zusaetzlich haelt der
 systemd-Hardware-Watchdog (`RuntimeWatchdogSec=60`) einen echten Hang im Griff.
 
+## Leistung: spart das ueberhaupt Strom?
+
+**Ja, aber begrenzt - und der Grund ist die Spannung.** Das Overlay uebernimmt
+fuer alle neuen Punkte die Spannung des 1.0-GHz-Punkts (little 0.762 V, big
+0.730 V); die Spannung faellt mit dem Takt **nicht**. Bei CMOS ist
+P = C * V^2 * f + P_leck, hier sinkt also nur der f-Anteil.
+
+Gemessen (kein Stromsensor am Board, kein INA2xx - Temperatur als Proxy):
+
+| Zustand | Takt little | Temp |
+|---|---|---|
+| Volllast, 2 Loops auf cpu0,1, Untergrenze 1.0 GHz | 999 MHz | 37 °C |
+| dieselbe Last, Untergrenze 24 MHz | 24 MHz | 36 °C |
+| Leerlauf, Untergrenze 1.0 GHz | 1000 MHz | 36 °C |
+| Leerlauf, Untergrenze 15.6 MHz (schedutil waehlt 250 MHz) | 250 MHz | 35.7 °C |
+
+Bei gleicher **Dauerlast** unterscheiden sich 1.0 GHz und 24 MHz nur um ~1 °C.
+Der Grund: unter Last schaltet der Regler die Spannung auf `VDDCPU_A` = 1.011 V
+(1.0 GHz) bzw. 0.950 V (250 MHz) hoch, und die Leckleistung des A73/A53 bei
+dieser Spannung dominiert den f-Anteil. Der Nutzen liegt daher nicht im
+Volllastbetrieb, sondern **im Leerlauf**: dort waehlt `schedutil` von selbst
+250 MHz statt 1.0 GHz und spart den Taktanteil, ohne dass etwas fehlt.
+
+Ehrliche Einordnung: einen echten Leistungsmesser gibt es am Board nicht, die
+Temperatur ist nur ein Proxy. Der belastbare Effekt ist der Idle-Anteil; die
+~1 °C unter Last liegen im Rauschen.
+
+## Leerlauf: Kerne schlafen nicht (cpuidle fehlt)
+
+`/sys/devices/system/cpu/cpuidle/current_driver` = **`none`**, das DTB enthaelt
+**keine** `idle-states`. Die Kerne gehen im Leerlauf also **nicht** in einen
+Schlafzustand; nur der Takt faellt. Das ist ein Kernel-/DT-Limit des Meson-G12B
+und nicht ohne Risiko aenderbar.
+
+Was stattdessen hilft: **CPU-Hotplug**. `cpu_hotplug.py` + `cpu-hotplug.service`
+nehmen ungenutzte Kerne ueber `/sys/devices/system/cpu/cpuN/online` ganz aus dem
+Takt. Gemessen im Leerlauf: nur cpu0+cpu1 online, cpu2-5 aus; unter Last holt
+der Dienst sie zurueck. Ein offline genommener Kern verbraucht keinen Takt und
+keine Leckleistung mehr.
+
+Regeln des Dienstes:
+- **cpu0 bleibt immer online** (Boot-CPU; ihr Wieder-Onlinen ist nicht
+  garantiert).
+- Stufen: Last < 0.5 -> 2 Kerne, < 1.5 -> 3, < 3 -> 4, sonst alle.
+- Hysterese: eine Aenderung erst nach 6 Messungen (30 s) mit gleicher Stufe.
+- Beim Beenden (SIGTERM) werden alle Kerne wieder online genommen.
+- Reine Entscheidung `plan_online()`, host-getestet
+  (`test_cpu_hotplug.py`, 134 Checks).
+
+Nicht verwechseln: Hotplug ist kein Schlaf. Ein offline genommener Kern ist
+stromlos, aber das Wieder-Onlinen kostet Zeit (Boot der Sekundaer-CPU), deshalb
+die Hysterese.
+
+## Wichtig: Peripherie haengt NICHT am CPU-Takt
+
+`mmc` (SD/eMMC), `usb` und `ethernet` haengen an `fclk_div2` (1.0 GHz) bzw.
+`fclk_div3` (666.7 MHz), **nicht** am CPU-Mux. Der CPU-Takt ist damit isoliert:
+die tiefen Raten verlangsamen weder SD noch USB noch Netz. Die CPU-internen
+AXI/ATB/APB-Takte (`cpub_clk_axi/atb/apb`) sind zwar Teiler des CPU-Takts, aber
+das ist das vorgesehene Design (der Speichercontroller des SoC laeuft weiter
+ueber `dmc`/`fclk_div2`).
+
+## Wichtig: zwei Stellen fuer die Untergrenze
+
+Armbians `/usr/lib/armbian/armbian-hardware-optimization` liest `MIN_SPEED` aus
+`/etc/default/cpufrequtils` und setzt `scaling_min_freq` damit **noch nach**
+`cpu-freq-guard.service` (das Skript laeuft als Kind weiter, im Journal bei
+8.1 s und 9.5 s). Wer nur `/etc/default/cpu-freq-guard` setzt, sieht nach dem
+Boot wieder 1.0 GHz. `lowfreq_set_floor.sh` schreibt daher **beide** Dateien.
+Das war ein realer Fehler: der Reboot-Test zeigte `min=1000000`, obwohl
+`cpu-freq-guard` = 15625 war.
+
 ## Ablauf
 
 ```bash
@@ -86,8 +158,12 @@ sh /root/lowfreq_clk_truth.sh          # echter Takt je Rate
 # 3. jeden Punkt unter Last pruefen
 python3 /root/lowfreq_probe.py --iters 400000 --dwell 0.4
 
-# 4. Untergrenze dauerhaft setzen (z.B. auf die tiefste Rate)
-sh /root/lowfreq_set_floor.sh auto
+# 4. Untergrenze dauerhaft setzen (z.B. auf die tiefste Rate).
+#    Schreibt BEIDE Dateien (cpu-freq-guard + cpufrequtils MIN_SPEED).
+sh /root/ha/lowfreq_set_floor.sh 15625
+
+# 5. Hotplug-Governor installieren (Kerne im Leerlauf aus)
+sh /root/ha/deploy_hotplug.sh
 ```
 
 ## Messergebnis (2026-10-17)
@@ -97,6 +173,11 @@ Alle 14 Raten je Cluster (15.625 MHz … 666.666 MHz) unter Last geprueft:
 Rate (z.B. x20 bei 50 MHz). Mit gesenkter Untergrenze waehlt `schedutil` die
 tiefen Punkte **von selbst**: im Leerlauf little 249 MHz / big 124-499 MHz,
 Temperatur 41 °C statt 66-68 °C unter Volllast.
+
+Reboot-Test (2026-10-17): nach dem Reboot `scaling_min_freq` = 15625 auf beiden
+Clustern, `cpu-freq-guard` + `cpu-hotplug` aktiv, schedutil waehlt im Leerlauf
+little 250 MHz / big 200 MHz, 35 °C. Hotplug: idle cpu0-1, unter Last zurueck
+auf cpu0-5.
 
 ## Ruecknahme
 
