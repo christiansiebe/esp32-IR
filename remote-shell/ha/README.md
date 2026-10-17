@@ -19,6 +19,18 @@ tree (`main/`, `components/`, `tools/`, `test/`). The CI path filter
 All three run **inside** the Home Assistant container so they can read
 `/config/.storage` (gateway credentials, admin token) and the recorder DB.
 
+## Odroid CPU tools (outside the HA container)
+
+- `cpu-volt-watch`, `cpu-volt-line`, `htopv`, `htopv.tmux.conf`,
+  `deploy_htopv.sh`, `test_htopv.py` + `htopv-README.md` — live per-core MHz
+  and per-cluster voltage (`VDDCPU_A`/`_B`) on the Odroid N2+, shown in a tmux
+  status line next to htop. Rail mapping is measured, see `htopv-README.md`.
+- `cpu_hotplug.py`, `cpu-hotplug.service`, `deploy_hotplug.sh`,
+  `lowfreq_set_floor.sh`, `cpu-freq-guard.sh`/`.service`, `test_cpu_hotplug.py`
+  + `LOWFREQ-README.md` — idle CPU hotplug and the persistent clock floor.
+- `uv.py`, `uv_lowfreq.py`, `gen_lowfreq_dts.py`, `uv-opp-table.json` +
+  `UV-README.md` — software undervolt (VDDCPU_A/B, DT floor 680 mV).
+
 ## Gateway backfill
 
 HA only records from the day the `bosch_k40rf` integration was configured, so

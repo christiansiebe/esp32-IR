@@ -1,0 +1,17 @@
+[Unit]
+Description=XFCE VNC Server (TigerVNC, display :1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=root
+Environment=HOME=/root
+ExecStartPre=-/usr/bin/vncserver -kill :1
+ExecStart=/usr/bin/vncserver :1 -geometry 1920x1080 -depth 24 -localhost no -SecurityTypes VncAuth
+ExecStop=/usr/bin/vncserver -kill :1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

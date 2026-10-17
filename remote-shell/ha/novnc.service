@@ -1,0 +1,15 @@
+[Unit]
+Description=noVNC web frontend for XFCE desktop (websockify 6080 -> VNC 5901)
+After=network-online.target xfce-vnc.service
+PartOf=xfce-vnc.service
+Wants=network-online.target
+Requires=xfce-vnc.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc 0.0.0.0:6080 localhost:5901
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
