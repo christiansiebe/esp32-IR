@@ -175,6 +175,50 @@ Der N2+ (S922X Rev. C) hat den Bereich gegenueber dem N2 (721000 uV) nach unten
 auf das Datenblatt-Minimum erweitert - konsistent mit "rev. C supports slightly
 higher voltages".
 
+## 3b. Schaltplan Rev 0.6 20210121 (Board-Revision) - **neu**
+
+Das Board ist **Rev 0.6 20210121**. Der Plan ist ueber das Web-Archive
+beschaffbar (`dn.odroid.com/S922X/ODROID-N2/Schematic/odroid-n2_rev0.6_20210121.pdf`,
+Snapshot 2023-02-27). Die VDDCPU-Regler liegen auf **Sheet 16 "PWR DC/DC OTHERS"**
+(nicht S.12; S.12 ist `S905D2_MIPI`). Damit ist Punkt 17 der Quellenliste
+**ueberholt**.
+
+**Regler-Zuordnung (aus dem Plan):**
+
+| Ref | Bauteil | Rail |
+|-----|---------|------|
+| **U15** | **MP8756GD** | **VDDCPU_A** |
+| **U17** | **SY8120B1ABC** | **VDDCPU_B** |
+| U14 | MP8756GD | VDD_EE (eigene Rail) |
+
+Beide CPU-Rails sind **PWM-gesteuert** (Netze `VDDCPUA_PWM` / `VDDCPUB_PWM`),
+also genau der invertierte Continuous-Mode-Regler aus Kapitel 2.
+
+**FB-Beschaltung VDDCPU_A (U15):** R73=**3K6**, R74=**75K**, R76=**10k**,
+R77=**360k**, R78=**47k**, R81=**127k**, R71=499k, R72=499R, C189=1nF,
+C176=220pF.
+**FB-Beschaltung VDDCPU_B (U17):** R84=**360k**, R85=**47k**, R83=**10k**,
+R82=**68k**, R87=**127k**, C190=27pF, C193=1nF.
+
+**Wichtigster Befund:** Beide Rails nutzen **dasselbe Teilerpaar 360k/47k** und
+dieselbe PWM-Injektionsbeschaltung (127k + 10k + 1nF). Das ist die
+Hardware-Bestaetigung dafuer, dass der DT fuer **beide** Cluster dieselbe
+Kalibrierung (`680000..1040000`, 1500 ns) verwendet - die Rev.-0.6-Bestueckung
+traegt also auf **beiden** CPU-Rails bis 680 mV mit.
+
+**Grenze der Auswertung (ehrlich):** Die **exakte Uebertragungsfunktion
+Tastgrad -> Vout** liess sich aus dem PDF **nicht** rekonstruieren. Der Grund:
+das FB-Netz ist eine **PWM-Injektion in den Teiler** (nicht ein einfacher
+Teiler), und die Drahtendpunkte treffen die Bauteilsymbole im Vektorlayer nicht
+punktgenau. Eine naive Rechnung `0,6*(1+360k/47k) = 5,2 V` ist daher
+**unzulaessig** - sie ignoriert den PWM-Knoten und die Parallelzweige. Der
+Schaltplan **bestaetigt die Werte und die Topologie**, liefert aber **nicht** die
+Spannung bei Tastgrad 0. Diese Groesse bleibt - wie in Kapitel 8/9 dargelegt -
+nur messtechnisch zu bestimmen.
+
+**Ein N2±spezifischer Plan ist nicht archiviert** (nur `odroid-n2_*` bis rev0.6).
+Der Rev-0.6-Plan ist der des Boards; N2 und N2+ teilen ihn.
+
 ## 4. Voltage-Table-Modus: umgeht er die Grenze?
 Im Table-Modus (`pwm-regulator.c:72-95` `pwm_regulator_set_voltage_sel()`) ist
 `pwm_set_relative_duty_cycle(&pstate, duty_cycle_table[sel].dutycycle, 100)` (Z. 90)
@@ -382,11 +426,15 @@ python3 /tmp/verify_chain.py
 16. **Silergy SY8120B1ABC Datasheet**, S. 1-2: `V_FB = 588/600/612 mV`,
     `V_OUT = 0.6*(1+R1/R2)`, `D_max 90 %`. (digikey-Spiegel:
     `mm.digikey.com/.../5399_SY8120B SOT-23-6.PDF`)
-17. **Nicht beschaffbar:** Hardkernel-Schaltplan
-    `dn.odroid.com/S922X/ODROID-N2/Schematic/odroid-n2_rev0.4_20190307.pdf` -
-    Cloudflare-Schutz blockiert den Abruf (auch via Web-Archive nicht
-    archiviert). Daher ist das **FB-Teilerverhaeltnis (R1/R2) unbekannt**; die
-    Aussage "DC-DC koennte bis 0.600 V" folgt aus der FB-Referenz der Bauteile,
-    nicht aus dem konkreten Beschaltungsverhaeltnis.
+17. **Hardkernel-Schaltplan Rev 0.6 20210121** (Board-Revision), Sheet 16
+    `PWR_DCDC_OTHERS.SchDoc`: U15=MP8756GD -> VDDCPU_A, U17=SY8120B1ABC ->
+    VDDCPU_B, U14=MP8756GD -> VDD_EE. FB-Werte A: R73 3K6, R74 75K, R76 10k,
+    R77 360k, R78 47k, R81 127k; B: R84 360k, R85 47k, R83 10k, R82 68k,
+    R87 127k. Beschafft ueber das **Web-Archive** (Snapshot 2023-02-27):
+    `http://web.archive.org/web/20230227180615if_/https://dn.odroid.com/S922X/ODROID-N2/Schematic/odroid-n2_rev0.6_20210121.pdf`.
+    Direktabruf bei `dn.odroid.com` ist Cloudflare-blockiert; der Wayback-Spiegel
+    funktioniert. Siehe Kapitel 3b. Das **FB-Teilerverhaeltnis R1/R2 bzw. die
+    exakte PWM-Uebertragungsfunktion bleibt unbekannt** (PWM-Injektion, im
+    Vektorlayer nicht punktgenau aufloesbar).
 
 Stand: 2026-10-17. Host-Analyse, kein Boardzugriff.
