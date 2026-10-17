@@ -32,7 +32,7 @@ set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "json_escape.c" "version.c"
               "wall_clock.c" "wall_clock_store.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
-    list(APPEND main_srcs "mqtt_bridge.c" "web_guard.c")
+    list(APPEND main_srcs "mqtt_bridge.c" "mqtt_events.c" "web_guard.c")
 endif()
 if(CONFIG_ESPNOW_ROLE_SENDER)
     list(APPEND main_srcs "tx_batch.c" "uart_sleep_window.c")
