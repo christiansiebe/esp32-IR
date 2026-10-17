@@ -44,6 +44,40 @@ Alle Ziele teilen sich `SANDBOX_TERM_TOKEN`.
 Hinweis: `run_remote_command` im Server **broadcastet** an alle verbundenen Agenten — pro
 Sandbox also **genau ein** Ziel eintragen (sonst fuehrt derselbe Befehl mehrfach aus).
 
+### Tote Ziele kosten CPU (Backoff, 2026-10-17)
+
+Das GitHub-Register (`memory/sandboxes.json`) und `$SANDBOX_TERM_URLS_FILE` sammeln **jede**
+Sandbox, die es je gab. Eine beendete Sandbox antwortet auf `/agent` mit **HTTP 404**. Ohne
+Backoff versuchte der Agent **jede tote URL alle 5 s** erneut — gemessen **9-14 % CPU dauerhaft**
+plus hektisches Taktschreiben (`sugov`), was die Last auf ~0,7 hob und verhinderte, dass die
+Kerne in den tiefen Takt (250 MHz) fielen. Zwei Aenderungen:
+
+- `cmd_agent.next_delay()` — exponentieller Backoff je Ziel. **404** (Sandbox tot) bis **900 s**,
+  jeder andere Fehler (eigener Server kurz weg) bis **60 s**; nach erfolgreichem Connect wieder 5 s.
+  Wirkung: gemessen **0,03 % CPU** statt 9-14 %, keine 404-Wiederholungen mehr.
+- `register_sandbox.prune_sandboxes()` — Eintraege, die laenger als **24 h** nicht aktualisiert
+  wurden, fallen aus dem Register. So waechst die Liste nicht endlos.
+
+Host-Test: `python3 remote-shell/test_channel_backoff.py` (15 Checks, ohne Netz).
+
+**Wichtig:** Zusaetzliche tote URLs gar nicht erst eintragen. Ein verwaister Eintrag in
+`/etc/odroid-cmd-agent.urls` oder im Register kostet nur Verbindungsversuche.
+
+### Nie am Kanal der Produktions-WLAN-Karte drehen (2026-10-17)
+
+Der Odroid hat **eine** WLAN-Karte (`rtw88_8822bu`, `wlxdc627949ba79`) und ist damit im
+5-GHz-Heimnetz (Kanal 36). Ein Monitor-Interface laesst sich zwar anlegen (`iw list` zeigt
+`* monitor`), aber die Karte ist **einkanalig**: sie folgt dem Kanal des Managed-Interfaces.
+Ein Versuch, das Monitor-Interface auf einen **anderen** Kanal zu stellen, liefert
+`Device or resource busy` — und das Anlegen/Hochnehmen kann die Managed-Verbindung
+**abreissen**. Genau das hat das Board einmal aus dem WLAN geworfen (Agent weg, nur per
+Neustart zurueck).
+
+Regel: Monitor-Mode **nur** auf einer **zweiten** WLAN-Karte, oder auf demselben Kanal wie
+die bestehende Verbindung. Fuer ESP-NOW (Kanal 1) heisst das: entweder zusaetzlichen
+USB-WLAN-Adapter stecken, oder die Verbindung auf das 2,4-GHz-Netz legen, das ebenfalls auf
+Kanal 1 sendet.
+
 ## Dateien
 - `supervise.py` — Supervisor (flock-geschuetzt, startet Server bei Absturz neu, `--status`/`--stop`)
 - `sandbox_term_server.py` — WS-Server: PTY-Terminal + `/agent`-Befehlskanal

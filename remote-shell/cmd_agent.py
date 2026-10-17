@@ -154,16 +154,41 @@ async def session(conn, token):
             conn.cid = None
 
 
+def next_delay(delay, exc, base=5, cap_dead=900, cap_live=60):
+    """Backoff nach einem Fehlversuch (reine Funktion, host-getestet).
+
+    Ein HTTP 404 heisst: die Sandbox gibt es nicht mehr -> sehr langsamer
+    Backoff. Jeder andere Fehler (unser eigener Server war kurz weg) -> der
+    normale, schnellere Backoff. Das ist der Unterschied, der verhindert, dass
+    der Agent dauerhaft CPU gegen tote Register-Eintraege verbrennt."""
+    gone = "404" in str(exc)
+    return min(max(delay, base) * 2, cap_dead if gone else cap_live)
+
+
 async def run_target(conn, token):
-    """Haelt genau ein Ziel dauerhaft verbunden (eigener Reconnect/Backoff)."""
+    """Haelt genau ein Ziel dauerhaft verbunden (eigener Reconnect/Backoff).
+
+    Der Backoff ist kein Detail: das GitHub-Register listet jede Sandbox, die
+    es je gab, und eine beendete Sandbox antwortet mit HTTP 404. Ohne Backoff
+    laeuft der Agent dann in einer 5-s-Schleife gegen jeden toten Eintrag - das
+    kostet dauerhaft CPU, hebt die Last und verhindert, dass die Kerne in den
+    tiefen Takt fallen (gemessen: 9-14 % CPU, Last ~0,7). Deshalb:
+      * 404 = Ziel existiert nicht mehr -> Backoff bis 900 s (sehr selten).
+      * andere Fehler (unser eigener Server kurz weg) -> Backoff bis 60 s.
+      * nach einem erfolgreichen Connect wieder bei 5 s beginnen."""
+    delay = 5
     while True:
         try:
             await session(conn, token)
         except Exception as exc:  # noqa: BLE001
-            print(f"[{conn.url}] {exc} - neuer Versuch in 5s ...")
+            print(f"[{conn.url}] {exc} - neuer Versuch in {delay}s ...")
+            await asyncio.sleep(delay)
+            delay = next_delay(delay, exc)
+        else:
+            delay = 5
+            await asyncio.sleep(5)
         finally:
             conn.ws = None
-        await asyncio.sleep(5)
 
 
 def read_targets():
