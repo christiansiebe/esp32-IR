@@ -71,10 +71,18 @@ jobs:
         include:
           - role: receiver
             kconfig_role: RECEIVER
+            extra_kconfig: ""
+          # Station-only receiver: no SoftAP. ESP-NOW then runs on WIFI_IF_STA
+          # (the #if in main.c flips ESPNOW_IF) and the dashboard is served over
+          # the home WLAN. ESPNOW_CHANNEL must match the home AP's channel.
+          - role: receiver-apoff
+            kconfig_role: RECEIVER
+            extra_kconfig: "CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y"
           # The sender ships as a single image with the adaptive light sleep
           # enabled by default (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y in Kconfig).
           - role: sender
             kconfig_role: SENDER
+            extra_kconfig: ""
     env:
       IDF_CCACHE_ENABLE: "1"
       CCACHE_DIR: /root/.cache/ccache
@@ -116,6 +124,7 @@ jobs:
           CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
           CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
           CONFIG_ESPNOW_ROLE_${{ matrix.kconfig_role }}=y
+          ${{ matrix.extra_kconfig }}
           EOF
           echo "SDKCONFIG_DEFAULTS=sdkconfig.defaults;$RUNNER_TEMP/sdkconfig.defaults" >> "$GITHUB_ENV"
 
@@ -183,6 +192,19 @@ jobs:
           # window apply without an association when the option is turned on.
           grep -q '^CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y$' sdkconfig
           echo "Sender image keeps the ESP-NOW radio on (power save opt-in, off)"
+
+      - name: Verify station-only receiver config (apoff)
+        if: matrix.role == 'receiver-apoff'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The station-only receiver starts no SoftAP and runs ESP-NOW on
+          # WIFI_IF_STA. Both must hold, and the ESP-NOW channel must be explicit
+          # because the sender can no longer discover it from the AP.
+          grep -q '^CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y$' sdkconfig
+          grep -q '^CONFIG_ESPNOW_ROLE_RECEIVER=y$' sdkconfig
+          grep -q '^CONFIG_ESPNOW_CHANNEL=1$' sdkconfig
+          echo "Station-only receiver: SoftAP off, ESP-NOW on WIFI_IF_STA, channel 1"
 
       - name: Stage firmware and flash files
         shell: bash
