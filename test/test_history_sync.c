@@ -231,6 +231,8 @@ static void test_resume_after_link_drop(void)
     CHECK(!first.caught_up, "not caught up after the drop");
     CHECK(first.cursor == base + 13 * 60, "cursor stops at the last served minute");
     CHECK(store.count == 14, "store holds the 14 served minutes");
+    CHECK(first.fetch_failures == 1,
+          "a dropped link counts one page loss, not one per retry attempt");
 
     /* Link is back: resume from the persisted cursor and finish. */
     sender.fail_after_pages = -1;
@@ -298,6 +300,8 @@ static void test_drop_before_first_page(void)
     CHECK(!result.any_round, "no round completed");
     CHECK(result.cursor == 0, "cursor unchanged on a first-page drop");
     CHECK(store.count == 0, "nothing merged");
+    CHECK(result.fetch_failures == 1,
+          "a page that exhausts every retry counts exactly one fetch failure");
 }
 
 static void test_dedupe_within_page(void)
@@ -342,6 +346,8 @@ static void test_transient_fetch_retry(void)
     CHECK(result.any_round, "a transient miss does not end the session");
     CHECK(result.merged == 10, "the retried page still mirrors the sender");
     CHECK(store_matches(&store, &sender), "no page skipped by the retry");
+    CHECK(result.fetch_failures == 0,
+          "a transient miss recovered by the retry is not counted as an error");
 }
 
 /* A merge that drops the tail of every page (full store queue): the cursor must

@@ -197,6 +197,7 @@ static void run_scenario(unsigned seed, int seeded_prefix)
     ctx.store = &store;
 
     int sessions = 0;
+    uint32_t total_fetch_failures = 0;
     int64_t cursor = seeded_prefix > 0 ? sender.minutes[seeded_prefix - 1] : 0;
     int64_t prev_cursor = -1;
     int guard = 0;
@@ -211,6 +212,7 @@ static void run_scenario(unsigned seed, int seeded_prefix)
         history_sync_run(&result, cursor, base + RING_MINUTES * 60, 64,
                          mock_fetch, mock_has, mock_merge, mock_store_cursor, &ctx);
         ++sessions;
+        total_fetch_failures += result.fetch_failures;
 
         /* The cursor must never rewind and must never exceed the smallest
          * missing minute (otherwise a minute would be skipped). */
@@ -235,6 +237,10 @@ static void run_scenario(unsigned seed, int seeded_prefix)
     CHECK(!store_has_duplicates(&store), "no duplicate minute after the stress run");
     CHECK(store.count == RING_MINUTES, "store mirrors the sender exactly");
     CHECK(sessions < 200, "sessions converge (no livelock)");
+    /* Each fetch failure ends its session, so there can never be more failures
+     * than fetch calls (a retry that recovered is not counted). */
+    CHECK(total_fetch_failures <= (uint32_t)ctx.fetch_calls,
+          "fetch failures never exceed the fetch attempts made");
     printf("  seed %u: %d minutes, prefix %d, %d sessions, %d fetch, %d merge -> OK\n",
            seed, RING_MINUTES, seeded_prefix, sessions, ctx.fetch_calls, ctx.merge_calls);
 }

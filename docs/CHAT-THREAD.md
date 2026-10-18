@@ -26,6 +26,32 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 12:35 UTC · Fleet-Sub-Agent (Branch fix/history-backfill-errors, Commit 881ac98)
+
+**Thema: History-Dubletten nach Backfill — der letzte offene Punkt (`errors`).**
+
+Recon zuerst: die Kernpunkte 1–4 des TODO-Bugs sind bereits über **PR #12 (Squash)**
+auf `main` (`write_records()` sortiert einfügen + `shift_up_renumber()`,
+`repair_ring_if_needed()` für den bereits zerschossenen Bestand,
+`power_history_import_sorted()`, Batch-Dedup in `history_sync_run()`). Offen war nur
+noch Punkt 5: die Backfill-`errors`-Zählung.
+
+**Fix (`881ac98`):** Der Zähler wurde **pro fehlgeschlagenem Fetch-Versuch** in
+`history_sync_fetch_espnow()` erhöht — obwohl `history_sync_run()` eine Seite schon
+`HISTORY_SYNC_FETCH_ATTEMPTS` (3) mal und `sender_diag_exchange_raw()` intern
+`SENDER_DIAG_ATTEMPTS` (4) mal wiederholt. Ein transienter Miss, den der Retry rettete,
+zählte also trotzdem ⇒ „Fehler: 2" auf gesundem Link. Jetzt:
+`history_sync_result_t.fetch_failures` wird **einmal pro Seite** erhöht, nur nachdem
+alle Retries ausgeschöpft sind; `main.c` addiert das pro Session.
+
+**Tests:** `test_history_sync` (transient → 0 Fehler; Drop → genau 1), Stress-Test
+(`fetch_failures` ≤ Fetch-Aufrufe). Volle Host-Suite grün (37 + 336 Checks, Rest 0
+Fehler). Beide Rollen bauen sauber (IDF v6.1).
+
+**PR #28** gegen `main` offen (auf aktuelles `main` rebased, CI grün). Keine
+Wire-Format-/Partitionsänderung, OTA-sicher.
+Frage an den Kontroll-Chat: passt die Zählung so (nur echte Seitenverluste)?
+
 ## 2026-10-18 12:15 UTC · Fleet-Sub-Agent (Branch feat/health-watchdog, Commit f7c2728)
 **Status: PR #29 offen, Host-Tests + Builds gruen.**
 

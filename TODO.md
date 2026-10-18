@@ -607,7 +607,12 @@ in seiner eigenen SPIFFS-Historie (siehe oben).
 nur die Lücken und überschreibt nie eigene Werte — so umgesetzt. Die Minutenhistorie wird
 auf **beiden** Rollen lokal geschrieben (SPIFFS), der Sender speichert also alles selbst.
 
-### 🐛 Bug: doppelte Minuten in der History nach Backfill (NEU, 2026-10-14)
+### 🐛 Bug: doppelte Minuten in der History nach Backfill (BEHOBEN, 2026-10-14/18)
+**Stand 2026-10-18 (Sub-Agent `fix/history-backfill-errors`):** Die Kernpunkte 1–4
+waren bereits über PR #12 (Squash) auf `main` gelandet (`write_records()` sortiert
+einfügen, `shift_up_renumber()`, `repair_ring_if_needed()`,
+`power_history_import_sorted()`, Batch-Dedup in `history_sync_run()`). Offen war
+noch Punkt 5 (`errors`-Zählung); er ist jetzt behoben (siehe unten).
 Symptom: `GET /api/power-history.csv` liefert **doppelte Minuten**. Empfänger-Export
 14.10.: 4828 Zeilen / 3557 eindeutige Minuten → **1271 überzählige Zeilen**; ein früherer
 Export 615 doppelte Minuten / 1047 Zeilen. Die Dubletten-Paare liegen im `sequence` weit
@@ -630,27 +635,37 @@ für Live-Recorder **und** Merge). Alternative B: `minute_is_stored` + `read*` a
 unsortierten Ring auslegen.
 
 **Zwei zusätzliche Abnahmepunkte:**
-- [ ] **Bereits unsortierten Bestand mitreparieren.** Nicht nur neue Inserts sortiert
+- [x] **Bereits unsortierten Bestand mitreparieren.** Nicht nur neue Inserts sortiert
       einfügen — der Ring ist am Gerät **schon** zerschossen. Vorhandene Daten einmalig in
       sortierte Ordnung überführen (z. B. Normalisierung beim Start), sonst bleiben
       `has_minute`/Export für die Alt-Daten kaputt.
-- [ ] **`sequence` beim Umsortieren monoton halten.** Export/HA blättern über `sequence`
+- [x] **`sequence` beim Umsortieren monoton halten.** Export/HA blättern über `sequence`
       (`power_history_read(after_sequence=…)`). Neu-Nummerierung macht alte Cursor
       ungültig ⇒ Export/HA verlieren Zeilen. `sequence` als Identität erhalten.
 
 **Mitnehmen:**
-- [ ] **Batch-Dedup im Backfill:** `history_sync_run` filtert nur gegen `has()`
+- [x] **Batch-Dedup im Backfill:** `history_sync_run` filtert nur gegen `has()`
       (schon gespeichert); dieselbe Minute kann **innerhalb** einer Session doppelt
       ankommen (Retry/überlappende Seiten) → vor `merge()` im Batch deduplizieren.
-- [ ] **Backfill-`errors` („Fehler: 2")** im Sender-Abgleich: bei `fetch()`-Fehlschlag
+- [x] **Backfill-`errors` („Fehler: 2")** im Sender-Abgleich: bei `fetch()`-Fehlschlag
       (`sender_diag_exchange_raw`) bricht die Seite ab, Cursor retryt später. Prüfen, ob
-      Fehler gezählt/erneut versucht werden sollen.
+      Fehler gezählt/erneut versucht werden sollen. **Behoben (2026-10-18,
+      `fix/history-backfill-errors`):** Der Zähler wurde pro fehlgeschlagenem
+      `sender_diag_exchange_raw`-Versuch erhöht — auch wenn ein Retry die Seite
+      rettete. Jetzt zählt `history_sync_result_t.fetch_failures` eine Seite
+      **einmal**, nachdem alle `HISTORY_SYNC_FETCH_ATTEMPTS` ausgeschöpft sind, und
+      `main.c` addiert das pro Session. Ein transienter Miss, den der Retry
+      abfängt, zählt **nicht** mehr als Fehler. Host-Tests: `test_history_sync`
+      (transient → 0 Fehler, Drop → genau 1) + Stress-Test (`fetch_failures`
+      ≤ Fetch-Aufrufe).
 
 **Regressionstest (Pflicht):** Host-Test in `test/` (analog `test_history_backfill_merge.c`):
 (1) Live-Minuten enqueuen, ältere mergen; (2) `power_history_has_minute(T0) == true`, Ring
 sortiert; (3) dieselben Minuten erneut mergen → `record_count` unverändert; (4) CSV-Export
 liefert **keine** doppelten Minuten; (5) vorab unsortierter Ring + Export-Monotonie.
 `test/run_host_tests.sh` grün; neuer Test eingehängt. OTA-sicher (reine App-Änderung).
+**Umgesetzt:** `test_history_backfill_merge` (Punkte 1–4, `test_out_of_order_backfill_keeps_sorted`),
+`test_history_ring_repair` (Punkt 5, unsortierter Bestand + Monotonie).
 
 ### 🐛 UX: Interface minutenlang offline nach CSV-Upload (NEU, 2026-10-14)
 Nach dem Re-Import einer großen CSV (`POST /api/power-history-upload`) ist die Weboberfläche
