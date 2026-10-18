@@ -2,7 +2,7 @@
 """Host-Tests fuer gen_oc_dts.py (reine Erzeugung, kein Board, kein dtc).
 
 Geprueft werden die drei Zusagen des OC-Generators:
-  * der gemessene stabile Punkt 2496 MHz (N=208) wird erzeugt,
+  * der gemessene stabile Punkt 2472 MHz (N=206) wird erzeugt,
   * Werte unter dem Regler-Boden (680 mV) werden abgelehnt,
   * Raten, die der big-PLL nicht erzeugen kann, werden abgelehnt,
   * der Standardlauf von gen_lowfreq_dts.py bleibt byte-identisch zu lowfreq.dts.
@@ -51,15 +51,15 @@ def opps(text):
 
 def main():
     with tempfile.TemporaryDirectory() as d:
-        # 1. Standardlauf: genau der gemessene Punkt, 2496 MHz @ 1040 mV.
+        # 1. Standardlauf: genau der gemessene Punkt, 2472 MHz @ 1040 mV.
         o1 = os.path.join(d, 'oc.dts')
         r, t = gen([], o1)
         check(r.returncode == 0, 'Standardlauf ok')
         o = opps(t)
-        check(o == {2496000000: 1040000}, 'genau ein Punkt: 2496 MHz @ 1040 mV')
+        check(o == {2472000000: 1040000}, 'genau ein Punkt: 2472 MHz @ 1040 mV')
         check('opp-table-1' in t, 'Ziel ist der big-Cluster (opp-table-1)')
-        check('N=208' in t, 'N=208 dokumentiert')
-        check('2496 MHz (N=208) @ 1040 mV' in r.stdout, 'Ausgabe nennt Punkt')
+        check('N=206' in t, 'N=206 dokumentiert')
+        check('2472 MHz (N=206) @ 1040 mV' in r.stdout, 'Ausgabe nennt Punkt')
 
         # 2. Regler-Boden: 670 mV muss abgelehnt werden, ohne Datei.
         o2 = os.path.join(d, 'bad.dts')
@@ -72,7 +72,7 @@ def main():
         o3 = os.path.join(d, 'floor.dts')
         r, t = gen(['--mv', '680'], o3)
         check(r.returncode == 0, '680 mV (Boden) erlaubt')
-        check(opps(t) == {2496000000: 680000}, '680 mV uebernommen')
+        check(opps(t) == {2472000000: 680000}, '680 mV uebernommen')
 
         # 4. Nicht darstellbare Rate (2450 MHz, N=204.17) wird abgelehnt.
         o4 = os.path.join(d, 'frac.dts')
@@ -93,10 +93,10 @@ def main():
         r, t = gen(['--with-lowfreq', '--big-mv', '700', '--little-mv', '700'], o6)
         check(r.returncode == 0, '--with-lowfreq ok')
         o = opps(t)
-        check(2496000000 in o, 'OC-Punkt enthalten')
+        check(2472000000 in o, 'OC-Punkt enthalten')
         check(15625000 in o, 'tiefste Rate enthalten')
         check(len(opp_list(t)) == 29, '29 OPP-Eintraege (28 Tief-Takte + 1 OC)')
-        check(o[2496000000] == 1040000 and o[15625000] == 700000,
+        check(o[2472000000] == 1040000 and o[15625000] == 700000,
               'Spannungen je Punkt korrekt')
 
         # 7. Standardlauf von gen_lowfreq_dts.py bleibt unveraendert.
@@ -113,7 +113,7 @@ def main():
                   'Dateivergleich uebersprungen')
         # Der OC-Generator darf lowfreq.dts nie anfassen: Standardziel ist oc.dts.
         check(not os.path.exists(os.path.join(HERE, 'oc.dts')) or
-              open(os.path.join(HERE, 'lowfreq.dts')).read().count('2496000000') == 0,
+              open(os.path.join(HERE, 'lowfreq.dts')).read().count('2472000000') == 0,
               'lowfreq.dts enthaelt keinen OC-Punkt')
 
     print('%d Checks, %d Fehler' % (CHECKS, FAILURES))
