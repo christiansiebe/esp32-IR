@@ -105,15 +105,22 @@ Beobachtet 2026-10-18: Nach einem Sandbox-Reset **sterben die beiden Helfer**
 (`channel_server.py:12001`, `upload-server:12000`); der Odroid-Agent bleibt
 zwar am Leben, aber ein **einzelner Befehl ohne eigenes Timeout** (z. B. ein
 `curl`-Download ohne `-m`) blockiert den Poll-Loop und der Agent wirkt tot.
-- **Behoben (Sandbox-Seite):** `keepalive.sh` wird jetzt aus `~/.bashrc`
-  idempotent gestartet, sobald wieder eine Shell aufgeht — die Helfer kommen
-  damit ohne manuellen Eingriff hoch. (Der Odroid-Agent selbst läuft als
-  systemd-Dienst `esp32-channel` und muss dort nicht neu gestartet werden.)
-- **Zu tun (Geräteseite):** jeden `curl` im Agenten mit `-m`/`--max-time`
-  versehen (v. a. den Datei-Download); ggf. `timeout` um `bash -lc` legen.
+- **Behoben (Sandbox-Seite):** `keepalive.sh` wird jetzt idempotent aus
+  `~/.bashrc` gestartet, sobald eine Shell aufgeht — die Helfer kommen ohne
+  manuellen Eingriff hoch.
+- **Behoben (Geräteseite, am Odroid eingespielt & verifiziert):**
+  `odroid_agent.sh` führt jeden Befehl jetzt unter
+  `timeout -k 10 $CMD_TIMEOUT` (Default 240 s) aus; ein hängender Befehl wird
+  abgebrochen und der Loop läuft weiter. Der Poll-Loop ist gegen Fehler in
+  `poll()` gepanzert, und die systemd-Unit hat `StartLimitIntervalSec=0` +
+  `Restart=always` — sie gibt nie auf. Verifikation: `timeout 3 sleep 60` →
+  `rc=124`, nächster Befehl kommt trotzdem an.
+- **Keine Aussperrung anderer Agenten:** Kanal-Key und `/register` unverändert,
+  Unit läuft weiter als `root`, kein Lock auf eine einzelne Instanz. Die
+  Timeout-Panzerung hilft sogar allen Chats, weil sie denselben Agenten teilen.
 - Merksatz: der Agent hängt am laufenden `bash -lc "$cmd"`, **nicht** am Poll —
   solange keine neuen `results/`-Dateien erscheinen, aber `inflight/` wächst,
-  steckt genau ein Befehl.
+  steckt genau ein Befehl (jetzt maximal `CMD_TIMEOUT` s).
 
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
