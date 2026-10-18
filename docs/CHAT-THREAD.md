@@ -26,6 +26,41 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 09:10 UTC · Bau-Chat (Branch feat/twdt-worker-registration, Commit cd0e880)
+**Status: PR #10 ist rebased, konfliktfrei, CI-gruen und aus dem Draft geholt.**
+
+**Teil 2 (TODO.md „TWDT explizit") — erledigt.** Die langlaufenden Worker sind beim
+Task-Watchdog angemeldet; der fruehere Zustand „0 Treffer fuer `esp_task_wdt`" ist
+behoben. Neues, kleines Modul `main/task_wdt_policy.{h,c}` (rein, host-getestet) haelt
+die Policy (welche Worker je Rolle, wie lange sie legitim blockieren duerfen, die
+Timeout-Math); `main/task_wdt_guard.{h,c}` ist der IDF-Kleber
+(`esp_task_wdt_init`/`_reconfigure` mit 120 s + `trigger_panic`, `esp_task_wdt_add`/
+`_reset`). Angemeldet: `power_history_worker` (beide Rollen) und die Sender-UART-Worker
+`uart_event_worker`/`uart_capture_worker`. Der 60-s-Batch-Wait des Writers ist jetzt
+begrenzt (nicht mehr `portMAX_DELAY`), damit ein idle-aber-gesunder Writer fuettert und
+**nicht** als Stall gilt; kein Busy-Loop. Der `status`-Konsolenbefehl zeigt
+„task watchdog: armed, timeout 120000 ms, panic on, N worker(s)". Host-Test
+`test/test_task_wdt_policy.c` (115 Checks, im Runner). CI grept beide Rollen-Images auf
+die Registrierungs-Strings.
+
+**Teil 1 (PR #10) — erledigt.** Der PR zielte auf `feat/link-fallback` (nicht in `main`
+gemergt, eigene Historie) ⇒ CONFLICTING. Rebase nur meiner 3 TWDT-Commits per
+`git rebase --onto origin/main 66a8b95 feat/twdt-worker-registration`; ein Konflikt in
+`main/main.c` (Include-Hunk, `ap_off_policy.h` existiert auf `main` nicht → nur
+`task_wdt_guard.h` behalten). PR-Basis auf `main` umgestellt (GitHub: mergeable=true,
+clean).
+
+**Verifikation (frisch, 2026-10-18):**
+- `./test/run_host_tests.sh` → exit 0; `task watchdog policy: 115 checks, 0 failures`
+  (34 Suiten gruen).
+- `tools/build.sh receiver` (1309856 B) und `tools/build.sh sender` (927776 B) → OK.
+- CI: Build receiver, Build receiver-apoff, Build sender, Host tests → alle gruen.
+- PR #10: base `main`, draft **false**, mergeable **true**, state `clean`.
+- Unabhaengige Verifikation durch Sub-Agent (read-only) laeuft parallel.
+
+**Kein Eingriff** in `partitions.csv`/`storage` (0x320000, 0xE0000) — reine App-Aenderung,
+OTA-sicher. TASKS.json auf done; `/workspace/fleet/agents.json` aktualisiert.
+
 ## 2026-10-15 07:30 UTC · Kontroll-Chat (Branch cline/auftrag-history-dubletten)
 **Nutzerauftrag: „echtes Desktop-Interface ueber Web auf dem Odroid" — an neuen Chat delegiert.**
 Recherche-Ergebnis (Memory): Auf dem **Odroid N2** (Armbian bookworm) laeuft bereits ein
