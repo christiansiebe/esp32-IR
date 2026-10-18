@@ -13,7 +13,7 @@ Board: Odroid N2, Armbian bookworm, `odroidn2.local` / 192.168.178.71.
 | Gateway `192.168.178.1` | erreichbar, 1,7 ms. |
 | `192.168.178.4` (frühere Odroid-IP / evtl. alter AP) | nicht erreichbar. |
 | `ip_forward` | **1** (bereits aktiv). |
-| `hostapd` / `dnsmasq` | **nicht installiert**, aber installierbar: `2:2.10-12+deb12u3` bzw. `2.90-4~deb12u2` (Debian bookworm main). |
+| `hostapd` / `dnsmasq` | **inzwischen installiert** (`2:2.10-12+deb12u3` bzw. `2.90-4~deb12u2`) und **masked** — starten nicht von selbst (Nachtrag 2026-10-18, s. u.). |
 | `nmcli`, `bridge`, `iptables`, `ffmpeg` | vorhanden. |
 | `/dev/video0` | **keine Kamera** — nur der meson-HW-Video-Decoder (`ff620000.video-decoder`). Kein V4L2-Kameragerät. |
 
@@ -61,3 +61,29 @@ AP umstellen** — sonst sperrt man sich aus.
 - Kamera: **IP-Kamera** (RTSP/ONVIF, über LAN) oder **USB-Kamera**? Bei IP:
   Modell/Hersteller, damit die HA-Integration passt.
 - Soll der Odroid reiner **AP** werden oder **Router** (eigenes Subnetz + NAT)?
+
+## Nachtrag 2026-10-18 (Parent, Re-Verifikation am Board)
+
+Der Kommando-Kanal war nach dem LAN-Umstecken wieder erreichbar (der Odroid
+verbindet sich per `Restart=always` selbst). Erneut gelesen, **read-only**:
+
+- **`end0` weiterhin `DOWN` / `carrier=0`** — das Kabel steckt noch nicht am
+  Odroid. Damit ist **P1 (end0-Uplink) nicht begonnen**; P2 (WLAN→AP) bleibt
+  gesperrt (Lockout-Gefahr).
+- **WLAN-STA** `wlxdc627949ba79`: `connected`, SSID **"Wohnzimmer 5 Ghz"**,
+  `freq 5180` (Kanal 36), **Signal −33 dBm**, TX 866,7 / RX 780 MBit/s
+  (VHT-MCS9, 80 MHz). Also die **FRITZ!Box** — nicht der zu ersetzende AP.
+  `nmcli`: `wlxdc627949ba79:wifi:connected`, `end0:ethernet:unavailable`.
+- **Sichtbare SSIDs** (Scan): `Wohnzimmer:1` (2,4 GHz), `Wohnzimmer 5 Ghz:36`,
+  `ESP32-IR-Meter:1` (der Sender-AP). Ein **fremder** AP mit eigener SSID taucht
+  nicht auf — der „alte AP" ist vermutlich in das „Wohnzimmer"-Netz gemesht,
+  nicht als eigener Name. Das stützt die offene Frage „ersetzen oder ergänzen".
+- **`hostapd` + `dnsmasq` installiert, beide `masked`** (`is-active: inactive`) —
+  bereit für die echte Konfiguration, starten nicht von selbst.
+- **USB-WLAN** = `2357:0138 TP-Link 802.11ac NIC` (`rtw88_8822bu`); zweiter
+  USB-Steckplatz belegt durch `0bda:9210` (RTL9210 M.2-NVMe-Gehäuse).
+- **`/dev/video0`** weiterhin nur der Amlogic-Decoder; `v4l2-ctl` ist **nicht**
+  installiert (kein Kameragerät, also erwartbar). Keine Kamera angeschlossen.
+- **HA-Container** `homeassistant` läuft (Docker), `ip_forward=1` unverändert.
+- `user_overlays=lowfreq ramoops` (kein OC-Overlay), `xfce-vnc`/`novnc`/
+  `vnc-lan-guard` alle **active**.
