@@ -41,7 +41,9 @@ task (`"status": "open" | "done"`). The parent mirrors the open-task count into
 
 ## Files
 
-- `fleet.py` - the watchdog. Stdlib only.
+- `fleet.py` - in-sandbox fallback watchdog. Stdlib only.
+- `restart.py` - restart a chat that no longer responds: interrupt a wedged turn
+  on the conversation's own runtime host, then resume + wake message.
 - `nudge.py` - send one message to a conversation (wake nudge / manual test).
 - `agents.json` - the worker registry the parent maintains.
 - `fleet_state.json` - wake bookkeeping (created at runtime, not committed).
@@ -54,6 +56,9 @@ export OPENHANDS_API_KEY=...          # or leave the 0600 .api_key in place
 python3 fleet.py --once --dry-run     # report only
 python3 fleet.py --once               # one real cycle
 python3 fleet.py --loop --interval 300
+
+# a chat that no longer responds:
+python3 restart.py <conversation_id>  # interrupt + resume + wake message
 ```
 
 Safety rails: `--task-only` (never wake an agent with no open tasks),
