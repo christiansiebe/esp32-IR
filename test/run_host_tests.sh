@@ -114,6 +114,20 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_mqtt_topics"
 
+# MQTT bridge payload builders + the Home Assistant discovery entities (live
+# power and the two cumulative energy counters). Pure C: the state strings and
+# the discovery JSON are what silently break HA (a JSON state without a
+# value_template reads as "unknown"; a wrong unit breaks statistics).
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/mqtt_topics.c" \
+    "$repo/main/mqtt_publish.c" \
+    "$here/test_mqtt_bridge.c" \
+    -lm -o "$out/test_mqtt_bridge"
+
+"$out/test_mqtt_bridge"
+
 # Sender-side batching ring + backfill arithmetic (no radio): batching,
 # oldest-eviction and the gap count the receiver reconciles against.
 "$cc" -std=c11 -Wall -Wextra -O2 \

@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "mqtt_client.h"
 #include "nvs.h"
+#include "mqtt_publish.h"
 #include "mqtt_topics.h"
 
 static const char *TAG = "mqtt";
@@ -46,6 +47,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         snprintf(payload, sizeof(payload), hub, topics.status);
         esp_mqtt_client_publish(s_client, topics.state, payload, 0, 0, 1);
 
+        char import_topic[MQTT_TOPIC_MAX];
+        char export_topic[MQTT_TOPIC_MAX];
+        snprintf(import_topic, sizeof(import_topic), "%s/import", topics.base);
+        snprintf(export_topic, sizeof(export_topic), "%s/export", topics.base);
+
         char topic[MQTT_TOPIC_MAX];
         char value_payload[512];
         struct {
@@ -59,13 +65,23 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         } entities[] = {
             {"sensor", "Leistung", "power", topics.power, "W", "power",
              "measurement"},
+            /* Cumulative counters: Home Assistant's statistics engine records
+             * the minute/hourly history itself from these two total_increasing
+             * sensors, so the device no longer has to be polled for old data. */
+            {"sensor", "Bezug gesamt", "import", import_topic, "kWh", "energy",
+             "total_increasing"},
+            {"sensor", "Einspeisung gesamt", "export", export_topic, "kWh",
+             "energy", "total_increasing"},
         };
         for (size_t i = 0; i < sizeof(entities) / sizeof(entities[0]); ++i) {
+            char unique_id[96];
+            snprintf(unique_id, sizeof(unique_id), "esp32ir_recv_%s",
+                     entities[i].object_id);
             if (mqtt_discovery_topic(s_prefix, entities[i].component,
                                      "esp32ir_recv", entities[i].object_id,
                                      topic, sizeof(topic)) == 0 &&
                 mqtt_discovery_payload(
-                    entities[i].name, "esp32ir_recv_power",
+                    entities[i].name, unique_id,
                     entities[i].state_topic, entities[i].unit,
                     entities[i].device_class, entities[i].state_class,
                     topics.status, value_payload, sizeof(value_payload)) == 0) {
@@ -178,18 +194,45 @@ void mqtt_bridge_publish_power(double watts)
     if (mqtt_topics_build(s_prefix, &topics) != 0) {
         return;
     }
-    cJSON *root = cJSON_CreateObject();
-    if (root == NULL) {
+    /* A bare number, not JSON: the discovery entity declares <base>/power as its
+     * state_topic with no value_template, so a JSON object would read as
+     * "unknown" in Home Assistant. */
+    char payload[24];
+    if (mqtt_power_payload(watts, payload, sizeof(payload)) == 0) {
+        esp_mqtt_client_publish(s_client, topics.power, payload, 0, 0, 1);
+    }
+}
+
+/* Publish one cumulative counter (import/export) as a retained bare number. */
+static void publish_energy(const char *suffix, double raw, int8_t scaler)
+{
+    if (!s_connected) {
         return;
     }
-    cJSON_AddNumberToObject(root, "power", watts);
-    cJSON_AddNumberToObject(root, "unit", 27);
-    char *json = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    if (json != NULL) {
-        esp_mqtt_client_publish(s_client, topics.power, json, 0, 0, 1);
-        cJSON_free(json);
+    mqtt_topics_t topics;
+    if (mqtt_topics_build(s_prefix, &topics) != 0) {
+        return;
     }
+    char topic[MQTT_TOPIC_MAX];
+    char payload[24];
+    if (snprintf(topic, sizeof(topic), "%s/%s", topics.base, suffix) >=
+        (int)sizeof(topic)) {
+        return;
+    }
+    if (mqtt_energy_payload(mqtt_energy_to_kwh(raw, scaler), payload,
+                            sizeof(payload)) == 0) {
+        esp_mqtt_client_publish(s_client, topic, payload, 0, 0, 1);
+    }
+}
+
+void mqtt_bridge_publish_import(double raw, int8_t scaler)
+{
+    publish_energy("import", raw, scaler);
+}
+
+void mqtt_bridge_publish_export(double raw, int8_t scaler)
+{
+    publish_energy("export", raw, scaler);
 }
 
 void mqtt_bridge_publish_history(const power_history_record_t *record)

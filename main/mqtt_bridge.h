@@ -24,6 +24,16 @@ void mqtt_bridge_start(void);
  * when the bridge is not connected. */
 void mqtt_bridge_publish_power(double watts);
 
+/* Publish a cumulative meter reading to <base>/import or <base>/export (kWh,
+ * retained). Home Assistant's total_increasing energy sensors record the
+ * statistics history from these, so HA mirrors the meter without polling. The
+ * value is the raw SML reading (value * 10^scaler, i.e. Wh) and is converted to
+ * kWh here. Publish each counter only when its own reading arrives, so a
+ * not-yet-seen counter is never sent as a spurious 0 (which a total_increasing
+ * sensor would read as a meter reset). Cheap no-op when not connected. */
+void mqtt_bridge_publish_import(double raw, int8_t scaler);
+void mqtt_bridge_publish_export(double raw, int8_t scaler);
+
 /* Publish a finished minute record to <base>/history as JSON. */
 void mqtt_bridge_publish_history(const power_history_record_t *record);
 

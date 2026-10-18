@@ -34,7 +34,7 @@ set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "task_wdt_policy.c" "task_wdt_guard.c"
               "json_escape.c" "version.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
-    list(APPEND main_srcs "mqtt_bridge.c" "web_guard.c"
+    list(APPEND main_srcs "mqtt_bridge.c" "mqtt_publish.c" "web_guard.c"
                           "health_policy.c" "health_task.c")
 endif()
 if(CONFIG_ESPNOW_ROLE_SENDER)

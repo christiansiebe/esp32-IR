@@ -204,7 +204,12 @@ Aus dem Event-Log rekonstruiert und gesichert.
             unbestätigtes Image rollt zurück, sonst normaler Reboot. Der Health-Worker ist beim
             TWDT angemeldet; `task_wdt_policy` führt ihn als receiver-only Worker. Kconfig
             `ESPNOW_RECEIVER_HEALTH_WATCHDOG`/`_STALE_DATA_S`/`_LOW_HEAP_BYTES`/`_GRACE_S`.)
-      - [ ] `mqtt_publish.{c,h}`, `mqtt_bridge.{c,h}`, `mqtt_client.h` — MQTT + HA-Discovery
+      - [x] `mqtt_publish.{c,h}` — **neu gebaut** (`feat/mqtt-ha-live-minutes`, PR #32): reine
+            Payload-Builder (`mqtt_energy_to_kwh`, `mqtt_power_payload`, `mqtt_energy_payload`),
+            host-getestet. `mqtt_bridge.{c,h}` + HA-Discovery waren bereits über PR #12 in `main`;
+            hier nur additiv um die Import/Export-Energie-Entitaeten und den Live-Minuten-Push
+            ergaenzt. `mqtt_client.h` entfaellt (die esp-mqtt-Header kommen direkt aus dem
+            managed Component `espressif/mqtt`).
       - [x] `boot_confirm.{c,h}`, `boot_policy.{c,h}` — Post-OTA-Rollback-Bestätigung
             (schon auf `main`, PR #14/#16; Host-Test `test_boot_policy.c` +
             `test_boot_confirm_trigger.c` laufen).
@@ -214,10 +219,12 @@ Aus dem Event-Log rekonstruiert und gesichert.
             Kconfig `RECOVERY_BUTTON_GPIO` (Default 0, nur Empfänger) + `RECOVERY_BUTTON_HOLD_MS`
             (Default 3000); `main.c` ruft `recovery_button_check()` vor `boot_confirm_init()`.
             `recovery_button_hw.h` aus der Bergung entfiel (doppelte Deklaration).
-      - [ ] `test/test_mqtt_bridge.c` in `test/run_host_tests.sh` aufnehmen
-            (`test_health_policy.c`, `test_boot_policy.c` und `test_recovery_button.c`
-            bereits eingehängt; mqtt offen)
-      - [ ] `main/CMakeLists.txt`, `sdkconfig.defaults` (MQTT/esp-mqtt), `idf_component.yml`
+      - [x] `test/test_mqtt_bridge.c` in `test/run_host_tests.sh` aufgenommen
+            (PR #32; `test_health_policy.c`, `test_boot_policy.c` und `test_recovery_button.c`
+            ebenfalls eingehängt).
+      - [x] `main/CMakeLists.txt` (mqtt_publish.c im Receiver), `idf_component.yml`
+            (espressif/mqtt + cjson bereits vorhanden); `sdkconfig.defaults` braucht keinen
+            MQTT-Eintrag (esp-mqtt ist ein managed Component, kein Kern-Kconfig).
 - [ ] Offene Integrationsschritte, die **nicht** rekonstruierbar waren und neu gemacht werden müssen:
       `main/main.c`-Aufrufe, `power_history.c`-Migration (s. u.), `run_host_tests.sh`-Einträge.
 - [x] Nach Integration: beide Rollen über CI bauen (Nachweis fehlt bisher komplett).
@@ -908,11 +915,20 @@ und tunnelt jede Anfrage ueber den bestehenden Diag-Kanal (`sender_diag_exchange
       Grammatik/Format der Topics kommt aus `main/mqtt_topics.c` (host-getestet).
 - [x] **Home-Assistant-Discovery** (`homeassistant/sensor/.../config`): als
       `mqtt_discovery_topic`/`mqtt_discovery_payload` in `mqtt_topics.c` implementiert
-      und beim Connect retained veroeffentlicht; aktuell eine Entitaet „Leistung"
-      (`device_class: power`, `state_class: measurement`, Unit W, mit Availability).
-      **Offen:** weitere Entitaeten (Import/Export in kWh → `state_class: total_increasing`).
-- [ ] Optional: Live-MQTT-Push der Minutenwerte, damit HA ab sofort selbst
-      mitschreibt (dann ist der Import nur noch fuer die Alt-Daten noetig).
+      und beim Connect retained veroeffentlicht.
+- [x] **Weitere Entitaeten (Import/Export in kWh)** (`feat/mqtt-ha-live-minutes`): drei
+      Sensoren statt einer — „Leistung" (`device_class: power`, `state_class: measurement`,
+      W) plus „Bezug gesamt"/„Einspeisung gesamt" (`device_class: energy`,
+      `state_class: total_increasing`, kWh, eigene `unique_id`). Die beiden Zaehler werden
+      als **Bare-Number** auf `<prefix>/import` bzw. `<prefix>/export` veroeffentlicht
+      (kein `value_template` noetig); `store_sml_value()` ruft sie bei jeder neuen
+      1-0:1.8.0-/1-0:2.8.0-Lesung. Rein rechnend in `main/mqtt_publish.{c,h}`
+      (`mqtt_energy_to_kwh` = Wh/1000), host-getestet.
+- [x] **Live-MQTT-Push der Minutenwerte** — die Live-Leistung geht bereits als
+      Bare-Number auf `<prefix>/power` (war vorher JSON ohne `value_template` → HA zeigte
+      „unknown"; **mit diesem Fix behoben**), der abgeschlossene Minutenwert weiter als JSON
+      auf `<prefix>/history`. Damit schreibt HA ueber die `total_increasing`-Zaehler selbst
+      mit; der `tools/ha_import.py`-Import bleibt nur fuer die **Alt-Daten** noetig.
 - **⚠️ Am Geraet noch zu verifizieren:** Broker in NVS setzen, dann `mqtt` in der
       Konsole pruefen und in HA sehen, ob die Entitaet auftaucht (LWT online/offline
       durch Broker-Neustart testen). Broker/Port/User/Pass sind Werte, die der
