@@ -58,9 +58,12 @@
   },
   "4950336be956489a960a2ef506320545": {
    "name": "ODROID PR-Review 5-8+14",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "branch": "docs/odroid-pr-review-5-8",
-   "note": "Review der gestapelten Odroid-PRs #5/#6/#7/#8/#14 -> PR-REVIEW-ODROID.md. Merged nichts."
+   "note": "FERTIG: Review der Odroid-PRs #5/#6/#7/#8/#14 -> remote-shell/ha/PR-REVIEW-ODROID.md (PR #38, MERGEABLE/CLEAN). Urteile: #5 UPDATE, #6 UPDATE(blockierend), #7 UPDATE, #8 CLOSE, #14 UPDATE. Gegen Basis bcb9938 nachverifiziert. Kein Board, nichts gemergt.",
+   "pr": [
+    38
+   ]
   },
   "9fe65410b01148a5a30fa18994436a83": {
    "name": "Firmware record_count+web_guard",
