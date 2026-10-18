@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <pthread.h>
 #include <errno.h>
 
@@ -131,17 +132,20 @@ static inline int xQueueReceive(QueueHandle_t q, void *item, uint32_t t)
         while (h->count == 0) {
             pthread_cond_wait(&h->c, &h->m);
         }
-    } else {
-        /* No timeout support on the host: poll the count while yielding. Only
-         * the reboot-persistence test takes this path, with a generous retry
-         * budget, so a bounded busy-wait is fine and keeps the shim portable
-         * (no clock_gettime / _POSIX_C_SOURCE dependency for the other tests). */
-        unsigned spins = t == 0 ? 0 : t * 1000u;
-        while (h->count == 0 && spins > 0) {
-            pthread_mutex_unlock(&h->m);
-            sched_yield();
-            pthread_mutex_lock(&h->m);
-            --spins;
+    } else if (h->count == 0) {
+        /* Timed wait via pthread_cond_timedwait (absolute deadline), so a
+         * bounded receive is cheap and realistic instead of a busy spin. Only
+         * the storage host tests take this path. timespec_get(TIME_UTC) is
+         * standard C11 (no _POSIX_C_SOURCE needed) and matches the default
+         * CLOCK_REALTIME of pthread_cond_timedwait. */
+        struct timespec deadline;
+        timespec_get(&deadline, TIME_UTC);
+        uint64_t ns = (uint64_t)deadline.tv_nsec + (uint64_t)t * 1000000ull;
+        deadline.tv_sec += (time_t)(ns / 1000000000ull);
+        deadline.tv_nsec = (long)(ns % 1000000000ull);
+        while (h->count == 0 &&
+               pthread_cond_timedwait(&h->c, &h->m, &deadline) == 0) {
+            /* spurious wake-up: keep waiting until the deadline */
         }
     }
     int ok = pdFALSE;

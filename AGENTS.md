@@ -439,10 +439,31 @@ incoming diagnostic requests; until it is known the request is broadcast. The
 - Health failures after confirmation cannot roll back (that slot is gone); they
   only reboot. A post-confirmation health watchdog is still open (see TODO.md).
 
-## Watchdog (reviewed, not enabled)
-- No `esp_task_wdt_*` usage anywhere; the task watchdog (TWDT) and interrupt
-  watchdog are left at the IDF defaults (enabled, panic on timeout). So a hang
-  in a watched task already reboots the device and shows up as
+## Watchdog (task watchdog subscribed; idle-task check still off)
+- The long-running workers are registered with the task watchdog (TWDT) behind
+  `main/task_wdt_policy.{h,c}` (pure, host-tested) + `main/task_wdt_guard.{h,c}`
+  (the IDF glue). `task_wdt_guard_init()` runs early in `app_main` and adopts the
+  running watchdog (`esp_task_wdt_reconfigure`) with a **generous timeout (120 s)
+  and `trigger_panic = true`**, so a wedged worker reboots instead of hanging.
+  `power_history_worker` (both roles) and the sender's `uart_event_worker` /
+  `uart_capture_worker` call `task_wdt_guard_subscribe()` on entry and
+  `task_wdt_guard_feed()` once per loop. The IDF default is 5 s / no panic; the
+  policy overrides it at runtime, so the `sdkconfig` still shows the default.
+  The `status` console command prints the live state.
+- Why the timeout is 120 s: the history writer drains the queue in batches and
+  may legitimately wait up to `POWER_HISTORY_BATCH_TIMEOUT_MS` (60 s) for more
+  records before it writes. That wait is now **bounded** (was `portMAX_DELAY`) and
+  the writer feeds the watchdog around it, so an idle-but-healthy writer never
+  looks stalled, while a truly wedged one (mutex deadlock, a SPIFFS call that
+  never returns) is caught within 120 s. `task_wdt_worker_max_block_ms()` is the
+  single source for each worker's longest legitimate block, and
+  `task_wdt_policy_covers_role()` proves the timeout covers every subscribed
+  worker with margin. Host test: `test/test_task_wdt_policy.c` (115 checks).
+- `CONFIG_ESP_TASK_WDT_INIT=y` (IDF default) still starts the watchdog, so the
+  idle tasks stay monitored; `task_wdt_guard_init()` mirrors
+  `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0/1` into `idle_core_mask` so
+  reconfiguring does not change which idle cores are watched. So a hang in a
+  watched task already reboots the device and shows up as
   `task-watchdog`/`interrupt-watchdog` in the crash journal.
 - The sender's workers all block on a queue/semaphore/UART read with a finite
   timeout and have no busy loop, so they should not trip the TWDT. `app_main`
