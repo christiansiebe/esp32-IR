@@ -87,31 +87,33 @@ und Funk-Powersave/DFS nicht gleichzeitig zu haben.** Am Gerät verifiziert.
 - Hinweis: Mit `test sleep pin 80` läuft der Takt manuell auf 80 MHz; mit
       `test sleep restore` zurück auf die Obergrenze. `test cpu` zeigt jetzt
       „40-80 MHz … 0 steps" (Takt bleibt oben, weil der Funk den APB-Lock hält).
-- [~] **40-MHz-Step-Down messbar machen (Sender):** Die einzige Ursache, die DFS
-      auf dem Sender unter die Decke drückt, ist der WiFi-Powersave
-      (`esp_wifi_set_ps(WIFI_PS_MIN_MODEM)` + ESP-NOW-Wake-Window): nur dann gibt
-      der Treiber `ESP_PM_APB_FREQ_MAX` frei. Weil dieser Pfad den ESP-NOW-Link
-      brach, ist er opt-in. Neu: eine **experimentelle CI-Variante `sender-dfs`**
-      (`CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=y`) wird neben dem Default gebaut
-      (`.github/workflows/esp-idf-build.yml`), damit die Kombination
-      „40 MHz **und** Link stabil" am Gerät messbar ist, ohne den Default zu
-      ändern. Der Fortschritt wird über die 1-Hz-Histogramme
-      `cpu_freq_hist_40/80/160/240` + `cpu_freq_below_ceiling_seen` (Commit
-      `d7d8cd8`) sichtbar. **Am Gerät noch zu verifizieren.**
+- [x] **40-MHz-Step-Down am Gerät gemessen (sender-dfs): negatives Ergebnis.**
+      Der Sender lief auf dem experimentellen `sender-dfs`-Image (`caa0140`,
+      `wifi_ps_mode=1` = Modem-Sleep AN, Decke 80, Boden 40). Ausgelesen über den
+      Empfänger (`192.168.178.70/api/sender-diag`):
+      `cpu_freq_changes=0`, `cpu_freq_hist_min_mhz=80`, `cpu_freq_hist_max_mhz=80`
+      → **40 MHz wurde nie erreicht.** Gleichzeitig `sleep_fallback=1`,
+      `fallback_stage=2` → der Link-Watchdog hat ausgelöst (kein Peer-Verkehr) und
+      den bewährten Modus wiederhergestellt: `uart_sleep_disable_idf()`
+      (Light-Sleep aus, Funk bleibt an, 80 MHz). Auf dem ESP32 classic ist der
+      WiFi-Modem-Sleep also **kein** Weg zu 40 MHz ohne den Link zu brechen — der
+      Default „Funk an / 80 MHz" bleibt. TODO-Punkt damit abgeschlossen
+      (bewusst verworfene Option, nicht mehr offen).
 
-### ⏳ Relay-Kanal (Sandbox↔Odroid) — Zuverlässigkeit
+### ✅ Relay-Kanal (Sandbox↔Odroid) — Zuverlässigkeit
 Beobachtet 2026-10-18: Nach einem Sandbox-Reset **sterben die beiden Helfer**
-(`channel_server.py:12001`, `upload-server:12000`) und der Odroid-Agent
-(`odroid_agent.sh`, `while true; poll; sleep 5`) **bleibt am laufenden Auftrag
-hängen** — ein `curl` ohne `-m` (Datei-Download) blockiert den einzigen
-Poll-Loop, danach werden keine neuen Aufträge mehr abgeholt. Ergebnis: der Agent
-wirkt tot, obwohl er nur feststeckt.
-- Sofort-Maßnahme: `setsid nohup bash /workspace/remote-shell/keepalive.sh &`
-  (startet die Helfer neu) und den hängenden Auftrag verwerfen; danach wieder
-  eine Aufgabe schicken (der Agent hängt am `bash -lc "$cmd"`, nicht am Poll).
-- Zu tun (Geräteseite): **jeden** `curl` im Agenten mit `-m`/`--max-time`
-  versehen (v. a. den Datei-Download), damit ein langsamer Transfer den Agenten
-  nicht dauerhaft blockiert; ggf. `timeout` um `bash -lc` legen.
+(`channel_server.py:12001`, `upload-server:12000`); der Odroid-Agent bleibt
+zwar am Leben, aber ein **einzelner Befehl ohne eigenes Timeout** (z. B. ein
+`curl`-Download ohne `-m`) blockiert den Poll-Loop und der Agent wirkt tot.
+- **Behoben (Sandbox-Seite):** `keepalive.sh` wird jetzt aus `~/.bashrc`
+  idempotent gestartet, sobald wieder eine Shell aufgeht — die Helfer kommen
+  damit ohne manuellen Eingriff hoch. (Der Odroid-Agent selbst läuft als
+  systemd-Dienst `esp32-channel` und muss dort nicht neu gestartet werden.)
+- **Zu tun (Geräteseite):** jeden `curl` im Agenten mit `-m`/`--max-time`
+  versehen (v. a. den Datei-Download); ggf. `timeout` um `bash -lc` legen.
+- Merksatz: der Agent hängt am laufenden `bash -lc "$cmd"`, **nicht** am Poll —
+  solange keine neuen `results/`-Dateien erscheinen, aber `inflight/` wächst,
+  steckt genau ein Befehl.
 
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).

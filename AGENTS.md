@@ -738,3 +738,16 @@ dem Odroid, Key in KEY, Doku in README.md).
   esp32-channel, pollt alle 5 s). Skripte auch unter /files/odroid_agent.sh.
 - Damit ist der serielle Web-Monitor (/console, POST /api/console) und der
   OTA-Pull (POST /api/ota-pull) am echten Geraet aus dem Chat bedienbar.
+
+### Betriebsfakten (im LAN verifiziert, 2026-10-18)
+- **Empfaenger-Weboberflaeche:** `http://192.168.178.70` (nginx-301 auf `/`
+  ignoriert; `/api` liefert JSON, `version` zeigt das laufende Image).
+- Der **Sender hat kein WiFi** (nur ESP-NOW) — es gibt keine Sender-IP. Die
+  Sender-Diagnose holt man **ueber den Empfaenger**:
+  `curl -s http://192.168.178.70/api/sender-diag -H "X-OTA-Key: <key>"`
+  (der Empfaenger leitet per ESP-NOW weiter).
+- **OTA-Key** fuer die Auth-Header liegt in `/workspace/remote-shell/.ota_key`.
+- **Sandbox-Helfer** (`channel_server.py:12001`, `upload-server:12000`) werden
+  jetzt idempotent aus `~/.bashrc` via `keepalive.sh` gestartet, sobald eine
+  Shell aufgeht — kein manueller Neustart nach einem Sandbox-Reset noetig.
+- Hinweis: `192.168.178.71` ist der **Odroid selbst** (nginx), nicht der ESP32.
