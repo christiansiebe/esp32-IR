@@ -489,3 +489,26 @@ Wichtigste Punkte (sonst scheitert es):
 deploy_htopv.sh,test_htopv.py}` + `htopv-README.md`. `htopv` zeigt htop mit
 per-Kern-MHz und per-Cluster-Spannung in der tmux-Statuszeile.
 
+### Externer noVNC-Zugriff ueber den Sandbox-Proxy (Chat fa4de3cb, 2026-10-18)
+- **Auftrag:** XFCE-Desktop des Odroid von AUSSERHALB erreichbar machen, ueber
+  den Reverse-Tunnel und den oeffentlichen Proxy auf Port 12000. Reine
+  Repo-/Host-Arbeit, kein Board-Zugriff.
+- **Kette:** Browser --HTTPS--> `work-1-<RUNTIME_ID>...` (:12000) -> websockify
+  (Sandbox) -> (Reverse-Tunnel) -> TigerVNC `127.0.0.1:5901` -> XFCE.
+- **Befund (wichtig):** Das ist ein OEFFENTLICH erreichbarer root-Desktop.
+  (a) Der Runtime-Proxy authentifiziert nicht; die RUNTIME_ID ist kein
+  Geheimnis. (b) `vnc-lan-guard` filtert nur den Odroid-Port 6080 nach
+  Quell-IP — Loopback-Verkehr des Tunnels sieht er nicht, der IP-Schutz greift
+  hier also NICHT. (c) `xfce-vnc.service` laeuft mit `-SecurityTypes None`.
+  -> Extern nur mit `-SecurityTypes VncAuth` UND zusaetzlicher Auth vor dem
+  Proxy (websockify `--auth-plugin` oder nginx/Caddy). Sonst lieber SSH-Weg
+  (`reverse_ssh.sh`, Local-Forward) oder VPN.
+- **Dateien (Branch `feat/novnc-external-tunnel`, PR #19):**
+  `remote-shell/ha/{novnc-external-README.md,novnc_bridge.py,
+  start_novnc_bridge.sh,test_novnc_bridge.py}`. Reine Logik in
+  `novnc_bridge.py` (Endpunkt-Parsing, oeffentl. URL, websockify-argv,
+  Start-Entscheidung), Wrapper idempotent mit --help/--dry-run/--status/--stop.
+  Test: 62 Checks, 0 Fehler, keine Mocks. `sh -n` sauber.
+- **Port-Fakt:** work-1 -> Container-Port 12000, work-2 -> 12001 (Proxy).
+  12000 traegt entweder den Desktop oder den OTA-Upload (schliessen sich aus).
+
