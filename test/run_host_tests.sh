@@ -53,6 +53,22 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_reboot_persistence"
 
+# Header-handling + migration: a store written by an older firmware (older
+# header/record version) must not be treated as "empty" at boot, and the
+# "Persistent history ready: N of ..." line must match the record_count the API
+# reports. Each scenario boots in its own process against its own store file.
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog-hdr\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_header_migration.c" \
+    -lm -o "$out/test_header_migration"
+
+"$out/test_header_migration"
+
 # Post-OTA rollback decision (receiver). Pure, host-testable logic: replays boot
 # scenarios tick by tick and asserts confirm / rollback / nothing. No ESP-IDF;
 # the production glue (boot_confirm.c) that calls the OTA API is not part of the

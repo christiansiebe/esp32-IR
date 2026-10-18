@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,10 +41,30 @@ typedef int portMUX_TYPE;
 typedef void *SemaphoreHandle_t;
 typedef void *QueueHandle_t;
 
-#define ESP_LOGE(tag, ...) ((void)0)
-#define ESP_LOGW(tag, ...) ((void)0)
-#define ESP_LOGI(tag, ...) ((void)0)
-#define ESP_LOGD(tag, ...) ((void)0)
+/* Optional host log sink. Production code logs via ESP_LOGx; on the host the
+ * macros forward the formatted message here so a test can assert on a specific
+ * line (e.g. the "Persistent history ready: N of ..." boot line). The weak
+ * definition means tests that do not set host_log_sink keep the old no-op
+ * behaviour. */
+typedef void (*host_log_fn)(const char *tag, const char *msg);
+__attribute__((weak)) host_log_fn host_log_sink;
+static inline void host_log_emit(const char *tag, const char *fmt, ...)
+{
+    if (host_log_sink == 0) {
+        return;
+    }
+    char buf[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    host_log_sink(tag, buf);
+}
+
+#define ESP_LOGE(tag, ...) host_log_emit(tag, __VA_ARGS__)
+#define ESP_LOGW(tag, ...) host_log_emit(tag, __VA_ARGS__)
+#define ESP_LOGI(tag, ...) host_log_emit(tag, __VA_ARGS__)
+#define ESP_LOGD(tag, ...) host_log_emit(tag, __VA_ARGS__)
 
 static inline const char *esp_err_to_name(esp_err_t err)
 {
