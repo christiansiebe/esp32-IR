@@ -46,9 +46,12 @@
   },
   "732f5e0624b948499d0183f5633d86b5": {
    "name": "ODROID Watchdog-Aktor",
-   "open_tasks": 1,
-   "branch": "feat/odroid-watchdog-actor",
-   "note": "Off-board Aktor-Design + host-testbarer watchdog_actor.py (Stromunterbrechung/Relais). Kein Board-Zugriff."
+   "open_tasks": 0,
+   "branch": "feat/watchdog-offboard-actor",
+   "pr": [
+    37
+   ],
+   "note": "FERTIG: WATCHDOG-ACTOR.md (Aktor-Optionen + Cooldown/Quorum + systemd-Unit) + host-testbarer watchdog_actor.py (50 Checks) + in run_host_tests.sh eingehaengt -> PR #37 gegen cline/power-history-diag. Kein Board-Zugriff."
   },
   "4950336be956489a960a2ef506320545": {
    "name": "ODROID PR-Review 5-8+14",
