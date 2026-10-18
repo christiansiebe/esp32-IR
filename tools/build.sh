@@ -61,6 +61,7 @@ $docker_cmd run --rm \
     -e IDF_CCACHE_ENABLE=1 -e CCACHE_DIR=/root/.cache/ccache \
     -e SDKCONFIG_DEFAULTS="sdkconfig.defaults;/tmp/extra.defaults" \
     -e IDF_TARGET=esp32 \
+    -e FIRMWARE_VERSION="${FIRMWARE_VERSION:-}" \
     -w /project \
     espressif/idf:v6.1 \
     idf.py -B "build/$role" -DSDKCONFIG="/project/sdkconfig.$role" build
