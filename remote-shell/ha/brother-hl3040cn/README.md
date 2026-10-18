@@ -41,7 +41,12 @@ Das Skript:
 1. installiert bei Bedarf `qemu-user-static` + `binfmt-support`,
 2. testet die i386-Emulation (`docker run --platform linux/386 … uname -m` → `i686`),
 3. baut das Image (laedt die Brother-debs von `download.brother.com`),
-4. startet den Container `brother-cups` mit `-p 631:631 --restart unless-stopped`.
+4. startet den Container `brother-cups` mit `--network=host --restart unless-stopped`.
+
+Hinweis `--network=host`: Die Docker-Bridge des Odroid kann das LAN nicht
+erreichen (die Host-FORWARD-Policy verwirft es, und die Box laeuft zusaetzlich
+als AP). Mit Host-Netzwerk nutzt CUPS die Host-Route zum Drucker und lauscht
+direkt auf Port 631.
 
 ## Benutzen
 

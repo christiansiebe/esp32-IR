@@ -70,8 +70,10 @@ ok("cupsd -f &" in entry and "wait " in entry,
 ok("qemu-user-static" in deploy and "binfmt-support" in deploy,
    "deploy installs the i386 emulator")
 ok("--platform linux/386" in deploy, "deploy tests i386 emulation before building")
+ok("docker build --network=host" in deploy,
+   "build uses host network (bridge DNS is broken on the board)")
+ok("--network=host" in deploy, "container uses host networking (bridge cannot reach the LAN)")
 ok("--restart unless-stopped" in deploy, "container restarts automatically")
-ok("-p 631:631" in deploy, "CUPS published on port 631")
 
 print("test_brother_cups: %d checks, %d failures" % (checks, fails))
 sys.exit(1 if fails else 0)

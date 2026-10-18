@@ -34,13 +34,18 @@ echo "== 2. i386-Emulation testen =="
 docker run --rm --platform linux/386 i386/debian:bookworm-slim uname -m
 
 echo "== 3. Image bauen ($IMAGE) =="
-docker build -t "$IMAGE" "$HERE"
+# --network=host: the Brother debs are fetched during the build; the default
+# docker bridge has no working DNS on this board (the host does).
+docker build --network=host -t "$IMAGE" "$HERE"
 
 echo "== 4. Container starten ($NAME) =="
 docker rm -f "$NAME" >/dev/null 2>&1 || true
+# --network=host: the default bridge cannot reach the LAN on this board (the
+# host FORWARD policy drops it, and the box also runs an AP). Host networking
+# gives CUPS the host's route to the printer and exposes 631 directly.
 docker run -d --name "$NAME" \
     --restart unless-stopped \
-    -p 631:631 \
+    --network=host \
     -e "PRINTER_IP=$PRINTER_IP" \
     "$IMAGE" >/dev/null
 
