@@ -86,8 +86,16 @@ check("just under threshold -> ok",
       sup.decide(conv(PARENT, "RUNNING", "running", age_min=1), E1, {}, False), "ok")
 
 # rails
-check("too many wakes -> skip",
-      sup.decide(conv(PARENT, "RUNNING", "error"), E1, {"wakes": sup.MAX_WAKES}, False), "skip")
+check("too many wakes, recent attempt -> skip",
+      sup.decide(conv(PARENT, "RUNNING", "error"), E1,
+                 {"wakes": sup.MAX_WAKES, "last_wake": "2999-01-01T00:00:00+00:00"}, False), "skip")
+# ...but the cap is a cooldown, not a lifetime ban: once it has elapsed the
+# agent with open work must be woken again, otherwise it sleeps forever.
+check("too many wakes, cooldown elapsed -> wake",
+      sup.decide(conv(PARENT, "RUNNING", "error"), E1,
+                 {"wakes": sup.MAX_WAKES, "last_wake": "2000-01-01T00:00:00+00:00"}, False), "wake")
+check("too many wakes, no last_wake recorded -> wake",
+      sup.decide(conv(PARENT, "RUNNING", "error"), E1, {"wakes": sup.MAX_WAKES}, False), "wake")
 
 print()
 if fails:

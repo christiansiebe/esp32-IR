@@ -56,6 +56,12 @@ STUCK_MINUTES = float(os.environ.get("FLEET_STUCK_MINUTES", "10"))
 # wake must wait for RUNNING before it sends.
 RESUME_WAIT_SECONDS = float(os.environ.get("FLEET_RESUME_WAIT_SECONDS", "90"))
 MAX_WAKES = int(os.environ.get("FLEET_MAX_WAKES", "6"))
+# Once an agent has been woken MAX_WAKES times without ever being observed
+# awake, stop waking it every cycle but keep retrying on this cadence. A hard
+# lifetime cap strands a healthy agent that merely had a bad patch (a dropped
+# wake message, a 409 while the sandbox was still STARTING) - it would sit with
+# open work and never be woken again.
+WAKE_COOLDOWN_MIN = float(os.environ.get("FLEET_WAKE_COOLDOWN_MIN", "15"))
 # Both parents host fleet tooling / coordinate the workers; the cron is the real
 # guarantee, but do not pause a coordinator out from under its workers.
 NEVER_PAUSE = {
@@ -257,25 +263,43 @@ def sandbox_status(token, sandbox_id):
     return None
 
 
+def send_wake(token, cid, attempts=4):
+    """Send the wake message, retrying the 409 the platform returns while a
+    sandbox is still STARTING. A single dropped wake is what the cooldown then
+    has to make up for, so give it a few tries before giving up this cycle."""
+    for i in range(attempts):
+        try:
+            cloud(token, "POST", f"/api/v1/app-conversations/{cid}/send-message",
+                  {"role": "user", "content": [{"type": "text", "text": WAKE_MESSAGE}],
+                   "run": True})
+            return
+        except urllib.error.HTTPError as exc:
+            if exc.code == 409 and i < attempts - 1:
+                time.sleep(15)
+                continue
+            raise
+
+
 def wake_worker(token, cid, conv):
     """Resume the sandbox if it is not RUNNING, wait until it is, then send the
     wake message. send-message answers 409 while the sandbox is STARTING, so
     resuming and sending in one breath silently drops the wake."""
     sandbox_id = conv.get("sandbox_id")
     if sandbox_id:
-        if sandbox_status(token, sandbox_id) not in ("RUNNING", None):
+        # Resume unless we positively know it is RUNNING. An unknown status
+        # (transient API error) must not skip the resume, and must not be
+        # mistaken for "ready" either - both mistakes drop the wake.
+        if sandbox_status(token, sandbox_id) != "RUNNING":
             try:
                 cloud(token, "POST", f"/api/v1/sandboxes/{sandbox_id}/resume", {})
             except Exception:  # noqa: BLE001
                 pass
         deadline = time.monotonic() + RESUME_WAIT_SECONDS
         while time.monotonic() < deadline:
-            if sandbox_status(token, sandbox_id) in (None, "RUNNING"):
+            if sandbox_status(token, sandbox_id) == "RUNNING":
                 break
             time.sleep(5)
-    cloud(token, "POST", f"/api/v1/app-conversations/{cid}/send-message",
-          {"role": "user", "content": [{"type": "text", "text": WAKE_MESSAGE}],
-           "run": True})
+    send_wake(token, cid)
 
 
 def decide(conv, entry, rec_state, sandbox_shared_live):
@@ -302,8 +326,14 @@ def decide(conv, entry, rec_state, sandbox_shared_live):
     idle_h = hours_since(conv.get("updated_at"))
     if idle_h is not None and idle_h > MAX_AGE_HOURS:
         return "skip"
+    # Back off, do not give up: after MAX_WAKES attempts that never produced an
+    # awake agent, only retry once the cooldown has elapsed. A lifetime cap here
+    # is what left agents with open work asleep forever.
     if rec_state.get("wakes", 0) >= MAX_WAKES:
-        return "skip"
+        last = rec_state.get("last_wake")
+        since = minutes_since(last) if last else None
+        if since is not None and since < WAKE_COOLDOWN_MIN:
+            return "skip"
 
     # Awake means exactly one thing: the sandbox is up AND a turn is actually
     # running. Everything else with open work is asleep and must be woken -
@@ -400,6 +430,11 @@ def main():
                 continue
 
             if action == "ok":
+                # The agent is genuinely awake: any earlier wake demonstrably
+                # worked, so clear the budget. Without this reset the counter is
+                # a lifetime total and the agent gets abandoned mid-task.
+                rec_state["wakes"] = 0
+                rec_state.pop("last_wake", None)
                 print(f"{name}: {status}/{exec_status}, offene Aufgaben={open_n} - ok")
                 continue
 
