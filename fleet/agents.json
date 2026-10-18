@@ -101,6 +101,11 @@
    "pr": [
     31
    ]
+  },
+  "30cfd896aac440a4a09ba70ec6199f08": {
+   "name": "Odroid Entwicklung (neu)",
+   "open_tasks": 2,
+   "note": "ERSETZT den geloeschten 'Odroid Entwicklung' (b29e060b..., Sandbox MISSING/read-only, stand NICHT in der Registry). Koordinator der Odroid-Sub-Agenten (noVNC-extern, OC-Overlay, Watchdog-Luecke). Offen: Watchdog-Luecke, 2496-MHz-OC-Overlay, noVNC-von-aussen."
   }
  }
 }
