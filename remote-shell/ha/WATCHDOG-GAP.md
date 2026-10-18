@@ -256,8 +256,9 @@ Steckdose / Power-Cut-Relais) oder die **Reset-Leitung** des Boards — **nicht*
 Repo-Dateien:
 - `watchdog-heartbeat.sh` — Emitter (reines `sh`, kein Python noetig).
 - `watchdog-heartbeat.service` + `watchdog-heartbeat.timer` — Board-Units.
+- `deploy_heartbeat.sh` — installiert nur die **Board-Seite** (Emitter + Timer).
 - `watchdog_monitor.py` — Beobachter mit **reiner Entscheidungslogik**
-  (`decide()` / `should_reboot()`), host-getestet ohne Mocks.
+  (`decide()`), host-getestet ohne Mocks.
 - `test_watchdog_monitor.py` — die Tests dazu.
 
 Der Monitor startet den Aktor nur ueber einen **konfigurierbaren Befehl**

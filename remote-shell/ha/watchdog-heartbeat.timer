@@ -1,0 +1,13 @@
+[Unit]
+Description=External-watchdog heartbeat timer
+Documentation=file:/usr/local/share/remote-shell/WATCHDOG-GAP.md
+# INTERVAL muss zum Monitor passen: watchdog_monitor.py --interval
+# (Default 60 s). Nach einem Boot sofort einmal schreiben.
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=1s
+Unit=watchdog-heartbeat.service
+
+[Install]
+WantedBy=timers.target
