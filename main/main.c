@@ -39,6 +39,7 @@
 #include "json_escape.h"
 #include "link_fallback.h"
 #include "power_history.h"
+#include "receiver_sleep.h"
 #include "runtime_config.h"
 #include "sml_selftest.h"
 #include "version.h"
@@ -321,6 +322,20 @@ static uint32_t g_cpu_freq_sum_mhz;
 static uint32_t g_cpu_freq_samples;
 static uint32_t g_cpu_freq_changes;
 static uint8_t g_cpu_freq_last_mhz;
+/* DFS histogram: how many 1 Hz samples saw each supported clock. The 1 Hz
+ * sampler can miss short dips, so this plus the "stepped down" event below
+ * answer "did the clock ever leave the ceiling?" over a whole session. Index
+ * maps to {40, 80, 160, 240} MHz. */
+static const uint8_t k_cpu_freq_steps[] = {40u, 80u, 160u, 240u};
+#define CPU_FREQ_STEP_COUNT (sizeof(k_cpu_freq_steps) / sizeof(k_cpu_freq_steps[0]))
+static uint32_t g_cpu_freq_hist[CPU_FREQ_STEP_COUNT];
+static bool g_cpu_freq_below_ceiling_seen;
+#if CONFIG_ESPNOW_ROLE_SENDER
+static bool g_cpu_freq_below_ceiling_event_logged;
+#endif
+/* The configured ceiling, mirrored from the active runtime config so the sampler
+ * can tell "at the ceiling" from "DFS stepped down". */
+static uint8_t g_cpu_freq_ceiling_mhz = CONFIG_ESPNOW_CPU_MAX_MHZ;
 static esp_timer_handle_t g_power_sample_timer;
 static int64_t g_power_bucket_start_utc;
 static int64_t g_power_bucket_first_sample_utc;
@@ -473,6 +488,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req);
 static esp_err_t power_history_csv_handler(httpd_req_t *req);
 static esp_err_t db_refresh_handler(httpd_req_t *req);
 static esp_err_t power_history_upload_handler(httpd_req_t *req);
+static esp_err_t reboot_handler(httpd_req_t *req);
 static void history_backfill_request_full(void);
 static esp_err_t send_http_error_status(httpd_req_t *req, const char *status,
                                         const char *message);
@@ -1617,6 +1633,34 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
     wifi_ps_type_t wifi_ps = WIFI_PS_NONE;
     (void)esp_wifi_get_ps(&wifi_ps);
 
+    /* Which link clock is stale, sampled now: outbound (last_ok) vs inbound
+     * (last_rx). Surfaces the fallback's trigger reason without a reboot. */
+    uint32_t last_ok_ago_s = 0;
+    uint32_t last_rx_ago_s = 0;
+#if CONFIG_ESPNOW_LINK_FALLBACK
+    {
+        uint64_t now_ms = now_us / 1000ULL;
+        uint64_t last_ok_ms;
+        uint64_t last_rx_ms;
+        portENTER_CRITICAL(&g_link_fallback_lock);
+        last_ok_ms = g_link_fallback.last_ok_ms;
+        last_rx_ms = g_link_fallback.last_rx_ms;
+        portEXIT_CRITICAL(&g_link_fallback_lock);
+        if (now_ms > last_ok_ms) {
+            last_ok_ago_s = (uint32_t)((now_ms - last_ok_ms) / 1000ULL);
+        }
+        if (now_ms > last_rx_ms) {
+            last_rx_ago_s = (uint32_t)((now_ms - last_rx_ms) / 1000ULL);
+        }
+        if (last_ok_ago_s > 65535u) {
+            last_ok_ago_s = 65535u;
+        }
+        if (last_rx_ago_s > 65535u) {
+            last_rx_ago_s = 65535u;
+        }
+    }
+#endif
+
     *counters = (espnow_diag_counters_t) {
         .uptime_ms = (uint64_t)(esp_timer_get_time() / 1000),
         .uart_rx_bytes = rx_bytes,
@@ -1675,6 +1719,13 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .boot_marker_count = g_boot_marker_count,
         .boot_marker_reason = g_boot_marker_reason,
         .build_profile = BUILD_PROFILE_ID,
+        .cpu_freq_hist_40 = g_cpu_freq_hist[0],
+        .cpu_freq_hist_80 = g_cpu_freq_hist[1],
+        .cpu_freq_hist_160 = g_cpu_freq_hist[2],
+        .cpu_freq_hist_240 = g_cpu_freq_hist[3],
+        .cpu_freq_below_ceiling_seen = g_cpu_freq_below_ceiling_seen ? 1 : 0,
+        .last_ok_ago_s = (uint16_t)last_ok_ago_s,
+        .last_rx_ago_s = (uint16_t)last_rx_ago_s,
 #if CONFIG_ESPNOW_LINK_FALLBACK
         .sleep_fallback_active = g_link_fallback_active ? 1 : 0,
         .link_fallback_stage = g_link_fallback_stage,
@@ -1874,6 +1925,20 @@ static void espnow_diag_worker(void *arg)
         } else if (request.flags & ESPNOW_DIAG_SECTION_CMD) {
             build_diag_cmd_response(&request, frame, &frame_len);
 #endif
+        } else if (request.flags & ESPNOW_DIAG_SECTION_PING) {
+            /* Keep-alive: answer with a header-only frame. The requester only
+             * needs to *receive* something so its link watchdog stays quiet on
+             * an otherwise idle link. */
+            espnow_diag_header_t *ping = (espnow_diag_header_t *)frame;
+            *ping = (espnow_diag_header_t) {
+                .magic = ESPNOW_DIAG_MAGIC,
+                .version = request.version,
+                .type = ESPNOW_DIAG_TYPE_RESPONSE,
+                .flags = ESPNOW_DIAG_SECTION_PING,
+                .request_id = request.request_id,
+                .page = 0,
+            };
+            frame_len = sizeof(*ping);
         } else {
             continue;
         }
@@ -2100,6 +2165,10 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 #endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
+    /* An inbound frame is real work: keep the receiver awake briefly so the
+     * reply path (diagnostics, history pages) is not interrupted by a sleep
+     * window. */
+    receiver_sleep_note_espnow();
     /* Bootstrap the sender MAC from any inbound frame, whatever its type. The
      * receiver needs the MAC to send diagnostics/history requests, but gating
      * that on a fully valid SML packet means a silent SML path (no meter head,
@@ -2463,12 +2532,38 @@ static void cpu_freq_sample(void)
     g_cpu_freq_last_mhz = mhz;
     g_cpu_freq_sum_mhz += mhz;
     ++g_cpu_freq_samples;
+
+    for (size_t i = 0; i < CPU_FREQ_STEP_COUNT; ++i) {
+        if (k_cpu_freq_steps[i] == mhz) {
+            ++g_cpu_freq_hist[i];
+            break;
+        }
+    }
+    /* The ceiling is whatever the console/build pinned; a sample below it is
+     * proof that DFS (or modem sleep) actually let the clock drop. The event
+     * ring is sender-only, so the receiver just keeps the histogram. */
+    if (mhz < g_cpu_freq_ceiling_mhz) {
+        g_cpu_freq_below_ceiling_seen = true;
+#if CONFIG_ESPNOW_ROLE_SENDER
+        if (!g_cpu_freq_below_ceiling_event_logged) {
+            g_cpu_freq_below_ceiling_event_logged = true;
+            diag_log_event(ESPNOW_DIAG_LEVEL_INFO,
+                           "CPU clock stepped down to %u MHz (ceiling %u)",
+                           (unsigned)mhz, (unsigned)g_cpu_freq_ceiling_mhz);
+        }
+#endif
+    }
 }
 
 static void power_sample_timer_callback(void *arg)
 {
     (void)arg;
     cpu_freq_sample();
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Receiver: release/re-acquire the light-sleep lock once per second based on
+     * how long the dashboard has been idle. A no-op unless `sleep on` was set. */
+    receiver_sleep_tick();
+#endif
     const uint64_t now_us = (uint64_t)esp_timer_get_time();
     const int64_t wall_clock = current_utc_seconds();
     power_history_record_t completed_interval = {0};
@@ -3097,6 +3192,9 @@ static esp_err_t root_handler(httpd_req_t *req)
         "sequence,interval_start_ms,average_w,sample_count,reason. Fehlende Minuten werden "
         "ergänzt, bereits vorhandene übersprungen; vorhandene Daten werden nicht überschrieben.</small></p>"
         "<p id=\"db-status\" role=\"status\"></p>"
+        "<p><button type=\"button\" id=\"reboot\" class=\"action\">Gerät neu starten</button> "
+        "startet den Empfänger neu (OTA-Key erforderlich, wie beim Firmware-Update). "
+        "Nach dem Neustart lädt diese Seite in ein paar Sekunden wieder.</p>"
         "</section>"
         "<script>"
         "const byId=id=>document.getElementById(id);"
@@ -3304,6 +3402,17 @@ static esp_err_t root_handler(httpd_req_t *req)
         "clearTimeout(historyTimer);historyTimer=setTimeout(updateHistory,1500);"
         "}catch(e){s.textContent='Upload fehlgeschlagen: '+e;}});"
         "byId('history-day').addEventListener('change',()=>{setLive(false);redraw();});"
+        "byId('reboot').addEventListener('click',async()=>{"
+        "const s=byId('db-status');"
+        "const key=prompt('OTA-Key (wie beim Firmware-Update):');"
+        "if(!key){return;}"
+        "s.textContent='Starte neu…';"
+        "try{const r=await fetch('/api/reboot',{method:'POST',cache:'no-store',"
+        "headers:{'X-OTA-Key':key}});"
+        "if(!r.ok)throw new Error('HTTP '+r.status);"
+        "s.textContent='Neustart läuft – Seite in ein paar Sekunden neu laden…';"
+        "setTimeout(()=>location.reload(),8000);"
+        "}catch(e){s.textContent='Neustart fehlgeschlagen: '+e;}});"
         "function shiftDay(delta){const base=byId('history-day').value?Date.parse(byId('history-day').value+'T00:00:00Z'):Date.now();"
         "const next=new Date(base+delta*86400000);byId('history-day').value=dayISO(next);setLive(false);redraw();}"
         "function toggleCompare(){if(historyCompare){historyCompare=null;}else{const base=byId('history-day').value?Date.parse(byId('history-day').value+'T00:00:00Z'):Date.now();"
@@ -4573,6 +4682,44 @@ static esp_err_t send_http_error_status(httpd_req_t *req,
     return httpd_resp_sendstr(req, message);
 }
 
+/* POST /api/reboot: restart from the web UI (auth-gated like /update). The
+ * response is sent first and a short one-shot timer does the restart, so the
+ * browser gets a clean reply instead of a reset connection. On the sender the
+ * restart is marked deliberate so the crash journal does not log it as a crash. */
+static void reboot_timer_callback(void *arg)
+{
+    (void)arg;
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* The crash journal (and its clean-restart marker) is sender-only. */
+    crash_journal_mark_clean_restart();
+#endif
+    esp_restart();
+}
+
+static esp_err_t reboot_handler(httpd_req_t *req)
+{
+    if (!ota_key_is_valid(req)) {
+        return send_http_error_status(req, "401 Unauthorized",
+                                      "X-OTA-Key missing or wrong");
+    }
+    liveness_note_alive();
+    const esp_timer_create_args_t timer_args = {
+        .callback = reboot_timer_callback,
+        .name = "web_reboot",
+    };
+    esp_timer_handle_t timer = NULL;
+    if (esp_timer_create(&timer_args, &timer) != ESP_OK) {
+        return send_http_error_status(req, "500 Internal Server Error",
+                                      "could not schedule the restart");
+    }
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    esp_err_t err = httpd_resp_sendstr(
+        req, "rebooting in 500 ms - reload the page in a few seconds\n");
+    /* The reply is out; a failure to arm the timer leaves the device running. */
+    (void)esp_timer_start_once(timer, 500 * 1000);
+    return err;
+}
+
 /* --- Web debug console -----------------------------------------------------
  * A browser alternative to the serial console. Commands are executed against
  * the live device state; output is plain text. All handlers run in the HTTP
@@ -4965,15 +5112,78 @@ static esp_err_t simulate_page_handler(httpd_req_t *req)
 }
 #endif /* !CONFIG_ESPNOW_ROLE_SENDER */
 
-/* RAM-only test knobs, changed through the console ('set' / 'reset-config').
- * A reboot restores the compile-time defaults. */
+/* Persisted test knobs, changed through the console ('set' / 'reset-config').
+ * They live in NVS so a value survives a reboot *and* an OTA; a build with a
+ * different ceiling clamps a restored value back into range. 'reset-config'
+ * erases the namespace and returns to the compile-time defaults. */
 static runtime_config_t g_runtime_config;
 static bool g_runtime_config_ready;
+
+#define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
+#define RUNTIME_CONFIG_NVS_KEY "cfg"
+#define RUNTIME_CONFIG_NVS_VERSION 1u
+
+static void runtime_config_store(const runtime_config_t *cfg)
+{
+    nvs_handle_t handle;
+    if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    uint8_t blob[12];
+    blob[0] = (uint8_t)RUNTIME_CONFIG_NVS_VERSION;
+    blob[1] = cfg->light_sleep ? 1u : 0u;
+    blob[2] = (uint8_t)cfg->cpu_mhz;
+    blob[3] = (uint8_t)cfg->cpu_min_mhz;
+    uint32_t retries = cfg->espnow_retries;
+    memcpy(&blob[4], &retries, sizeof(retries));
+    if (nvs_set_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, sizeof(blob)) == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+}
+
+static void runtime_config_erase(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    (void)nvs_erase_key(handle, RUNTIME_CONFIG_NVS_KEY);
+    (void)nvs_commit(handle);
+    nvs_close(handle);
+}
+
+/* Load the persisted knobs, clamped to what this build allows. A missing or
+ * malformed blob leaves *cfg untouched (the caller keeps the defaults). */
+static void runtime_config_load(runtime_config_t *cfg)
+{
+    nvs_handle_t handle;
+    if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return;
+    }
+    uint8_t blob[12];
+    size_t len = sizeof(blob);
+    esp_err_t err = nvs_get_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, &len);
+    nvs_close(handle);
+    if (err != ESP_OK || len != sizeof(blob) || blob[0] != RUNTIME_CONFIG_NVS_VERSION) {
+        return;
+    }
+    runtime_config_t loaded = runtime_config_defaults();
+    loaded.light_sleep = blob[1] != 0;
+    loaded.cpu_mhz = blob[2];
+    loaded.cpu_min_mhz = blob[3];
+    uint32_t retries = 0;
+    memcpy(&retries, &blob[4], sizeof(retries));
+    loaded.espnow_retries = retries;
+    runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
+    *cfg = loaded;
+}
 
 static runtime_config_t *active_runtime_config(void)
 {
     if (!g_runtime_config_ready) {
         g_runtime_config = runtime_config_defaults();
+        runtime_config_load(&g_runtime_config);
         g_runtime_config_ready = true;
     }
     return &g_runtime_config;
@@ -5120,21 +5330,33 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
             snprintf(out, out_size, "cpu: could not read the power config\n");
             return;
         }
-        snprintf(out, out_size,
+        (void)snprintf(out, out_size,
                  "cpu: %d-%d MHz  light sleep %s  avg %u MHz  %lu steps\n"
+                 "  min %u MHz  histogram(1 Hz): 40:%lu 80:%lu 160:%lu 240:%lu\n"
+                 "  clock below ceiling seen: %s\n"
                  "usage: test cpu | test sleep pin <mhz> | test sleep restore\n",
                  pm.min_freq_mhz, pm.max_freq_mhz,
                  pm.light_sleep_enable ? "on" : "off",
                  (unsigned)(g_cpu_freq_samples ? g_cpu_freq_sum_mhz / g_cpu_freq_samples : 0),
-                 (unsigned long)g_cpu_freq_changes);
+                 (unsigned long)g_cpu_freq_changes,
+                 (unsigned)g_cpu_freq_min_mhz,
+                 (unsigned long)g_cpu_freq_hist[0], (unsigned long)g_cpu_freq_hist[1],
+                 (unsigned long)g_cpu_freq_hist[2], (unsigned long)g_cpu_freq_hist[3],
+                 g_cpu_freq_below_ceiling_seen ? "yes" : "no");
         return;
     }
 #else
     if (strcmp(what, "sleep") == 0) {
-        /* The receiver has no SML light-sleep path; it is sender-only. Say so
-         * instead of reporting 'unknown test'. */
+        /* Receiver: idle light sleep, opt-in via `set sleep on`. Report the
+         * latch and how long the dashboard has been quiet. */
         snprintf(out, out_size,
-                 "sleep: not available on the receiver (sender-only test)\n");
+                 "sleep: idle light sleep %s\n"
+                 "  state: %s  idle for %u ms (sleeps after %u ms)\n"
+                 "usage: set sleep on|off\n",
+                 receiver_sleep_enabled() ? "enabled" : "disabled",
+                 receiver_sleep_is_sleeping() ? "sleeping" : "awake",
+                 (unsigned)receiver_sleep_idle_age_ms(),
+                 (unsigned)RECEIVER_SLEEP_IDLE_MS);
         return;
     }
     if (strcmp(what, "storage") == 0) {
@@ -5189,6 +5411,10 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         return;
     }
     bool applied = runtime_config_apply(cfg);
+    /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only). */
+    runtime_config_store(cfg);
+    /* Keep the DFS sampler's notion of "the ceiling" in step with the config. */
+    g_cpu_freq_ceiling_mhz = (uint8_t)cfg->cpu_mhz;
 
     /* Say so when the stored value differs from what was asked for (a value
      * below the Wi-Fi minimum or off the DFS grid is snapped, not rejected). */
@@ -5221,6 +5447,14 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         uart_sleep_set_enabled(cfg->light_sleep);
     }
 #endif
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Receiver: mirror the sleep knob onto the idle-sleep latch. Enabling it
+     * holds the CPU awake until the idle window passes, so the switch is safe
+     * mid-session. */
+    if (sleep_key) {
+        receiver_sleep_init(cfg->light_sleep);
+    }
+#endif
     int written = snprintf(out, out_size,
                            "%s=%s%s%s\n", key, value, note,
                            applied ? "" : " (hardware rejected the change)");
@@ -5234,10 +5468,15 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
     (void)args;
     runtime_config_t *cfg = active_runtime_config();
     runtime_config_reset(cfg);
+    runtime_config_erase();
     runtime_config_apply(cfg);
+    g_cpu_freq_ceiling_mhz = (uint8_t)cfg->cpu_mhz;
 #if CONFIG_ESPNOW_ROLE_SENDER
     uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
     uart_sleep_set_enabled(cfg->light_sleep);
+#endif
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    receiver_sleep_init(cfg->light_sleep);
 #endif
     size_t used = (size_t)snprintf(out, out_size, "config reset to defaults\n");
     if (used < out_size) {
@@ -5347,8 +5586,9 @@ static esp_err_t console_page_handler(httpd_req_t *req)
         "(pin the CPU), <b>set cpu 80</b> (DFS ceiling), <b>help</b>.</p>"
         "<input id=\"key\" type=\"password\" placeholder=\"Wi-Fi / OTA key\">"
         "<h2>CPU / power</h2>"
-        "<p class=\"note\">RAM only; a reboot restores the defaults. Use 80, 160 "
-        "or 240 MHz (40 MHz is not allowed with Wi-Fi and would abort it). Here "
+        "<p class=\"note\">Saved to NVS: the value survives a reboot and an OTA "
+        "(reset-config clears it). Use 80, 160 or 240 MHz (40 MHz is not allowed "
+        "with Wi-Fi and would abort it). Here "
         "'Set fixed' raises the DFS floor, so the clock stays in [value, ceiling]; "
         "'Set ceiling' lowers the DFS ceiling. The sender keeps its own pin.</p>"
         "<select id=\"cpuval\"><option>80</option>"
@@ -5489,6 +5729,48 @@ static esp_err_t sender_diag_exchange(uint16_t flags, uint32_t page,
     return sender_diag_exchange_raw(&request, sizeof(request), request_id,
                                     response, response_len);
 }
+
+/* Receiver -> sender keep-alive: one empty request the sender answers with an
+ * empty response. The receiver sends it only while the sender MAC is known and
+ * the link has been quiet for most of the silence timeout, so each side sees an
+ * inbound frame before its own watchdog fires. Without this the sender's
+ * watchdog trips on a healthy but idle link (the receiver only talks during the
+ * 30-minute backfill) and needlessly drops its adaptive light sleep. */
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static void sender_link_ping(void)
+{
+    uint8_t sender_mac[ESP_NOW_ETH_ALEN];
+    portENTER_CRITICAL(&g_sender_mac_lock);
+    bool known = g_sender_mac_valid;
+    memcpy(sender_mac, g_sender_mac, ESP_NOW_ETH_ALEN);
+    portEXIT_CRITICAL(&g_sender_mac_lock);
+    if (!known) {
+        return;
+    }
+    uint32_t request_id = (uint32_t)esp_random();
+    if (request_id == 0) {
+        request_id = 1;
+    }
+    espnow_diag_header_t request = {
+        .magic = ESPNOW_DIAG_MAGIC,
+        .version = ESPNOW_DIAG_VERSION,
+        .type = ESPNOW_DIAG_TYPE_REQUEST,
+        .flags = ESPNOW_DIAG_SECTION_PING,
+        .request_id = request_id,
+        .page = 0,
+    };
+    if (add_espnow_peer(sender_mac, ESPNOW_IF) != ESP_OK) {
+        return;
+    }
+    if (esp_now_send(sender_mac, (const uint8_t *)&request, sizeof(request)) == ESP_OK) {
+        /* Our own confirmed send also proves the link from our side. */
+        portENTER_CRITICAL(&g_link_fallback_lock);
+        link_fallback_note_send_ok(&g_link_fallback,
+                                   (uint64_t)(esp_timer_get_time() / 1000));
+        portEXIT_CRITICAL(&g_link_fallback_lock);
+    }
+}
+#endif /* !CONFIG_ESPNOW_ROLE_SENDER */
 
 /* Send one command line to the sender over ESP-NOW and return its captured
  * output. This is the transport behind the receiver-hosted sender web console:
@@ -5919,7 +6201,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
                        "\"sender_fw_version\":\"%s\","
                        "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
-                       "\"sleep_fallback\":%u,\"fallback_stage\":%u}",
+                       "\"sleep_fallback\":%u,\"fallback_stage\":%u,"
+                       "\"last_ok_ago_s\":%u,\"last_rx_ago_s\":%u}",
                        fw_version(),
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
@@ -5977,7 +6260,9 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.boot_marker_count,
                        (unsigned int)counters.boot_marker_reason,
                        (unsigned int)counters.sleep_fallback_active,
-                       (unsigned int)counters.link_fallback_stage);
+                       (unsigned int)counters.link_fallback_stage,
+                       (unsigned int)counters.last_ok_ago_s,
+                       (unsigned int)counters.last_rx_ago_s);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -6318,7 +6603,8 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
                        "\"sender_fw_version\":\"%s\","
                        "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
-                       "\"sleep_fallback\":%u,\"fallback_stage\":%u}%s%s}",
+                       "\"sleep_fallback\":%u,\"fallback_stage\":%u,"
+                       "\"last_ok_ago_s\":%u,\"last_rx_ago_s\":%u}%s%s}",
                        mac_known ? "true" : "false",
                        (int)sender_rssi,
                        sender_rssi_valid ? "true" : "false",
@@ -6379,6 +6665,8 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        (unsigned int)counters.boot_marker_reason,
                        (unsigned int)counters.sleep_fallback_active,
                        (unsigned int)counters.link_fallback_stage,
+                       (unsigned int)counters.last_ok_ago_s,
+                       (unsigned int)counters.last_rx_ago_s,
                        crash_json[0] != '\0' ? "," : "",
                        crash_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
@@ -6447,10 +6735,10 @@ static esp_err_t sender_page_handler(httpd_req_t *req)
         "<h2>Previous session / last crash</h2><pre id=\"crash\"></pre>"
         "<h2>Recent events</h2><pre id=\"events\"></pre>"
         "<h2>CPU / power</h2>"
-        "<p class=\"note\">Pins the sender CPU in RAM (a reboot restores the "
-        "defaults). Use 80, 160 or 240 MHz (40 MHz is not allowed with Wi-Fi and "
-        "would abort it). 'Set fixed' turns DFS off and holds exactly that clock; "
-        "'Set ceiling' only caps the DFS ceiling.</p>"
+        "<p class=\"note\">Pins the sender CPU and is saved in NVS, so it "
+        "survives a reboot and an OTA. Use 80, 160 or 240 MHz (40 MHz is not "
+        "allowed with Wi-Fi and would abort it). 'Set fixed' turns DFS off and "
+        "holds exactly that clock; 'Set ceiling' only caps the DFS ceiling.</p>"
         "<select id=\"cpuval\"><option>80</option>"
         "<option>160</option><option>240</option></select>"
         "<button id=\"pin\" type=\"button\">Set fixed</button>"
@@ -7115,7 +7403,7 @@ static void start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 31;
+    config.max_uri_handlers = 32;
     /* Handlers that keep a full history page (128 records) on their stack run
      * on this task; keep headroom so a large page cannot overflow it and abort
      * the whole HTTP server. */
@@ -7126,6 +7414,12 @@ static void start_webserver(void)
      * the ESP_ERROR_CHECK below would then abort and boot-loop. Derive the value
      * from the LWIP cap so it can never drift past it again. */
     config.max_open_sockets = CONFIG_LWIP_MAX_SOCKETS - 3;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Note a real dashboard connection as activity for the idle light sleep.
+     * The web-health self-probe runs over loopback and is filtered out inside
+     * receiver_sleep, so it does not keep the receiver awake. */
+    config.open_fn = receiver_sleep_http_open;
+#endif
 
     /* Static: the web-health guard keeps this pointer across restarts, so it
      * must outlive start_webserver()'s stack frame. */
@@ -7241,6 +7535,11 @@ static void register_webserver_handlers(httpd_handle_t server)
         .method = HTTP_POST,
         .handler = power_history_upload_handler,
     };
+    httpd_uri_t reboot_api = {
+        .uri = "/api/reboot",
+        .method = HTTP_POST,
+        .handler = reboot_handler,
+    };
 #endif
     httpd_uri_t log_page = {
         .uri = "/log",
@@ -7330,6 +7629,7 @@ static void register_webserver_handlers(httpd_handle_t server)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sender_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &db_refresh));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_history_upload));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &reboot_api));
 #endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config_uri));
@@ -7376,9 +7676,35 @@ static void link_fallback_worker(void *arg)
         }
         uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
         uint64_t uptime_ms = now_ms - started_ms;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        /* Keep the sender's watchdog fed on an idle link: the sender only hears
+         * from us when we send something, and it has no way to know that "no
+         * request" is normal. Ping once our own outbound traffic has been quiet
+         * for half the silence timeout (link_keepalive_due). Keyed off
+         * last_ok_ms (our confirmed sends), NOT last_rx_ms: we hear the
+         * sender's broadcasts continuously, so last_rx_ms is always fresh and
+         * would suppress the ping - which is exactly how the sender's watchdog
+         * tripped anyway. */
+        {
+            uint64_t last_ok;
+            portENTER_CRITICAL(&g_link_fallback_lock);
+            last_ok = g_link_fallback.last_ok_ms;
+            portEXIT_CRITICAL(&g_link_fallback_lock);
+            if (link_keepalive_due(last_ok, now_ms,
+                                   CONFIG_ESPNOW_LINK_FALLBACK_MS)) {
+                sender_link_ping();
+            }
+        }
+#endif
         bool fallback;
         portENTER_CRITICAL(&g_link_fallback_lock);
-        fallback = link_fallback_should_fallback(&g_link_fallback, now_ms, uptime_ms);
+        fallback = link_fallback_should_fallback(&g_link_fallback, now_ms,
+                                                 uptime_ms,
+#if CONFIG_ESPNOW_ROLE_SENDER
+                                                 true);
+#else
+                                                 false);
+#endif
         portEXIT_CRITICAL(&g_link_fallback_lock);
         if (!fallback) {
             continue;
@@ -7416,8 +7742,18 @@ static void link_fallback_worker(void *arg)
         /* Drop the adaptive light sleep for good: the radio stays awake. */
         uart_sleep_disable_idf();
         g_link_fallback_stage = 2;
-        diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
-                       "link fallback: light sleep off, radio stays awake");
+        {
+            /* Log both clocks so the trigger is unambiguous: which one went
+             * stale (send vs receive) and how long it had been quiet. */
+            uint64_t now_ms2 = (uint64_t)(esp_timer_get_time() / 1000);
+            uint64_t ok_ago = now_ms2 > g_link_fallback.last_ok_ms
+                                  ? now_ms2 - g_link_fallback.last_ok_ms : 0;
+            uint64_t rx_ago = now_ms2 > g_link_fallback.last_rx_ms
+                                  ? now_ms2 - g_link_fallback.last_rx_ms : 0;
+            diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
+                           "link fallback ok=%us rx=%us",
+                           (unsigned)(ok_ago / 1000u), (unsigned)(rx_ago / 1000u));
+        }
         ESP_LOGW(TAG, "Link fallback: no peer traffic for %u ms; light sleep "
                       "disabled, CPU stays awake", (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
 #else
@@ -7628,31 +7964,48 @@ static void run_sender(void)
 }
 #endif
 
-/* DFS ceiling for both roles. The receiver keeps light sleep off (it must stay
- * responsive for HTTP and ESP-NOW); the sender enables it so its adaptive
- * window can park the CPU (uart_sleep_window.c re-applies its own config with
- * light sleep on, so this is not overwritten for the sender). */
+/* Apply the persisted CPU/light-sleep knobs at boot. active_runtime_config()
+ * loads them from NVS (clamped to this build's ceiling) or falls back to the
+ * compile-time defaults, so a 'set' from a previous session — or before an OTA
+ * that kept the NVS partition — is in effect from the first tick.
+ *
+ * The receiver must stay responsive for HTTP and ESP-NOW and never enters
+ * light sleep by default; the sender enables its adaptive light sleep inside
+ * the verified quiet window (uart_sleep_window.c re-applies its own config with
+ * light sleep on, so the sender is driven through that module). */
 static void apply_power_management(void)
 {
-    uint32_t max_mhz = (uint32_t)CONFIG_ESPNOW_CPU_MAX_MHZ;
-    if (max_mhz < 80) {
-        max_mhz = 80;
-    } else if (max_mhz > 240) {
-        max_mhz = 240;
-    }
+    runtime_config_t *cfg = active_runtime_config();
+    g_cpu_freq_ceiling_mhz = (uint8_t)cfg->cpu_mhz;
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* uart_sleep_init_idf() already configured PM during Wi-Fi init with the
+     * compile-time ceiling; push the persisted range into the module and mirror
+     * the light-sleep latch, which re-applies esp_pm_configure() with it. */
+    uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
+    uart_sleep_set_enabled(cfg->light_sleep);
+    ESP_LOGI(TAG, "CPU config: %u-%u MHz, light sleep %s",
+             (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
+             cfg->light_sleep ? "on" : "off");
+#else
     esp_pm_config_t pm = {
-        .max_freq_mhz = (int)max_mhz,
-        .min_freq_mhz = 40,
-        .light_sleep_enable = false,
+        .max_freq_mhz = (int)cfg->cpu_mhz,
+        .min_freq_mhz = (int)cfg->cpu_min_mhz,
+        .light_sleep_enable = cfg->light_sleep,
     };
     esp_err_t err = esp_pm_configure(&pm);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Could not apply DFS ceiling (%u MHz): %s",
-                 (unsigned)max_mhz, esp_err_to_name(err));
+        ESP_LOGW(TAG, "Could not apply the CPU config (%u-%u MHz): %s",
+                 (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
+                 esp_err_to_name(err));
         return;
     }
-    ESP_LOGI(TAG, "CPU clock ceiling %u MHz with DFS (min 40 MHz)",
-             (unsigned)max_mhz);
+    ESP_LOGI(TAG, "CPU config: %u-%u MHz, light sleep %s",
+             (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
+             cfg->light_sleep ? "on" : "off");
+    /* Idle light sleep: opt-in via `sleep on`. Starts held awake and parks the
+     * CPU only once the dashboard has been idle for RECEIVER_SLEEP_IDLE_MS. */
+    receiver_sleep_init(cfg->light_sleep);
+#endif
 }
 
 void app_main(void)

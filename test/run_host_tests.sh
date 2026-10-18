@@ -158,6 +158,17 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_link_fallback"
 
+# Receiver idle light sleep: the gate that parks the mains-powered receiver
+# between dashboard requests. Pure C; the boot grace window and the idle
+# transition must be exact or the CPU sleeps before Wi-Fi/HTTP are up.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$here/test_receiver_sleep.c" \
+    -o "$out/test_receiver_sleep"
+
+"$out/test_receiver_sleep"
+
 # Receiver-side backfill merge bookkeeping (window/presence/dedupe). Pure C.
 "$cc" -std=c11 -Wall -Wextra -O2 \
     -Wno-unused-variable -Wno-unused-const-variable \

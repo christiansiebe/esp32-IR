@@ -70,11 +70,18 @@ bool uart_sleep_init_idf(void)
 
     /* Variable CPU clock (DFS) plus light sleep in the idle path. Without this
      * call light_sleep_enable stays 0 and the chip never sleeps. The ceiling is
-     * shared with the receiver (CONFIG_ESPNOW_CPU_MAX_MHZ). */
+     * shared with the receiver (CONFIG_ESPNOW_CPU_MAX_MHZ).
+     *
+     * Honour the persisted latch: apply_power_management() runs before this
+     * (from app_main) and calls uart_sleep_set_enabled(false) when the saved
+     * config says "sleep off", which sets s_disabled. Enabling light sleep
+     * unconditionally here would then re-arm PM behind the user's back and the
+     * diagnostics would report light_sleep_enabled=1 for a device that is
+     * configured "sleep=off". */
     esp_pm_config_t pm = {
         .max_freq_mhz = sleep_pm_max(),
         .min_freq_mhz = sleep_pm_min(),
-        .light_sleep_enable = true,
+        .light_sleep_enable = !s_disabled,
     };
     if (esp_pm_configure(&pm) != ESP_OK) {
         return false;

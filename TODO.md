@@ -1,5 +1,47 @@
 # To-do – esp32-IR
 
+## NEU (2026-10-18): Fleet-Regel – Agenten halten sich gegenseitig wach
+**Jeder Chat-Agent arbeitet über Sub-Agenten und darf nicht einschlafen,
+solange offene Aufträge existieren.** Eine pausierte Sandbox kann sich nicht
+selbst wecken (es läuft nichts darin) — also wecken sich die Agenten
+gegenseitig über die Cloud-API.
+- Jeder Agent pflegt `TASKS.json` (`status: open|done`); offene Einträge =
+  wachbleiben. Der Parent spiegelt die Zahl nach `fleet/agents.json`.
+- Garantie ist die **Cron-Automation `fleet-watchdog`** (alle 5 min, **kein
+  LLM, keine Token-Kosten**): sie läuft auf dem Plattform-Scheduler, also
+  *außerhalb* jeder Sandbox, und überlebt damit Sandbox-Pausen. Sie liest
+  `fleet/agents.json` und weckt jede Konversation mit `open_tasks > 0` in
+  `PAUSED`: `resume` + Weck-Nachricht.
+- `fleet/fleet.py` (In-Sandbox-Loop) bleibt nur als schneller lokaler Fallback;
+  er kann die Garantie nicht sein, weil eine pausierte Sandbox sich nicht selbst
+  weckt.
+- Schutz: fertige Agenten (`open_tasks == 0`) werden nie geweckt; Sandboxes mit
+  >72 h Inaktivität bleiben liegen.
+- Die alten `chat-heartbeat`-Automations wurden **deaktiviert** (blindes Wecken
+  auch fertiger Agenten kostete Budget und machte den Chat träge).
+- Erledigt: die drei delegierten Sub-Agenten (UTC-persist PR #16 grün/fertig,
+  TWDT PR #10 DRAFT+CONFLICTING → rebasen, MQTT PR #9 DRAFT → finalisieren)
+  wurden geweckt und arbeiten weiter; Details in `fleet/README.md`.
+
+## NEU (2026-10-17): Laufzeit-Knöpfe überleben Reboot + OTA (NVS)
+**Bisher waren `set cpu|freq|cpu-min|sleep|retries` RAM-only** — ein Reboot warf
+sie auf die Compile-Time-Defaults zurück, also musste man zum dauerhaften Ändern
+des Takts doch flashen. Jetzt liegen sie in NVS (Namespace `rtcfg`, versionierter
+Blob):
+- `set …` schreibt den Blob; `reset-config` löscht ihn.
+- `runtime_config_load()` liest ihn in `active_runtime_config()` und klemmt ihn
+  mit `runtime_config_clamp()` auf den Decken-Wert des laufenden Builds — ein
+  Image mit kleinerem `CONFIG_ESPNOW_CPU_MAX_MHZ` kann keinen zu hohen Takt
+  wiederherstellen.
+- `apply_power_management()` wendet die geladene Config beim Boot an (Sender über
+  `uart_sleep_set_pm_override`/`_set_enabled`, Empfänger direkt via `esp_pm_configure`).
+- Host-Test `test/test_runtime_config.c` um die clamp-Fälle erweitert (36 Checks).
+- [x] Am Empfänger verifiziert (`efa49fb`, 2026-10-17): `set freq 80` → `reboot`
+      → `config` zeigt `cpu=80/80`, live `cpu_freq_mhz=80`; `reset-config` → wieder
+      `240/40`. Und `set freq 80` → **OTA** auf dasselbe Image → nach dem
+      OTA-Reboot weiterhin `cpu=80/80`. Backfill danach sauber
+      (`backfill: 1 record merged`, `write errors: 0`, `queue drops: 0`).
+
 ## Empfänger „AP aus" (`feat/receiver-ap-off`, 2026-10-17) – PR #13
 **Ergebnis: AP darf aus — aber nur über die Compile-Time-Option
 `CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y`, nie im laufenden Betrieb.**
@@ -68,6 +110,41 @@ und Funk-Powersave/DFS nicht gleichzeitig zu haben.** Am Gerät verifiziert.
 - Hinweis: Mit `test sleep pin 80` läuft der Takt manuell auf 80 MHz; mit
       `test sleep restore` zurück auf die Obergrenze. `test cpu` zeigt jetzt
       „40-80 MHz … 0 steps" (Takt bleibt oben, weil der Funk den APB-Lock hält).
+- [x] **40-MHz-Step-Down am Gerät gemessen (sender-dfs): negatives Ergebnis.**
+      Der Sender lief auf dem experimentellen `sender-dfs`-Image (`caa0140`,
+      `wifi_ps_mode=1` = Modem-Sleep AN, Decke 80, Boden 40). Ausgelesen über den
+      Empfänger (`192.168.178.70/api/sender-diag`):
+      `cpu_freq_changes=0`, `cpu_freq_hist_min_mhz=80`, `cpu_freq_hist_max_mhz=80`
+      → **40 MHz wurde nie erreicht.** Gleichzeitig `sleep_fallback=1`,
+      `fallback_stage=2` → der Link-Watchdog hat ausgelöst (kein Peer-Verkehr) und
+      den bewährten Modus wiederhergestellt: `uart_sleep_disable_idf()`
+      (Light-Sleep aus, Funk bleibt an, 80 MHz). Auf dem ESP32 classic ist der
+      WiFi-Modem-Sleep also **kein** Weg zu 40 MHz ohne den Link zu brechen — der
+      Default „Funk an / 80 MHz" bleibt. TODO-Punkt damit abgeschlossen
+      (bewusst verworfene Option, nicht mehr offen).
+
+### ✅ Relay-Kanal (Sandbox↔Odroid) — Zuverlässigkeit
+Beobachtet 2026-10-18: Nach einem Sandbox-Reset **sterben die beiden Helfer**
+(`channel_server.py:12001`, `upload-server:12000`); der Odroid-Agent bleibt
+zwar am Leben, aber ein **einzelner Befehl ohne eigenes Timeout** (z. B. ein
+`curl`-Download ohne `-m`) blockiert den Poll-Loop und der Agent wirkt tot.
+- **Behoben (Sandbox-Seite):** `keepalive.sh` wird jetzt idempotent aus
+  `~/.bashrc` gestartet, sobald eine Shell aufgeht — die Helfer kommen ohne
+  manuellen Eingriff hoch.
+- **Behoben (Geräteseite, am Odroid eingespielt & verifiziert):**
+  `odroid_agent.sh` führt jeden Befehl jetzt unter
+  `timeout -k 10 $CMD_TIMEOUT` (Default 240 s) aus; ein hängender Befehl wird
+  abgebrochen und der Loop läuft weiter. Der Poll-Loop ist gegen Fehler in
+  `poll()` gepanzert, und die systemd-Unit hat `StartLimitIntervalSec=0` +
+  `Restart=always` — sie gibt nie auf. Verifikation: `timeout 3 sleep 60` →
+  `rc=124`, nächster Befehl kommt trotzdem an.
+- **Keine Aussperrung anderer Agenten:** Kanal-Key und `/register` unverändert,
+  Unit läuft weiter als `root`, kein Lock auf eine einzelne Instanz. Die
+  Timeout-Panzerung hilft sogar allen Chats, weil sie denselben Agenten teilen.
+- Merksatz: der Agent hängt am laufenden `bash -lc "$cmd"`, **nicht** am Poll —
+  solange keine neuen `results/`-Dateien erscheinen, aber `inflight/` wächst,
+  steckt genau ein Befehl (jetzt maximal `CMD_TIMEOUT` s).
+
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
 Letzter Commit: `f5239c7` – CI **grün** (Push-Run `38466461726`, PR-Run `38466468521`:
@@ -776,13 +853,18 @@ und tunnelt jede Anfrage ueber den bestehenden Diag-Kanal (`sender_diag_exchange
       bleiben. CI prueft `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80` in beiden Rollen.
 
 ### Bedienung / Diagnose (neu)
-- [ ] **Reboot-Taste im Dashboard** (`POST /api/reboot`, Auth-Gate wie `/update`,
+- [x] **Reboot-Taste im Dashboard** (`POST /api/reboot`, Auth-Gate wie `/update`,
       Antwort senden, dann `esp_restart()`). Nuetzlich fuer den Persistenz-Test
       (Reboot ohne Stecker ziehen) und generell zum Neustart aus der Weboberflaeche.
       Muss auf der AP-Seite auch ohne STA-Verbindung funktionieren.
-      **Teilweise erledigt:** die Web-Konsole (`web_console.c`, `/api/console`) hat
-      bereits den Befehl `reboot` (`console_cmd_reboot` -> `esp_restart()`); es fehlt
-      nur noch die prominente Taste im Dashboard.
+      **Erledigt:** der Handler (`reboot_handler`) sendet die Antwort zuerst und
+      startet dann ueber einen One-Shot-`esp_timer` (500 ms) neu; der Neustart wird
+      als *geplant* markiert (`crash_journal_mark_clean_restart`), damit er nicht als
+      Crash im Journal auftaucht. Die Dashboard-Taste fragt den OTA-Key per `prompt()`
+      ab und laedt die Seite nach 8 s neu. Zusaetzlich gab es bereits den
+      Konsolen-Befehl `reboot` (`console_cmd_reboot`). Host-Check: Dashboard-JS
+      syntaktisch gruen. **Am Geraet noch zu verifizieren** (Reboot + `record_count`
+      danach).
 - [~] **Debug-Konsole mit Eingabe** — **teilweise erledigt:** Web-Konsole existiert
       (`/api/console`, `web_console.c`) mit Befehlen `help`, `status`, `history`,
       `time`, `wifi`, `power`, `reboot` (Registrierung `web_console_register_commands`).

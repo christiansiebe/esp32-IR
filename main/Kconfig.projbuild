@@ -48,6 +48,20 @@ config ESPNOW_SENDER_LIGHT_SLEEP
         image. Verify on the bench that ESP-NOW broadcasts are still received
         while sleeping (see TODO.md); disable to fall back to DFS only.
 
+config ESPNOW_RECEIVER_LIGHT_SLEEP
+    bool "Receiver: idle light sleep between dashboard requests"
+    default y
+    depends on ESPNOW_ROLE_RECEIVER
+    help
+        Let the receiver park the CPU (light sleep) whenever the dashboard has
+        been idle for a minute. Any real HTTP request or inbound ESP-NOW frame
+        wakes it immediately; the web-health self-probe runs over loopback and
+        does not count as activity. A broadcast missed while asleep is not lost:
+        the sender records every minute in its own history and the backfill
+        pulls it back on the next round. The receiver is mains-powered, so this
+        is a frugality/heat measure, not a battery one. Turn off with
+        'set sleep off' (persisted in NVS) to keep the CPU always awake.
+
 config ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS
     int "ESP-NOW connectionless wake interval (ms)"
     range 10 1000

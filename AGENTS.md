@@ -16,6 +16,48 @@ Two firmware roles are built from one source tree.
 - Commit and push small steps promptly; never leave important work only in
   `/tmp`.
 
+## Fleet rule: agents work through sub-agents and keep each other awake
+This is a standing rule for **every** esp32-IR chat agent, not a suggestion.
+
+- **Work through sub-agents.** Break work into sub-conversations (each with
+  `parent_conversation_id` set). The parent coordinates and reviews; the
+  sub-agents do the long work.
+- **A conversation must not sleep while it has open work.** An idle sandbox is
+  paused by the platform, and a paused agent cannot wake itself - nothing is
+  running in it. So the agents watch each other.
+- **Every agent keeps a `TASKS.json`** in its workspace with one entry per task
+  and `"status": "open" | "done"`. Open entries are the signal that the agent
+  must stay awake. A conversation may only be considered finished when it has no
+  open entries.
+- **The parent keeps `/workspace/fleet/agents.json`** current: for each worker
+  it stores `open_tasks` (0 = may sleep) and a short note. This is the registry
+  the supervisor trusts.
+- **The fleet supervisor** (`automations/fleet-supervisor`, a cron automation
+  every 20 min, **no LLM, no token cost**) is the guarantee. It runs on the
+  platform scheduler, *outside* every conversation sandbox, so it survives a
+  sandbox pause. It reads `fleet/agents.json`, and each cycle:
+  - `open_tasks > 0` and sandbox `PAUSED` -> resume + wake message;
+  - `open_tasks > 0`, running but no activity for more than
+    `FLEET_STUCK_MINUTES` (20) -> interrupt the wedged turn + wake message;
+  - `open_tasks == 0` and sandbox `RUNNING` -> pause it (stop paying for idle).
+  A paused sandbox is therefore not a hang - the next cycle brings it back. (An
+  in-sandbox loop such as `fleet/fleet.py` cannot be the guarantee: if its own
+  sandbox pauses, nothing wakes anyone. It is kept only as a fast local
+  fallback.)
+- **A wedged chat can also be restarted by hand**:
+  `python3 /workspace/fleet/restart.py <conversation_id>` interrupts the stuck
+  turn on the conversation's own runtime host, then resumes and wakes it. (The
+  org-level stop endpoint returns 404 on Cloud.)
+- **The PR report** (`automations/fleet-pr-report`, every 6 h, no LLM) prints one
+  line per open PR with draft / mergeable / CI and flags the ones that are
+  `READY` to review and merge. The parent reads that instead of every chat
+  polling GitHub by hand.
+- **Safety rails** in the supervisor: it never wakes an agent with no open tasks,
+  it skips a sandbox idle for more than `FLEET_MAX_AGE_HOURS` (72), and it gives
+  up on an agent after `FLEET_MAX_WAKES` (6) failed wakes.
+- **If you finish all your work:** set your `TASKS.json` entries to `done` and
+  update `/workspace/fleet/agents.json`, then you may sleep.
+
 ## Roles
 - **Sender**: UART SML decoder (9600 baud 8N1 on UART1, RX GPIO16) and ESP-NOW
   value transport. No web server, no WLAN/IP of its own. Its page is hosted by
@@ -139,6 +181,13 @@ Two firmware roles are built from one source tree.
   History: the sender was pinned at 80 MHz (commits `40baea3`/`fa24b5e`/
   `c53b028`), then moved to 240 MHz; it is back at 80 MHz now that the radio is
   known to be held awake on this chip.
+- The console `set cpu|freq|cpu-min|sleep|retries` knobs are **persisted in NVS**
+  (namespace `rtcfg`, blob versioned): a value survives a reboot **and** an OTA,
+  so the clock can be pinned from the dashboard without reflashing.
+  `runtime_config_load()` reads it in `active_runtime_config()` and clamps it to
+  the running build's ceiling, so an image with a lower `CONFIG_ESPNOW_CPU_MAX_MHZ`
+  can never restore an out-of-range clock. `reset-config` erases the blob and
+  returns to the compile-time defaults. Host-tested (`test/test_runtime_config.c`).
 - **Generated `sdkconfig*` files are git-ignored** (only `sdkconfig.defaults` is
   tracked). `sdkconfig`, `sdkconfig.receiver`, `sdkconfig.sender` are local
   artefacts; an old local `sdkconfig.*` pins `CONFIG_ESPNOW_CPU_MAX_MHZ` and
@@ -213,6 +262,19 @@ Two firmware roles are built from one source tree.
   Verify health with the *live* signals instead: `last_rx_ago_ms` stays low,
   `sml_send_fail` is low, the receiver's `sender_rssi_valid` is true and the
   history sync reports `caught_up: true` / `errors: 0`.
+- **The watchdog decision is role-specific (`sender_role`).** The sender judges
+  only its acknowledged-send clock (`last_ok_ms`); its inbound path is
+  legitimately silent for long stretches (the receiver talks on demand), so the
+  old `max(last_rx, last_ok)` rule fired ~60 s after every boot on a link that
+  was broadcasting every 5 s (the fallback event logs `ok=<s>s rx=<s>s`). The
+  receiver still accepts either direction because it pings. `last_ok_ago_s` /
+  `last_rx_ago_s` in the `counters` section expose both ages for diagnosis.
+- **Do not drain `g_send_done` before a send.** A late broadcast completion is
+  harmless when taken as the current telegram's result, but draining it turns
+  the tail of a burst into hard send timeouts: `sml_sent_ok` stalls, `last_ok`
+  ages out and the watchdog fires on a healthy link. The ESP-NOW broadcast send
+  callback reports the driver hand-off, not a MAC ACK, so the retry path only
+  bites for genuine driver errors.
 - **Sender association is optional and OFF by default
   (`CONFIG_ESPNOW_SENDER_ASSOCIATE`, `ESPNOW_SENDER_ASSOC_{SSID,PASSWORD}`).** A
   bench test showed that associating the sender with the receiver SoftAP (station
@@ -718,3 +780,20 @@ dem Odroid, Key in KEY, Doku in README.md).
   esp32-channel, pollt alle 5 s). Skripte auch unter /files/odroid_agent.sh.
 - Damit ist der serielle Web-Monitor (/console, POST /api/console) und der
   OTA-Pull (POST /api/ota-pull) am echten Geraet aus dem Chat bedienbar.
+
+### Betriebsfakten (im LAN verifiziert, 2026-10-18)
+- **Empfaenger-Weboberflaeche:** `http://192.168.178.70` (nginx-301 auf `/`
+  ignoriert; `/api` liefert JSON, `version` zeigt das laufende Image).
+- Der **Sender hat kein WiFi** (nur ESP-NOW) — es gibt keine Sender-IP. Die
+  Sender-Diagnose holt man **ueber den Empfaenger**:
+  `curl -s http://192.168.178.70/api/sender-diag -H "X-OTA-Key: <key>"`
+  (der Empfaenger leitet per ESP-NOW weiter).
+- **OTA-Key** fuer die Auth-Header liegt in `/workspace/remote-shell/.ota_key`.
+- **Sandbox-Helfer** (`channel_server.py:12001`, `upload-server:12000`, fleet
+  watchdog) werden von `keepalive.sh` idempotent am Leben gehalten. Der
+  `~/.bashrc`-Hook greift bei Agent-Tool-Befehlen **nicht** (die Shell ist
+  langlebig, `.bashrc` wird nicht neu geladen); die Selbstheilung sitzt daher in
+  `channel.py` (prueft vor jedem `send` den `/health` und startet `keepalive.sh`)
+  und in `keepalive.sh` selbst (flock, eininstanzig). Kein manueller Neustart
+  nach einem Sandbox-Reset noetig.
+- Hinweis: `192.168.178.71` ist der **Odroid selbst** (nginx), nicht der ESP32.

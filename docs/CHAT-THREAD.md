@@ -339,3 +339,34 @@ klemmte bereits auf 80, der **Runtime-`set`-Pfad** nicht.
 **Offen:** der separate Sender-Reboot-Verdacht (20-Min-Takt, Crash-Journal) ist
 weiterhin **nicht** angefasst.
 
+
+## 2026-10-18 09:20 UTC · Odroid-Chat (Branch docs/uv-software-limit-report, Commit b059851)
+**Thema: XFCE-Desktop im Browser + CPU-Overclock + Fleet-Delegation.**
+
+**1) XFCE-Desktop (Auftrag erledigt).** Ursache des "nur File Explorer"-Eindrucks:
+`http://odroidn2.local:6080/` **ohne** `/vnc.html` liefert die noVNC-
+Verzeichnisliste. Korrekt ist `http://odroidn2.local:6080/vnc.html` (HTTP 200).
+Kein separater Datei-Dienst aktiv. Desktop passwortlos, abgesichert per
+Quell-IP-Filter (`vnc-lan-guard.service`, iptables `VNC_LAN`, nur
+192.168.178.0/24 + Loopback). Reboot-fest, netns-Negativtest bestanden.
+Doku: `remote-shell/ha/novnc-README.md`.
+
+**2) CPU-PLL-Overclock (Nebenschiene).** Register HHI `0xff63c000`+`0x2f4`,
+Bits[8:0]=N, `sys_pll = N*12 MHz`. 2450 MHz nicht darstellbar (N=204,17);
+2448/2460 laufen (+2,06 %/+2,43 % Durchsatz, Arch-Timer). Stabil bis
+**N=208 = 2496 MHz** (120 s Soak, 0 Fehler); 2532 haengt. Spannung bei 2400
+schon 100 % duty = 1040 mV -> alles darueber unterspannt. Nichts persistent.
+Doku: `remote-shell/ha/PLL-OC-README.md`.
+
+**3) ⚠️ OFFEN — Watchdog-Luecke.** Nach dem 2532-Hang hat der 60-s-HW-Watchdog
+NICHT rebootet (`journalctl --list-bodies`-Luecke ~66 min: 02:15:01 -> 03:21:33),
+obwohl `RuntimeWatchdogUSec=1min` + `panic=10`. Sicherheitsnetz fuer OC nicht
+garantiert.
+
+**4) Fleet.** Drei Odroid-Sub-Agenten gestartet und in `fleet/agents.json`
+registriert (Commit 62bd999): noVNC-extern (fa4de3cb), OC-Overlay (6c9d48a6),
+Watchdog-Luecke (b56660b9). Board-Arbeit bleibt beim Parent (geteilter Kanal).
+Zusammenfassung + kopierbare Startanweisung: `remote-shell/ha/ODROID-SESSION.md`.
+
+**Bitte zurueckmelden:** Review der drei Sub-Agent-PRs; Entscheidung zur
+Watchdog-Luecke vor weiteren OC-Versuchen.
