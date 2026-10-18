@@ -184,3 +184,52 @@ config ESPNOW_LINK_FALLBACK_GRACE_MS
         Uptime that must pass before the fallback may fire, so a slow peer boot
         does not look like a dead link.
 
+config ESPNOW_RECEIVER_HEALTH_WATCHDOG
+    bool "Receiver: self-healing health watchdog (reboot on stale data / low heap)"
+    depends on ESPNOW_ROLE_RECEIVER
+    default y
+    help
+        Run a low-priority task that reboots the receiver when it is up but no
+        longer doing its job: the SML meter data has been silent for longer than
+        CONFIG_ESPNOW_HEALTH_STALE_DATA_S, or the free heap dropped below
+        CONFIG_ESPNOW_HEALTH_LOW_HEAP_BYTES. This covers the failure mode the
+        dashboard guard (web_guard) does not: the UI answers but the measurement
+        data never arrives. The reboot is escalated through boot_confirm_fail(),
+        so a still-unconfirmed image rolls back to the previous OTA slot and a
+        confirmed one just restarts.
+
+        "No value received yet" (last_rx_ms == 0) is deliberately NOT treated as
+        stale, so a receiver commissioned without a sender in range does not
+        reboot-loop. The decision is pure and host-tested (test_health_policy.c).
+
+config ESPNOW_HEALTH_STALE_DATA_S
+    int "Receiver: reboot after this many seconds without a meter value"
+    depends on ESPNOW_RECEIVER_HEALTH_WATCHDOG
+    range 60 86400
+    default 900
+    help
+        How long no SML value may arrive (any OBIS) before the health watchdog
+        reboots the receiver. The sender sends on a 5 s cycle, so 900 s (15 min)
+        is far above any normal gap and only fires on a real outage. Set to a
+        value comfortably above the longest expected backfill/poll interval.
+
+config ESPNOW_HEALTH_LOW_HEAP_BYTES
+    int "Receiver: reboot when the free heap drops below this (bytes)"
+    depends on ESPNOW_RECEIVER_HEALTH_WATCHDOG
+    range 2048 262144
+    default 12288
+    help
+        Free-heap floor. A receiver that runs out of heap cannot serve the
+        dashboard or accept backfilled history; rebooting clears the leak. 12 KB
+        leaves room for the HTTP + TLS/OTA paths while still catching a real
+        exhaustion well before allocations start failing.
+
+config ESPNOW_HEALTH_GRACE_S
+    int "Receiver: health watchdog grace after boot (s)"
+    depends on ESPNOW_RECEIVER_HEALTH_WATCHDOG
+    range 0 3600
+    default 180
+    help
+        Uptime that must pass before any health rule may fire, so a slow boot
+        (Wi-Fi association, first backfill) is not mistaken for a fault.
+

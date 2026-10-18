@@ -322,6 +322,18 @@ python3 "$here/check_dashboard_js.py"
 
 "$out/test_task_wdt_policy"
 
+# Receiver health/watchdog policy: the self-heal reboot decision (stale meter
+# data / low heap) must be exact - grace window, staleness limit, heap floor and
+# the latch. Pure C; the IDF glue (health_task.c) only performs the reboot.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/health_policy.c" \
+    "$here/test_health_policy.c" \
+    -o "$out/test_health_policy"
+
+"$out/test_health_policy"
+
 # OTA safety policy: the update slot must never overlap the storage partition,
 # and a pull-OTA URL must be https. Pure, driven with the real partitions.csv
 # addresses so the guard that protects the measurement history is covered.

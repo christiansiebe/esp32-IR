@@ -437,7 +437,34 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   decision) and `test/test_boot_confirm_trigger.c` (the real glue performs the
   rollback exactly once, and a confirmed image only reboots, never rolls back).
 - Health failures after confirmation cannot roll back (that slot is gone); they
-  only reboot. A post-confirmation health watchdog is still open (see TODO.md).
+  only reboot.
+
+## Receiver health watchdog (self-heal reboot, receiver only)
+- The receiver's failure mode is not a crash but a silent hang: the SML data
+  stops arriving (sender or ESP-NOW lost) while the device keeps serving a stale
+  dashboard. `health_task.c` (started from the receiver branch of `app_main`,
+  receiver-only) evaluates the pure rules in `health_policy.{h,c}` every 5 s and
+  reboots when the meter data has been silent for longer than
+  `CONFIG_ESPNOW_HEALTH_STALE_DATA_S` (default 900 s) or the free heap dropped
+  below `CONFIG_ESPNOW_HEALTH_LOW_HEAP_BYTES` (12 KB), after a
+  `CONFIG_ESPNOW_HEALTH_GRACE_S` (180 s) start-up window. A reason **latches**,
+  so the reboot decision does not flap.
+- `last_rx_ms == 0` (no value received yet, e.g. no sender in range during
+  commissioning) is deliberately **not** treated as stale, so a receiver without
+  a sender does not reboot-loop. `health_task_note_rx()` is called from
+  `store_sml_value()` for every received value (any OBIS).
+- The reboot is escalated through `boot_confirm_fail()`: a still-unconfirmed
+  image rolls back to the previous OTA slot, a confirmed one just restarts. This
+  is the post-confirmation health path the boot policy cannot cover (that slot
+  is gone).
+- It complements `web_guard.c` (dashboard dead) and `liveness_guard.c` (global
+  stall): the health watchdog covers "the UI answers but the measurement data
+  never arrives". The health worker also subscribes to the TWDT
+  (`TASK_WDT_NAME_HEALTH`, receiver-only in `task_wdt_policy.c`), so a wedged
+  health loop reboots too. The decision is pure and host-tested
+  (`test/test_health_policy.c`); the glue is compiled only for the receiver
+  (the sender build has no `health_*` object). Enable/disable with
+  `CONFIG_ESPNOW_RECEIVER_HEALTH_WATCHDOG` (default on).
 
 ## Watchdog (task watchdog subscribed; idle-task check still off)
 - The long-running workers are registered with the task watchdog (TWDT) behind
@@ -447,7 +474,8 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   and `trigger_panic = true`**, so a wedged worker reboots instead of hanging.
   `power_history_worker` (both roles) and the sender's `uart_event_worker` /
   `uart_capture_worker` call `task_wdt_guard_subscribe()` on entry and
-  `task_wdt_guard_feed()` once per loop. The IDF default is 5 s / no panic; the
+  `task_wdt_guard_feed()` once per loop; the receiver's health worker
+  (`TASK_WDT_NAME_HEALTH`) does the same. The IDF default is 5 s / no panic; the
   policy overrides it at runtime, so the `sdkconfig` still shows the default.
   The `status` console command prints the live state.
 - Why the timeout is 120 s: the history writer drains the queue in batches and
@@ -458,7 +486,7 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   never returns) is caught within 120 s. `task_wdt_worker_max_block_ms()` is the
   single source for each worker's longest legitimate block, and
   `task_wdt_policy_covers_role()` proves the timeout covers every subscribed
-  worker with margin. Host test: `test/test_task_wdt_policy.c` (115 checks).
+  worker with margin. Host test: `test/test_task_wdt_policy.c` (119 checks).
 - `CONFIG_ESP_TASK_WDT_INIT=y` (IDF default) still starts the watchdog, so the
   idle tasks stay monitored; `task_wdt_guard_init()` mirrors
   `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0/1` into `idle_core_mask` so

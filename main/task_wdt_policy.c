@@ -22,6 +22,7 @@ const char *task_wdt_worker_name(task_wdt_worker_t worker)
     case TASK_WDT_WORKER_POWER_HISTORY: return "power_history";
     case TASK_WDT_WORKER_UART_EVENT:    return "uart_events";
     case TASK_WDT_WORKER_UART_CAPTURE:  return "uart_capture";
+    case TASK_WDT_WORKER_HEALTH:        return "health";
     case TASK_WDT_WORKER_COUNT:
     default:                            return "unknown";
     }
@@ -38,6 +39,10 @@ bool task_wdt_worker_in_role(task_wdt_worker_t worker, task_wdt_role_t role)
     case TASK_WDT_WORKER_UART_CAPTURE:
         /* The UART workers only exist in the sender. */
         return role == TASK_WDT_ROLE_SENDER;
+    case TASK_WDT_WORKER_HEALTH:
+        /* The self-heal watchdog only runs on the receiver (it has the
+         * dashboard + SML data path to protect; the sender has no such loop). */
+        return role == TASK_WDT_ROLE_RECEIVER;
     case TASK_WDT_WORKER_COUNT:
     default:
         return false;
@@ -60,6 +65,10 @@ uint32_t task_wdt_worker_max_block_ms(task_wdt_worker_t worker)
         /* UART read timeout (50 ms) plus the longest adaptive light-sleep window
          * the controller may request (1500 ms). */
         return 2000;
+    case TASK_WDT_WORKER_HEALTH:
+        /* The health watchdog sleeps HEALTH_POLL_MS (5 s) between evaluations,
+         * then feeds the watchdog before sleeping again. */
+        return 5000;
     case TASK_WDT_WORKER_COUNT:
     default:
         return 0;

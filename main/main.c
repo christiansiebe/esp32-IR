@@ -47,6 +47,7 @@
 #include "web_guard.h"
 #if !CONFIG_ESPNOW_ROLE_SENDER
 #include "mqtt_bridge.h"
+#include "health_task.h"
 #endif
 #include "crash_journal.h"
 #include "liveness_guard.h"
@@ -2593,6 +2594,10 @@ static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
         g_sml_latest_power_valid = true;
     }
     portEXIT_CRITICAL(&g_sml_history_lock);
+
+    /* Feed the health watchdog with the freshest received value (any OBIS), so
+     * the "meter data went silent" rule only fires on a real outage. */
+    health_task_note_rx();
 
     ESP_LOGI(TAG, "SML value: OBIS=%s value=%s scaler=%d unit=%u",
              record.obis, record.value, (int)record.scaler,
@@ -7874,6 +7879,14 @@ void app_main(void)
     /* Backstop for a global stall: fed by every worker and by HTTP/console
      * traffic, it reboots the device if nothing makes progress. */
     liveness_guard_start();
+#if CONFIG_ESPNOW_RECEIVER_HEALTH_WATCHDOG
+    /* Self-heal: reboot when the device is up but the meter data has gone silent
+     * or the heap fell below the floor. web_guard covers a dead dashboard; this
+     * covers the "dashboard answers but no data" case. */
+    if (health_task_start() != ESP_OK) {
+        ESP_LOGW(TAG, "Receiver health watchdog is disabled");
+    }
+#endif
     /* Same command set on the USB serial monitor (UART0), so the receiver can
      * be driven locally even if the dashboard is unreachable. */
     serial_console_start();

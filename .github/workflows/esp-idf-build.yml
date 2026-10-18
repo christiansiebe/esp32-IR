@@ -225,6 +225,23 @@ jobs:
             "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image registers workers with the task watchdog"
 
+      - name: Verify the receiver health watchdog is compiled in
+        if: startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The receiver ships a self-heal watchdog (health_task.c + the pure
+          # health_policy.c) that reboots on stale meter data / low heap. The
+          # strings below live in the receiver-only sources, so grepping the
+          # built app proves the module is compiled into this role and not just
+          # the host test. The sender image must NOT contain it.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Health watchdog armed: stale' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Health failure: %s; rebooting' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image runs the health watchdog"
+
       - name: Stage firmware and flash files
         shell: bash
         run: |

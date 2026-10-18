@@ -197,16 +197,25 @@ Aus dem Event-Log rekonstruiert und gesichert.
 - [x] Lokal gesichert: Branch **`recovered/ams-features-salvage`** (Commit `d10ea8c`, `README.md`
       mit Herkunft/Grenzen) + Kopie unter `/workspace/project/.../recovered-ams/`.
 - [ ] **Nach `main.c` integrieren** (nur teilweise nachspielbar, daher noch nicht baubar):
-      - [ ] `health_policy.{c,h}`, `health_task.{c,h}` — Health-Monitor / selbstheilender Reboot + TWDT
+      - [x] `health_policy.{c,h}`, `health_task.{c,h}` — Health-Monitor / selbstheilender Reboot + TWDT
+            (integriert 2026-10-18, `feat/health-watchdog`: reine, host-getestete Policy + IDF-Kleber
+            receiver-only; rebootet bei stummer Messdatenlage (Default 900 s) oder Heap unter der
+            Untergrenze (12 KB) nach einer Grace (180 s), eskaliert über `boot_confirm_fail()` —
+            unbestätigtes Image rollt zurück, sonst normaler Reboot. Der Health-Worker ist beim
+            TWDT angemeldet; `task_wdt_policy` führt ihn als receiver-only Worker. Kconfig
+            `ESPNOW_RECEIVER_HEALTH_WATCHDOG`/`_STALE_DATA_S`/`_LOW_HEAP_BYTES`/`_GRACE_S`.)
       - [ ] `mqtt_publish.{c,h}`, `mqtt_bridge.{c,h}`, `mqtt_client.h` — MQTT + HA-Discovery
-      - [ ] `boot_confirm.{c,h}`, `boot_policy.{c,h}` — Post-OTA-Rollback-Bestätigung
+      - [x] `boot_confirm.{c,h}`, `boot_policy.{c,h}` — Post-OTA-Rollback-Bestätigung (bereits auf `main`)
       - [ ] `recovery_button.{c,h}`, `recovery_start.{c,h}` — BOOT-Tasten-Recovery
       - [ ] `test/test_health_policy.c`, `test/test_mqtt_bridge.c`, `test/test_boot_policy.c`,
             `test/test_recovery_button.c` in `test/run_host_tests.sh` aufnehmen
+            (`test_health_policy.c` + `test_boot_policy.c` bereits eingehängt; mqtt/recovery offen)
       - [ ] `main/CMakeLists.txt`, `sdkconfig.defaults` (MQTT/esp-mqtt), `idf_component.yml`
 - [ ] Offene Integrationsschritte, die **nicht** rekonstruierbar waren und neu gemacht werden müssen:
       `main/main.c`-Aufrufe, `power_history.c`-Migration (s. u.), `run_host_tests.sh`-Einträge.
-- [ ] Nach Integration: beide Rollen über CI bauen (Nachweis fehlt bisher komplett).
+- [x] Nach Integration: beide Rollen über CI bauen (Nachweis fehlt bisher komplett).
+      (Health-Modul: receiver + sender + receiver-apoff lokal gebaut, Health-Strings nur im
+      Empfänger; TWDT-Registrierung in beiden Rollen.)
 
 ### AMS-Reader-Vergleich (`amsreader-firmware`) — Übernahmen
 Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
@@ -226,9 +235,13 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       `test_record_migration` + `test_migration_in_aggregation` (11 Checks). Ohne Fix rot
       (v1-Datensatz wird verworfen), mit Fix grün - rot/grün verifiziert. **Gepusht** (in
       `origin/cline/power-history-diag` enthalten).
-- [ ] **Health-Reboot / Selbstheilung**: Reboot, wenn z. B. `last_rx_ago_ms` > N Minuten oder
-      Wi-Fi down > N Minuten. Nutzt vorhandenes `last_rx_ago_ms`. (Im geretteten
-      `health_*`-Modul angelegt, aber nicht integriert.)
+- [x] **Health-Reboot / Selbstheilung** (integriert 2026-10-18, `feat/health-watchdog`): Reboot,
+      wenn die Messdaten stumm sind (`ESPNOW_HEALTH_STALE_DATA_S`, Default 900 s) oder der freie
+      Heap unter die Untergrenze fällt (`ESPNOW_HEALTH_LOW_HEAP_BYTES`, 12 KB), nach einer Grace
+      (`ESPNOW_HEALTH_GRACE_S`, 180 s). Der Worker meldet sich per `health_task_note_rx()` an jeder
+      empfangenen SML-Wert; `last_rx == 0` (noch nie ein Wert) wird **nicht** als stumm gewertet
+      (kein Reboot-Loop bei der Inbetriebnahme ohne Sender). Eskalation über `boot_confirm_fail()`.
+      Receiver-only; beim TWDT angemeldet. Host-Test `test/test_health_policy.c` (18 Checks).
 - [x] **Rollback-Pfad verdrahtet** (`boot_confirm_poll`): `BOOT_TAKE_ROLLBACK` wurde
       berechnet, aber **nie ausgeführt** — nur `BOOT_TAKE_CONFIRM` wurde behandelt, und
       `boot_confirm_fail()` hatte **null Aufrufer**. Ein Image, das zwar hochkommt, aber das

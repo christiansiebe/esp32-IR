@@ -26,6 +26,42 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 12:15 UTC · Fleet-Sub-Agent (Branch feat/health-watchdog, Commit f7c2728)
+**Status: PR #29 offen, Host-Tests + Builds gruen.**
+
+**Auftrag:** AMS-Features aus dem verlorenen `/tmp/work` nach `main.c`
+integrieren — `health_policy.{c,h}`, `health_task.{c,h}` (Health-Monitor /
+selbstheilender Reboot) + `test/test_health_policy.c`; dazu TWDT-Worker (TODO ~310).
+
+**Befund zum TWDT-Teil:** Die explizite TWDT-Anmeldung ist **bereits auf `main`**
+(PR #10, `d836092`): `power_history_worker`, `uart_event_worker`,
+`uart_capture_worker` abonnieren sich selbst, `task_wdt_guard_init()` armiert den
+Waechter. TODO ~310 war also schon erledigt. Dieser PR **erweitert** die
+Registrierung um den neuen Health-Worker.
+
+**Gebaut (rebuilt, nicht replayed):**
+- `main/health_policy.{h,c}` — reine, host-getestete Entscheidung (stumme
+  Messdaten / niedriger Heap) mit Latch + Boot-Grace. Kein ESP-IDF.
+- `main/health_task.{h,c}` — IDF-Kleber, **receiver-only**. 5-s-Worker wertet die
+  Policy aus und eskaliert ueber `boot_confirm_fail()`: unbestimmtes Image rollt
+  zurueck, bestaetigtes startet nur neu. Worker ist beim **TWDT** angemeldet.
+- `health_task_note_rx()` wird aus `store_sml_value()` an jedem empfangenen Wert
+  gespeist; `last_rx == 0` (noch nie ein Wert, z. B. Inbetriebnahme ohne Sender)
+  gilt **nicht** als stumm -> kein Reboot-Loop ohne Peer.
+- `task_wdt_policy.{h,c}`: Health-Worker als receiver-only TWDT-Worker
+  (`TASK_WDT_NAME_HEALTH`, 5 s max Block); Timeout-Math deckt ihn mit Marge.
+- Kconfig: `ESPNOW_RECEIVER_HEALTH_WATCHDOG` (Default an) + `_STALE_DATA_S` (900),
+  `_LOW_HEAP_BYTES` (12288), `_GRACE_S` (180).
+
+**Tests/Verifikation:** Host-Suite gruen (`test_health_policy.c` 18 Checks,
+`test_task_wdt_policy.c` 119), Dashboard-JS ok, beide Rollen lokal gebaut
+(receiver + sender + receiver-apoff), Health-Strings nur im Empfaenger. CI hat
+einen neuen Schritt, der die Health-Strings in beiden Empfaenger-Images prueft.
+
+**Kein Wire-/Storage-Layout-Wechsel, OTA-sicher.** „Kein Datenverlust" unberuehrt:
+der Reboot erholt nur ein stummes Geraet, der Backfill spiegelt verpasste Minuten
+danach nach. Offen: Verifikation am echten Geraet (kein Hardware-Zugriff im Chat).
+
 ## 2026-10-18 11:55 UTC · Fleet-Sub-Agent (Branch docs/license-third-party, Commit 8d1c989)
 **Thema: „LICENSE + README" (TODO.md).** Der Auftrag war teilweise veraltet:
 `LICENSE` (MIT) und `README.md` liegen **schon auf main** (Commit `e350984` / PR #12,

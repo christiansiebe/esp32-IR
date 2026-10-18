@@ -62,10 +62,16 @@ int main(void)
     CHECK(task_wdt_worker_in_role(TASK_WDT_WORKER_UART_CAPTURE,
                                   TASK_WDT_ROLE_SENDER),
           "uart capture worker runs on the sender");
+    CHECK(task_wdt_worker_in_role(TASK_WDT_WORKER_HEALTH,
+                                  TASK_WDT_ROLE_RECEIVER),
+          "health watchdog runs on the receiver");
+    CHECK(!task_wdt_worker_in_role(TASK_WDT_WORKER_HEALTH,
+                                   TASK_WDT_ROLE_SENDER),
+          "health watchdog is receiver-only");
 
-    /* Receiver subscribes 1 worker (history), sender 3. */
-    CHECK(task_wdt_subscribed_count(TASK_WDT_ROLE_RECEIVER) == 1,
-          "receiver subscribes exactly the history writer");
+    /* Receiver subscribes 2 workers (history + health), sender 3. */
+    CHECK(task_wdt_subscribed_count(TASK_WDT_ROLE_RECEIVER) == 2,
+          "receiver subscribes the history writer and the health watchdog");
     CHECK(task_wdt_subscribed_count(TASK_WDT_ROLE_SENDER) == 3,
           "sender subscribes history + both uart workers");
 
