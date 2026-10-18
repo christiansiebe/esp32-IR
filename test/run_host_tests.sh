@@ -266,6 +266,11 @@ python3 "$here/check_dashboard_js.py"
 # must reject placeholders, bad band/channel pairs and an AP subnet overlapping
 # the home network before anything reaches the board.
 python3 "$repo/remote-shell/ha/test_odroid_ap_config.py"
+# External watchdog (remote-shell/ha): the off-board observer's decision logic
+# and the actuator adapter are pure functions -> host-tested without mocks,
+# network or board. The real power cut needs hardware and is not exercised.
+python3 "$repo/remote-shell/ha/test_watchdog_monitor.py"
+python3 "$repo/remote-shell/ha/test_watchdog_actor.py"
 
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.
