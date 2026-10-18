@@ -20,8 +20,8 @@ LIVE="${MEM_LIVE:-/workspace/MEMORY.md}"
 INTERVAL="${MEM_INTERVAL:-90}"
 
 API="https://api.github.com"
-READ_TOKEN="${GITHUB_TOKEN:-${GITHUB_WRITE_TOKEN:-}}"
-WRITE_TOKEN="${GITHUB_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
+READ_TOKEN="${GITHUB_WRITE_TOKEN:-}"
+WRITE_TOKEN="${GITHUB_WRITE_TOKEN:-}"
 
 do_pull() {
   local tmp; tmp="$(mktemp)"

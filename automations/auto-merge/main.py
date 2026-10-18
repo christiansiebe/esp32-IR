@@ -51,8 +51,12 @@ def get_secret(name):
 
 
 def resolve_token():
-    """The first token that actually authenticates (merging needs a real one)."""
-    for name in ("GITHUB_WRITE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+    """The registered GITHUB_WRITE_TOKEN, verified to actually authenticate.
+
+    The read-only platform token (GITHUB_TOKEN) is deliberately NOT a fallback:
+    it cannot merge and would only produce a 401/403.
+    """
+    for name in ("GITHUB_WRITE_TOKEN",):
         tok = get_secret(name)
         if not tok:
             continue
