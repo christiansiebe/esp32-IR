@@ -59,9 +59,9 @@
   },
   "4e889e18ce73432d9c65d3d8568c55e8": {
    "name": "LICENSE+README",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "branch": "fleet/license-readme",
-   "note": "TODO: LICENSE + README fehlen (blockiert Code-Uebernahme). PR gegen main."
+   "note": "FERTIG: PR #25 (docs/license-third-party) gemerged - Drittlizenz-Angabe (LGPL-2.1 sml_parser, Apache-2.0/MIT Managed Components) im README. LICENSE+README lagen schon auf main (PR #12)."
   },
   "b6b11eb9dd704eaca389ecbaa5cb7de8": {
    "name": "Backfill-Dubletten",
