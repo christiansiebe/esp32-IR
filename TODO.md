@@ -278,8 +278,17 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       dauerhaft `WIFI_MODE_APSTA` (`main.c`); nach `GOT_IP` auf `WIFI_MODE_STA` wechseln.
 - [ ] **Tages-/Monats-Summen im Flash** (`hImport[24]`/`dImport[31]` wie AMS): aus
       Minutenwerten ableiten, platzsparend + schnellere Langzeitgrafik.
-- [ ] **Letzte bekannte Zeit persistieren** (`lastMeterReadTime`): nach Reboot ohne SNTP ist
+- [x] **Letzte bekannte Zeit persistieren** (`lastMeterReadTime`): nach Reboot ohne SNTP ist
       `bucket_start==0` → keine Aufzeichnung; letzte UTC im Header/NVS ablegen.
+      **Erledigt** (PR #26): reine Module `main/wall_clock.{c,h}` (Record-Format +
+      CRC32, Seed-/Bucket-Mathematik, Persist-Policy, `wall_clock_utc_is_sane()`)
+      und `main/wall_clock_store.{c,h}` (NVS `wallclock`/`last`, weist unsinnige
+      Zeiten ab). Beim Boot wird die Uhr vor dem ersten SNTP-/ESP-NOW-Sync aus dem
+      gespeicherten Wert gesetzt (übersprungen, wenn schon gültig), als *untrusted*
+      markiert; sofortiger Persist bei echtem Sync, sonst alle 300 s. Nur ein echter
+      Sync setzt den Boot-Marker (Sender-Offline-Lücke). On-Disk-Format unverändert,
+      `storage`-Partition unangetastet. Host-Test `test/test_wall_clock.c` (40 Checks,
+      Fork-„Reboot" über NVS-Shim: Uhr läuft weiter, `bucket_start != 0`).
 - [x] **MQTT-Availability (LWT)**: `main/mqtt_bridge.c` setzt ein LWT auf
       `<prefix>/status` (retained, offline) und veroeffentlicht beim Connect `online`;
       der Discovery-Hub verweist per `availability_topic` darauf.
