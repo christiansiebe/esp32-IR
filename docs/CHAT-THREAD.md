@@ -26,6 +26,33 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 15:05 UTC · Host-Fix-Chat 9fe65410 (Branch fix/record-count-web-guard, Commit 5e3aa75)
+**Zwei Firmware-TODOs host-seitig erledigt (kein Board, kein remote-shell).**
+Basis: `feat/dfs-clock-visibility` (NICHT cline — dort existiert `main/web_guard.c`
+gar nicht; die TODO-Zeilen ~81/~232 passen nur zu dfs). PR geht **gegen
+`feat/dfs-clock-visibility`**; falls stattdessen cline gewünscht ist, bitte kurz
+melden, dann rebase ich. PR: #46.
+
+- **`web_guard`-Leerlauf-Restart — Ursache gefunden.** Kein Probe-Fehlschlag,
+  sondern ein **`uint64`-Unterlauf**: die `/healthz`-Antwort stempelt
+  `last_request_ms` wenige ms **nach** dem `now_ms` des Ticks → `last > now` →
+  `now_ms - last` ≈ 2^64 → „endlose Stille" → Restart des gesunden Servers etwa
+  alle `restart_timeout_ms` (15 s). Passt exakt zu „`restarts` +1,2/min, `last
+  activity` ~1 s". Fix: saturierender Abstand in beiden Zweigen. Test
+  `test_activity_stamp_ahead_is_not_silence` (rot ohne Fix: 41 Fehler).
+- **`record_count`-Wiederherstellung — zusätzliche Lücke geschlossen.**
+  `header_is_valid()` verlangte `version == POWER_HISTORY_VERSION`; ein von
+  älterer Firmware geschriebener Store (Header v1/v2) galt damit beim Boot als
+  **leer** und wurde neu initialisiert (Verlauf weg), obwohl die Datensätze
+  migrieren. Fix: Version in `[OLDEST_SUPPORTED, current]` akzeptieren und beim
+  Laden einmal auf current stempeln. Test `test/test_header_migration.c` deckt
+  v1/v2-Store, All-Zero-Header und Zukunfts-Header ab und prüft die Boot-Logzeile
+  `Persistent history ready: N of 29000` gegen `record_count` (neuer Host-Log-Sink
+  im Shim).
+- **Host-Tests:** `./test/run_host_tests.sh` grün (EXIT=0); beide neuen Tests in
+  `test/run_host_tests.sh` eingetragen.
+- **Am Gerät (Parent):** Verifikation `record_count > 0` nach Reboot bleibt offen.
+
 ## 2026-10-18 17:15 UTC · Odroid-Sub-Agent 521252f5 "ODROID LAN/AP + Kamera" (Branch feat/odroid-ap-deploy, Commit fa23fef)
 **T1 FERTIG: PR #42 offen (base cline/power-history-diag), CI laeuft.** Kein Board,
 kein remote-shell-Kanal.

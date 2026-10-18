@@ -99,6 +99,17 @@ echter `httpd`-Restart stattfindet (Bootlog ist von SML-Werten überflutet),
 und ob `threshold_ms`/`restart_timeout_ms` für den Leerlauf zu knapp sind.
 **Nicht im AP-aus-Scope; separat zu untersuchen.**
 
+**Gelöst host-seitig (2026-10-18, Branch `fix/record-count-web-guard`):** Ursache ist
+**kein** Probe-Fehlschlag, sondern ein **`uint64`-Unterlauf** in `web_guard_tick()`. Die
+`/healthz`-Antwort der Selbstprobe stempelt `last_request_ms` **wenige ms nach** dem
+`now_ms` des Ticks, d. h. `last > now`. `now_ms - last` läuft dann auf ~2^64 über und
+liest sich als **endlose Stille** (`> threshold_ms`), obwohl die Probe gerade eben
+geantwortet hat. Der Guard startet den gesunden Server deshalb etwa alle
+`restart_timeout_ms` (15 s) neu — passt zu „`restarts` +1,2/min, `last activity` ~1 s".
+Fix: saturierender Abstand (`now_ms >= last ? now_ms - last : 0`) in beiden Zweigen
+(Threshold und Restart). Host-Test `test_activity_stamp_ahead_is_not_silence` in
+`test/test_web_guard.c` (rot ohne den Clamp: 41 Fehler, grün mit).
+
 ## Fix „Sender 240 MHz, 0 Steps" (`feat/sender-associate-dfs`, 2026-10-17)
 **Ergebnis: Auf dem ESP32 classic (IDF v6.1) sind ein zuverlässiger ESP-NOW-Link
 und Funk-Powersave/DFS nicht gleichzeitig zu haben.** Am Gerät verifiziert.
@@ -249,15 +260,24 @@ bisher **ungedeckt** (der Shim rief `power_history_init()` nie auf). Neu: Host-T
 grün mit dem Fix.
 
 Zu prüfen / zu tun:
-- [ ] Beim Boot verifizieren, dass `power_history` die SPIFFS-Datei öffnet und den
-      Header liest (nicht in den RAM-Fallback fällt). Logzeile `Persistent history
-      ready: N of 29000` gegen `record_count` in `/api/power-history` abgleichen.
-- [ ] Header-Handling prüfen: Nach dem Fix `1612975` (gültiger Fresh-Header + In-Place-
-      Reparatur) darf ein gültiger Bestand **nicht** als „leer" gewertet werden.
-- [ ] Migration prüfen (`4af921a`): Alte `format_version` darf die Datensätze nicht
-      mehr verwerfen — nach dem Boot müssen migrierte Datensätze `record_count > 0` ergeben.
-- [ ] Akzeptanzkriterium (Pflicht): nach Reboot sofort `record_count > 0`, kein RAM-Fallback,
-      0 Schreibfehler. Am Gerät verifizieren.
+- [x] **Host-seitig (2026-10-18):** Logzeile `Persistent history ready: N of 29000`
+      gegen `record_count` abgesichert — `test/test_header_migration.c` fängt die echte
+      Logzeile über einen Host-Log-Sink (`esp_shim.h`) ab und prüft `N == record_count`
+      **und** `capacity == 29000`. Die Verifikation am Gerät (`/api/power-history`) macht
+      der Parent.
+- [x] **Host-seitig (2026-10-18):** Header-Handling — ein **gültiger** Bestand darf nicht
+      als „leer" gelten. Ursache gefunden: `header_is_valid()` verlangte
+      `header->version == POWER_HISTORY_VERSION`, d. h. ein von **älterer** Firmware
+      geschriebener Store (Header v1/v2) wurde beim Boot als leer verworfen und die Datei
+      neu initialisiert — obwohl die Datensätze migrieren. Fix: jede Version in
+      `[OLDEST_SUPPORTED, current]` akzeptieren und beim Laden einmal auf die aktuelle
+      Version stempeln. Test deckt v1-/v2-Store (bleibt erhalten) sowie All-Zero- und
+      Zukunfts-Header (erholen sich zu einem bereiten, leeren Store) ab.
+- [x] **Host-seitig (2026-10-18):** Migration — alte `format_version` verwirft keine
+      Datensätze mehr; `test_header_migration.c` liest v1-/v2-Datensätze nach dem Boot
+      zurück und prüft `record_count > 0` plus `format_version == current`.
+- [ ] **Am Gerät (Parent):** Akzeptanzkriterium nach Reboot sofort `record_count > 0`,
+      kein RAM-Fallback, 0 Schreibfehler.
 
 ### Push / Zugang (gelöst)
 - [x] **Schreibzugang gefunden (2026-10-12).** `GITHUB_TOKEN` = GitHub-App-Token (`ghu_…`),
