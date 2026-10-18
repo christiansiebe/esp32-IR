@@ -336,3 +336,92 @@ Diese drei sind **Hypothesen-adressierend** und brauchen Board-Verifikation
 3. `fuser -v /dev/watchdog0` → wer haelt das Device.
 4. Aktor festlegen (Power-Cut vorhanden? schaltbare Steckdose? GPIO am MCU?).
 5. Erst danach `watchdog_monitor.py` produktiv anschliessen (Board-Zugriff).
+
+---
+
+## 8. Parent-Verifikation am Board (2026-10-18, Kanal `remote-shell/cmd_send.sh`)
+
+Der Parent hat die in Abschnitt 4/7 genannten Befehle **sequenziell** am Board
+gefahren. Ergebnis: **zwei Hypothesen sind widerlegt, und der in Abschnitt 4 als
+„Kernnachweis" bezeichnete Wert ist auf dieser Hardware unbrauchbar.**
+
+### 8.1 `bootstatus` ist KEIN Kernnachweis (Korrektur zu Abschnitt 4/7)
+
+- `cat /sys/class/watchdog/watchdog0/bootstatus` → **`0`**.
+- Der Grund steht im **eigenen** Board-Werkzeug `boot_journal.py`
+  (`/usr/local/sbin/boot_journal.py`, Kopfkommentar):
+  *„Die Amlogic-Hardware liefert KEINEN Reset-Grund (`watchdog/bootstatus` ist
+  immer 0, pstore bleibt leer)."*
+- **Folge:** `bootstatus` entscheidet hier **nichts** — weder H1/H2 noch H3.
+  Der Satz in Abschnitt 4 („`bootstatus` allein entscheidet H3 gegen H1/H2 —
+  der wichtigste Einzelwert") gilt fuer diese Hardware **nicht**. Die
+  Entscheidung faellt ueber die **anderen** Spuren (8.2–8.5).
+
+### 8.2 H2 (systemd konnte das Device nicht oeffnen) — WIDERLEGT
+
+Am laufenden Board **und** im Journal des Hang-Boots (-4):
+
+```
+systemd[1]: Using hardware watchdog 'Meson GXBB Watchdog', version 0, device /dev/watchdog0
+systemd[1]: Watchdog running with a hardware timeout of 1min.
+fuser -v /dev/watchdog0   ->  /dev/watchdog0:  root  PID 1  F....  systemd
+wdctl                      ->  Identity: Meson GXBB Watchdog [version 0]
+                               Timeout: 60 seconds   Timeleft: 36 seconds
+```
+
+systemd hat das Device **erfolgreich geoeffnet, gehalten (PID 1) und auf 60 s
+gestellt** — im Hang-Boot (-4) zeigen dieselben Zeilen um 02:14:55 dasselbe.
+Ein „Device busy"/fehlgeschlagenes Open (H2) ist damit **ausgeschlossen**.
+
+### 8.3 H1 ueber den Guard-Timer — WIDERLEGT
+
+`systemctl cat watchdog-guard.{timer,service}` + `/usr/local/sbin/watchdog-guard.sh`:
+
+- Der Guard liest **nur** `/sys/class/watchdog/watchdog0/state` (sysfs-Attribut)
+  — er **oeffnet das Char-Device `/dev/watchdog0` nicht**.
+- Damit ist er **kein** `close()`-Kandidat, der den Watchdog entwaffnen koennte
+  (`nowayout=0`, aber ohne Opener/Closer gibt es nichts zu entwaffnen).
+- Sein Zweck ist umgekehrt: bei `state != active` **3x** in Folge → `reboot`.
+
+### 8.4 Kein sauberer Reboot-Pfad im Hang-Boot (H1-Variante „Magic-Close")
+
+`journalctl -b -4` endet **mitten im fruehen Boot** (letzte Zeile 02:15:01,
+`armbian-hardware-optimization`), **ohne** jede
+`systemd-shutdown`/`Shutting down`/`reboot`-Sequenz. Die H1-Variante „systemd
+schreibt beim geordneten Reboot `V` (Magic-Close), der Reboot haengt am PLL" ist
+fuer **diesen** Hang **widerlegt** — es gab gar keinen Shutdown.
+
+### 8.5 Boot-Journal (persistenter Reset-Grund)
+
+`/var/lib/boot-journal/state.json` fuehrt `history` mit dem Grund je Boot
+(`boot_journal.py`, `classify_reset`). Der Hang-Boot -4 (02:14:55–02:15:01) →
+Recovery-Boot -3 (03:21:33) ist als **`hard-reset-unknown`** klassifiziert
+(`prev_uptime_s ≈ 904 s`, kein Panic, kein pstore). Das persistierte Log endet
+nach 6 s (Armbian-Ramlog verliert den RAM-Puffer beim Hard-Reset), waehrend der
+Boot ~15 min lief. **Kein Panic** → `panic=10` konnte nicht greifen.
+
+### 8.6 Rest-Bild
+
+| Hypothese | Stand nach Parent-Verifikation |
+|---|---|
+| H1 (entwaffnet via `close()`) | **schwach**: Guard scheidet aus, kein Shutdown im Hang-Boot; nur `nowayout=0` als theoretische Luecke |
+| H2 (Device busy, nie armiert) | **widerlegt** (systemd haelt `/dev/watchdog0`, 60 s) |
+| H3 (feuerte, Reset kam nicht durch) | **beste verbleibende Erklaerung**: `hard-reset-unknown`, kein Panic, Board kam von selbst zurueck — passt zu einem PLL-Hang, der die Reset-/Boot-ROM-Domain mitnimmt |
+| H4 (Timeout > 60 s) | traegt nur ~10 min bei, nicht die ~52–66 min |
+| H5 (Kick-Task friert ein) | als Alleinursache unplausibel (Kick-Ausfall → Reset, nicht Ausbleiben) |
+| H7 (nur big-Cluster stand) | **nicht auszuschliessen**: `prev_uptime_s` = 904 s ohne Zwischenbeobachtung |
+
+**Konsequenz:** Das 60-s-HW-Watchdog-Sicherheitsnetz ist fuer **rohe PLL-OC-
+Experimente nicht verlaesslich** (H3 bleibt plausibel). Die Haertung aus
+Abschnitt 5 (externer Heartbeat + off-board Aktor) bleibt richtig; die in 5.5
+genannten Sofortmassnahmen (`nowayout=1`, `hung_task_panic=1`) adressieren H1/H7
+und sind weiterhin sinnvoll, aber **kein** Ersatz fuer den externen Pfad.
+
+### 8.7 Zustand des Boards waehrend der Verifikation
+
+- `user_overlays=lowfreq ramoops` in `/boot/armbianEnv.txt` → **kein OC-Overlay
+  aktiv**, Board auf Stock-Takt.
+- `/dev/video0` = **Amlogic Video Decoder** (`meson-video-decoder`), **keine
+  Kamera** (bestaetigt den Net-Recon).
+- Ethernet `end0` **NO-CARRIER** (Kabel am AP), WLAN-STA `192.168.178.71` aktiv —
+  unveraendert (kein Eingriff).
