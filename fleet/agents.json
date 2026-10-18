@@ -133,9 +133,12 @@
   },
   "e6c5a6cb7a794da6a88ee7449a5555c9": {
    "name": "AMS Boot-Rollback",
-   "open_tasks": 1,
-   "branch": "fleet/ams-boot-recovery",
-   "note": "TODO: boot_confirm/boot_policy + recovery_button/recovery_start salvage"
+   "open_tasks": 0,
+   "branch": "feat/recovery-button",
+   "pr": [
+    27
+   ],
+   "note": "FERTIG: PR #27 (BOOT-Tasten-Recovery) gemerged als squash 9a75c40. boot_confirm/boot_policy + test_boot_policy waren schon auf main (#14/#16); neu: recovery_button.{c,h} (reine Gestenlogik) + recovery_start.{c,h} (receiver-only Glue, esp_ota_mark_app_invalid_rollback_and_reboot), Kconfig RECOVERY_BUTTON_GPIO/HOLD_MS, main.c-Aufruf vor boot_confirm_init, test_recovery_button.c (12 Checks) + Host-Stub + CI-Syntax-Check. Zweimal auf main rebased (#25/#29, #28/#31), CI gruen (Host-Tests + receiver/receiver-apoff/sender). Offen nur Hardware-Verifikation des Tasten->Rollback-Pfads am Geraet."
   },
   "65b95dbdf8ce4d7f962e4a42fe36755a": {
    "name": "SML-Parser Haertung",
