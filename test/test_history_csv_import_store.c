@@ -185,6 +185,47 @@ static void test_import_idempotent(void)
     CHECK(st.record_count == before + 2, "count unchanged by the re-import");
 }
 
+/* A record stamped before the valid-clock bound (0 / 1970 from a device that
+ * never had a wall clock) must be rejected at ingestion: it would sort before
+ * every stored minute and break the time-ordered ring's dedupe and paging. */
+static void test_import_rejects_pre_2024(void)
+{
+    printf("test_import_rejects_pre_2024\n");
+    const int64_t base = 9400000000LL;
+    power_history_status_t st;
+    power_history_get_status(&st);
+    uint32_t before = st.record_count;
+
+    power_history_record_t imported[3] = {
+        import_record(0, 1111),               /* bucket_start == 0 */
+        import_record(1700000000LL, 2222),    /* 2023-11: still pre-2024 */
+        import_record(base, 3333),            /* valid */
+    };
+    size_t imported_n = 0;
+    size_t skipped = 0;
+    CHECK(power_history_import_sorted(imported, 3, &imported_n, &skipped) == ESP_OK,
+          "import ok");
+    CHECK(imported_n == 1, "only the valid minute imported");
+    CHECK(skipped == 2, "the two pre-2024 minutes skipped");
+
+    power_history_get_status(&st);
+    CHECK(st.record_count == before + 1, "store grew by one minute");
+    CHECK(!power_history_has_minute(0), "the 0 minute was not stored");
+    CHECK(!power_history_has_minute(1700000000LL), "the 2023 minute was not stored");
+    CHECK(power_history_has_minute(base), "the valid minute is present");
+}
+
+/* `storage_ready` must not claim persistence when the store is only in RAM.
+ * With a real file open (as here), status.persistent is true. */
+static void test_status_persistent(void)
+{
+    printf("test_status_persistent\n");
+    power_history_status_t st;
+    power_history_get_status(&st);
+    CHECK(st.ready, "store ready");
+    CHECK(st.persistent, "persistent flag set when the file is open");
+}
+
 static void test_import_arg_guards(void)
 {
     printf("test_import_arg_guards\n");
@@ -224,6 +265,8 @@ int main(void)
     test_import_extends_and_dedupes();
     test_import_forward_order();
     test_import_idempotent();
+    test_import_rejects_pre_2024();
+    test_status_persistent();
     test_import_arg_guards();
 
     printf("history_csv_import_store: %d checks, %d failures\n", g_checks, g_failures);

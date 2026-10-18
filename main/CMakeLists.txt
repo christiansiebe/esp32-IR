@@ -27,7 +27,7 @@ set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "boot_policy.c" "boot_confirm.c" "boot_log.c"
               "crash_journal.c" "crash_journal_store.c"
               "mqtt_topics.c" "history_backfill.c" "history_sync.c"
-              "history_csv_import.c"
+              "history_csv_import.c" "history_upload.c"
               "link_fallback.c" "liveness_guard.c" "ota_policy.c"
               "task_wdt_policy.c" "task_wdt_guard.c"
               "json_escape.c" "version.c")

@@ -50,6 +50,14 @@
 #define POWER_HISTORY_VERSION 3u
 #define POWER_HISTORY_OLDEST_SUPPORTED_VERSION 1u
 
+/* A minute whose interval_start_utc is below this is not a real measurement:
+ * 1704067200 == 2024-01-01T00:00:00Z, the same "is the clock valid" bound the
+ * recorder uses. Without a wall clock the sender's bucket_start stays 0 (or the
+ * 1970 epoch), and a record stamped 0 would sort before every real minute and
+ * poison the time-ordered ring (dedupe, CSV paging, the backfill window). Such
+ * records are rejected at ingestion instead. */
+#define POWER_HISTORY_MIN_VALID_UTC 1704067200LL
+
 /* Why a minute carries no live measurement. 0 is a normal measured minute (or
  * one merged live from the sender); anything else is a "boot marker": the
  * sender filled an offline window with a marker record instead of a value, so
@@ -77,7 +85,11 @@ typedef struct __attribute__((packed)) {
 } power_history_record_t;
 
 typedef struct {
-    bool ready;
+    bool ready;       /* the store object is usable (queue/worker running) */
+    bool persistent;  /* the SPIFFS file is open: data survives a reboot.
+                       * `ready` alone is also true in the RAM-only fallback, so
+                       * a caller that must not be misled (dashboard/diag) checks
+                       * this instead. */
     uint32_t oldest_sequence;
     uint32_t latest_sequence;
     uint32_t record_count;

@@ -239,6 +239,22 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_history_csv_import"
 
+# Streaming accumulator for the CSV restore upload: partial lines across reads,
+# the optional header, sorted 64-row batches, the unsorted hint and the abort on
+# a rejected batch. Pure C (no store), so the offload path's core is host-tested.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$repo/main/history_csv_import.c" \
+    "$repo/main/history_upload.c" \
+    "$here/test_history_upload.c" \
+    -lm -o "$out/test_history_upload"
+
+"$out/test_history_upload"
+
 # The store-side half of the CSV restore: power_history_import_sorted() appends
 # a backup, dedupes existing minutes (keeping live values) and stays readable.
 "$cc" -std=c11 -Wall -Wextra -O2 -pthread \

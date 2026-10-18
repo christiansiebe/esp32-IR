@@ -461,3 +461,41 @@ klemmte bereits auf 80, der **Runtime-`set`-Pfad** nicht.
 **Offen:** der separate Sender-Reboot-Verdacht (20-Min-Takt, Crash-Journal) ist
 weiterhin **nicht** angefasst.
 
+
+
+## 2026-10-18 14:30 UTC · Fleet-Sub-Agent (Branch fix/upload-offload-storage-ready, PR #31)
+
+**Thema: "Interface minutenlang offline nach CSV-Upload" - Ursache = HTTPD blockiert.**
+
+**Befund (Auftrag aus TODO.md, Abschnitt "Separater Wunsch des Nutzers"):**
+`esp_http_server` fuehrt **jeden** URI-Handler auf **einem** Thread aus. Der alte
+`power_history_upload_handler` las den Body **und** importierte inline und hielt
+dabei den HTTP-Task **und** `g_history_mutex` ueber die SPIFFS-In-Place-Inserts
+hinweg fuer Minuten. Folge: Dashboard-Poll, `/healthz`-Selbst-Probe und Liveness-
+Feed stauten sich dahinter. **Heap war nicht die Ursache** (es wurde schon in
+64er-Batches importiert), der **Task-Watchdog** war nicht der direkte Ausloeser.
+
+**Fix (ein Commit, PR #31):**
+1. Body lesen/parsen laeuft jetzt in einem **eigenen Task**
+   (`httpd_req_async_handler_begin`), der HTTP-Thread kehrt sofort zurueck.
+2. Der Task **parst nur**; jede sortierte 64er-Batch geht per **Queue** an den
+   **Backfill-Worker** (der einzige History-Writer) - Mutex + SPIFFS-Insert also
+   nie auf einem HTTP-Thread. Der Worker zieht die Queue zuerst leer und
+   **ueberspringt seine lange Sync-Session**, solange ein Upload laeuft.
+3. Neues reines, host-getestetes Modul `main/history_upload.{c,h}` (Streaming-
+   Akkumulator: Zeilen ueber Read-Grenzen, optionaler Header, Batch-Sort,
+   unsorted-Hinweis, Abbruch bei abgelehnter Batch).
+4. **`storage_ready` praezisiert**: `power_history_status_t.persistent` (nur true,
+   wenn die SPIFFS-Datei wirklich offen ist, nicht der RAM-Fallback). Diag-Counter,
+   Dashboard-JSON, Konsole und Upload-Ergebnis nutzen es.
+5. **Sender-Zeitbasis**: Records vor der gueltigen Uhr (0 / 1970) werden in
+   `write_records` und `import_sorted` verworfen, der CSV-Parser lehnt pre-2024
+   ab - eine solche Minute kann nie vor allen gespeicherten einsortiert werden.
+
+**Tests:** `test_history_upload` (neu, 27), `test_history_csv_import_store`
+(+pre-2024-Reject, +persistent -> 32), `test_history_csv_import` angepasst.
+`run_host_tests.sh` gruen, `check_dashboard_js.py` gruen, beide Rollen bauen gruen.
+
+**Kein Datenverlust:** Import dedupliziert pro Minute, verdraengt nie eine Live-
+Minute, Resume-Cursor rueckt nur ueber gespeicherte Minuten vor. Reine App-Aenderung
+(keine `partitions.csv`/Bootloader/`sdkconfig.defaults`).
