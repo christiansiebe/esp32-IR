@@ -116,3 +116,28 @@ ist der einzige Weg ohne Neukauf**.
 (b) AP-SSID/Kanal/Passwort. (c) IP-Kamera vorhanden? Sonst P2/Kamera gesperrt.
 P2 (WLAN→AP) ist ohne diese Entscheide **gesperrt**.
 
+## Nachtrag 2026-10-18 19:3x CEST — Board-Reboot + noVNC-Zugriff
+
+Das Board hat um **19:32 CEST (17:32 UTC)** neu gebootet (der Agent war ~73 s
+weg → in dieser Zeit antwortete noVNC mit **502**). Danach war alles wieder da
+(`novnc`/`xfce-vnc`/`vnc-lan-guard` active; `cpu-real-clock` active+enabled,
+2 Mounts — der T4-Fix hat den Reboot ueberlebt). Reboot-Ursache nicht eindeutig
+(kein pstore-Eintrag, `journalctl -b -1` endet ohne Shutdown-Sequenz →
+vermutlich Reset/Watchdog; vgl. `WATCHDOG-GAP.md`).
+
+**Wichtig — die WLAN-STA-IP hat sich geaendert:** Das USB-WLAN heisst jetzt
+**`ap0`** (NM-Profil "Supervisor wlxdc627949ba79") und hat **`192.168.178.77`**,
+nicht mehr `.71`. Die alte `192.168.178.71` ist **nicht mehr vergeben**
+(ARP INCOMPLETE) — daher die 502/„not found" auf der alten URL. Es ist weiter
+**STA** (verbunden mit "Wohnzimmer 5 Ghz"), `hostapd`/`dnsmasq` **inactive**.
+
+**Korrekte noVNC-URL (im LAN):**
+- **`http://192.168.178.4:6080/vnc.html`** (end0 — verifiziert HTTP 200)
+- alternativ `http://192.168.178.77:6080/vnc.html` (ap0 — HTTP 200)
+
+Fallstricke: **`/vnc.html` nicht weglassen** (nacktes `:6080/` = Verzeichnis-
+liste). **Kein HTTPS** auf 6080 — Port 443 ist `nginx` (HA), das liefert 404.
+`odroidn2.local` loest hier nicht auf (avahi ohne `avahi-resolve`-Tool).
+`vnc-lan-guard` (Kette `VNC_LAN`) erlaubt 6080 nur aus `127.0.0.0/8` +
+`192.168.178.0/24` → aus dem Heimnetz ok, von aussen gesperrt.
+

@@ -2,7 +2,7 @@
   "_comment": "Odroid Entwicklung (neu), conversation 30cfd896aac440a4a09ba70ec6199f08. Ein Eintrag pro Aufgabe, status open|done. Offene Eintraege = wachbleiben. Der Parent spiegelt die Zahl der offenen Eintraege nach fleet/agents.json (open_tasks).",
   "conversation_id": "30cfd896aac440a4a09ba70ec6199f08",
   "role": "parent/coordinator",
-  "updated": "2026-10-18T17:20:00Z",
+  "updated": "2026-10-18T17:45:00Z",
   "tasks": [
     {
       "id": "T1",
@@ -21,8 +21,8 @@
     {
       "id": "T3",
       "title": "PR-Stack #5/#6/#7/#8/#14 aufraeumen",
-      "status": "open",
-      "note": "Teil 1 GELIEFERT: PR #40 (fix/pwm-regulator-notes-accuracy, supersedes #7). IN ARBEIT (Sub-Agent 4950336b, re-getaskt): #5 (kleine Fixes), #6 (BLOCKIEREND: Rebase+Konflikt gen_lowfreq_dts.py, darf OC-Pfad nicht brechen), #14 (Rebase+Scope teilen)."
+      "status": "done",
+      "note": "ALLE Review-Empfehlungen umgesetzt, je PR gegen cline/power-history-diag (nichts gemergt, Originale unangetastet): #7 -> PR #40 (PWM-Notes-Korrektur), #5 -> PR #43 (safe lowfreq overlay: additives user_overlays, MIN_SPEED=1000000, Dry-Run ohne Board-DTB warnt), #6 -> PR #44 (voltage curve rebased; render() erhalten -> OC-Pfad intakt, vom Parent verifiziert: test_gen_oc_dts 24/0 + gen_oc_dts laeuft), #14 -> PR #45 (ramoops/boot-journal herausgetrennt, 16 Dateien). Zusatz: PR #46 (9fe65410, firmware record_count+web_guard). Host-Tests auf allen Branches gruen."
     },
     {
       "id": "T4",

@@ -59,18 +59,24 @@
   },
   "4950336be956489a960a2ef506320545": {
    "name": "ODROID PR-Review 5-8+14",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "branch": "docs/odroid-pr-review-5-8",
-   "note": "FERTIG + GEMERGED: PR #38 (PR-REVIEW-ODROID.md). NEU 2026-10-18 (T3): von Parent 30cfd896 re-getaskt -> die Review-Empfehlungen UMSETZEN (#5/#6/#7/#14 UPDATE, #8 schon geschlossen), je PR eigener Branch + PR gegen cline/power-history-diag. #6 blockierend (Konflikt gen_lowfreq_dts.py, darf OC-Pfad nicht brechen). Re-use statt Neustart (Tages-Limit 20 erreicht).",
+   "note": "FERTIG: PR #38 (Review) + T3-Umsetzung 2026-10-18: PR #40 (#7), PR #43 (#5), PR #44 (#6, OC-Pfad erhalten), PR #45 (#14). Je PR gegen cline/power-history-diag, Host-Tests gruen, nichts gemergt.",
    "pr": [
-    38
+    38,
+    40,
+    43,
+    44,
+    45
    ]
   },
   "9fe65410b01148a5a30fa18994436a83": {
    "name": "Firmware record_count+web_guard",
    "open_tasks": 0,
    "branch": "fix/record-count-web-guard",
-   "pr": [46],
+   "pr": [
+    46
+   ],
    "note": "Fertig (host-seitig, kein Board): web_guard-Leerlauf-Restart = uint64-Unterlauf (last>now durch /healthz-Probe-Stempel) -> saturierender Abstand; record_count = header_is_valid verlangte exakte Version -> alte v1/v2-Stores galten als leer -> jetzt [OLDEST,current] akzeptieren + Upgrade. Neue Host-Tests test_header_migration.c + web_guard-Regression; run_host_tests.sh EXIT=0. PR #46 gegen feat/dfs-clock-visibility (nicht cline: dort kein web_guard). CI gruen, mergeable. Offen nur am Geraet (Parent)."
   },
   "fa4de3cbc9f34a3f958f95aac45725e9": {
@@ -147,8 +153,8 @@
   },
   "30cfd896aac440a4a09ba70ec6199f08": {
    "name": "Odroid Entwicklung (neu)",
-   "open_tasks": 1,
-   "note": "ERSETZT den geloeschten Odroid Entwicklung (b29e060b). Odroid-Koordinator; Board-Arbeit nur hier (geteilter remote-shell-Kanal). FERTIG 2026-10-18: cpu-real-clock (T4); OC-Overlay 2496->2472 (T5, PR #39); P1 end0-Uplink bestaetigt. T1 -> PR #42 (AP deploy/revert/dead-man), T2 -> PR #41 (Watchdog-Verdrahtung), T3 -> PR #40 (PWM-Notes) + in Arbeit #5/#6/#14. Re-use bestehender Sub-Agenten (Tages-Limit 20). OFFEN: T3 Rest (#5/#6/#14) + Nutzer-Entscheide (AP, Kamera, Watchdog-Aktor).",
+   "open_tasks": 0,
+   "note": "ERSETZT den geloeschten Odroid Entwicklung (b29e060b). Odroid-Koordinator; Board-Arbeit nur hier (geteilter remote-shell-Kanal). FERTIG 2026-10-18: T4 cpu-real-clock (reboot-fest, ueberlebte den 19:32-Reboot); T5 OC-Overlay 2496->2472 (PR #39); T1 -> PR #42 (AP deploy/revert/dead-man); T2 -> PR #41 (Watchdog-Verdrahtung); T3 -> PR #40/#43/#44/#45 (Review-Empfehlungen #5/#6/#7/#14). Re-use bestehender Sub-Agenten (Tages-Limit 20). Offene NUTZER-Entscheide: AP (ersetzen/ergaenzen, SSID/Kanal/Passwort), Kamera (IP-Modell), Watchdog-Aktor.",
    "sandbox_id": "14OgyIfbGZEKFmFiE4cHVv"
   }
  }
