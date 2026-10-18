@@ -40,9 +40,12 @@
   },
   "521252f5a71b42c28165ad7e74ed13ec": {
    "name": "ODROID LAN/AP + Kamera",
-   "open_tasks": 1,
-   "branch": "feat/odroid-lan-ap-camera",
-   "note": "Plan + hostapd/dnsmasq-Vorlagen + HA-Kamera-Einbindung + Rollback (Doku). Kein Board-Zugriff."
+   "open_tasks": 0,
+   "branch": "docs/odroid-lan-ap-kamera",
+   "pr": [
+    36
+   ],
+   "note": "FERTIG: PR #36 (open, mergeable=clean, CI gruen) -> ODROID-LAN-AP-KAMERA.md (end0-Uplink/WLAN-AP Plan, harte Gates gegen Lockout, hostapd/dnsmasq/NAT-Vorlagen, IP- vs USB-Kamera + HA, Rollback/Dead-Man-Switch) + odroid_ap_config.py + 52 Host-Checks. Kein Board-Zugriff, kein remote-shell-Kanal. Zielbranch cline/power-history-diag."
   },
   "732f5e0624b948499d0183f5633d86b5": {
    "name": "ODROID Watchdog-Aktor",
