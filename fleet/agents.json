@@ -2,9 +2,9 @@
  "_comment": "Worker-Registry des esp32-IR-Fleet. Der Parent pflegt sie; der Fleet Supervisor (automations/fleet-supervisor, cron */10 + KV-Run-Lock, ~13 min/Lauf) liest die Kopie auf GitHub raw (Branch feat/dfs-clock-visibility) - lokal aendern reicht nicht, pushen. open_tasks=0 -> Agent darf schlafen. Der alte fleet-watchdog ist deaktiviert; der Supervisor ersetzt ihn.",
  "agents": {
   "8c2548251ad045599fbfb6f95f3e7944": {
-   "name": "parent (dieser Chat)",
-   "open_tasks": 1,
-   "note": "koordiniert, verteilt TODO-Aufgaben, pflegt die Registry"
+   "name": "parent (ALT, ersetzt)",
+   "open_tasks": 0,
+   "note": "ERSETZT durch 30cfd896 (Handoff docs/CHAT-HANDOFF-2026-10-18.md, 2026-10-18). Rolle Parent/Koordinator uebergeben; dieser Chat darf schlafen."
   },
   "a3484f59487c4e6a9f1c5a40664506ba": {
    "name": "UTC-persist",
@@ -142,8 +142,9 @@
   },
   "30cfd896aac440a4a09ba70ec6199f08": {
    "name": "Odroid Entwicklung (neu)",
-   "open_tasks": 2,
-   "note": "ERSETZT den geloeschten 'Odroid Entwicklung' (b29e060b..., Sandbox MISSING/read-only, stand NICHT in der Registry). Koordinator der Odroid-Sub-Agenten (noVNC-extern, OC-Overlay, Watchdog-Luecke). Offen: Watchdog-Luecke, 2496-MHz-OC-Overlay, noVNC-von-aussen."
+   "open_tasks": 3,
+   "note": "ERSETZT den geloeschten Odroid Entwicklung (b29e060b, Sandbox MISSING/read-only, stand NICHT in der Registry -> Supervisor weckte ihn nie). Odroid-Koordinator; Board-Arbeit nur hier (geteilter remote-shell-Kanal). Board am 2026-10-18 wieder erreichbar. Offen: Netz/AP+Kamera Entscheidungen, Odroid-PR-Triage (#35/#36/#37), Registry-Pflege.",
+   "sandbox_id": "14OgyIfbGZEKFmFiE4cHVv"
   }
  }
 }
