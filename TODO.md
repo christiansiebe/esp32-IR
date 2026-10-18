@@ -205,11 +205,18 @@ Aus dem Event-Log rekonstruiert und gesichert.
             TWDT angemeldet; `task_wdt_policy` führt ihn als receiver-only Worker. Kconfig
             `ESPNOW_RECEIVER_HEALTH_WATCHDOG`/`_STALE_DATA_S`/`_LOW_HEAP_BYTES`/`_GRACE_S`.)
       - [ ] `mqtt_publish.{c,h}`, `mqtt_bridge.{c,h}`, `mqtt_client.h` — MQTT + HA-Discovery
-      - [x] `boot_confirm.{c,h}`, `boot_policy.{c,h}` — Post-OTA-Rollback-Bestätigung (bereits auf `main`)
-      - [ ] `recovery_button.{c,h}`, `recovery_start.{c,h}` — BOOT-Tasten-Recovery
-      - [ ] `test/test_health_policy.c`, `test/test_mqtt_bridge.c`, `test/test_boot_policy.c`,
-            `test/test_recovery_button.c` in `test/run_host_tests.sh` aufnehmen
-            (`test_health_policy.c` + `test_boot_policy.c` bereits eingehängt; mqtt/recovery offen)
+      - [x] `boot_confirm.{c,h}`, `boot_policy.{c,h}` — Post-OTA-Rollback-Bestätigung
+            (schon auf `main`, PR #14/#16; Host-Test `test_boot_policy.c` +
+            `test_boot_confirm_trigger.c` laufen).
+      - [x] `recovery_button.{c,h}`, `recovery_start.{c,h}` — BOOT-Tasten-Recovery
+            (Branch `feat/recovery-button`, PR #27): reine Gestenlogik `recovery_button.c`
+            (host-getestet) + IDF-Glue `recovery_start.c` (`esp_ota_mark_app_invalid_rollback_and_reboot`).
+            Kconfig `RECOVERY_BUTTON_GPIO` (Default 0, nur Empfänger) + `RECOVERY_BUTTON_HOLD_MS`
+            (Default 3000); `main.c` ruft `recovery_button_check()` vor `boot_confirm_init()`.
+            `recovery_button_hw.h` aus der Bergung entfiel (doppelte Deklaration).
+      - [ ] `test/test_mqtt_bridge.c` in `test/run_host_tests.sh` aufnehmen
+            (`test_health_policy.c`, `test_boot_policy.c` und `test_recovery_button.c`
+            bereits eingehängt; mqtt offen)
       - [ ] `main/CMakeLists.txt`, `sdkconfig.defaults` (MQTT/esp-mqtt), `idf_component.yml`
 - [ ] Offene Integrationsschritte, die **nicht** rekonstruierbar waren und neu gemacht werden müssen:
       `main/main.c`-Aufrufe, `power_history.c`-Migration (s. u.), `run_host_tests.sh`-Einträge.

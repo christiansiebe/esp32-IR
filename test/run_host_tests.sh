@@ -66,6 +66,18 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_boot_policy"
 
+# Recovery-button gesture (receiver): the pure timing logic that turns a held
+# BOOT button into a forced rollback. Replays press patterns tick by tick; the
+# GPIO read and the OTA call live in recovery_start.c, which is not host-built.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/recovery_button.c" \
+    "$here/test_recovery_button.c" \
+    -o "$out/test_recovery_button"
+
+"$out/test_recovery_button"
+
 # The trigger half: the real boot_confirm.c glue (with test hooks) must actually
 # perform the rollback for every failure scenario — the link that was missing.
 "$cc" -std=c11 -Wall -Wextra -O2 \
