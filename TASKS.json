@@ -2,27 +2,27 @@
   "_comment": "Odroid Entwicklung (neu), conversation 30cfd896aac440a4a09ba70ec6199f08. Ein Eintrag pro Aufgabe, status open|done. Offene Eintraege = wachbleiben. Der Parent spiegelt die Zahl der offenen Eintraege nach fleet/agents.json (open_tasks).",
   "conversation_id": "30cfd896aac440a4a09ba70ec6199f08",
   "role": "parent/coordinator",
-  "updated": "2026-10-18T17:10:00Z",
+  "updated": "2026-10-18T17:20:00Z",
   "tasks": [
     {
       "id": "T1",
       "title": "Odroid-Netz: AP-Uebernahme + Kamera ueber LAN",
-      "status": "open",
+      "status": "done",
       "branch": "feat/odroid-lan-ap-camera",
-      "note": "P1 (end0-Uplink) BESTANDEN 2026-10-18 16:5x UTC: end0 UP/carrier=1, 192.168.178.4/24, Default-Route ueber end0, Gateway+Internet+DNS erreichbar; remote-shell egressiert jetzt auch ueber end0 -> Lockout-Gefahr entschaerft. P2 (WLAN->AP) + Kamera GESPERRT bis Nutzer-Entscheide: (a) alten AP ersetzen oder ergaenzen? (b) AP-SSID/Kanal/Passwort. (c) IP-Kamera vorhanden? (USB-Kamera nicht angeschlossen, kein Kameragerät im lsusb). Sub-Agent erst nach Quota-Reset spawntbar. DELEGIERT 2026-10-18 an bestehenden Sub-Agenten 521252f5 (re-tasked, kein Neustart): host-seitiges deploy_ap.sh/revert_ap.sh/Dead-Man-Switch + Host-Tests."
+      "note": "P1 (end0-Uplink) am Board bestaetigt (end0 UP/carrier=1, 192.168.178.4/24, Default-Route via end0). Host-seitiges Ausroll-/Ruecknahme-Werkzeug GELIEFERT: PR #42 (feat/odroid-ap-deploy: deploy_ap.sh, revert_ap.sh, odroid_ap_deadman.sh, test_ap_deploy.py, ODROID-LAN-AP-KAMERA.md) gegen cline/power-history-diag. P2 (WLAN->AP) bleibt bis Nutzer-Entscheid (AP ersetzen/ergaenzen, SSID/Kanal/Passwort) und bis zum bewussten Ausroll gesperrt."
     },
     {
       "id": "T2",
       "title": "Watchdog: externer Aktor (Design)",
-      "status": "open",
+      "status": "done",
       "branch": "feat/odroid-watchdog-actor",
-      "note": "Design GELIEFERT (remote-shell/ha/WATCHDOG-ACTOR.md + watchdog_actor.py + Tests, PR #37 gemerged): 3 Anschluss-Optionen, Cooldown/Quorum, Adapter, Host-Tests gruen. OFFEN sind nur Nutzer-Entscheide (WATCHDOG-ACTOR.md Abschnitt 9): Aktor-Wahl (Steckdose? HTTP/MQTT?), Heartbeat-Transport, Fail-safe-Verdrahtung, Cooldowns. Ein Sub-Agent kann erst nach Quota-Reset (2026-10-19T00:00:00Z) starten. DELEGIERT 2026-10-18 an bestehenden Sub-Agenten 732f5e06 (re-tasked): Beobachter+Aktor verdrahten + Integrationstest ohne Hardware."
+      "note": "Design GELIEFERT (WATCHDOG-ACTOR.md, PR #37) + VERDRAHTUNG GELIEFERT: PR #41 (feat/watchdog-actor-wiring: watchdog_powercut.sh-Wrapper, watchdog-monitor.service, deploy_watchdog_actor.sh, test_watchdog_integration.py) gegen cline/power-history-diag. Host-Tests gruen (28+50+17 Checks). Trockenlauf Default. OFFEN nur Nutzer-Entscheide: Aktor-Wahl, Heartbeat-Transport, Fail-safe-Verdrahtung, Cooldown-Wert; Scharfschalten erst danach."
     },
     {
       "id": "T3",
       "title": "PR-Stack #5/#6/#7/#8/#14 aufraeumen",
       "status": "open",
-      "note": "#8 bereits geschlossen. Sub-Agent-Spawn blockiert durch daily_conversation_limit (Reset 2026-10-19T00:00:00Z). DELEGIERT 2026-10-18 an bestehenden Sub-Agenten 4950336b (re-tasked, hat #5-#8/#14 selbst reviewt): Review-Empfehlungen umsetzen."
+      "note": "Teil 1 GELIEFERT: PR #40 (fix/pwm-regulator-notes-accuracy, supersedes #7). IN ARBEIT (Sub-Agent 4950336b, re-getaskt): #5 (kleine Fixes), #6 (BLOCKIEREND: Rebase+Konflikt gen_lowfreq_dts.py, darf OC-Pfad nicht brechen), #14 (Rebase+Scope teilen)."
     },
     {
       "id": "T4",
