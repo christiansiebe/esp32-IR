@@ -1,0 +1,12 @@
+[Unit]
+Description=Cap the CPU maximum frequency at the stock value (OC overlay guard)
+After=sysinit.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/oc-freq-guard.sh
+
+[Install]
+WantedBy=multi-user.target

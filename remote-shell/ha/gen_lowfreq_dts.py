@@ -83,6 +83,38 @@ HEAD = """\
 """
 
 
+def render(big_mv=None, little_mv=None, extra_big=(), header_note=None):
+    """Erzeugt den vollstaendigen DTS-Text.
+
+    extra_big: zusaetzliche (rate_hz, uv, kommentar)-Punkte fuer den big-Cluster,
+    vor den Tief-Takten einsortiert. Leer = unveraendertes lowfreq-Overlay.
+    header_note: optionaler zusaetzlicher Kommentarblock direkt nach dem Kopf.
+    """
+    want = {'big': big_mv, 'little': little_mv}
+    tbl = '\n'.join(' *   %-11d = %s' % (r, c) for r, c in RATES)
+    out = [HEAD % tbl]
+    if header_note:
+        out.append(header_note)
+    for i, (node, label, stock_uv, key) in enumerate(CLUSTERS):
+        uv = want[key] * 1000 if want[key] else stock_uv
+        if uv < REG_FLOOR_UV:
+            raise SystemExit('%s: %d mV liegt unter der Regler-Grenze %d mV'
+                             % (key, uv // 1000, REG_FLOOR_UV // 1000))
+        out.append('\n/ {\n\tfragment@%d {\n\t\ttarget-path = "/%s";\n\t\t__overlay__ {\n'
+                   % (i, node))
+        entries = [(r, uv, c) for r, c in RATES]
+        if key == 'big' and extra_big:
+            entries = list(extra_big) + entries
+        for r, euv, c in entries:
+            out.append('\t\t\topp-%d {\n'
+                       '\t\t\t\topp-hz = /bits/ 64 <%d>;\n'
+                       '\t\t\t\topp-microvolt = <%d>;\n'
+                       '\t\t\t\tclock-latency-ns = <50000>;\n'
+                       '\t\t\t};\n' % (r, r, euv))
+        out.append('\t\t};\n\t};\n};\n')
+    return ''.join(out)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -93,25 +125,12 @@ def main():
     ap.add_argument('--out', default=os.path.join(HERE, 'lowfreq.dts'))
     args = ap.parse_args()
 
-    want = {'big': args.big_mv, 'little': args.little_mv}
-    tbl = '\n'.join(' *   %-11d = %s' % (r, c) for r, c in RATES)
-    out = [HEAD % tbl]
-    for i, (node, label, stock_uv, key) in enumerate(CLUSTERS):
-        uv = want[key] * 1000 if want[key] else stock_uv
-        if uv < REG_FLOOR_UV:
-            raise SystemExit('%s: %d mV liegt unter der Regler-Grenze %d mV'
-                             % (key, uv // 1000, REG_FLOOR_UV // 1000))
-        out.append('\n/ {\n\tfragment@%d {\n\t\ttarget-path = "/%s";\n\t\t__overlay__ {\n'
-                   % (i, node))
-        for r, c in RATES:
-            out.append('\t\t\topp-%d {\n'
-                       '\t\t\t\topp-hz = /bits/ 64 <%d>;\n'
-                       '\t\t\t\topp-microvolt = <%d>;\n'
-                       '\t\t\t\tclock-latency-ns = <50000>;\n'
-                       '\t\t\t};\n' % (r, r, uv))
-        out.append('\t\t};\n\t};\n};\n')
+    # Erst rendern (kann bei zu niedriger Spannung abbrechen), dann schreiben:
+    # so entsteht bei einem Fehler keine (halbe) Datei.
+    text = render(args.big_mv, args.little_mv)
     with open(args.out, 'w') as f:
-        f.write(''.join(out))
+        f.write(text)
+    want = {'big': args.big_mv, 'little': args.little_mv}
     vols = ', '.join('%s %d mV' % (k, (want[k] * 1000 if want[k] else
                                        [c[2] for c in CLUSTERS if c[3] == k][0]) // 1000)
                      for k in ('big', 'little'))
