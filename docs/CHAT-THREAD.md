@@ -587,3 +587,27 @@ Doku: `remote-shell/ha/PLL-OC-README.md` + `margin-2472-30min-rerun.txt`
 **Fazit:** Der geplante 30-min-Test bei 2472 MHz ist damit zweimal (11:32 und
 16:03 UTC) sauber durchgelaufen; "stabil" bleibt trotzdem nur "1800 s ohne
 Fehler", kein Sicherheitsnachweis (N=208 hielt 120 s und resetete dann).
+
+---
+
+**5) CPU-Takt-Anzeige: echten PLL-Takt zeigen (2026-10-18, Parent 30cfd896).**
+`scaling_cur_freq` meldete den gecachten OPP (2400), waehrend der PLL real mit
+2472 lief -> kein Werkzeug konnte den Overclock messen. Geloest mit
+`cpu-real-clock.service`: der Daemon liest den lebenden PLL-N, berechnet den
+echten Takt und **bind-mountet** ihn ueber `policy{0,2}/scaling_cur_freq`. Da
+die Per-Core-Pfade derselbe Inode sind, profitiert **jeder** Leser, auch `htop`
+(`show_cpu_frequency=1`). Der reale Wert wird ueber einen vorab geoeffneten fd
+gelesen (kein Selbst-Lesen). Top-OPP-Erkennung: PLL==Takt nur bei Teiler 1;
+darunter haelt der Treiber den PLL hoch und teilt (getrennter Registersatz,
+siehe `cpu-real-clock-README.md`).
+
+Verifiziert am Board: `htop` zeigt bei N=206 **2472** statt 2400,
+`cpu-volt-line` zeigt `big 2472MHz`, `scaling_cur_freq=2472000`; Mount
+ueberlebt Hotplug, `systemctl stop` haengt sauber ab. Host-Test
+`test_cpu_real_clock.py` gruen, Gesamtsuite gruen. Dienst reboot-fest
+installiert. Dateien: `remote-shell/ha/{cpu_real_clock.py,cpu-real-clock.service,
+deploy_cpu_real_clock.sh,cpu-real-clock-README.md,test_cpu_real_clock.py}`.
+
+**6) Fleet.** Dieser Chat (30cfd896) ist der Ersatz fuer den geloeschten
+"Odroid Entwicklung" (b29e060b) und jetzt in `fleet/agents.json` registriert
+(open_tasks=3). `TASKS.json` angelegt (T4 done, T1/T2/T3 open).

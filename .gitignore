@@ -83,3 +83,9 @@ main/build_version.h
 fleet/.api_key
 fleet/fleet_state.json
 fleet/fleet.log
+
+# Sandbox-lokale Laufzeitdaten des remote-shell-Kanals (PIDs, Logs, Queue).
+remote-shell/run/
+
+# Agent-Memory der Sandbox (wird ueber remote-shell/memory/SHARED.md geteilt).
+.openhands/memory/

@@ -1,0 +1,18 @@
+[Unit]
+Description=Report the real CPU clock (live PLL) in scaling_cur_freq
+Documentation=https://github.com/christiansiebe/esp32-IR/blob/main/remote-shell/ha/cpu-real-clock-README.md
+# /dev/mem is needed to read the HHI PLL registers.
+After=local-fs.target
+Before=cpu-freq-guard.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/cpu-real-clock -i 1
+Restart=always
+RestartSec=3
+# Clean unmount of the sysfs overlays on stop (SIGTERM is handled).
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

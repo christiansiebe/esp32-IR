@@ -286,6 +286,10 @@ python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"
 python3 "$here/check_dashboard_js.py"
 
+# cpu-real-clock: the top-OPP detection that makes scaling_cur_freq report the
+# real (possibly overclocked) PLL clock instead of the driver's cached OPP.
+python3 "$repo/remote-shell/ha/test_cpu_real_clock.py"
+
 # Fleet supervisor decision table (pure, no Cloud API): the cases that let an
 # agent fall asleep and never wake (shared parent sandbox, a failed turn, a
 # finished worker sharing a live sandbox).
