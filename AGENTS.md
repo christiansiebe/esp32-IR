@@ -734,12 +734,23 @@ Host-Test in `test/` (analog `test_history_backfill_merge.c`):
 - OTA-sicher (reine App-Änderung, keine `partitions.csv`/Bootloader/`sdkconfig.defaults`).
 - CI grün. Nach dem Build: **Commit-SHA** an den Kontroll-Chat zurückmelden.
 
-### Separater Wunsch des Nutzers (NICHT dieser Fix)
+### ✅ CSV-Upload blockierte den HTTPD (BEHOBEN, 2026-10-18, PR #31 `be1507d`)
 „Nach dem CSV-Upload bleibt das Interface minutenlang offline." Der Handler
-`power_history_upload_handler` rebootet **nicht**; er streamt den Body. Vermutete Ursache:
-die große Upload-Transaktion blockiert den HTTPD-Task; zusätzlich belastet die
-Dashboard-Auto-Aktualisierung (`updateHistory` alle 1,5 s) den Server. Eigener Task: Upload
-in den Backfill-Worker verlagern bzw. HTTPD während des Imports nicht blockieren.
+`power_history_upload_handler` rebootete **nicht**; er streamte den Body und importierte
+inline. **Ursache = HTTPD blockiert**, nicht Heap und nicht der Watchdog: `esp_http_server`
+führt **jeden** URI-Handler auf **einem** Thread aus, und der alte Handler hielt den HTTP-Task
+**und** `g_history_mutex` über die SPIFFS-In-Place-Inserts hinweg für Minuten — Dashboard-Poll,
+`/healthz`-Selbst-Probe und Liveness-Feed stauten sich dahinter (der Import batchte schon in
+64er-Blöcken, war also nie ein Heap-Problem).
+Fix: (1) Body lesen/parsen in einem **eigenen Task** (`httpd_req_async_handler_begin`), der
+HTTP-Thread kehrt sofort zurück; (2) der Task **parst nur** und übergibt jede sortierte
+64er-Batch per **Queue** an den **Backfill-Worker** (der einzige History-Writer), der die
+Queue zuerst leert und seine lange Sync-Session überspringt, solange `g_history_upload_active`
+gilt; (3) neues reines, host-getestetes Modul `main/history_upload.{c,h}`
+(`test/test_history_upload.c`). Dabei mitgefixt: `storage_ready` meldet jetzt echte
+Persistenz (`power_history_status_t.persistent`, true nur wenn die SPIFFS-Datei offen ist,
+nicht der RAM-Fallback), und Sender-Records ohne gültige Uhr (0 / 1970) werden in
+`write_records`/`import_sorted` sowie vom CSV-Parser (pre-2024) verworfen.
 
 ## ➕ NACHTRAG (Kontroll-Chat, 2026-10-14): zwei Punkte für die Umsetzung
 Der Bau-Chat hat den Auftrag übernommen (Radio-Manager verworfen — **richtig**, gehört nicht
