@@ -325,6 +325,23 @@ trap 'rm -rf "$out"' EXIT
 # Full ring (29000) unsorted + duplicates -> forces the in-place disk sort.
 "$out/test_history_ring_repair" full
 
+# Last known wall clock: the record/clock math plus the real NVS store driven
+# through a file-backed NVS shim. A forked "reboot" proves the clock is seeded
+# from the store and keeps advancing, so bucket_start is never 0 after a boot
+# without a fresh SNTP/ESP-NOW sync.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DWALL_CLOCK_TEST_DIR="\"$out/wallclock\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/wall_clock.c" \
+    "$repo/main/wall_clock_store.c" \
+    "$here/test_wall_clock.c" \
+    -o "$out/test_wall_clock"
+
+"$out/test_wall_clock"
+
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"

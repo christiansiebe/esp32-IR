@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/time.h>
 #include <time.h>
 #include <math.h>
 
@@ -44,6 +46,7 @@
 #include "runtime_config.h"
 #include "sml_selftest.h"
 #include "version.h"
+#include "wall_clock.h"
 #include "web_console.h"
 #include "serial_console.h"
 #include "web_guard.h"
@@ -407,6 +410,9 @@ static uint64_t g_uart_parser_progress_us;
 static portMUX_TYPE g_time_sync_lock = portMUX_INITIALIZER_UNLOCKED;
 static int64_t g_utc_offset_us;
 static bool g_utc_valid;
+/* True only after a real ESP-NOW calibration; a boot seed makes the clock valid
+ * but not trusted, so the offline gap is still marked once the real time is in. */
+static bool g_utc_trusted;
 static uint32_t g_time_sync_count;
 static uint32_t g_time_request_count;
 static uint8_t g_receiver_mac[ESP_NOW_ETH_ALEN];
@@ -555,10 +561,17 @@ static void fill_station_config(wifi_config_t *config)
     strlcpy((char *)config->sta.password, g_wifi_password, sizeof(config->sta.password));
 }
 
+/* Last-known-wall-clock persistence; defined below (the SNTP callback needs it
+ * before the definition). */
+static void wall_clock_mark_trusted(void);
+
 static void time_sync_notification(struct timeval *tv)
 {
     (void)tv;
     ESP_LOGI(TAG, "System clock synchronized; minute history enabled");
+    /* Trusted source: persist the real time and, on the sender, mark the
+     * offline gap now that it can be bounded. */
+    wall_clock_mark_trusted();
 }
 
 /* Start mDNS once we have an address, so both devices are reachable by name
@@ -590,6 +603,147 @@ static bool system_time_is_valid(void)
 }
 
 static void diag_log_event(uint8_t level, const char *format, ...);
+
+/* --- Last known wall clock ------------------------------------------------
+ * Persisted once the clock is usable, so a boot without a fresh time source
+ * (no WLAN, receiver down, both devices restarting) can seed the minute
+ * recorder from it instead of dropping every sample until the next sync. The
+ * seed is approximate by design; the first real sync replaces it. */
+#define WALL_CLOCK_PERSIST_INTERVAL_SECONDS 300LL
+static portMUX_TYPE g_wall_clock_lock = portMUX_INITIALIZER_UNLOCKED;
+static int64_t g_wall_clock_last_saved_utc;
+/* True once a *trusted* source (SNTP / ESP-NOW time sync) set the clock; a
+ * seeded clock is valid but not trusted, so the offline gap is still marked
+ * with the real time once a sync arrives. */
+static bool g_wall_clock_trusted;
+
+#if CONFIG_ESPNOW_ROLE_SENDER
+/* Defined with the sender diagnostics / boot-marker block further down. */
+static void boot_marker_on_clock_valid(void);
+#endif
+
+/* Current wall clock regardless of the role (the receiver seeds time() with
+ * settimeofday, the sender keeps the ESP-NOW offset); same as the recorder's
+ * clock. Used only to decide when to persist. */
+static int64_t current_utc_seconds(void);
+
+/* Persist the clock if it is sane and has moved on enough since the last save.
+ * Cheap when nothing is due, so it can be called from the periodic paths. */
+static void wall_clock_persist_if_due(void)
+{
+    int64_t now = current_utc_seconds();
+    if (!wall_clock_utc_is_sane(now)) {
+        return;
+    }
+    portENTER_CRITICAL(&g_wall_clock_lock);
+    bool due = wall_clock_persist_due(g_wall_clock_last_saved_utc, now,
+                                      WALL_CLOCK_PERSIST_INTERVAL_SECONDS);
+    portEXIT_CRITICAL(&g_wall_clock_lock);
+    if (!due) {
+        return;
+    }
+    if (wall_clock_store_save(now) == ESP_OK) {
+        portENTER_CRITICAL(&g_wall_clock_lock);
+        g_wall_clock_last_saved_utc = now;
+        portEXIT_CRITICAL(&g_wall_clock_lock);
+    }
+}
+
+/* Seed the clock from the persisted value on a boot without a fresh sync. The
+ * seed is only a stopgap: it is flagged as untrusted and the first real sync
+ * overwrites it. Returns the seeded time, or 0 when there was nothing usable. */
+static int64_t wall_clock_seed_from_store(void)
+{
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* Never clobber a real calibration: a sync may have arrived during Wi-Fi
+     * bring-up, before this runs. */
+    portENTER_CRITICAL(&g_time_sync_lock);
+    bool already_valid = g_utc_valid;
+    portEXIT_CRITICAL(&g_time_sync_lock);
+#else
+    bool already_valid = system_time_is_valid();
+#endif
+    if (already_valid) {
+        return 0;
+    }
+    int64_t stored = 0;
+    bool found = false;
+    if (wall_clock_store_load(&stored, &found) != ESP_OK || !found ||
+        !wall_clock_utc_is_sane(stored)) {
+        return 0;
+    }
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* The sender has no RTC: derive the ESP-NOW offset from the stored time at
+     * this boot's uptime so event_wall_ms()/current_utc_seconds() are usable. */
+    portENTER_CRITICAL(&g_time_sync_lock);
+    g_utc_offset_us =
+        wall_clock_offset_us_from_utc(stored, (uint64_t)(esp_timer_get_time() / 1000));
+    g_utc_valid = true;
+    g_utc_trusted = false;
+    portEXIT_CRITICAL(&g_time_sync_lock);
+#else
+    struct timeval seeded = {
+        .tv_sec = (time_t)stored,
+        .tv_usec = 0,
+    };
+    if (settimeofday(&seeded, NULL) != 0) {
+        ESP_LOGW(TAG, "Could not seed the clock from the store: %s", strerror(errno));
+        return 0;
+    }
+#endif
+    portENTER_CRITICAL(&g_wall_clock_lock);
+    g_wall_clock_last_saved_utc = stored;
+    g_wall_clock_trusted = false;
+    portEXIT_CRITICAL(&g_wall_clock_lock);
+    ESP_LOGW(TAG, "No fresh time source; seeded the clock from the last known "
+                  "value (%lld, up to %lld s old)",
+             (long long)stored, (long long)WALL_CLOCK_PERSIST_INTERVAL_SECONDS);
+    return stored;
+}
+
+/* The clock was set by a trusted source (SNTP or the receiver's ESP-NOW sync).
+ * Persist it immediately and let the boot marker run with the real time. */
+static void wall_clock_mark_trusted(void)
+{
+    bool was_trusted;
+    portENTER_CRITICAL(&g_wall_clock_lock);
+    was_trusted = g_wall_clock_trusted;
+    g_wall_clock_trusted = true;
+    portEXIT_CRITICAL(&g_wall_clock_lock);
+    if (was_trusted) {
+        return;
+    }
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* The real time is in: the offline gap of this boot can now be bounded and
+     * marked (a seeded clock cannot do that - it is too close to "now"). */
+    boot_marker_on_clock_valid();
+#endif
+    wall_clock_persist_if_due();
+}
+
+#if CONFIG_ESPNOW_ROLE_SENDER
+/* Only the sender's boot-marker path needs to know whether the clock is
+ * trusted; the receiver records from time() as soon as it is seeded. */
+static bool wall_clock_is_trusted(void)
+{
+    portENTER_CRITICAL(&g_wall_clock_lock);
+    bool trusted = g_wall_clock_trusted;
+    portEXIT_CRITICAL(&g_wall_clock_lock);
+    return trusted;
+}
+#endif
+
+/* Low-rate persistence worker (both roles): refresh the stored clock every
+ * WALL_CLOCK_PERSIST_INTERVAL_SECONDS while it is usable, so a power cut or
+ * crash never loses more than that. */
+static void wall_clock_worker(void *arg)
+{
+    (void)arg;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(60000));
+        wall_clock_persist_if_due();
+    }
+}
 
 static void wifi_event_handler(void *arg,
                                esp_event_base_t event_base,
@@ -1425,10 +1579,13 @@ static const char *boot_marker_reason_label(uint8_t reason)
 
 static void boot_marker_note_and_log(int64_t now_utc, uint8_t reason)
 {
-    /* Run at most once per boot: the fill drains the storage queue, so a repeat
-     * call (every time sync) would discard markers queued earlier and re-enqueue
-     * the same window, inflating the queue-drop counter. */
-    if (g_boot_marker_done) {
+    /* Only a *trusted* clock can bound the offline window: a seeded (approximate)
+     * clock sits too close to "now", so latching on it would mark the gap as
+     * empty and the real gap would never be filled. Run at most once with a
+     * trusted clock: the fill drains the storage queue, so a repeat call (every
+     * time sync) would discard markers queued earlier and re-enqueue the same
+     * window, inflating the queue-drop counter. */
+    if (g_boot_marker_done || !wall_clock_is_trusted()) {
         return;
     }
     g_boot_marker_done = true;
@@ -2209,19 +2366,23 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             if ((response.header.flags & ESPNOW_DIAG_SECTION_TIME_SYNC) &&
                 response.valid && response.utc_seconds > 0) {
                 int64_t uptime_us = (int64_t)response.uptime_ms * 1000;
-                bool was_valid;
+                bool was_trusted;
                 portENTER_CRITICAL(&g_time_sync_lock);
-                was_valid = g_utc_valid;
+                was_trusted = g_utc_trusted;
                 g_utc_offset_us = response.utc_seconds * 1000000 - uptime_us;
                 g_utc_valid = true;
+                g_utc_trusted = true;
                 ++g_time_sync_count;
                 portEXIT_CRITICAL(&g_time_sync_lock);
-                if (!was_valid) {
-                    /* First calibration this session: a boot without a clock
-                     * (e.g. battery change while the receiver was down) can now
-                     * bound its offline window and fill it with boot markers. */
+                if (!was_trusted) {
+                    /* First *trusted* calibration this session: a boot without a
+                     * clock (e.g. battery change while the receiver was down) can
+                     * now bound its offline window and fill it with boot markers.
+                     * A boot that only had a seeded (approximate) clock has not
+                     * marked the gap yet, so this still runs. */
                     boot_marker_on_clock_valid();
                 }
+                wall_clock_mark_trusted();
             }
         }
         return;
@@ -7917,6 +8078,10 @@ void app_main(void)
      * so the long-running workers can subscribe themselves and a wedged one
      * reboots the device instead of hanging. */
     (void)task_wdt_guard_init();
+    /* Seed the wall clock from the persisted value before anything starts
+     * recording minutes: without it a boot that has no time source yet would
+     * leave bucket_start at 0 and drop every sample until the first sync. */
+    (void)wall_clock_seed_from_store();
 #if CONFIG_ESPNOW_ROLE_SENDER
     g_espnow_ota_rx_queue = xQueueCreate(4, sizeof(espnow_ota_rx_item_t));
     if (g_espnow_ota_rx_queue == NULL) {
@@ -7957,6 +8122,12 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_create(&power_sample_timer_args,
                                      &g_power_sample_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(g_power_sample_timer, 1000000));
+
+    /* Refresh the persisted wall clock on both roles so a reboot without a fresh
+     * sync can always seed from it (a crash/power cut must not lose the time). */
+    if (xTaskCreate(wall_clock_worker, "wall_clock", 3072, NULL, 2, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the wall-clock persistence worker");
+    }
 
     ESP_ERROR_CHECK(esp_now_register_recv_cb(receive_callback));
 
