@@ -673,3 +673,44 @@ Board-Testhilfen (NUR Session, nicht enabled): `/root/netbackup/recover-wlan.sh`
 - **Design-Regel:** `--confirm` impliziert `--apply` (sonst faellt ein bestaetigter AP
   doch zurueck); Dry-Run bleibt Default, hostapd/dnsmasq bleiben MASKED bis zum
   echten Ausroll.
+
+
+## 2026-10-18 · Odroid-Parent f85f7c47 (Session 2) — Odroid-Zweig abgeschlossen
+
+**Alle vier Kinder fertig + gemerged:** #36 (LAN/AP), #37 (Watchdog-Aktor),
+#38 (PR-Review), #35 (Watchdog-Verifikation).
+
+**Firmware-Kind 9fe65410 (record_count + web_guard).** PR #46 (Basis
+`feat/dfs-clock-visibility`) gemerged `8252d5f`. Befund beim Review: der
+`web_guard`-Hunk (uint64-Saturating-Clamp) war ein **Duplikat** von main-PR #15
+(d2635a2) — `main` hat ihn, `dfs`/`cline` nie bekommen. Der `header_is_valid`-
+Versionsbereich (alter v1/v2-Store muss migrieren statt verworfen zu werden) ist
+**echt neu**; `cline` hatte dieselbe Luecke. Deshalb nur den Header-Commit
+(cc85eebf) als **PR #47** gegen `cline/power-history-diag` gecherry-picked und
+gemerged `9822ae4`.
+- Beide neuen Tests unabhaengig verifiziert: Datei auf Basis zurueckgesetzt ->
+  `test_web_guard` 41 Fehler, `test_header_migration` 2 Fehler; gruen mit Fix.
+  `./test/run_host_tests.sh` EXIT=0.
+
+**Geraete-Check (Odroid-Kanal).** ESP32-**Empfaenger = 192.168.178.70** (Odroid
+nginx = .71). `GET /api/power-history` (ohne Key) -> `record_count=7339`,
+`storage_ready=true`, `write_errors=0`, `capacity=29000` -> Persistenz
+wiederhergestellt. `/api/bootlog`, `/api/ota-pull`, Reboot brauchen `X-OTA-Key`
+(nicht in der Sandbox). Kein USB-Serial zum ESP32 auf dem Odroid — nur HTTP/OTA.
+
+**Wichtige Umgebungs-Fakten.**
+- `create_pr`-Tool gibt hier **403** (`GITHUB_TOKEN` ohne Write); stattdessen
+  `GH_TOKEN=$GITHUB_WRITE_TOKEN gh pr create`.
+- Async-Merge: `gh api -X PUT .../pulls/N/merge-async -f merge_method=squash
+  -f sha=<head>`, dann `.../merge-async/<uuid>` pollen bis `status != pending`.
+- `main` und die Feature-Branches (`dfs`, `cline`) sind divergiert: ein Fix kann
+  auf `main` liegen und auf beiden Feature-Branches fehlen -> Fix immer gegen die
+  tatsaechliche PR-Basis diffen, nicht gegen `main`.
+- `fleet/agents.json`: Parent f85f7c47 + alle Kinder auf `open_tasks=0`.
+- **`/workspace/MEMORY.md` war veraltet** (193 Zeilen lokal vs. 675 auf GitHub) —
+  immer erst `sync-memory.sh pull`, dann ergaenzen, sonst ueberschreibt der Push
+  fremde Abschnitte.
+
+Commits: Parent-Repo `feat/dfs-clock-visibility` HEAD `2b05c6a` (Registry +
+CHAT-THREAD). Keine offene Arbeit im Odroid-Zweig.
+
