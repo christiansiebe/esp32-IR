@@ -470,6 +470,7 @@ cxx="${CXX:-g++}"
     -I"$repo/components/sml_parser/include" \
     -I"$repo/components/sml_transport/include" \
     "$repo/components/sml_parser/src/sml.cpp" \
+    "$repo/components/sml_parser/src/sml_crc16.c" \
     "$repo/components/sml_parser/src/sml_adapter.cpp" \
     "$here/test_sml_parser.cpp" \
     -o "$out/test_sml_parser"
@@ -483,6 +484,7 @@ ASAN_OPTIONS=detect_leaks=1 "$out/test_sml_parser"
     -I"$repo/components/sml_parser/src" \
     -I"$repo/test" \
     "$repo/components/sml_parser/src/sml.cpp" \
+    "$repo/components/sml_parser/src/sml_crc16.c" \
     "$here/test_sml_parser_golden.cpp" \
     -o "$out/test_sml_parser_golden"
 
@@ -495,11 +497,39 @@ ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_parser_golden"
     -I"$repo/components/sml_parser/include" \
     -I"$repo/components/sml_transport/include" \
     "$repo/components/sml_parser/src/sml.cpp" \
+    "$repo/components/sml_parser/src/sml_crc16.c" \
     "$repo/components/sml_parser/src/sml_selftest.cpp" \
     "$here/test_sml_selftest.cpp" \
     -o "$out/test_sml_selftest"
 
 ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_selftest"
+
+# SML CRC-16 variants (X-25 vs Kermit): published check values, the shared
+# reflected table, and the real committed telegrams. Every corpus telegram
+# validates as X-25 - including the Holley DTZ541 - so the parser's existing
+# choice is correct; Kermit is kept as a verified, tested building block only.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -I"$repo/components/sml_parser/src" \
+    "$repo/components/sml_parser/src/sml_crc16.c" \
+    "$here/test_sml_crc16.c" \
+    -o "$out/test_sml_crc16"
+
+"$out/test_sml_crc16" "$repo/test/fixtures/sml"
+
+# Golden decode of the committed .bin fixtures through the *production* adapter:
+# valid telegrams yield CRC_VALID with exact OBIS values; a flipped-byte copy
+# yields CRC_INVALID and transports nothing.
+"$cxx" -std=c++17 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I"$repo/components/sml_parser/src" \
+    -I"$repo/components/sml_parser/include" \
+    -I"$repo/components/sml_transport/include" \
+    "$repo/components/sml_parser/src/sml.cpp" \
+    "$repo/components/sml_parser/src/sml_crc16.c" \
+    "$repo/components/sml_parser/src/sml_adapter.cpp" \
+    "$here/test_sml_golden_bin.cpp" \
+    -o "$out/test_sml_golden_bin"
+
+ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_golden_bin" "$repo/test/fixtures/sml"
 
 # Stability / fault-injection harness for the power-history logic (ASan+UBSan):
 # corrupted, truncated, adversarial and boundary inputs must never crash or be

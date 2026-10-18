@@ -33,6 +33,8 @@ build/
 *.bin
 *.elf
 *.map
+# ...but keep the committed SML golden test fixtures (real meter telegrams).
+!test/fixtures/sml/*.bin
 # Generated in the build directory
 flasher_args.json
 sdkconfig.old

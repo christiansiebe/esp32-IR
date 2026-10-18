@@ -2,7 +2,7 @@
 #include <string.h>
 
 #include "sml.h"
-#include "smlCrcTable.h"
+#include "sml_crc16.h"
 
 #ifdef SML_DEBUG
 char logBuff[200];
@@ -76,12 +76,9 @@ sml_states_t smlCurrentState(void)
 
 void crc16(unsigned char &byte)
 {
-#ifdef ARDUINO
-  crc =
-      pgm_read_word_near(&smlCrcTable[(byte ^ crc) & 0xff]) ^ (crc >> 8 & 0xff);
-#else
-  crc = smlCrcTable[(byte ^ crc) & 0xff] ^ (crc >> 8 & 0xff);
-#endif
+  /* Standard SML CRC-16 (X-25): shared with sml_crc16.c so the variant logic
+   * lives in one place. Behaviourally identical to the old inline table. */
+  crc = sml_crc16_update(byte, crc);
 }
 
 void setState(sml_states_t state, int byteLen)
