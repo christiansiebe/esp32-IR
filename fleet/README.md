@@ -16,24 +16,33 @@ are tasks."*
 ## How it works
 
 ```
-   platform scheduler (cron */5 min)  <- outside every sandbox: survives pauses
+   platform scheduler (cron */10 min)  <- outside every sandbox: survives pauses
               |
               v
-   automations/fleet-watchdog/main.py   (no LLM, no token cost)
+   automations/fleet-supervisor/main.py   (no LLM, no token cost)
               |  reads
               v
    fleet/agents.json  (raw.githubusercontent, public repo)
               |  open_tasks per worker (0 = may sleep)
               v
-   for each worker with open_tasks > 0 whose sandbox is PAUSED:
-       POST /api/v1/sandboxes/<id>/resume
-       POST /api/v1/app-conversations/<id>/send-message   (wake nudge)
+   per worker:
+     open_tasks > 0 and sandbox PAUSED          -> resume + wake message
+     open_tasks > 0 and no activity > 20 min     -> interrupt + wake message
+     open_tasks == 0 and sandbox RUNNING         -> pause (stop paying for idle)
+
+   automations/fleet-pr-report/main.py  (every 6 h, no LLM)
+              -> one line per open PR: draft / mergeable / CI, READY flagged
 ```
 
 The **cron automation is the guarantee** because it runs on the platform
 scheduler, not inside a sandbox - a paused sandbox cannot wake itself, but the
 scheduler is always running. The in-sandbox `fleet.py` loop is only a fast local
 fallback and cannot be the guarantee for the same reason.
+
+A chat that is wedged (running but not responding) can be restarted by hand with
+`python3 /workspace/fleet/restart.py <conversation_id>`: it interrupts the stuck
+turn on the conversation's own runtime host, then resumes and wakes it. (The
+org-level stop endpoint returns 404 on Cloud.)
 
 Each worker also keeps a `TASKS.json` in its own workspace with one entry per
 task (`"status": "open" | "done"`). The parent mirrors the open-task count into

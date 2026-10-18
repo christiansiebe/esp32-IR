@@ -32,18 +32,29 @@ This is a standing rule for **every** esp32-IR chat agent, not a suggestion.
 - **The parent keeps `/workspace/fleet/agents.json`** current: for each worker
   it stores `open_tasks` (0 = may sleep) and a short note. This is the registry
   the watchdog trusts.
-- **The fleet watchdog** (`automations/fleet-watchdog`, a cron automation every
-  5 min, **no LLM, no token cost**) is the guarantee. It runs on the platform
-  scheduler, *outside* every conversation sandbox, so it survives a sandbox
-  pause. It reads `fleet/agents.json`, and for any agent with `open_tasks > 0`
-  whose sandbox is `PAUSED` it resumes the sandbox and sends a wake message
-  pointing at the open work. A paused sandbox is therefore not a hang - the next
-  cycle brings it back. (An in-sandbox loop such as `fleet/fleet.py` cannot be
-  the guarantee: if its own sandbox pauses, nothing wakes anyone. It is kept
-  only as a fast local fallback.)
-- **Safety rails** in the watchdog: it never wakes an agent with no open tasks,
-  and it skips a sandbox idle for more than `MAX_AGE_HOURS` (72). Finished
-  agents stay asleep and cost nothing.
+- **The fleet supervisor** (`automations/fleet-supervisor`, a cron automation
+  every 10 min, **no LLM, no token cost**) is the guarantee. It runs on the
+  platform scheduler, *outside* every conversation sandbox, so it survives a
+  sandbox pause. It reads `fleet/agents.json`, and each cycle:
+  - `open_tasks > 0` and sandbox `PAUSED` -> resume + wake message;
+  - `open_tasks > 0`, running but no activity for more than
+    `FLEET_STUCK_MINUTES` (20) -> interrupt the wedged turn + wake message;
+  - `open_tasks == 0` and sandbox `RUNNING` -> pause it (stop paying for idle).
+  A paused sandbox is therefore not a hang - the next cycle brings it back. (An
+  in-sandbox loop such as `fleet/fleet.py` cannot be the guarantee: if its own
+  sandbox pauses, nothing wakes anyone. It is kept only as a fast local
+  fallback.)
+- **A wedged chat can also be restarted by hand**:
+  `python3 /workspace/fleet/restart.py <conversation_id>` interrupts the stuck
+  turn on the conversation's own runtime host, then resumes and wakes it. (The
+  org-level stop endpoint returns 404 on Cloud.)
+- **The PR report** (`automations/fleet-pr-report`, every 6 h, no LLM) prints one
+  line per open PR with draft / mergeable / CI and flags the ones that are
+  `READY` to review and merge. The parent reads that instead of every chat
+  polling GitHub by hand.
+- **Safety rails** in the supervisor: it never wakes an agent with no open tasks,
+  it skips a sandbox idle for more than `FLEET_MAX_AGE_HOURS` (72), and it gives
+  up on an agent after `FLEET_MAX_WAKES` (6) failed wakes.
 - **If you finish all your work:** set your `TASKS.json` entries to `done` and
   update `/workspace/fleet/agents.json`, then you may sleep.
 

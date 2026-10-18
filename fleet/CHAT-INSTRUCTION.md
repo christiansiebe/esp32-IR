@@ -24,14 +24,21 @@ Die Regeln in Kurzform:
   `"status": "open" | "done"`. Offene Einträge = wachbleiben. Fertig bist du erst,
   wenn kein Eintrag mehr offen ist.
 - **Der Parent pflegt `fleet/agents.json`** (im Repo): pro Worker `open_tasks`
-  (0 = darf schlafen). Das ist die Registry, der der Watchdog vertraut.
-- **Der Fleet-Watchdog** (`automations/fleet-watchdog`, Cron alle 5 min, **kein
-  LLM, keine Token-Kosten**) läuft auf dem Plattform-Scheduler, also *außerhalb*
-  jeder Sandbox. Er weckt jede Konversation mit `open_tasks > 0`, deren Sandbox
-  `PAUSED` ist: `resume` + Weck-Nachricht. Eine pausierte Sandbox ist damit kein
-  Hänger — der nächste Zyklus holt sie zurück.
+  (0 = darf schlafen). Das ist die Registry, der der Supervisor vertraut.
+- **Der Fleet-Supervisor** (`automations/fleet-supervisor`, Cron alle 10 min,
+  **kein LLM, keine Token-Kosten**) läuft auf dem Plattform-Scheduler, also
+  *außerhalb* jeder Sandbox. Er liest `fleet/agents.json` und pro Zyklus:
+  `open_tasks > 0` + Sandbox `PAUSED` → resume + Weck-Nachricht; `open_tasks > 0`
+  aber > 20 min ohne Aktivität → Interrupt + Weck-Nachricht; `open_tasks == 0` +
+  Sandbox `RUNNING` → pausieren (Kosten sparen). Eine pausierte Sandbox ist damit
+  kein Hänger — der nächste Zyklus holt sie zurück.
+- **Hängender Chat:** `python3 /workspace/fleet/restart.py <conversation_id>`
+  (Interrupt + Resume + Weck-Nachricht).
+- **Der PR-Report** (`automations/fleet-pr-report`, alle 6 h, kein LLM) listet je
+  PR draft/mergeable/CI und markiert `READY` (grün + mergebar) zum Mergen.
 - **Sicherungen:** fertige Agenten (`open_tasks == 0`) werden nie geweckt;
-  Sandboxes, die länger als 72 h inaktiv sind, bleiben liegen.
+  Sandboxes, die länger als 72 h inaktiv sind, bleiben liegen; nach 6 erfolglosen
+  Weckversuchen gibt der Supervisor auf.
 - **Wenn du fertig bist:** setze deine `TASKS.json` auf `done`, bitte den Parent,
   `fleet/agents.json` zu aktualisieren — dann darfst du schlafen.
 
@@ -47,5 +54,5 @@ Die Regeln in Kurzform:
 
 > Lade die Fleet-Regeln aus `AGENTS.md` ("Fleet rule") und `fleet/README.md`.
 > Arbeite über Sub-Agenten, führe eine `TASKS.json` (open/done) und schlafe nicht
-> ein, solange offene Aufgaben existieren; der `fleet-watchdog` weckt dich sonst
+> ein, solange offene Aufgaben existieren; der `fleet-supervisor` weckt dich sonst
 > wieder. Fertig = `TASKS.json` auf done + `fleet/agents.json` aktualisiert.
