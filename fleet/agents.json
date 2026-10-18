@@ -1,5 +1,5 @@
 {
- "_comment": "Worker-Registry des esp32-IR-Fleet. Der Parent pflegt sie; der Fleet Supervisor (automations/fleet-supervisor, cron */5) liest sie. open_tasks=0 -> Agent darf schlafen.",
+ "_comment": "Worker-Registry des esp32-IR-Fleet. Der Parent pflegt sie; der Fleet Supervisor (automations/fleet-supervisor, cron */10 + KV-Run-Lock, ~13 min/Lauf) liest die Kopie auf GitHub raw (Branch feat/dfs-clock-visibility) - lokal aendern reicht nicht, pushen. open_tasks=0 -> Agent darf schlafen. Der alte fleet-watchdog ist deaktiviert; der Supervisor ersetzt ihn.",
  "agents": {
   "8c2548251ad045599fbfb6f95f3e7944": {
    "name": "parent (dieser Chat)",

@@ -4,28 +4,24 @@ Deterministic, no LLM, no token cost. Runs on the platform scheduler, outside
 every sandbox, so it survives a sandbox pause.
 
 Each cycle, for every worker in the registry:
-  * open_tasks > 0 and sandbox PAUSED, or the
-    agent loop is not running (execution_status paused/finished/idle)
-                                               -> resume + wake message
-  * open_tasks > 0 and running, but no event
-    for longer than STUCK_MINUTES              -> interrupt (clear a wedged turn)
+  * open_tasks > 0 and asleep (sandbox PAUSED
+    or execution_status paused/finished)       -> resume (only if really paused)
                                                   + wake message
-  * open_tasks == 0 and sandbox RUNNING, not
-    shared with a worker that still has work   -> pause (stop paying for idle)
+  * open_tasks > 0 and a turn is running, but
+    no event for longer than STUCK_MINUTES     -> interrupt (clear a wedged turn)
+                                                  + wake message
+  * open_tasks == 0 and sandbox RUNNING, and
+    no *other* conversation shares that sandbox-> pause (stop paying for idle)
   * open_tasks == 0 and PAUSED                 -> leave asleep
 
-Stuck detection uses the conversation's last activity time, not the platform's
-updated_at, which does not move while an agent sits idle.
+A sandbox can be shared: a worker started with parent_conversation_id inherits
+the parent's sandbox, so pausing it because *that* worker is done would freeze
+the parent too. The pause decision therefore looks at every conversation in the
+sandbox, not just the one being considered.
 
-Two platform behaviours this has to respect:
-  * Several workers can share one sandbox (a worker started with
-    parent_conversation_id inherits the parent's). Such a worker keeps
-    sandbox_status=RUNNING while execution_status drops to paused after a
-    turn - keying on sandbox_status alone never wakes it. Pausing that
-    sandbox because one tenant is done would take the others down.
-  * send-message answers HTTP 409 while a sandbox is still STARTING, so a
-    resume followed immediately by send-message silently loses the wake. The
-    sandbox is polled until RUNNING first.
+Stuck detection uses the conversation's last activity time from the agent server
+(/events/count), not the platform's updated_at, which does not move while an
+agent sits idle.
 
 State between runs (consecutive wake attempts per conversation) lives in the KV
 store, so a genuinely broken agent is not retried forever.
@@ -55,12 +51,17 @@ FALLBACK_REGISTRY = {
 }
 
 MAX_AGE_HOURS = float(os.environ.get("FLEET_MAX_AGE_HOURS", "72"))
-STUCK_MINUTES = float(os.environ.get("FLEET_STUCK_MINUTES", "20"))
-MAX_WAKES = int(os.environ.get("FLEET_MAX_WAKES", "6"))
+STUCK_MINUTES = float(os.environ.get("FLEET_STUCK_MINUTES", "10"))
+# After a resume the sandbox answers HTTP 409 while it is STARTING, so a
+# wake must wait for RUNNING before it sends.
 RESUME_WAIT_SECONDS = float(os.environ.get("FLEET_RESUME_WAIT_SECONDS", "90"))
-# The parent hosts the fleet tooling; pausing it would stop nothing critical
-# (the cron is the guarantee) but it is the coordinator, so leave it running.
-NEVER_PAUSE = {"8c2548251ad045599fbfb6f95f3e7944"}
+MAX_WAKES = int(os.environ.get("FLEET_MAX_WAKES", "6"))
+# Both parents host fleet tooling / coordinate the workers; the cron is the real
+# guarantee, but do not pause a coordinator out from under its workers.
+NEVER_PAUSE = {
+    "8c2548251ad045599fbfb6f95f3e7944",
+    "7a894c13678043e58935dd1509217a75",
+}
 
 WAKE_MESSAGE = (
     "System: Deine Sandbox war pausiert bzw. dein Lauf festgefahren und wurde vom "
@@ -98,6 +99,42 @@ def kv_set(key, value):
         headers={"Authorization": f"Bearer {_KV_TOKEN}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=20) as r:
         r.read()
+
+
+_LOCK_KEY = "run_lock"
+_LOCK_TTL_MIN = 15
+
+
+def acquire_lock():
+    """Single-flight guard.
+
+    A run takes ~13 min (mostly sandbox provisioning), so a */5 schedule would
+    otherwise start several overlapping runs - each spawning its own sandbox and
+    each sending the same wake messages, which would also burn through MAX_WAKES
+    three times as fast. Returns True if we hold the lock, False if a fresh run
+    is already active, None if the KV store is unavailable (no guard).
+    """
+    if not kv_available():
+        return None
+    now = datetime.now(timezone.utc)
+    cur = kv_get(_LOCK_KEY)
+    if isinstance(cur, dict) and cur.get("at"):
+        try:
+            age = (now - datetime.fromisoformat(cur["at"])).total_seconds()
+            if age < _LOCK_TTL_MIN * 60:
+                return False
+        except ValueError:
+            pass
+    kv_set(_LOCK_KEY, {"at": now.isoformat()})
+    return True
+
+
+def release_lock():
+    if kv_available():
+        try:
+            kv_set(_LOCK_KEY, {"at": "2000-01-01T00:00:00+00:00"})
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def load_state():
@@ -208,7 +245,7 @@ def interrupt(conv):
 
 def sandbox_status(token, sandbox_id):
     """Authoritative sandbox status. The app-conversation record can be stale
-    (it may say RUNNING while the sandbox is really PAUSED)."""
+    (it may say RUNNING while the sandbox is really PAUSED, or the reverse)."""
     try:
         rec = cloud(token, "GET", f"/api/v1/sandboxes?id={sandbox_id}")
         items = rec if isinstance(rec, list) else rec.get("items", [])
@@ -222,10 +259,8 @@ def sandbox_status(token, sandbox_id):
 
 def wake_worker(token, cid, conv):
     """Resume the sandbox if it is not RUNNING, wait until it is, then send the
-    wake message. send-message returns 409 while the sandbox is STARTING, so
-    resuming and sending in one breath silently drops the wake. The authoritative
-    status is queried because a shared sandbox's per-conversation record can be
-    stale."""
+    wake message. send-message answers 409 while the sandbox is STARTING, so
+    resuming and sending in one breath silently drops the wake."""
     sandbox_id = conv.get("sandbox_id")
     if sandbox_id:
         if sandbox_status(token, sandbox_id) not in ("RUNNING", None):
@@ -243,6 +278,48 @@ def wake_worker(token, cid, conv):
            "run": True})
 
 
+def decide(conv, entry, rec_state, sandbox_shared_live):
+    """Pure decision for one conversation. Returns one of:
+      "pause"  - no open work, sandbox running, not shared with live work
+      "wake"   - open work and the agent is asleep (or its turn is wedged)
+      "stuck"  - open work, a turn is running but has not moved for STUCK_MINUTES
+      "ok"     - open work and a turn is actively running
+      "skip"   - nothing to do (no open work and not pausable, or too old / too
+                 many failed wakes)
+
+    No I/O, so the table can be host-tested without the Cloud API.
+    """
+    open_n = (entry or {}).get("open_tasks", 0)
+    status = conv.get("sandbox_status")
+    exec_status = conv.get("execution_status")
+    cid = conv.get("id")
+
+    if open_n <= 0:
+        if status == "RUNNING" and cid not in NEVER_PAUSE and not sandbox_shared_live:
+            return "pause"
+        return "skip"
+
+    idle_h = hours_since(conv.get("updated_at"))
+    if idle_h is not None and idle_h > MAX_AGE_HOURS:
+        return "skip"
+    if rec_state.get("wakes", 0) >= MAX_WAKES:
+        return "skip"
+
+    # Awake means exactly one thing: the sandbox is up AND a turn is actually
+    # running. Everything else with open work is asleep and must be woken -
+    # sandbox PAUSED, a turn that ended (paused/finished), and equally a turn
+    # that *failed* (error) or has no status yet. Keying only on sandbox_status
+    # (or only on paused/finished) leaves an agent that inherits its parent's
+    # sandbox - or whose turn errored - asleep forever.
+    secs = minutes_since(conv.get("updated_at"))
+    awake = status == "RUNNING" and exec_status == "running"
+    if awake and secs is not None and secs > STUCK_MINUTES:
+        return "stuck"
+    if awake:
+        return "ok"
+    return "wake"
+
+
 def main():
     token = get_secret("OPENHANDS_API_KEY")
     registry = load_registry()
@@ -250,14 +327,20 @@ def main():
     conv_state = state.setdefault("conv", {})
     woken, paused, stuck = [], [], []
 
-    # First pass: fetch every conversation and note, per sandbox, the highest
-    # open_tasks among its tenants. A sandbox is shared by several workers, so
-    # pausing it because ONE tenant is done would take the others down.
-    records = {}
-    sandbox_open = {}
+    lock = acquire_lock()
+    if lock is False:
+        print("ein anderer Lauf haelt den Lock - uebersprungen (kein Doppel-Wecken)")
+        fire_callback("COMPLETED")
+        return
+
+    # Pass 1: fetch every conversation once. Two facts are needed before any
+    # action: the per-conversation state, and the set of conversations sharing
+    # each sandbox (a worker with parent_conversation_id runs in its parent's
+    # sandbox, so a pause decision must consider all of them).
+    convs = {}
+    sandbox_users = {}   # sandbox_id -> [conversation ids]
     for cid, entry in registry.items():
         name = (entry or {}).get("name", cid[:8])
-        open_n = (entry or {}).get("open_tasks", 0)
         try:
             rec = cloud(token, "GET", f"/api/v1/app-conversations?ids={cid}")
             items = rec.get("items") if isinstance(rec, dict) else rec
@@ -265,74 +348,87 @@ def main():
                 print(f"{name}: nicht gefunden")
                 continue
             conv = items[0]
-            records[cid] = (conv, open_n, name)
-            sid = conv.get("sandbox_id")
-            if sid:
-                sandbox_open[sid] = max(sandbox_open.get(sid, 0), open_n)
+            convs[cid] = (name, entry or {}, conv)
+            sbx = conv.get("sandbox_id")
+            if sbx:
+                sandbox_users.setdefault(sbx, []).append(cid)
         except Exception as exc:  # noqa: BLE001 - one bad agent must not stop the rest
-            print(f"{name}: Fehler: {exc}")
+            print(f"{name}: Fehler beim Status: {exc}")
 
-    for cid, (conv, open_n, name) in records.items():
-        status = conv.get("sandbox_status")
-        exec_status = conv.get("execution_status")
-        sandbox_id = conv.get("sandbox_id")
-        idle_h = hours_since(conv.get("updated_at"))
-        rec_state = conv_state.setdefault(cid, {})
-        # The agent loop is not running: either the sandbox is down or, for a
-        # worker sharing a parent sandbox, execution_status went idle while
-        # sandbox_status stayed RUNNING.
-        asleep = status == "PAUSED" or exec_status in ("paused", "finished", "idle")
+    def sandbox_busy(sandbox_id):
+        """True if any conversation in this sandbox still has open work or must
+        not be paused. Pausing a shared sandbox would freeze those too."""
+        for other in sandbox_users.get(sandbox_id, []):
+            if other in NEVER_PAUSE:
+                return True
+            _, oentry, _ = convs.get(other, (None, {}, {}))
+            if (oentry or {}).get("open_tasks", 0) > 0:
+                return True
+        return False
 
-        if open_n <= 0:
-            shared_with_work = bool(sandbox_id) and sandbox_open.get(sandbox_id, 0) > 0
-            if (status == "RUNNING" and cid not in NEVER_PAUSE and sandbox_id
-                    and not shared_with_work):
+    # Pass 2: act on the pure decision.
+    for cid, (name, entry, conv) in convs.items():
+        try:
+            open_n = (entry or {}).get("open_tasks", 0)
+            status = conv.get("sandbox_status")
+            exec_status = conv.get("execution_status")
+            sandbox_id = conv.get("sandbox_id")
+            rec_state = conv_state.setdefault(cid, {})
+            shared = bool(sandbox_id) and sandbox_busy(sandbox_id)
+            action = decide(conv, entry, rec_state, shared)
+
+            if action == "pause":
                 try:
                     cloud(token, "POST", f"/api/v1/sandboxes/{sandbox_id}/pause", {})
                     print(f"{name}: fertig -> pausiert (Kosten sparen)")
                     paused.append(name)
                 except Exception as e:  # noqa: BLE001
                     print(f"{name}: pause fehlgeschlagen: {e}")
-            else:
-                print(f"{name}: 0 offene Aufgaben - schlafen lassen")
-            rec_state["wakes"] = 0
-            continue
+                rec_state["wakes"] = 0
+                continue
 
-        if idle_h is not None and idle_h > MAX_AGE_HOURS:
-            print(f"{name}: {idle_h:.0f}h inaktiv (> {MAX_AGE_HOURS:.0f}h) - schlafen lassen")
-            continue
+            if action == "skip":
+                if open_n <= 0:
+                    if shared:
+                        print(f"{name}: 0 offene Aufgaben, aber Sandbox {sandbox_id[:8]} "
+                              f"wird noch geteilt - nicht pausieren")
+                    else:
+                        print(f"{name}: 0 offene Aufgaben - schlafen lassen")
+                    rec_state["wakes"] = 0
+                else:
+                    print(f"{name}: uebersprungen (zu alt oder zu viele Weckversuche)")
+                continue
 
-        if rec_state.get("wakes", 0) >= MAX_WAKES:
-            print(f"{name}: {rec_state['wakes']} Weckversuche ohne Erfolg - uebersprungen (defekt?)")
-            continue
+            if action == "ok":
+                print(f"{name}: {status}/{exec_status}, offene Aufgaben={open_n} - ok")
+                continue
 
-        secs = minutes_since(conv.get("updated_at"))
-        is_stuck = (status == "RUNNING" and not asleep and secs is not None
-                    and secs > STUCK_MINUTES)
-
-        if asleep or is_stuck:
-            if is_stuck and interrupt(conv):
-                print(f"{name}: festgefahren ({secs:.0f} min ohne Aktivitaet) -> interrupt")
+            # "wake" or "stuck": interrupt a wedged turn first, then resume the
+            # sandbox (waiting for RUNNING) and send the wake message.
+            if action == "stuck" and interrupt(conv):
+                print(f"{name}: festgefahren ({minutes_since(conv.get('updated_at')):.0f} min ohne Aktivitaet) -> interrupt")
                 stuck.append(name)
             try:
                 wake_worker(token, cid, conv)
-                rec_state["wakes"] = rec_state.get("wakes", 0) + 1
-                rec_state["last_wake"] = datetime.now(timezone.utc).isoformat()
-                woken.append(name)
-                print(f"{name}: geweckt (offene Aufgaben={open_n}, Versuch {rec_state['wakes']})")
             except Exception as e:  # noqa: BLE001
                 print(f"{name}: Weck-Nachricht fehlgeschlagen: {e}")
-        else:
-            print(f"{name}: {status}/{exec_status}, offene Aufgaben={open_n} - ok")
+            rec_state["wakes"] = rec_state.get("wakes", 0) + 1
+            rec_state["last_wake"] = datetime.now(timezone.utc).isoformat()
+            woken.append(name)
+            print(f"{name}: geweckt ({status}/{exec_status}, offene Aufgaben={open_n}, Versuch {rec_state['wakes']})")
+        except Exception as exc:  # noqa: BLE001 - one bad agent must not stop the rest
+            print(f"{name}: Fehler: {exc}")
 
     save_state(state)
+    release_lock()
     print(f"fertig: geweckt={woken} pausiert={paused} festgefahren={stuck}")
     fire_callback("COMPLETED")
 
 
-try:
-    main()
-except Exception as exc:  # noqa: BLE001
-    print(f"ERROR: {exc}", file=sys.stderr)
-    fire_callback("FAILED", str(exc))
-    sys.exit(1)
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        fire_callback("FAILED", str(exc))
+        sys.exit(1)

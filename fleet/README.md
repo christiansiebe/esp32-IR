@@ -54,6 +54,12 @@ task (`"status": "open" | "done"`). The parent mirrors the open-task count into
 - `restart.py` - restart a chat that no longer responds: interrupt a wedged turn
   on the conversation's own runtime host, then resume + wake message.
 - `nudge.py` - send one message to a conversation (wake nudge / manual test).
+- `deploy_automation.py` - upload `automations/<name>/` as a tarball and point the
+  automation at it. **The automation code does not run from this repo**: each run
+  unpacks the tarball uploaded once, so editing `automations/<name>/main.py` has
+  no effect until `python3 fleet/deploy_automation.py <name> [--schedule ...]` is
+  run. (OpenHands Cloud only; needs `customTarball` in `/api/automation/v1/capabilities`.)
+- `test_supervisor.py` - host test for the supervisor decision table.
 - `agents.json` - the worker registry the parent maintains.
 - `fleet_state.json` - wake bookkeeping (created at runtime, not committed).
 - `.api_key` - sandbox-local 0600 key file for the detached watchdog (not committed).
@@ -74,6 +80,30 @@ Safety rails: `--task-only` (never wake an agent with no open tasks),
 `--max-age-hours` (default 72, do not resurrect long-finished agents),
 `--max-wakes-per-day` (default 12, stop retrying a genuinely broken agent and
 report it instead of looping).
+
+## Wake pitfalls (learned the hard way, 2026-10-18)
+
+These all made agents sit asleep with open work. The supervisor's `decide()` now
+covers them and `test_supervisor.py` locks them in:
+
+1. **A worker shares its parent's sandbox.** A conversation started with
+   `parent_conversation_id` runs in the *parent's* sandbox, so its
+   `sandbox_status` stays `RUNNING` while its own `execution_status` goes
+   `paused`/`finished` once its turn ends. Keying only on `sandbox_status`
+   never wakes it.
+2. **A turn can fail.** `execution_status` can be `error` (or absent) while the
+   sandbox runs. Any non-`running` exec state with open work is asleep and must
+   be woken - not just `paused`/`finished`.
+3. **Pausing a shared sandbox freezes the parent.** When a finished worker
+   (`open_tasks=0`) shares a sandbox with a conversation that still has open
+   work (or a `NEVER_PAUSE` coordinator), the supervisor must not pause it. The
+   pause decision looks at every conversation in the sandbox.
+4. **A run takes ~13 min** (mostly sandbox provisioning), so a short cron
+   schedule starts overlapping runs that each wake the same agent and burn
+   `MAX_WAKES`. A KV run-lock (`_LOCK_TTL_MIN`) makes runs single-flight; the
+   schedule (`*/10`) plus the lock keeps one run at a time.
+5. **The registry the supervisor reads is the one on GitHub**, not the local
+   file - keep `fleet/agents.json` pushed or the open-task counts are stale.
 
 ## Rule for a worker agent
 

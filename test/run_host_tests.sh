@@ -286,6 +286,11 @@ python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"
 python3 "$here/check_dashboard_js.py"
 
+# Fleet supervisor decision table (pure, no Cloud API): the cases that let an
+# agent fall asleep and never wake (shared parent sandbox, a failed turn, a
+# finished worker sharing a live sandbox).
+python3 "$repo/fleet/test_supervisor.py"
+
 # Firmware version: must always resolve to a non-empty string, so the dashboard
 # and the diagnostics can identify the running build (CMake writes
 # main/build_version.h; host builds fall back to PROJECT_VER / "unknown").
