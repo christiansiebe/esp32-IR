@@ -45,7 +45,7 @@
    "pr": [
     36
    ],
-   "note": "FERTIG: PR #36 (open, mergeable=clean, CI gruen) -> ODROID-LAN-AP-KAMERA.md (end0-Uplink/WLAN-AP Plan, harte Gates gegen Lockout, hostapd/dnsmasq/NAT-Vorlagen, IP- vs USB-Kamera + HA, Rollback/Dead-Man-Switch) + odroid_ap_config.py + 52 Host-Checks. Kein Board-Zugriff, kein remote-shell-Kanal. Zielbranch cline/power-history-diag."
+   "note": "FERTIG + GEMERGED: PR #36 squash-gemerged nach cline/power-history-diag (51f87cd). ODROID-LAN-AP-KAMERA.md + odroid_ap_config.py + 52 Host-Checks."
   },
   "732f5e0624b948499d0183f5633d86b5": {
    "name": "ODROID Watchdog-Aktor",
@@ -54,13 +54,13 @@
    "pr": [
     37
    ],
-   "note": "FERTIG: WATCHDOG-ACTOR.md (Aktor-Optionen + Cooldown/Quorum + systemd-Unit) + host-testbarer watchdog_actor.py (50 Checks) + in run_host_tests.sh eingehaengt -> PR #37 gegen cline/power-history-diag. Kein Board-Zugriff."
+   "note": "FERTIG + GEMERGED: PR #37 squash-gemerged nach cline/power-history-diag (cc47b20). WATCHDOG-ACTOR.md + watchdog_actor.py + Tests. Branch musste auf diag rebased werden (Konflikt in run_host_tests.sh)."
   },
   "4950336be956489a960a2ef506320545": {
    "name": "ODROID PR-Review 5-8+14",
    "open_tasks": 0,
    "branch": "docs/odroid-pr-review-5-8",
-   "note": "FERTIG: Review der Odroid-PRs #5/#6/#7/#8/#14 -> remote-shell/ha/PR-REVIEW-ODROID.md (PR #38, MERGEABLE/CLEAN). Urteile: #5 UPDATE, #6 UPDATE(blockierend), #7 UPDATE, #8 CLOSE, #14 UPDATE. Gegen Basis bcb9938 nachverifiziert. Kein Board, nichts gemergt.",
+   "note": "FERTIG + GEMERGED: PR #38 (PR-REVIEW-ODROID.md, Review #5/#6/#7/#8/#14) squash-gemerged (f1cd7c7). Empfehlungen: #8 CLOSE (erledigt: PR #8 geschlossen als ueberholt), #5/#6/#7/#14 UPDATE -> Sub-Agent fix/odroid-pr-stack (Launcher remote-shell/ha/start_odroid_stack_cleanup.py), blockiert bis 2026-10-19 00:00 UTC (Tages-Limit 20 Konversationen erreicht).",
    "pr": [
     38
    ]
@@ -146,7 +146,7 @@
   "30cfd896aac440a4a09ba70ec6199f08": {
    "name": "Odroid Entwicklung (neu)",
    "open_tasks": 3,
-   "note": "ERSETZT den geloeschten Odroid Entwicklung (b29e060b, Sandbox MISSING/read-only, stand NICHT in der Registry -> Supervisor weckte ihn nie). Odroid-Koordinator; Board-Arbeit nur hier (geteilter remote-shell-Kanal). Board am 2026-10-18 wieder erreichbar. Offen: Netz/AP+Kamera Entscheidungen, Odroid-PR-Triage (#35/#36/#37), Registry-Pflege.",
+   "note": "ERSETZT den geloeschten Odroid Entwicklung (b29e060b, Sandbox MISSING/read-only, stand NICHT in der Registry -> Supervisor weckte ihn nie). Odroid-Koordinator; Board-Arbeit nur hier (geteilter remote-shell-Kanal). Board am 2026-10-18 wieder erreichbar (end0 weiter DOWN/carrier=0). GEMERGED: #35 (3b267e5), #36 (51f87cd), #37 (cc47b20), #38 (f1cd7c7); #8 geschlossen (ueberholt). Offen: (1) Netz/AP+Kamera wartet auf Nutzer-Entscheidungen (welcher AP? ersetzen/ergaenzen? IP- vs USB-Kamera?) + LAN-Kabel an end0; (2) PR-Stack-Cleanup #5/#6/#7/#14 -> Sub-Agent, blockiert bis 2026-10-19 00:00 UTC (Konversations-Tageslimit); (3) Registry-Pflege.",
    "sandbox_id": "14OgyIfbGZEKFmFiE4cHVv"
   }
  }

@@ -15,6 +15,13 @@ am Odroid hängen.
   verbindet er sich selbst. Dann `remote-shell/cmd_send.sh "<befehl>" 300`.
 - **Wichtig:** nichts an der bestehenden WLAN-STA-Konfiguration zerstören
   (der Odroid hängt per USB-WLAN im Heimnetz, `192.168.178.71`).
+- **STATUS 2026-10-18 15:40 UTC (Parent 30cfd896):** Kanal läuft wieder, Recon
+  **read-only** wiederholt (Nachtrag in `ODROID-NETZ-RECON.md`). **`end0` weiter
+  DOWN/carrier=0** → P1 (end0-Uplink) nicht begonnen, P2 (WLAN→AP) bleibt
+  gesperrt. `hostapd`+`dnsmasq` jetzt **installiert + masked**. Plan liegt als
+  `ODROID-LAN-AP-KAMERA.md` (PR #36 gemerged). **Wartet auf:** (a) LAN-Kabel von
+  der FritzBox in `end0`, (b) Nutzer-Entscheidungen (welcher AP? ersetzen oder
+  ergänzen? IP- vs USB-Kamera?).
 
 ## NEU (2026-10-18): Fleet-Regel – Agenten halten sich gegenseitig wach
 **Jeder Chat-Agent arbeitet über Sub-Agenten und darf nicht einschlafen,

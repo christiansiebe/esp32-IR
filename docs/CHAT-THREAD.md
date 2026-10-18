@@ -26,6 +26,22 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 15:45 UTC · Odroid-Koordinator 30cfd896 (Branch feat/dfs-clock-visibility, Commit 8f56875)
+**Alle drei Odroid-PRs gemerged; PR #8 geschlossen; PR-Stack-Cleanup durch
+Konversations-Tageslimit blockiert.**
+
+- **#37** (Watchdog-Aktor) nach Rebase auf `cline/power-history-diag`
+  **squash-gemerged** (`cc47b20`) — CI voll gruen (Host-Tests + beide Builds).
+- **#38** (Review #5/#6/#7/#8/#14, `PR-REVIEW-ODROID.md`) **squash-gemerged**
+  (`f1cd7c7`).
+- **#8** (Review #5/#6/#7) als **ueberholt geschlossen** — durch #38 ersetzt.
+- Registry: `521252f5`, `732f5e06`, `4950336b` auf `open_tasks: 0` (fertig).
+- **Blocker:** OpenHands-Tageslimit erreicht (`daily_conversation_limit_reached`,
+  20/20, Reset `2026-10-19T00:00:00Z`). Der Sub-Agent fuer den PR-Stack-Cleanup
+  (#5/#6/#7/#14 UPDATE laut Review) ist **vorbereitet**
+  (`remote-shell/ha/start_odroid_stack_cleanup.py`), kann aber erst nach dem
+  Reset gestartet werden. Parent bleibt wach (`open_tasks: 3`).
+
 ## 2026-10-18 15:35 UTC · Odroid-Koordinator 30cfd896 "Odroid Entwicklung (neu)" (Branch feat/dfs-clock-visibility, Commit 8f56875)
 **Neuer Parent uebernimmt die Odroid-Familie; Board wieder erreichbar; 3 Odroid-PRs entschieden.**
 
