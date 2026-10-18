@@ -592,3 +592,33 @@ Sandbox-ID in `ExecStart` zur aktuellen `$RUNTIME_ID` passt). Der Odroid-Agent
 verbindet sich dann von selbst (~1 min, `Restart=always`).
 **`cmd_send.sh` liegt im Worktree** `/workspace/wt-fleet/remote-shell/`, nicht in
 der Server-Kopie `/workspace/remote-shell/`.
+
+
+## 2026-10-18 · Odroid LAN-Uplink + WLAN-AP + Kamera (PR #36, Branch docs/odroid-lan-ap-kamera)
+
+Reine Repo-/Host-Arbeit, **kein Board-Zugriff, kein remote-shell-Kanal** (Auftrag
+verbietet den geteilten Kanal — parallele Nutzung = doppelte Befehle/Board-Haenger).
+Basis `cline/power-history-diag`, PR **gegen** `cline/power-history-diag` (nicht main).
+
+Neue Dateien:
+- `remote-shell/ha/ODROID-LAN-AP-KAMERA.md` — Umsetzungsplan: `end0`=Uplink,
+  WLAN=`wlxdc627949ba79`=AP. **Reihenfolge zwingend** (nur EIN Funkmodul): erst
+  end0-Uplink verifizieren, dann WLAN auf AP, sonst Lockout (der Kanal laeuft
+  ueber die WLAN-STA-Verbindung). hostapd/dnsmasq-Vorlagen (Platzhalter),
+  NAT auf end0, Kamera IP(RTSP/ONVIF) vs USB-UVC/V4L2, Rollback + Dead-Man-Switch,
+  offene Nutzer-Entscheidungen.
+- `remote-shell/ha/odroid_ap_config.py` + `test_odroid_ap_config.py` (52 Checks),
+  eingehaengt in `test/run_host_tests.sh`. Dry-Run Default, kein Clobber ohne
+  `--force`, lehnt Platzhalter/Heimnetz-Ueberlappung ab.
+
+**Wichtige Umgebungs-Erkenntnis:** `git push` mit dem Default-Remote-Token gibt
+**403** ("Permission ... denied to christiansiebe"). Der `create_pr`-Tool-Token
+gibt ebenfalls 403 auf `POST /pulls`. Loesung: `GITHUB_WRITE_TOKEN` nutzen —
+`git remote set-url origin https://${GITHUB_WRITE_TOKEN}@github.com/...` und den
+PR per `POST https://api.github.com/repos/christiansiebe/esp32-IR/pulls` mit
+`Authorization: Bearer $GITHUB_WRITE_TOKEN` anlegen.
+
+**Odroid Fakt (aus Recon, nicht neu gemessen):** nur EIN Ethernet-Port → Kamera
+kann NICHT direkt am Odroid haengen, wenn end0 der Uplink ist; Kamera gehoert an
+denselben Switch/dieselbe FritzBox. rtw88_8822bu meldet keine
+`valid interface combinations` → AP+STA auf einem Modul nicht garantiert.
