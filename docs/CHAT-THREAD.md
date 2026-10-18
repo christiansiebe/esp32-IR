@@ -385,3 +385,22 @@ Host-Suite grün, beide Rollen bauen (`tools/build.sh receiver|sender`).
 - Branch gepusht; PR **#11** (Beschreibung um den Wall-Clock-Abschnitt ergänzt).
 - `TASKS.json`: alle Punkte **done**. `fleet/agents.json` in dieser Sandbox nicht
   vorhanden - an Parent gemeldet.
+
+### 2026-10-18 (Fleet): kleiner PR von `main` — letzte bekannte Zeit persistieren
+
+- Auf Anweisung der Fleet (Branch **von `main`**, kleiner grüner PR gegen `main`)
+  neu aufgesetzt: Branch `feat/persist-last-known-clock` ab `origin/main` (`d836092`).
+- Nur die Wall-Clock-Arbeit gecherry-pickt; Konflikte aufgelöst:
+  - `main/CMakeLists.txt`: `task_wdt_policy/task_wdt_guard` (main) **und**
+    `wall_clock/wall_clock_store` (neu) behalten.
+  - `main/main.c`: `task_wdt_guard_init()` **und** `wall_clock_seed_from_store()`
+    im `app_main` behalten; Seed überspringt, wenn die Uhr schon gültig ist.
+  - Die unabhängige `.gitignore`-Änderung (`.openhands/`) **entfernt**, damit der
+    PR fokussiert bleibt.
+- Ergebnis: 2 Commits, +805/-11 über 8 Dateien. `storage`-Partition unangetastet,
+  On-Disk-Format unverändert (kein `POWER_HISTORY_VERSION`-Bump).
+- Host-Suite grün (`wall-clock: 40 checks, 0 failures`), beide Rollen bauen sauber.
+- **PR #26** (draft) gegen `main`: https://github.com/christiansiebe/esp32-IR/pull/26
+- CI läuft auf `4b9819e`.
+- `TASKS.json`: alle Punkte **done**. `fleet/agents.json` existiert in dieser Sandbox
+  nicht (kein `/workspace/fleet/`) — an Parent gemeldet.
