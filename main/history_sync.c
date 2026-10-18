@@ -36,6 +36,9 @@ void history_sync_run(history_sync_result_t *result, int64_t start_cursor,
             }
         }
         if (!fetched) {
+            /* Every retry missed: a real page loss that ends the session. Count
+             * it once here (not per attempt) so the diagnostic is meaningful. */
+            result->fetch_failures++;
             break; /* link drop: cursor already saved up to here */
         }
         result->any_round = true;

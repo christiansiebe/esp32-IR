@@ -49,6 +49,10 @@ typedef struct {
     int64_t cursor;            /* resume point after the session */
     uint32_t pages;            /* pages fetched */
     uint32_t merged;           /* minutes merged into the receiver store */
+    /* Pages whose fetch exhausted every retry (a real link failure that ended
+     * the session). A transient miss that a retry recovered is NOT counted, so
+     * the backfill `errors` diagnostic reflects lost pages, not each attempt. */
+    uint32_t fetch_failures;
     bool any_round;            /* at least one page round-trip completed */
     bool caught_up;            /* cursor reached the sender's newest minute */
     int64_t sender_oldest_utc;

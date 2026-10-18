@@ -5706,9 +5706,9 @@ static bool history_sync_fetch_espnow(void *ctx, int64_t after_utc, int64_t to_u
     size_t response_len = 0;
     if (sender_diag_exchange_raw(&request, sizeof(request), request_id, response,
                                  &response_len) != ESP_OK) {
-        portENTER_CRITICAL(&g_history_backfill_lock);
-        ++g_history_backfill_errors;
-        portEXIT_CRITICAL(&g_history_backfill_lock);
+        /* The session counts a page loss once it has exhausted its retries
+         * (history_sync_result_t.fetch_failures); a single recovered attempt
+         * must not inflate the diagnostic. */
         return false;
     }
     const size_t header_size = sizeof(espnow_diag_header_t) + sizeof(uint32_t) * 2u +
@@ -5797,6 +5797,9 @@ static bool history_backfill_run_session(uint32_t max_pages, uint32_t *merged_ou
     portENTER_CRITICAL(&g_history_backfill_lock);
     g_history_backfill_merged += result.merged;
     g_history_backfill_pages += result.pages;
+    /* Count only pages whose fetch exhausted every retry: a transient miss that
+     * a retry recovered is not an error. */
+    g_history_backfill_errors += result.fetch_failures;
     g_history_backfill_last_utc = now;
     g_history_sync_sender_oldest_utc = result.sender_oldest_utc;
     g_history_sync_sender_latest_utc = result.sender_latest_utc;
