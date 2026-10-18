@@ -252,16 +252,21 @@ Two firmware roles are built from one source tree.
   (`history-pull`: `caught_up: true`, `errors: 0`, `sender_mac_known: true`;
   sender round-trip via `/api/sender-diag` ok). The home AP "Wohnzimmer" runs on
   channel 1, which is why `CONFIG_ESPNOW_CHANNEL=1` still matches.
-- **Open (pre-existing): the receiver's `web_guard` restarts the HTTP server
-  while idle.** On `db228f9` the `status` counter `web health: … restarts N`
-  climbs ~1.2/min with no external traffic, while `last activity` stays ~1 s
-  (so the loopback probe *is* working, yet the guard still restarts the server).
-  The previous image (`g71409c8`) already showed `restarts 288`, so this is not
-  an AP-off regression; no data is lost (heap steady, backfill fine) but the
-  churn is wasteful. Suspect the 5 s loopback probe against `127.0.0.1:80`
-  occasionally fails or contends with `max_open_sockets`. The boot log is
-  flooded with SML lines, so the `web_guard` messages rotate out; investigate
-  separately (probe interval/timeout, whether a real `httpd` restart happens).
+- **Fixed (PR #14): the receiver's `web_guard` restarted the HTTP server while
+  idle — unsigned underflow in `web_guard_tick()`.** The guard captured `now_ms`
+  *before* the self-probe, but the `/healthz` handler stamps `last_request_ms`
+  *during* it, a few ms later. So `last` (e.g. 100183) exceeded `now` (100169)
+  and `now_ms - last` wrapped on `uint64_t` to a near-2^64 value that reads as an
+  endless silence (> the 30 s threshold) → a **false restart every ~45 s** even
+  though the dashboard was reachable from outside. Hardware proof:
+  `tick=RESTART last=100183 now=100169 thr=30000 probe_err=0(ESP_OK) status=200`.
+  The fix clamps the subtraction (`silence = now_ms >= last ? now_ms - last : 0`)
+  and a host test (`test_probe_timestamp_ahead_of_now`) now covers the
+  future-stamp case. Verified on device (`428fdaf`): `restarts 0`, `failures 0`
+  over 240 s (was ~5 restarts/window). The occasional `ESP_ERR_HTTP_EAGAIN` probe
+  error was a red herring (about once per 2 min, never ≥30 s in a row). Kept the
+  diagnostics that found it: a `self-probe failed: <err>` WARN and a
+  `web probe: last err …, http …, failures …` line in the `status` command.
 - Adaptive sender light sleep (`CONFIG_ESPNOW_SENDER_LIGHT_SLEEP`, default
   **on**, sender ships as a single image): `main/uart_sleep_window.{h,c}` parks
   the CPU only in the quiet gap between SML telegram bursts. The window starts at

@@ -20,19 +20,16 @@
   Station an den Heim-AP-Kanal gebunden ist, muss dieser 1 sein (verifiziert:
   FRITZ!Box „Wohnzimmer" = Kanal 1).
 
-## OFFEN: Empfänger-`web_guard` startet den HTTP-Server im Leerlauf neu
-**Beobachtet am AP-aus-Image (`db228f9`): `restarts` steigt ~1,2/Minute** (13→26
-in ~10 min), auch ohne externe Zugriffe; `last activity` bleibt aber bei ~1 s,
-d. h. die Loopback-Probe **funktioniert** und der Guard startet den Server
-trotzdem neu. **Vorbestehend** — das vorherige Image (`g71409c8`) zeigte
-`restarts 288` bei wenigen Stunden Uptime, gleiche Größenordnung; **kein**
-AP-aus-Regress. Kein Datenverlust (Heap stabil ~107 kB, Backfill ok), aber
-unnötige Churn. Verdacht: die 5-s-Loopback-Probe (`esp_http_client` auf
-`127.0.0.1:80`) schlägt gelegentlich fehl oder kollidiert mit `max_open_sockets`
-→ Guard wertet das als „Server tot". Zu prüfen: Probe-Intervall/Timeout, ob ein
-echter `httpd`-Restart stattfindet (Bootlog ist von SML-Werten überflutet),
-und ob `threshold_ms`/`restart_timeout_ms` für den Leerlauf zu knapp sind.
-**Nicht im AP-aus-Scope; separat zu untersuchen.**
+## BEHOBEN (PR #14): Empfänger-`web_guard` startete den HTTP-Server im Leerlauf neu
+**Ursache am Gerät belegt: vorzeichenloser Unterlauf in `web_guard_tick()`.**
+Der Guard liest `now_ms` **vor** dem Selbst-Probe; der `/healthz`-Handler stempelt
+`last_request_ms` aber **während** des Probes, also ein paar ms **später**. Damit
+ist `last` (z. B. 100183) **größer** als `now` (100169), und `now_ms - last`
+unterläuft auf `uint64_t` zu einer Riesenzahl → liest sich als „unendlich lange
+stumm" (> 30 s Schwelle) → **Fehl-Restart alle ~45 s**, obwohl das Dashboard von
+außen erreichbar war. Diagnose-Log: `tick=RESTART last=100183 now=100169
+thr=30000 probe_err=0(ESP_OK) status=200`.
+**Nicht im AP-aus-Scope; separat untersucht und behoben.**
 
 ## Fix „Sender 240 MHz, 0 Steps" (`feat/sender-associate-dfs`, 2026-10-17)
 **Ergebnis: Auf dem ESP32 classic (IDF v6.1) sind ein zuverlässiger ESP-NOW-Link

@@ -76,6 +76,8 @@ esp_err_t web_guard_register_healthz(httpd_handle_t server);
 bool web_guard_active(void);
 uint32_t web_guard_restart_count(void);
 uint32_t web_guard_last_activity_age_ms(void);
+/* Last self-probe result: transport error, HTTP status, cumulative failures. */
+void web_guard_probe_stats(uint32_t *err, int *status, uint32_t *fails);
 #endif
 
 #endif /* WEB_GUARD_H */
