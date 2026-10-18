@@ -30,6 +30,13 @@
       "status": "done",
       "branch": "feat/dfs-clock-visibility",
       "note": "cpu-real-clock.service (remote-shell/ha/cpu_real_clock.py) ueberlagert policy{0,2}/scaling_cur_freq per bind-Mount mit dem echten PLL-Takt. Auf dem Board installiert, aktiviert, reboot-fest. Verifiziert: htop zeigt 2472 statt 2400, cpu-volt-line zeigt big 2472MHz. Host-Test test_cpu_real_clock.py gruen."
+    },
+    {
+      "id": "T5",
+      "title": "OC-Overlay: Punkt 2496 (N=208) -> 2472 (N=206) ersetzen",
+      "status": "done",
+      "branch": "feat/oc-overlay-2472",
+      "note": "PR #39 gegen cline/power-history-diag. gen_oc_dts.py Standardpunkt 2472/N=206; deploy_oc_safe.sh DTB-Check, oc-freq-guard.sh und OC-README.md angepasst. Host-Tests gruen (test_gen_oc_dts 24 Checks, test_oc_safe, Gesamtsuite). Overlay auf dem Board noch NICHT installiert (Deployment = separater Schritt mit Testboot)."
     }
   ]
 }

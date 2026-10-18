@@ -611,3 +611,17 @@ deploy_cpu_real_clock.sh,cpu-real-clock-README.md,test_cpu_real_clock.py}`.
 **6) Fleet.** Dieser Chat (30cfd896) ist der Ersatz fuer den geloeschten
 "Odroid Entwicklung" (b29e060b) und jetzt in `fleet/agents.json` registriert
 (open_tasks=3). `TASKS.json` angelegt (T4 done, T1/T2/T3 open).
+
+---
+
+**7) OC-Overlay: Punkt 2496 -> 2472 (2026-10-18, Parent 30cfd896).** Der
+Standardpunkt des big-Cluster-Overlays war 2496 MHz (N=208, nur 120 s Soak).
+Umgestellt auf **2472 MHz (N=206)** - der am laengsten und fehlerfrei
+vermessene Punkt (30 min Soak, 22828 Laeufe, 0 Fehler). Geaendert:
+`gen_oc_dts.py` (OC_RATE/OC_N), `test_gen_oc_dts.py`, `deploy_oc_safe.sh`
+(DTB-Validierung `opp-2472000000`), `oc-freq-guard.sh` (Kommentar),
+`OC-README.md` (Tabellen/Ablauf). Boot-Schutz unveraendert (Guard-Cap 2400).
+Host-Tests gruen. **PR #39** gegen `cline/power-history-diag`. Das Overlay ist
+auf dem Board **noch nicht installiert** (Deployment = separater Schritt mit
+Testboot).
+
