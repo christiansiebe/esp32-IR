@@ -7,11 +7,18 @@ selbst wecken (es läuft nichts darin) — also wecken sich die Agenten
 gegenseitig über die Cloud-API.
 - Jeder Agent pflegt `TASKS.json` (`status: open|done`); offene Einträge =
   wachbleiben. Der Parent spiegelt die Zahl nach `fleet/agents.json`.
-- `fleet/fleet.py` (Watchdog, von `keepalive.sh` am Leben gehalten) pollt alle
-  300 s: Sandbox `PAUSED` **und** `open_tasks > 0` → `resume` + Weck-Nachricht.
-- Schutz: `--task-only` (fertige Agenten schlafen), `--max-age-hours` (alte
-  Agenten nicht auferstehen lassen), `--max-wakes-per-day` (kaputten Agenten
-  nicht endlos wecken, sondern melden).
+- Garantie ist die **Cron-Automation `fleet-watchdog`** (alle 5 min, **kein
+  LLM, keine Token-Kosten**): sie läuft auf dem Plattform-Scheduler, also
+  *außerhalb* jeder Sandbox, und überlebt damit Sandbox-Pausen. Sie liest
+  `fleet/agents.json` und weckt jede Konversation mit `open_tasks > 0` in
+  `PAUSED`: `resume` + Weck-Nachricht.
+- `fleet/fleet.py` (In-Sandbox-Loop) bleibt nur als schneller lokaler Fallback;
+  er kann die Garantie nicht sein, weil eine pausierte Sandbox sich nicht selbst
+  weckt.
+- Schutz: fertige Agenten (`open_tasks == 0`) werden nie geweckt; Sandboxes mit
+  >72 h Inaktivität bleiben liegen.
+- Die alten `chat-heartbeat`-Automations wurden **deaktiviert** (blindes Wecken
+  auch fertiger Agenten kostete Budget und machte den Chat träge).
 - Erledigt: die drei delegierten Sub-Agenten (UTC-persist PR #16 grün/fertig,
   TWDT PR #10 DRAFT+CONFLICTING → rebasen, MQTT PR #9 DRAFT → finalisieren)
   wurden geweckt und arbeiten weiter; Details in `fleet/README.md`.

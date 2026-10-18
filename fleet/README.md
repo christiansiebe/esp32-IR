@@ -16,22 +16,24 @@ are tasks."*
 ## How it works
 
 ```
-        parent conversation  (this chat)
-                 |  writes
-                 v
-        fleet/agents.json   <-- open_tasks per worker (0 = may sleep)
-                 ^  reads
-                 |
-        fleet/fleet.py  (watchdog, kept alive by remote-shell/keepalive.sh)
-                 |  polls every 300 s
-                 v
-   +-----------------------------------------------+
-   | for each worker: GET app-conversations?ids=.. |
-   |   sandbox PAUSED and open_tasks > 0 ?         |
-   |     -> POST sandboxes/<id>/resume             |
-   |     -> POST .../send-message  (wake nudge)    |
-   +-----------------------------------------------+
+   platform scheduler (cron */5 min)  <- outside every sandbox: survives pauses
+              |
+              v
+   automations/fleet-watchdog/main.py   (no LLM, no token cost)
+              |  reads
+              v
+   fleet/agents.json  (raw.githubusercontent, public repo)
+              |  open_tasks per worker (0 = may sleep)
+              v
+   for each worker with open_tasks > 0 whose sandbox is PAUSED:
+       POST /api/v1/sandboxes/<id>/resume
+       POST /api/v1/app-conversations/<id>/send-message   (wake nudge)
 ```
+
+The **cron automation is the guarantee** because it runs on the platform
+scheduler, not inside a sandbox - a paused sandbox cannot wake itself, but the
+scheduler is always running. The in-sandbox `fleet.py` loop is only a fast local
+fallback and cannot be the guarantee for the same reason.
 
 Each worker also keeps a `TASKS.json` in its own workspace with one entry per
 task (`"status": "open" | "done"`). The parent mirrors the open-task count into

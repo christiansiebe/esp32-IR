@@ -32,15 +32,18 @@ This is a standing rule for **every** esp32-IR chat agent, not a suggestion.
 - **The parent keeps `/workspace/fleet/agents.json`** current: for each worker
   it stores `open_tasks` (0 = may sleep) and a short note. This is the registry
   the watchdog trusts.
-- **The fleet watchdog** (`/workspace/fleet/fleet.py`, kept alive by
-  `keepalive.sh`) polls every conversation, and for any agent whose sandbox is
-  `PAUSED` **while `open_tasks > 0`** it resumes the sandbox and sends the agent
-  a message pointing at its open work. So a paused sandbox is not a hang - the
-  next cycle brings it back.
-- **Safety rails** in the watchdog: `--task-only` (never wake an agent with no
-  open tasks), `--max-age-hours` (do not resurrect agents idle for days),
-  `--max-wakes-per-day` (if one agent dies repeatedly, stop and report it as
-  broken instead of looping). Finished agents therefore stay asleep.
+- **The fleet watchdog** (`automations/fleet-watchdog`, a cron automation every
+  5 min, **no LLM, no token cost**) is the guarantee. It runs on the platform
+  scheduler, *outside* every conversation sandbox, so it survives a sandbox
+  pause. It reads `fleet/agents.json`, and for any agent with `open_tasks > 0`
+  whose sandbox is `PAUSED` it resumes the sandbox and sends a wake message
+  pointing at the open work. A paused sandbox is therefore not a hang - the next
+  cycle brings it back. (An in-sandbox loop such as `fleet/fleet.py` cannot be
+  the guarantee: if its own sandbox pauses, nothing wakes anyone. It is kept
+  only as a fast local fallback.)
+- **Safety rails** in the watchdog: it never wakes an agent with no open tasks,
+  and it skips a sandbox idle for more than `MAX_AGE_HOURS` (72). Finished
+  agents stay asleep and cost nothing.
 - **If you finish all your work:** set your `TASKS.json` entries to `done` and
   update `/workspace/fleet/agents.json`, then you may sleep.
 
