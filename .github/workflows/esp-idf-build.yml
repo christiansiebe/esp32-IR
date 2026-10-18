@@ -83,13 +83,6 @@ jobs:
           - role: sender
             kconfig_role: SENDER
             extra_kconfig: ""
-          # Experimental sender: ESP-NOW modem sleep + wake window, the only
-          # way the Wi-Fi driver releases ESP_PM_APB_FREQ_MAX so DFS can step
-          # down to 40 MHz. Built alongside the default so the DFS behaviour can
-          # be measured on hardware without changing the shipped default.
-          - role: sender-dfs
-            kconfig_role: SENDER
-            extra_kconfig: "CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=y"
     env:
       IDF_CCACHE_ENABLE: "1"
       CCACHE_DIR: /root/.cache/ccache
@@ -166,7 +159,7 @@ jobs:
           assert 'CONFIG_PM_DFS_INIT_AUTO=y'
           assert 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y'
           case "${{ matrix.role }}" in
-            sender|sender-dfs)
+            sender)
               assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=80'
               ;;
             *)
