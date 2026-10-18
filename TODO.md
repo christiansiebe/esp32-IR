@@ -182,8 +182,24 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       dauerhaft `WIFI_MODE_APSTA` (`main.c`); nach `GOT_IP` auf `WIFI_MODE_STA` wechseln.
 - [ ] **Tages-/Monats-Summen im Flash** (`hImport[24]`/`dImport[31]` wie AMS): aus
       Minutenwerten ableiten, platzsparend + schnellere Langzeitgrafik.
-- [ ] **Letzte bekannte Zeit persistieren** (`lastMeterReadTime`): nach Reboot ohne SNTP ist
+- [x] **Letzte bekannte Zeit persistieren** (`lastMeterReadTime`): nach Reboot ohne SNTP ist
       `bucket_start==0` → keine Aufzeichnung; letzte UTC im Header/NVS ablegen.
+      **Erledigt** (Branch `feat/link-fallback`): neue, reine Module
+      `main/wall_clock.{c,h}` (Record-Format + CRC, Seed-/Bucket-Mathematik,
+      Persist-Policy) und `main/wall_clock_store.{c,h}` (NVS, Namespace
+      `wallclock`/Key `last`, weist unsinnige Zeiten ab). Beim Boot wird die
+      letzte bekannte UTC aus dem NVS gelesen und **vor** dem ersten SNTP-Sync
+      als Startzeit gesetzt (Empfänger: `settimeofday`, Sender: ESP-NOW-Offset),
+      geflaggt als *nicht vertrauenswürdig*. Der Seed wird alle
+      `WALL_CLOCK_PERSIST_INTERVAL_SECONDS` (300 s, eigener Task, beide Rollen)
+      aktualisiert, damit auch ein Stromausfall/Absturz ihn nicht verliert; der
+      erste echte Sync (SNTP bzw. ESP-NOW) ersetzt ihn und persistiert sofort.
+      `boot_marker_note_and_log()` latcht jetzt nur noch bei **vertrauenswürdiger**
+      Uhr (sonst hätte der ungenaue Seed die Offline-Lücke als „leer" markiert).
+      **On-Disk-Format unverändert** (kein Versions-Bump, `storage`-Partition
+      unangetastet). Host-Test `test/test_wall_clock.c` (40 Checks, rot/grün
+      verifiziert): schreibt eine bekannte Zeit, „rebootet" per `fork()`, prüft
+      dass die Uhr weiterläuft und `bucket_start != 0` ist.
 - [x] **MQTT-Availability (LWT)**: `main/mqtt_bridge.c` setzt ein LWT auf
       `<prefix>/status` (retained, offline) und veroeffentlicht beim Connect `online`;
       der Discovery-Hub verweist per `availability_topic` darauf.
