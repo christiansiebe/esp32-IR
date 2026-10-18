@@ -2,7 +2,7 @@
   "_comment": "Odroid Entwicklung (neu), conversation 30cfd896aac440a4a09ba70ec6199f08. Ein Eintrag pro Aufgabe, status open|done. Offene Eintraege = wachbleiben. Der Parent spiegelt die Zahl der offenen Eintraege nach fleet/agents.json (open_tasks).",
   "conversation_id": "30cfd896aac440a4a09ba70ec6199f08",
   "role": "parent/coordinator",
-  "updated": "2026-10-18T17:45:00Z",
+  "updated": "2026-10-18T21:05:00Z",
   "tasks": [
     {
       "id": "T1",
@@ -37,6 +37,13 @@
       "status": "done",
       "branch": "feat/oc-overlay-2472",
       "note": "PR #39 gegen cline/power-history-diag. gen_oc_dts.py Standardpunkt 2472/N=206; deploy_oc_safe.sh DTB-Check, oc-freq-guard.sh und OC-README.md angepasst. Host-Tests gruen (test_gen_oc_dts 24 Checks, test_oc_safe, Gesamtsuite). Overlay auf dem Board noch NICHT installiert (Deployment = separater Schritt mit Testboot)."
+    },
+    {
+      "id": "T6",
+      "title": "Drucker HL-3040CN ueber Odroid (qemu-i386 CUPS-Container)",
+      "status": "open",
+      "branch": "feat/dfs-clock-visibility",
+      "note": "Ursache der leeren Seiten: HL-3040CN ist host-based (GDI), kann weder PCL6 noch PostScript (Brother-Spec: Emulation N/A, BR-Script3 N/A). Die Service-Namen PCL_P1/POSTSCRIPT_P1 sind Attrappen. Brother-Treiber ist i386-Binary ohne Quelle -> unter qemu-i386 in einem i386-CUPS-Container. GELIEFERT + auf dem Board AUSGERULLT: remote-shell/ha/brother-hl3040cn/ (Dockerfile, cupsd.conf, entrypoint.sh, deploy_brother_cups.sh, README) + test_brother_cups.py (24 Checks, in run_host_tests.sh). Board: Image brother-hl3040cn:local gebaut, Container 'brother-cups' laeuft (--network=host, --restart unless-stopped), Queue socket://192.168.178.50:9100. Verifiziert auf dem Board: 121 B PS -> 112587 B echter Brother-Strom (@PJL JOB...UEL), Job 'completed'. OFFEN: Nutzer bestaetigt, dass das Testblatt NICHT leer ist. Board-Befunde: Build braucht --network=host (Bridge-DNS kaputt), Container braucht --network=host (Bridge erreicht LAN nicht)."
     }
   ]
 }
