@@ -98,10 +98,16 @@ def main():
     # Reihenfolge der Tabelle darf das Ergebnis nicht aendern.
     check(m.table_select(900000, 900000, list(reversed(table)))
           == (900000, 39), 'Table: Ergebnis unabhaengig von der Reihenfolge')
-    # Entkopplung: gleicher Eintrag liefert immer denselben Tastgrad.
-    check(m.table_select(900000, 900000, table)[1]
-          == m.table_select(900000, 900000, table)[1],
-          'Table: duty je Eintrag fest (entkoppelt von min/max)')
+    # Entkopplung: derselbe Eintrag liefert immer denselben Tastgrad - und zwar
+    # unabhaengig von einer min/max-Verschiebung (Kontrast zu Continuous).
+    shifted_node = dict(m.N2P, min_uv=720000)
+    check(m.continuous_rel_duty(900000, **m.N2P)
+          != m.continuous_rel_duty(900000, **shifted_node),
+          'Continuous: min-Verschiebung aendert den Tastgrad (gekoppelt)')
+    check(m.table_duty_for(900000, table)
+          == m.table_duty_for(900000, table)
+          == 39,
+          'Table: duty 39 unabhaengig von min/max (entkoppelt)')
 
     # --- Falle "Boden umbenennen": min senken aendert die Hardware nicht ---
     check(m.nominal_at_reg_duty(m.N2P, 0, 999) == 680000,
@@ -132,6 +138,30 @@ def main():
           'Continuous-Boden: 680 mV ist rel_duty 100 (reg_duty 0)')
     check(m.table_select(679000, 679000, table) is None,
           'Table-Boden: < 680 mV hat keinen Eintrag')
+
+    # --- Cross-Check gegen uv.py (Roh-Register-Schreiber) ---
+    # uv.py importiert dieselben N2+-Knoten; im Test werden nur Konstanten und
+    # die reinen Rechenfunktionen benutzt (kein /dev/mem, kein Regler-Sysfs).
+    import uv as u
+    check(u.V_MIN == m.N2P['min_uv'] and u.V_MAX == m.N2P['max_uv'],
+          'uv.py und Modell nutzen dieselben N2+-Grenzen (680/1040 mV)')
+    # Spannungsebene: Treiber-Modell vs. uv.py-Roh-Register, <= halber
+    # Treiber-Schritt (1,8 mV) + halber Roh-Schritt (0,18 mV) = 1,98 mV.
+    worst_v = 0
+    for uv in range(680000, 1040001):
+        v_model = m.continuous_uv(m.continuous_rel_duty(uv, **m.N2P), **m.N2P)
+        v_uvpy = u.duty_to_uv('big', u.uv_to_duty('big', uv))
+        worst_v = max(worst_v, abs(v_model - v_uvpy))
+    check(worst_v <= m.step_mv(m.N2P) * 1000 / 2 + 0.5 * 360000 / 999,
+          'Cross-Check Spannung: max %.2f mV <= 1.98 mV' % (worst_v / 1000))
+    # Registerebene: beide Wege landen in <= 5 Roh-Einheiten (1,8 mV) aufeinander.
+    worst_reg = 0
+    for uv in range(680000, 1040001, 1000):
+        r_model = m.rel_to_reg_duty(m.continuous_rel_duty(uv, **m.N2P), 999)
+        r_uvpy = u.uv_to_duty('big', uv)
+        worst_reg = max(worst_reg, abs(r_model - r_uvpy))
+    check(worst_reg <= 5,
+          'Cross-Check Register: max %d Roh-Einheiten <= 5 (1.8 mV)' % worst_reg)
 
     # --- Quantisierung: Treiber (Prozent) ist groeber als das Roh-Register ---
     # Der Treiber rechnet in `pwm-dutycycle-unit` (=100, Prozent), also gibt es

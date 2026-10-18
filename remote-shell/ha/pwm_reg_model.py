@@ -168,20 +168,43 @@ def demo_continuous_coupling(node=N2P):
                                          shifted[r] - base[r]))
 
 
+def table_duty_for(req_uv, table):
+    """Duty, den die `voltage-table` fuer einen exakten Sollwert liefert.
+
+    Anders als im Continuous-Modus haengt dieser Wert NUR an der Tabelle, nicht
+    an `regulator-min/max-microvolt` (die wirken hier nur als Klemme). Genau das
+    ist die "Entkopplung".
+    """
+    hit = table_select(req_uv, req_uv, table)
+    return None if hit is None else hit[1]
+
+
 def demo_table_decoupling(node=N2P):
-    """Zeigt: eine voltage-table ist gegen min/max-Verschiebung invariant."""
+    """Zeigt: eine voltage-table ist gegen min/max-Verschiebung invariant.
+
+    Kontrast: im Continuous-Modus verschiebt dieselbe min-Aenderung den
+    Tastgrad, in der Tabelle bleibt er gleich.
+    """
     # Beispieltabelle (NUR Illustration der Mechanik, keine Messung).
     table = [(680000, 100), (800000, 67), (900000, 39),
              (1000000, 11), (1040000, 0)]
     req = 900000
+    shifted_node = dict(node, min_uv=720000)
+
+    cont_a = continuous_rel_duty(req, **node)
+    cont_b = continuous_rel_duty(req, **shifted_node)
+    tab = table_duty_for(req, table)
+
     hit = table_select(req, req, table)          # cpufreq-dt fragt exakt
     print('Voltage-Table: req %d mV -> %s' % (
         req // 1000, ('(%d mV, duty %d)' % (hit[0] // 1000, hit[1]))
         if hit else 'KEIN Treffer (-EINVAL)'))
-    # Dieselbe Tabelle, andere Klemme -> derselbe Treffer, duty unveraendert.
-    hit2 = table_select(req, req, table)
-    print('  min_uv-Klemme geaendert: duty bleibt %s (Abbildung entkoppelt)'
-          % (hit2[1] if hit2 else 'n/a'))
+    # Continuous koppelt: dieselbe min-Verschiebung aendert den Tastgrad.
+    print('  Continuous-Kontrast: rel_duty %d (@min %d mV) -> %d (@min %d mV)'
+          % (cont_a, node['min_uv'] // 1000, cont_b, shifted_node['min_uv'] // 1000))
+    # Tabelle entkoppelt: derselbe Eintrag, derselbe duty, unabhaengig von min.
+    print('  Tabelle (entkoppelt): duty bleibt %s bei min %d wie bei min %d'
+          % (tab, node['min_uv'] // 1000, shifted_node['min_uv'] // 1000))
     # Zeigt die Kehrseite: ein Wert ohne Tabelleneintrag faellt durch.
     miss = table_select(850000, 850000, table)
     print('  req 850 mV (nicht in der Tabelle) -> %s'

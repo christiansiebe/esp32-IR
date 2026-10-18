@@ -166,9 +166,10 @@ value = FIELD_PREP(PWM_HIGH_MASK, channel->hi) |   /* Bits 31..16 */
         FIELD_PREP(PWM_LOW_MASK,  channel->lo);    /* Bits 15..0  */
 ```
 
-Der Registerinhalt ist also `((cnt - duty_cnt) << 16) | duty_cnt`. Das passt zur
-im Repo (nicht hier) gemessenen Form `((period - duty) << 16) | duty`
-(`UV-README.md`): das dortige `duty` ist das **Low-Feld** (`lo`). Wegen
+Der Registerinhalt ist also `(duty_cnt << 16) | (cnt - duty_cnt)`, also
+`(hi << 16) | lo`. Das passt zur im Repo (nicht hier) gemessenen Form
+`((period - duty) << 16) | duty` (`UV-README.md`): das dortige `duty` ist das
+**Low-Feld** (`lo`). Wegen
 `pwm-dutycycle-range = <100 0>` gilt: relativer Tastgrad `100` (= `min_uV`,
 680 mV) -> `hi = cnt, lo = 0` -> Repo-`duty = 0`; relativer Tastgrad `0`
 (= `max_uV`, 1040 mV) -> `lo = cnt` -> Repo-`duty = period`. Beide Konventionen
@@ -338,17 +339,17 @@ enthaelt die **Sub-1-GHz-Punkte** (100/250/500/667 MHz) mit `opp-microvolt =
 - **U-Boot-Doku** [17] - `bl30_new.bin` = `bl30.bin` + `bl301.bin` (DVFS-Plugin).
 - **TF-A-Doku** [16] - Meson-Ports: PSCI + SCPI + SIP, kein CPU-DVFS.
 
-## 7. Praktische Anwendung: Host-Modell (`pwm_reg_model.py`)
+## 6. Praktische Anwendung: Host-Modell (`pwm_reg_model.py`)
 
 `remote-shell/ha/pwm_reg_model.py` rechnet die beiden Modi **ohne Board** nach
-(kein `/dev/mem`, kein Netz). `test_pwm_reg_model.py` prueft 157 Punkte, u. a.
+(kein `/dev/mem`, kein Netz). `test_pwm_reg_model.py` prueft 161 Punkte, u. a.
 gegen die im Repo am Board gemessenen Eckwerte (`UV-README.md`): bei 680 mV ist
 das Register-LOW-Feld 0, bei 1040 mV gleich der Periodenlaenge, und die lineare
 Form `V = 680000 + duty*360000/period` gilt mit dem **Register**-Tastgrad.
 
 ```bash
 python3 remote-shell/ha/pwm_reg_model.py        # Demo/Tabellen
-python3 remote-shell/ha/test_pwm_reg_model.py   # 157 Checks
+python3 remote-shell/ha/test_pwm_reg_model.py   # 161 Checks
 ```
 
 Zwei Dinge, die das Modell praktisch sichtbar macht:
@@ -367,13 +368,21 @@ rechnet in `pwm-dutycycle-unit` (hier Default **100 = Prozent**), es gibt also
 nur **101** verschiedene relative Tastgrade -> Spannungsschritt **3,6 mV**.
 `uv.py` schreibt dagegen das **Roh-Register** (Periode 999 bzw. 333) und erreicht
 damit **0,36 mV** (big) bzw. **1,08 mV** (little) pro Schritt. Cross-Check des
-Modells gegen `uv.py.uv_to_duty`/`duty_to_uv`: die Abweichung ist immer
-**<= halber Treiber-Schritt (1,8 mV)** - genau die erwartete Rundung des
-Prozent-Rasters, kein Widerspruch. Praktische Folge: ein DT-Overlay kann die
+Modells gegen `uv.py.uv_to_duty`/`duty_to_uv` (beide importieren dieselben
+N2+-Knoten; `uv.py` liest im Test nur Konstanten, kein `/dev/mem`): die
+Spannungsabweichung ist ueber den ganzen Bereich `<= 1,98 mV` (= halber
+Treiber-Schritt 1,8 mV + halber Roh-Schritt 0,18 mV) - genau die erwartete
+Rundung beider Raster, kein Widerspruch.
+Auf dem **Register**-Niveau (rohe Roh-Einheiten, Periode 999) weichen beide Wege
+um bis zu **5 Einheiten = 1,8 mV** voneinander ab, weil `uv.py` linear auf den
+Roh-Zaehler rundet, das Modell aber erst in Prozent und dann zurueck - dieselbe
+Rundungsgrenze, keine systematische Differenz. Beide Vergleiche sind in
+`test_pwm_reg_model.py` als Test hinterlegt. Praktische Folge: ein DT-Overlay
+kann die
 Spannung nur in 3,6-mV-Stufen setzen; die feinere Laufzeit-Aufloesung von
 `uv.py` laesst sich im DT **nicht** abbilden.
 
-## 8. Bezug zu diesem Repo (ohne neue Messwerte)
+## 7. Bezug zu diesem Repo (ohne neue Messwerte)
 
 - Der laufende Kernel (`7.1.8-edge-meson64`, Armbian) ist ein **Mainline**-Kernel
   -> es greift der Pfad aus 4.2b: `cpufreq-dt` + meson-Clock + `pwm-regulator`.
@@ -395,7 +404,7 @@ Spannung nur in 3,6-mV-Stufen setzen; die feinere Laufzeit-Aufloesung von
   dessen CPU-Mux genau diese Eltern (`xtal`, `fclk_div2`, `fclk_div3`) und einen
   Teiler anbietet [4][19].
 
-## 9. Quellen
+## 8. Quellen
 
 1. pwm-regulator DT-Binding (YAML) -
    https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/regulator/pwm-regulator.yaml
