@@ -133,6 +133,7 @@ def main():
                 continue
             it = items[0]
             status = it.get("sandbox_status")
+            exec_status = it.get("execution_status")
             sandbox_id = it.get("sandbox_id")
             idle_h = hours_since(it.get("updated_at"))
             if open_n <= 0:
@@ -141,13 +142,20 @@ def main():
             if idle_h is not None and idle_h > MAX_AGE_HOURS:
                 print(f"{name}: {idle_h:.0f}h inaktiv (> {MAX_AGE_HOURS:.0f}h) - schlafen lassen")
                 continue
-            if status != "PAUSED":
-                print(f"{name}: {status}, offene Aufgaben={open_n} - ok")
+            # A conversation that inherits its parent's sandbox (parent_conversation_id)
+            # shows execution_status=paused while sandbox_status stays RUNNING, because
+            # the shared sandbox is kept alive by the parent. Keying only on
+            # sandbox_status therefore never wakes such a worker. Treat either signal
+            # as "asleep".
+            asleep = status == "PAUSED" or exec_status == "paused"
+            if not asleep:
+                print(f"{name}: {status}/{exec_status}, offene Aufgaben={open_n} - ok")
                 continue
             if not sandbox_id:
-                print(f"{name}: PAUSED ohne sandbox_id - uebersprungen")
+                print(f"{name}: schlaeft ohne sandbox_id - uebersprungen")
                 continue
-            api(token, f"/api/v1/sandboxes/{sandbox_id}/resume", method="POST", body={})
+            if status == "PAUSED":
+                api(token, f"/api/v1/sandboxes/{sandbox_id}/resume", method="POST", body={})
             try:
                 api(token, f"/api/v1/app-conversations/{cid}/send-message", method="POST",
                     body={"role": "user", "content": [{"type": "text", "text": WAKE_MESSAGE}],
