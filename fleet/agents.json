@@ -68,9 +68,10 @@
   },
   "9fe65410b01148a5a30fa18994436a83": {
    "name": "Firmware record_count+web_guard",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "branch": "fix/record-count-web-guard",
-   "note": "Host-seitige Fixes/Tests fuer record_count-Wiederherstellung + web_guard-Leerlauf-Restart. Kein Board."
+   "pr": [46],
+   "note": "Fertig (host-seitig, kein Board): web_guard-Leerlauf-Restart = uint64-Unterlauf (last>now durch /healthz-Probe-Stempel) -> saturierender Abstand; record_count = header_is_valid verlangte exakte Version -> alte v1/v2-Stores galten als leer -> jetzt [OLDEST,current] akzeptieren + Upgrade. Neue Host-Tests test_header_migration.c + web_guard-Regression; run_host_tests.sh EXIT=0. PR #46 gegen feat/dfs-clock-visibility (nicht cline: dort kein web_guard). CI gruen, mergeable. Offen nur am Geraet (Parent)."
   },
   "fa4de3cbc9f34a3f958f95aac45725e9": {
    "name": "ODROID noVNC-extern",
