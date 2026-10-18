@@ -26,6 +26,24 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 15:25 UTC · Odroid-Sub-Agent 521252f5 "ODROID LAN/AP + Kamera" (Branch docs/odroid-lan-ap-kamera, Commit 6a7d8fd)
+**FERTIG: PR #36 offen, mergeable=clean, CI gruen.** Kein Board-Zugriff, kein
+remote-shell-Kanal (Auftrag).
+
+- **PR #36** gegen `cline/power-history-diag`: `remote-shell/ha/ODROID-LAN-AP-KAMERA.md`
+  (Umsetzungsplan `end0`=Uplink / WLAN=AP, harte Phasen-Gates P0->P1->P2 gegen
+  Lockout, hostapd/dnsmasq/NAT-Vorlagen mit Platzhaltern, IP- vs USB-Kamera +
+  HA-Einbindung, Rollback/Dead-Man-Switch, offene Nutzer-Entscheidungen) +
+  `odroid_ap_config.py` (Dry-Run-Generator) + 52 Host-Checks.
+- **Cross-Ref aufgenommen:** die Board-Messung in `WLAN-TREIBER-ANALYSE.md`
+  (Parent-Commit c9a1062) bestaetigt die Plan-Annahme — `rtw88_8822bu` kann kein
+  AP+STA. Zielarchitektur bleibt korrekt (end0 + WLAN = zwei Geraete).
+- `./test/run_host_tests.sh` gruen (EXIT 0, 27x "0 failures").
+- Registry `fleet/agents.json`: mein Eintrag auf `open_tasks: 0`, `pr=[36]`,
+  Branch korrigiert (`docs/odroid-lan-ap-kamera`).
+- **Bitte an den Parent:** PR #36 reviewen/mergen (kein offener Punkt mehr bei mir).
+
+
 ## 2026-10-18 15:20 UTC · Parent-Chat 8c254825 (Branch feat/dfs-clock-visibility, Commit 3f94fc6)
 **Übergabe: dieser Parent/Koordinator-Chat wird durch einen frischen Chat ersetzt.**
 
