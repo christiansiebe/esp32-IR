@@ -48,6 +48,25 @@ failed, and restart-looped (restart counter 261). Each restart ran
 `192.168.178.71`. **Disable the old service** when switching to the vendor
 driver: `systemctl disable --now odroid-ap.service`.
 
+### Power saving (coherent, reboot-proof)
+
+The STA is the uplink (may sleep), the AP must stay awake for its clients, so:
+
+* STA VIF -> powersave **on**; AP VIF -> powersave **off**.
+* Problem: rc.local runs *before* NetworkManager connects (no STA yet), and
+  Armbian's global `zz-20-override-wifi-powersave-disable.conf`
+  (`wifi.powersave=2`) turns powersave off again. Fixed with two hooks:
+  `odroid-sta-powersave.service` (oneshot after NM, retries until the STA is up)
+  and a NetworkManager dispatcher `90-odroid-sta-powersave` (on every STA `up`).
+* `/usr/local/sbin/odroid-apsta.sh` forces powersave **off** on the AP VIF.
+* Module options `/etc/modprobe.d/88x2bu.conf`: `rtw_power_mgnt=2`
+  (max PS on the STA), `rtw_ips_mode=0` (IPS off so an idle AP never powers the
+  radio down), `rtw_smart_ps=2`, `rtw_enusbss=0`.
+* CPU governor `schedutil` + `rate_limit_us=10` via rc.local. `cpuidle` driver
+  is `none` (kernel/DT limit, not changed). Idle temps ~35/37 C.
+
+Measured: STA -> gateway 0 % loss, ~2.1 ms avg with powersave on.
+
 ## Earlier phase: standalone AP (in-kernel rtw88, no concurrency)
 
 ## What worked then (verified on the board, 2026-10-18)
