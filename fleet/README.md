@@ -16,7 +16,7 @@ are tasks."*
 ## How it works
 
 ```
-   platform scheduler (cron */10 min)  <- outside every sandbox: survives pauses
+   platform scheduler (cron */20 min)  <- outside every sandbox: survives pauses
               |
               v
    automations/fleet-supervisor/main.py   (no LLM, no token cost)
