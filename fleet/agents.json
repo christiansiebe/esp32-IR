@@ -1,5 +1,5 @@
 {
- "_comment": "Worker-Registry des esp32-IR-Fleet. Der Parent pflegt sie; der Fleet Supervisor (automations/fleet-supervisor, cron */20) liest sie. open_tasks=0 -> Agent darf schlafen. Der alte fleet-watchdog (*/10) ist deaktiviert (manual) - der Supervisor ersetzt ihn.",
+ "_comment": "Worker-Registry des esp32-IR-Fleet. Der Parent pflegt sie; der Fleet Supervisor (automations/fleet-supervisor, cron */5) liest sie. open_tasks=0 -> Agent darf schlafen.",
  "agents": {
   "8c2548251ad045599fbfb6f95f3e7944": {
    "name": "parent (dieser Chat)",
@@ -10,28 +10,28 @@
    "name": "UTC-persist",
    "open_tasks": 1,
    "pr": [],
-   "note": "NEU: letzte bekannte Zeit persistieren (TODO ~331); PR #16 war fertig"
+   "note": "letzte bekannte Zeit persistieren (TODO ~331); PR #16 fertig"
   },
   "335a48a5e35442e69b8f1cb1c9321480": {
    "name": "TWDT",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "pr": [
     10
    ],
-   "note": "PR #10 rebasen (CONFLICTING) + TWDT-Worker anmelden (TODO ~310)"
+   "note": "FERTIG: PR #10 (TWDT-Modul) gemerged. Restaufgabe (TWDT-Worker anmelden) an Kind 'AMS Health-Monitor' uebergeben."
   },
   "1b043863d80d41a08f7b161036f65649": {
    "name": "MQTT-reboot",
-   "open_tasks": 0,
+   "open_tasks": 1,
    "pr": [
     9
    ],
-   "note": "FERTIG: PR #9 gruen+mergebar, MQTT-Reboot-Event implementiert+getestet; darf schlafen"
+   "note": "PR #9 (Reboot-Grund ueber MQTT) finalisieren; breite MQTT/HA-Discovery macht Kind 'AMS MQTT-Bridge'"
   },
   "7a894c13678043e58935dd1509217a75": {
    "name": "parent (XFCE-Desktop/Odroid-Chat)",
    "open_tasks": 2,
-   "note": "koordiniert die drei Odroid-Sub-Agenten, verifiziert am Board, haelt die Registry aktuell"
+   "note": "koordiniert die Odroid-Sub-Agenten, verifiziert am Board"
   },
   "fa4de3cbc9f34a3f958f95aac45725e9": {
    "name": "ODROID noVNC-extern",
@@ -40,22 +40,64 @@
    "pr": [
     19
    ],
-   "note": "fertig: README + start_novnc_bridge.sh + novnc_bridge.py + Test (62 Checks) -> PR #19 gegen cline/power-history-diag, clean"
+   "note": "fertig: README + start_novnc_bridge.sh + novnc_bridge.py + Test (62 Checks) -> PR #19"
   },
   "6c9d48a675af44c799ec283e6471a595": {
    "name": "ODROID OC-Overlay",
    "open_tasks": 0,
    "branch": "feat/oc-opp-overlay",
-   "note": "PR #20 fertig: gen_oc_dts.py + umkehrbares OC-Test-Overlay + Tests + OC-README",
    "pr": [
     20
-   ]
+   ],
+   "note": "fertig: PR #20 (gen_oc_dts.py + umkehrbares OC-Test-Overlay + Tests)"
   },
   "b56660b93576404d94dccf406be168c6": {
    "name": "ODROID Watchdog-Luecke",
    "open_tasks": 1,
    "branch": "docs/odroid-watchdog-gap",
    "note": "60-s-HW-Watchdog feuerte nach PLL-Hang nicht: Befund + Haertung"
+  },
+  "4e889e18ce73432d9c65d3d8568c55e8": {
+   "name": "LICENSE+README",
+   "open_tasks": 1,
+   "branch": "fleet/license-readme",
+   "note": "TODO: LICENSE + README fehlen (blockiert Code-Uebernahme). PR gegen main."
+  },
+  "b6b11eb9dd704eaca389ecbaa5cb7de8": {
+   "name": "Backfill-Dubletten",
+   "open_tasks": 1,
+   "branch": "fleet/backfill-dedup",
+   "note": "TODO: doppelte Minuten nach Backfill, unsortierter Bestand, sequence monoton, Batch-Dedup, errors-Zaehlung"
+  },
+  "843d8fde02eb4530a5a185d90db68650": {
+   "name": "AMS Health-Monitor",
+   "open_tasks": 1,
+   "branch": "fleet/ams-health",
+   "note": "TODO: health_policy/health_task salvage + TWDT-Worker anmelden (TODO ~310)"
+  },
+  "2001aa2feb0a4efc90f339404a7e2b0e": {
+   "name": "AMS MQTT-Bridge",
+   "open_tasks": 1,
+   "branch": "fleet/ams-mqtt",
+   "note": "TODO: mqtt_publish/mqtt_bridge salvage + HA-Discovery + Live-Push (TODO ~910)"
+  },
+  "e6c5a6cb7a794da6a88ee7449a5555c9": {
+   "name": "AMS Boot-Rollback",
+   "open_tasks": 1,
+   "branch": "fleet/ams-boot-recovery",
+   "note": "TODO: boot_confirm/boot_policy + recovery_button/recovery_start salvage"
+  },
+  "65b95dbdf8ce4d7f962e4a42fe36755a": {
+   "name": "SML-Parser Haertung",
+   "open_tasks": 1,
+   "branch": "fleet/sml-hardening",
+   "note": "TODO: CRC-Varianten + SML-Golden-Fixtures + Host-Test"
+  },
+  "52c2b110e5fd457e8ab4b938a4407351": {
+   "name": "UX & Persistenz",
+   "open_tasks": 1,
+   "branch": "fleet/ux-persistence",
+   "note": "TODO: CSV-Upload blockiert HTTPD, storage_ready praezisieren, Sender-Zeitbasis"
   }
  }
 }
