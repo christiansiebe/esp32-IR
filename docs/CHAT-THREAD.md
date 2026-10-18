@@ -372,3 +372,16 @@ Host-Suite grün, beide Rollen bauen (`tools/build.sh receiver|sender`).
 
 **Commits:** `09e74fe` (Modul + Test), `f25cae1` (main.c-Verdrahtung),
 `74ccd2d` (TODO). PR: siehe `feat/link-fallback`.
+
+### Nachtrag 2026-10-18: Rebase + CI grün (fertig)
+
+- Rebase auf `origin/feat/link-fallback` (`95cd383`) aufgelöst; Konflikt in
+  `main/main.c` war der **entfernte** `wifi_set_ap_enabled`-Helfer (upstream
+  gelöscht) - Block verworfen, kein SoftAP-Code wieder eingeführt.
+- `main.c` aufgeräumt: `wall_clock_current_utc()` entfernt und den vorhandenen
+  `current_utc_seconds()` wiederverwendet; Seed wird übersprungen, wenn die Uhr
+  schon gültig ist (Sync kann während des Wi-Fi-Bring-ups kommen).
+- **Host-Suite grün**, beide Rollen bauen sauber, **CI grün** auf `a59b649`.
+- Branch gepusht; PR **#11** (Beschreibung um den Wall-Clock-Abschnitt ergänzt).
+- `TASKS.json`: alle Punkte **done**. `fleet/agents.json` in dieser Sandbox nicht
+  vorhanden - an Parent gemeldet.
