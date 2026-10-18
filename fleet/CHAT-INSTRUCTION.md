@@ -25,7 +25,7 @@ Die Regeln in Kurzform:
   wenn kein Eintrag mehr offen ist.
 - **Der Parent pflegt `fleet/agents.json`** (im Repo): pro Worker `open_tasks`
   (0 = darf schlafen). Das ist die Registry, der der Supervisor vertraut.
-- **Der Fleet-Supervisor** (`automations/fleet-supervisor`, Cron alle 20 min,
+- **Der Fleet-Supervisor** (`automations/fleet-supervisor`, Cron alle 5 min,
   **kein LLM, keine Token-Kosten**) läuft auf dem Plattform-Scheduler, also
   *außerhalb* jeder Sandbox. Er liest `fleet/agents.json` und pro Zyklus:
   `open_tasks > 0` + Sandbox `PAUSED` → resume + Weck-Nachricht; `open_tasks > 0`

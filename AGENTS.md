@@ -33,7 +33,7 @@ This is a standing rule for **every** esp32-IR chat agent, not a suggestion.
   it stores `open_tasks` (0 = may sleep) and a short note. This is the registry
   the supervisor trusts.
 - **The fleet supervisor** (`automations/fleet-supervisor`, a cron automation
-  every 20 min, **no LLM, no token cost**) is the guarantee. It runs on the
+  every 5 min, **no LLM, no token cost**) is the guarantee. It runs on the
   platform scheduler, *outside* every conversation sandbox, so it survives a
   sandbox pause. It reads `fleet/agents.json`, and each cycle:
   - `open_tasks > 0` and sandbox `PAUSED` -> resume + wake message;
