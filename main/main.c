@@ -488,6 +488,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req);
 static esp_err_t power_history_csv_handler(httpd_req_t *req);
 static esp_err_t db_refresh_handler(httpd_req_t *req);
 static esp_err_t power_history_upload_handler(httpd_req_t *req);
+static esp_err_t reboot_handler(httpd_req_t *req);
 static void history_backfill_request_full(void);
 static esp_err_t send_http_error_status(httpd_req_t *req, const char *status,
                                         const char *message);
@@ -3191,6 +3192,9 @@ static esp_err_t root_handler(httpd_req_t *req)
         "sequence,interval_start_ms,average_w,sample_count,reason. Fehlende Minuten werden "
         "ergänzt, bereits vorhandene übersprungen; vorhandene Daten werden nicht überschrieben.</small></p>"
         "<p id=\"db-status\" role=\"status\"></p>"
+        "<p><button type=\"button\" id=\"reboot\" class=\"action\">Gerät neu starten</button> "
+        "startet den Empfänger neu (OTA-Key erforderlich, wie beim Firmware-Update). "
+        "Nach dem Neustart lädt diese Seite in ein paar Sekunden wieder.</p>"
         "</section>"
         "<script>"
         "const byId=id=>document.getElementById(id);"
@@ -3398,6 +3402,17 @@ static esp_err_t root_handler(httpd_req_t *req)
         "clearTimeout(historyTimer);historyTimer=setTimeout(updateHistory,1500);"
         "}catch(e){s.textContent='Upload fehlgeschlagen: '+e;}});"
         "byId('history-day').addEventListener('change',()=>{setLive(false);redraw();});"
+        "byId('reboot').addEventListener('click',async()=>{"
+        "const s=byId('db-status');"
+        "const key=prompt('OTA-Key (wie beim Firmware-Update):');"
+        "if(!key){return;}"
+        "s.textContent='Starte neu…';"
+        "try{const r=await fetch('/api/reboot',{method:'POST',cache:'no-store',"
+        "headers:{'X-OTA-Key':key}});"
+        "if(!r.ok)throw new Error('HTTP '+r.status);"
+        "s.textContent='Neustart läuft – Seite in ein paar Sekunden neu laden…';"
+        "setTimeout(()=>location.reload(),8000);"
+        "}catch(e){s.textContent='Neustart fehlgeschlagen: '+e;}});"
         "function shiftDay(delta){const base=byId('history-day').value?Date.parse(byId('history-day').value+'T00:00:00Z'):Date.now();"
         "const next=new Date(base+delta*86400000);byId('history-day').value=dayISO(next);setLive(false);redraw();}"
         "function toggleCompare(){if(historyCompare){historyCompare=null;}else{const base=byId('history-day').value?Date.parse(byId('history-day').value+'T00:00:00Z'):Date.now();"
@@ -4665,6 +4680,41 @@ static esp_err_t send_http_error_status(httpd_req_t *req,
 {
     httpd_resp_set_status(req, status);
     return httpd_resp_sendstr(req, message);
+}
+
+/* POST /api/reboot: restart from the web UI (auth-gated like /update). The
+ * response is sent first and a short one-shot timer does the restart, so the
+ * browser gets a clean reply instead of a reset connection. The restart is
+ * marked deliberate so the crash journal does not log it as a crash. */
+static void reboot_timer_callback(void *arg)
+{
+    (void)arg;
+    crash_journal_mark_clean_restart();
+    esp_restart();
+}
+
+static esp_err_t reboot_handler(httpd_req_t *req)
+{
+    if (!ota_key_is_valid(req)) {
+        return send_http_error_status(req, "401 Unauthorized",
+                                      "X-OTA-Key missing or wrong");
+    }
+    liveness_note_alive();
+    const esp_timer_create_args_t timer_args = {
+        .callback = reboot_timer_callback,
+        .name = "web_reboot",
+    };
+    esp_timer_handle_t timer = NULL;
+    if (esp_timer_create(&timer_args, &timer) != ESP_OK) {
+        return send_http_error_status(req, "500 Internal Server Error",
+                                      "could not schedule the restart");
+    }
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    esp_err_t err = httpd_resp_sendstr(
+        req, "rebooting in 500 ms - reload the page in a few seconds\n");
+    /* The reply is out; a failure to arm the timer leaves the device running. */
+    (void)esp_timer_start_once(timer, 500 * 1000);
+    return err;
 }
 
 /* --- Web debug console -----------------------------------------------------
@@ -7350,7 +7400,7 @@ static void start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 31;
+    config.max_uri_handlers = 32;
     /* Handlers that keep a full history page (128 records) on their stack run
      * on this task; keep headroom so a large page cannot overflow it and abort
      * the whole HTTP server. */
@@ -7482,6 +7532,11 @@ static void register_webserver_handlers(httpd_handle_t server)
         .method = HTTP_POST,
         .handler = power_history_upload_handler,
     };
+    httpd_uri_t reboot_api = {
+        .uri = "/api/reboot",
+        .method = HTTP_POST,
+        .handler = reboot_handler,
+    };
 #endif
     httpd_uri_t log_page = {
         .uri = "/log",
@@ -7571,6 +7626,7 @@ static void register_webserver_handlers(httpd_handle_t server)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sender_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &db_refresh));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_history_upload));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &reboot_api));
 #endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config_uri));
