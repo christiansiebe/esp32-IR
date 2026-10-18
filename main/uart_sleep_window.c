@@ -122,6 +122,31 @@ void uart_sleep_espnow_power_save_enable(void)
 #endif
 }
 
+/* Undo the ESP-NOW modem sleep. The link fallback's whole point is to restore
+ * the proven mode ("radio always on"), but disabling light sleep alone leaves
+ * WIFI_PS_MIN_MODEM in place, so the radio keeps cycling and the link stays
+ * broken - a modem-sleep image could never heal itself. Set WIFI_PS_NONE and
+ * drop the wake window so the radio is awake for good. No-op when the feature is
+ * compiled out. */
+void uart_sleep_espnow_power_save_disable(void)
+{
+#if CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE
+    esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (err == ESP_OK) {
+        (void)esp_now_set_wake_window(0);
+    }
+    s_last_wake_err = err;
+    if (err != ESP_OK) {
+        ESP_LOGW(UART_SLEEP_TAG,
+                 "Could not disable Wi-Fi power save (%s); the radio may stay "
+                 "in modem sleep", esp_err_to_name(err));
+    } else {
+        ESP_LOGW(UART_SLEEP_TAG,
+                 "Wi-Fi power save off: radio stays awake (proven mode)");
+    }
+#endif
+}
+
 int uart_sleep_espnow_last_err(void)
 {
     return (int)s_last_wake_err;
@@ -291,6 +316,7 @@ void uart_sleep_set_pm_override(int max_mhz, int min_mhz)
 
 bool uart_sleep_init_idf(void) { return false; }
 void uart_sleep_espnow_power_save_enable(void) {}
+void uart_sleep_espnow_power_save_disable(void) {}
 int uart_sleep_espnow_last_err(void) { return ESP_ERR_INVALID_STATE; }
 void uart_sleep_note_uart_byte(uint64_t now_us, uint64_t last_byte_us, uint32_t received,
                                bool awaiting)

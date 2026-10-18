@@ -7634,8 +7634,13 @@ static void link_fallback_worker(void *arg)
         peer.ifidx = ESPNOW_IF;
         peer.encrypt = false;
         esp_now_add_peer(&peer);
-        /* Drop the adaptive light sleep for good: the radio stays awake. */
+        /* Drop the adaptive light sleep for good: the radio stays awake.
+         * Also undo the ESP-NOW modem sleep: on an image built with
+         * CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE the radio would otherwise keep
+         * cycling and the link would stay broken (a modem-sleep image could
+         * never heal itself - seen on the sender-dfs bench image). */
         uart_sleep_disable_idf();
+        uart_sleep_espnow_power_save_disable();
         g_link_fallback_stage = 2;
         diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
                        "link fallback: light sleep off, radio stays awake");
