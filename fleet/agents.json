@@ -29,9 +29,38 @@
    "note": "FERTIG: PR #9 (Reboot-Grund ueber MQTT) rebased + gemerged in feat/link-fallback (e48c1cc5), CI 6/6 gruen. Breite MQTT/HA-Discovery = separates Kind."
   },
   "7a894c13678043e58935dd1509217a75": {
-   "name": "parent (XFCE-Desktop/Odroid-Chat)",
+   "name": "parent (XFCE-Desktop/Odroid-Chat, jetzt 'HA WP entwicklung')",
    "open_tasks": 2,
-   "note": "koordiniert die Odroid-Sub-Agenten, verifiziert am Board"
+   "note": "Odroid-Familie am 2026-10-18 an f85f7c47 uebergeben (Nutzer); arbeitet jetzt an HA-WP/Dashboard-Themen (offene Aufgaben dort)."
+  },
+  "f85f7c473e7748259d2751fc1085b2b2": {
+   "name": "parent (Odroid N2: VNC-Desktop & CPU-PLL-OC)",
+   "open_tasks": 1,
+   "note": "uebernimmt die Odroid-Familie: Board-Arbeit ueber den geteilten Kanal. Hat PR #18/#19/#20 gelandet + Watchdog-Verifikation (PR #35). Offen: LAN/AP-Uebernahme + Kamera. 4 Kinder gestartet (LAN/AP, Watchdog-Aktor, PR-Review, Firmware)."
+  },
+  "521252f5a71b42c28165ad7e74ed13ec": {
+   "name": "ODROID LAN/AP + Kamera",
+   "open_tasks": 1,
+   "branch": "feat/odroid-lan-ap-camera",
+   "note": "Plan + hostapd/dnsmasq-Vorlagen + HA-Kamera-Einbindung + Rollback (Doku). Kein Board-Zugriff."
+  },
+  "732f5e0624b948499d0183f5633d86b5": {
+   "name": "ODROID Watchdog-Aktor",
+   "open_tasks": 1,
+   "branch": "feat/odroid-watchdog-actor",
+   "note": "Off-board Aktor-Design + host-testbarer watchdog_actor.py (Stromunterbrechung/Relais). Kein Board-Zugriff."
+  },
+  "4950336be956489a960a2ef506320545": {
+   "name": "ODROID PR-Review 5-8+14",
+   "open_tasks": 1,
+   "branch": "docs/odroid-pr-review-5-8",
+   "note": "Review der gestapelten Odroid-PRs #5/#6/#7/#8/#14 -> PR-REVIEW-ODROID.md. Merged nichts."
+  },
+  "9fe65410b01148a5a30fa18994436a83": {
+   "name": "Firmware record_count+web_guard",
+   "open_tasks": 1,
+   "branch": "fix/record-count-web-guard",
+   "note": "Host-seitige Fixes/Tests fuer record_count-Wiederherstellung + web_guard-Leerlauf-Restart. Kein Board."
   },
   "fa4de3cbc9f34a3f958f95aac45725e9": {
    "name": "ODROID noVNC-extern",
@@ -40,7 +69,7 @@
    "pr": [
     19
    ],
-   "note": "fertig: README + start_novnc_bridge.sh + novnc_bridge.py + Test (62 Checks) -> PR #19"
+   "note": "FERTIG: README + start_novnc_bridge.sh + novnc_bridge.py + Test (62 Checks) -> PR #19 gemerged (a248c0b)."
   },
   "6c9d48a675af44c799ec283e6471a595": {
    "name": "ODROID OC-Overlay",
@@ -49,13 +78,16 @@
    "pr": [
     20
    ],
-   "note": "fertig: PR #20 (gen_oc_dts.py + umkehrbares OC-Test-Overlay + Tests)"
+   "note": "FERTIG: PR #20 (gen_oc_dts.py + umkehrbares OC-Test-Overlay + Tests) gemerged (af08832)."
   },
   "b56660b93576404d94dccf406be168c6": {
    "name": "ODROID Watchdog-Luecke",
-   "open_tasks": 1,
-   "branch": "docs/odroid-watchdog-gap",
-   "note": "60-s-HW-Watchdog feuerte nach PLL-Hang nicht: Befund + Haertung"
+   "open_tasks": 0,
+   "branch": "docs/watchdog-gap-hardening",
+   "pr": [
+    18
+   ],
+   "note": "FERTIG: PR #18 (Befund + Haertung) gemerged (faad569). Parent hat am Board verifiziert: H2+H1 widerlegt, bootstatus unbrauchbar -> H3 beste Erklaerung (PR #35)."
   },
   "4e889e18ce73432d9c65d3d8568c55e8": {
    "name": "LICENSE+README",
