@@ -4979,15 +4979,78 @@ static esp_err_t simulate_page_handler(httpd_req_t *req)
 }
 #endif /* !CONFIG_ESPNOW_ROLE_SENDER */
 
-/* RAM-only test knobs, changed through the console ('set' / 'reset-config').
- * A reboot restores the compile-time defaults. */
+/* Persisted test knobs, changed through the console ('set' / 'reset-config').
+ * They live in NVS so a value survives a reboot *and* an OTA; a build with a
+ * different ceiling clamps a restored value back into range. 'reset-config'
+ * erases the namespace and returns to the compile-time defaults. */
 static runtime_config_t g_runtime_config;
 static bool g_runtime_config_ready;
+
+#define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
+#define RUNTIME_CONFIG_NVS_KEY "cfg"
+#define RUNTIME_CONFIG_NVS_VERSION 1u
+
+static void runtime_config_store(const runtime_config_t *cfg)
+{
+    nvs_handle_t handle;
+    if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    uint8_t blob[12];
+    blob[0] = (uint8_t)RUNTIME_CONFIG_NVS_VERSION;
+    blob[1] = cfg->light_sleep ? 1u : 0u;
+    blob[2] = (uint8_t)cfg->cpu_mhz;
+    blob[3] = (uint8_t)cfg->cpu_min_mhz;
+    uint32_t retries = cfg->espnow_retries;
+    memcpy(&blob[4], &retries, sizeof(retries));
+    if (nvs_set_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, sizeof(blob)) == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+}
+
+static void runtime_config_erase(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    (void)nvs_erase_key(handle, RUNTIME_CONFIG_NVS_KEY);
+    (void)nvs_commit(handle);
+    nvs_close(handle);
+}
+
+/* Load the persisted knobs, clamped to what this build allows. A missing or
+ * malformed blob leaves *cfg untouched (the caller keeps the defaults). */
+static void runtime_config_load(runtime_config_t *cfg)
+{
+    nvs_handle_t handle;
+    if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return;
+    }
+    uint8_t blob[12];
+    size_t len = sizeof(blob);
+    esp_err_t err = nvs_get_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, &len);
+    nvs_close(handle);
+    if (err != ESP_OK || len != sizeof(blob) || blob[0] != RUNTIME_CONFIG_NVS_VERSION) {
+        return;
+    }
+    runtime_config_t loaded = runtime_config_defaults();
+    loaded.light_sleep = blob[1] != 0;
+    loaded.cpu_mhz = blob[2];
+    loaded.cpu_min_mhz = blob[3];
+    uint32_t retries = 0;
+    memcpy(&retries, &blob[4], sizeof(retries));
+    loaded.espnow_retries = retries;
+    runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
+    *cfg = loaded;
+}
 
 static runtime_config_t *active_runtime_config(void)
 {
     if (!g_runtime_config_ready) {
         g_runtime_config = runtime_config_defaults();
+        runtime_config_load(&g_runtime_config);
         g_runtime_config_ready = true;
     }
     return &g_runtime_config;
@@ -5203,6 +5266,8 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         return;
     }
     bool applied = runtime_config_apply(cfg);
+    /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only). */
+    runtime_config_store(cfg);
 
     /* Say so when the stored value differs from what was asked for (a value
      * below the Wi-Fi minimum or off the DFS grid is snapped, not rejected). */
@@ -5248,6 +5313,7 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
     (void)args;
     runtime_config_t *cfg = active_runtime_config();
     runtime_config_reset(cfg);
+    runtime_config_erase();
     runtime_config_apply(cfg);
 #if CONFIG_ESPNOW_ROLE_SENDER
     uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
@@ -5361,8 +5427,9 @@ static esp_err_t console_page_handler(httpd_req_t *req)
         "(pin the CPU), <b>set cpu 80</b> (DFS ceiling), <b>help</b>.</p>"
         "<input id=\"key\" type=\"password\" placeholder=\"Wi-Fi / OTA key\">"
         "<h2>CPU / power</h2>"
-        "<p class=\"note\">RAM only; a reboot restores the defaults. Use 80, 160 "
-        "or 240 MHz (40 MHz is not allowed with Wi-Fi and would abort it). Here "
+        "<p class=\"note\">Saved to NVS: the value survives a reboot and an OTA "
+        "(reset-config clears it). Use 80, 160 or 240 MHz (40 MHz is not allowed "
+        "with Wi-Fi and would abort it). Here "
         "'Set fixed' raises the DFS floor, so the clock stays in [value, ceiling]; "
         "'Set ceiling' lowers the DFS ceiling. The sender keeps its own pin.</p>"
         "<select id=\"cpuval\"><option>80</option>"
@@ -7642,31 +7709,44 @@ static void run_sender(void)
 }
 #endif
 
-/* DFS ceiling for both roles. The receiver keeps light sleep off (it must stay
- * responsive for HTTP and ESP-NOW); the sender enables it so its adaptive
- * window can park the CPU (uart_sleep_window.c re-applies its own config with
- * light sleep on, so this is not overwritten for the sender). */
+/* Apply the persisted CPU/light-sleep knobs at boot. active_runtime_config()
+ * loads them from NVS (clamped to this build's ceiling) or falls back to the
+ * compile-time defaults, so a 'set' from a previous session — or before an OTA
+ * that kept the NVS partition — is in effect from the first tick.
+ *
+ * The receiver must stay responsive for HTTP and ESP-NOW and never enters
+ * light sleep by default; the sender enables its adaptive light sleep inside
+ * the verified quiet window (uart_sleep_window.c re-applies its own config with
+ * light sleep on, so the sender is driven through that module). */
 static void apply_power_management(void)
 {
-    uint32_t max_mhz = (uint32_t)CONFIG_ESPNOW_CPU_MAX_MHZ;
-    if (max_mhz < 80) {
-        max_mhz = 80;
-    } else if (max_mhz > 240) {
-        max_mhz = 240;
-    }
+    runtime_config_t *cfg = active_runtime_config();
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* uart_sleep_init_idf() already configured PM during Wi-Fi init with the
+     * compile-time ceiling; push the persisted range into the module and mirror
+     * the light-sleep latch, which re-applies esp_pm_configure() with it. */
+    uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
+    uart_sleep_set_enabled(cfg->light_sleep);
+    ESP_LOGI(TAG, "CPU config: %u-%u MHz, light sleep %s",
+             (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
+             cfg->light_sleep ? "on" : "off");
+#else
     esp_pm_config_t pm = {
-        .max_freq_mhz = (int)max_mhz,
-        .min_freq_mhz = 40,
-        .light_sleep_enable = false,
+        .max_freq_mhz = (int)cfg->cpu_mhz,
+        .min_freq_mhz = (int)cfg->cpu_min_mhz,
+        .light_sleep_enable = cfg->light_sleep,
     };
     esp_err_t err = esp_pm_configure(&pm);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Could not apply DFS ceiling (%u MHz): %s",
-                 (unsigned)max_mhz, esp_err_to_name(err));
+        ESP_LOGW(TAG, "Could not apply the CPU config (%u-%u MHz): %s",
+                 (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
+                 esp_err_to_name(err));
         return;
     }
-    ESP_LOGI(TAG, "CPU clock ceiling %u MHz with DFS (min 40 MHz)",
-             (unsigned)max_mhz);
+    ESP_LOGI(TAG, "CPU config: %u-%u MHz, light sleep %s",
+             (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
+             cfg->light_sleep ? "on" : "off");
+#endif
 }
 
 void app_main(void)
