@@ -1,5 +1,5 @@
 {
- "_comment": "Worker-Registry des esp32-IR-Fleet. Der Parent pflegt sie; der Fleet-Watchdog liest sie. open_tasks=0 -> Agent darf schlafen.",
+ "_comment": "Worker-Registry des esp32-IR-Fleet. Der Parent pflegt sie; der Fleet Supervisor (automations/fleet-supervisor, cron */20) liest sie. open_tasks=0 -> Agent darf schlafen. Der alte fleet-watchdog (*/10) ist deaktiviert (manual) - der Supervisor ersetzt ihn.",
  "agents": {
   "8c2548251ad045599fbfb6f95f3e7944": {
    "name": "parent (dieser Chat)",
@@ -44,9 +44,12 @@
   },
   "6c9d48a675af44c799ec283e6471a595": {
    "name": "ODROID OC-Overlay",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "branch": "feat/oc-opp-overlay",
-   "note": "2496 MHz als umkehrbares Overlay: gen_oc_dts.py + Boot-Sicherheit + Tests"
+   "note": "PR #20 fertig: gen_oc_dts.py + umkehrbares OC-Test-Overlay + Tests + OC-README",
+   "pr": [
+    20
+   ]
   },
   "b56660b93576404d94dccf406be168c6": {
    "name": "ODROID Watchdog-Luecke",

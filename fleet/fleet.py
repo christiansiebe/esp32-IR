@@ -49,7 +49,7 @@ LOG = os.path.join(FLEET_DIR, "fleet.log")
 PARENT = "8c2548251ad045599fbfb6f95f3e7944"
 
 WAKE_MESSAGE = (
-    "System: Du wurdest vom Fleet-Watchdog geweckt (deine Sandbox war pausiert). "
+    "System: Du wurdest vom Fleet Supervisor geweckt (deine Sandbox war pausiert). "
     "Arbeite an deinen offenen Aufgaben weiter. Regel: arbeite immer ueber "
     "Sub-Agenten, und beende erst, wenn keine offene Aufgabe mehr existiert. "
     "Wenn alles erledigt ist, setze alle Eintraege in deiner TASKS.json auf "
