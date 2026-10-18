@@ -40,12 +40,12 @@
   },
   "521252f5a71b42c28165ad7e74ed13ec": {
    "name": "ODROID LAN/AP + Kamera",
-   "open_tasks": 1,
-   "branch": "docs/odroid-lan-ap-kamera",
+   "open_tasks": 0,
+   "branch": "feat/odroid-ap-deploy",
    "pr": [
-    36
+    42
    ],
-   "note": "FERTIG + GEMERGED: PR #36 (ODROID-LAN-AP-KAMERA.md + odroid_ap_config.py, 52 Host-Checks). NEU 2026-10-18 (T1): von Parent 30cfd896 re-getaskt -> host-seitiges Ausroll-/Ruecknahme-Werkzeug bauen (deploy_ap.sh, revert_ap.sh, Dead-Man-Switch, Host-Tests), analog deploy_oc_safe.sh. P1 (end0-Uplink) am Board bestaetigt; P2 bleibt bis Nutzer-Entscheid gesperrt. KEIN Board/Kanal."
+   "note": "FERTIG + GEMERGED: PR #36 (Plan ODROID-LAN-AP-KAMERA.md + Generator odroid_ap_config.py, 52 Host-Checks). FERTIG (T1, 2026-10-18): PR #42 (offen, base cline/power-history-diag) -> host-seitiges Ausroll-/Ruecknahme-Werkzeug deploy_ap.sh (Dry-Run Default, AP_ROOT-Praefix, hostapd/dnsmasq unmask+enable, NM unmanaged, AP-Adresse, NAT idempotent), revert_ap.sh (idempotent, Dienste wieder MASKED), odroid_ap_deadman.sh + Timer (Auto-Revert ohne --confirm), test_ap_deploy.py (48 Checks). Host-Suite gruen. KEIN Board/Kanal. P2 wartet auf Nutzer-Entscheid."
   },
   "732f5e0624b948499d0183f5633d86b5": {
    "name": "ODROID Watchdog-Aktor",
