@@ -22,11 +22,11 @@
   },
   "1b043863d80d41a08f7b161036f65649": {
    "name": "MQTT-reboot",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "pr": [
     9
    ],
-   "note": "PR #9 (Reboot-Grund ueber MQTT) finalisieren; breite MQTT/HA-Discovery macht Kind 'AMS MQTT-Bridge'"
+   "note": "FERTIG: PR #9 (Reboot-Grund ueber MQTT) rebased + gemerged in feat/link-fallback (e48c1cc5), CI 6/6 gruen. Breite MQTT/HA-Discovery = separates Kind."
   },
   "7a894c13678043e58935dd1509217a75": {
    "name": "parent (XFCE-Desktop/Odroid-Chat)",
@@ -71,9 +71,9 @@
   },
   "843d8fde02eb4530a5a185d90db68650": {
    "name": "AMS Health-Monitor",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "branch": "fleet/ams-health",
-   "note": "TODO: health_policy/health_task salvage + TWDT-Worker anmelden (TODO ~310)"
+   "note": "FERTIG: PR #29 (selbstheilender Health-Watchdog, receiver-only Reboot bei Stale-Daten/wenig Heap) gemerged (squash 453291d). TWDT-Worker-Anmeldung (TODO ~310) war schon in #10, um Health-Worker erweitert. CI gruen."
   },
   "2001aa2feb0a4efc90f339404a7e2b0e": {
    "name": "AMS MQTT-Bridge",
