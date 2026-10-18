@@ -1,0 +1,19 @@
+# margin_oc.py 206 1800  -  Odroid N2+ big-cluster PLL, 2026-10-18 (parent re-run)
+# Board: odroidn2 (Amlogic S922X). Re-run from scratch at 16:03 UTC by the parent
+# chat to confirm the 11:32 UTC result. Preconditions before the run:
+#   cpu-hotplug stopped, cpu2-5 online, governor performance on policy0+policy2,
+#   policy2 scaling_max_freq forced 1000000 -> 2400000 so the DRIVER reprogrammed
+#   the big PLL (otherwise a raw poke of 0x2f4 does nothing; the cluster can sit
+#   at ~1 GHz while cpufreq still reports 2400). True-clock precondition checked:
+#   2M-iteration int loop on cpu4 = 0.4357 s (~0.44 s expected at 2400 MHz).
+online=0-5 gov2=performance
+baseline 2400 loop=0.4357s OK
+== 30-min margin run (N=206, 2472 MHz) ==
+ref N=200: int=3185329824 mix=560778038
+MARGIN N=206 (2472 MHz) ARMED temp=33.5C reg=0x980104ce
+N=206 1800s: runs=22828 errs=0 err_rate=0.000e+00 (12.68 run/s) temp=41.4C CLEAN
+  pattern int  runs=11414 errs=0
+  pattern mix  runs=11414 errs=0
+restored reg=0x980104c8 N=200
+DONE
+ALLDONE

@@ -128,6 +128,38 @@ still only a longer statement about duration, not a proof of safety. A soak that
 ends in a hang and a soak that ends clean look identical up to the moment of the
 hang.
 
+### Reproduced 2026-10-18 16:03 UTC (parent chat)
+
+Re-ran the same test from scratch: N=206 (2472 MHz), 1800 s ->
+`runs=22828 errs=0 err_rate=0` (12.68 run/s), temp 33.5 -> 41.4 C, **CLEAN**.
+Register restored to stock (N=200) afterwards, governor back to `schedutil`,
+`cpu-hotplug` re-enabled. Same clean result as the 11:32 UTC run.
+
+**Precondition the first attempt missed (worth knowing before any raw poke):**
+a raw write to `0x2f4` only takes effect if the *driver* has programmed the big
+PLL at least once since boot. If the big cluster has been idle and
+`cpu-hotplug` took it offline, `scaling_max_freq` / `scaling_cur_freq` keep
+reporting 2400 MHz while the cluster is actually running ~1 GHz - and a raw poke
+of N then changes nothing measurable (throughput stayed flat, +0.02 % instead of
++3.00 %). The kernel's *cached* rate hides this; the throughput test is what
+exposes it.
+
+Safe order, verified:
+
+```
+systemctl stop cpu-hotplug.service
+for c in 2 3 4 5; do echo 1 > /sys/devices/system/cpu/cpu$c/online; done
+echo performance > .../policy0/scaling_governor
+echo performance > .../policy2/scaling_governor
+echo 1000000 > .../policy2/scaling_max_freq; sleep 1   # force a transition
+echo 2400000 > .../policy2/scaling_max_freq; sleep 1   # driver reprograms PLL
+# verify the TRUE clock first: 2M-iteration int loop must take ~0.44 s on a big core
+```
+
+Without the down/up transition the loop takes ~1.05 s (≈1 GHz) and a soak would
+"pass" at the wrong clock. `margin_oc.py` only hash-checks for bit errors, so it
+cannot detect a wrong-but-stable clock - check throughput before trusting a run.
+
 ## Important caveats
 
 - **Voltage is already at the ceiling.** At stock 2400 MHz the PWM regulator
