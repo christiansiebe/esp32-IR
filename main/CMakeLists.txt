@@ -29,7 +29,8 @@ set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "mqtt_topics.c" "history_backfill.c" "history_sync.c"
               "history_csv_import.c"
               "link_fallback.c" "liveness_guard.c" "ota_policy.c"
-              "json_escape.c" "version.c")
+              "json_escape.c" "version.c"
+              "wall_clock.c" "wall_clock_store.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
     list(APPEND main_srcs "mqtt_bridge.c" "web_guard.c")
 endif()
