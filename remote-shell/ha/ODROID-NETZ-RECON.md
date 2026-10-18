@@ -87,3 +87,32 @@ verbindet sich per `Restart=always` selbst). Erneut gelesen, **read-only**:
 - **HA-Container** `homeassistant` läuft (Docker), `ip_forward=1` unverändert.
 - `user_overlays=lowfreq ramoops` (kein OC-Overlay), `xfce-vnc`/`novnc`/
   `vnc-lan-guard` alle **active**.
+
+## Nachtrag 2026-10-18 16:5x UTC (Parent 30cfd896) — **P1-Gate BESTANDEN**
+
+Nach dem Weckruf des Fleet-Supervisors erneut read-only geprueft. **Das LAN-Kabel
+steckt jetzt am Odroid** — der `end0`-Uplink steht:
+
+- **`end0` = `UP`, `carrier=1`, `operstate=up`**, MAC `00:1e:06:42:b1:25`,
+  **`192.168.178.4/24`** (+ globales IPv6). Vorher: `DOWN`/`NO-CARRIER`.
+- **Default-Route laeuft ueber `end0`**: `default via 192.168.178.1 dev end0
+  metric 100` — die WLAN-STA-Route (`metric 600`) ist nur noch Fallback.
+- Gate-Pruefung: `ping 192.168.178.1` **0 % Verlust**, `ping 1.1.1.1` **0 %**,
+  DNS `github.com -> 140.82.121.3`. **Der Odroid ist kabelgebunden im Heimnetz.**
+- NetworkManager: `end0:ethernet:connected` (Profil "Supervisor end0"),
+  `wlxdc627949ba79:wifi:connected` (Profil "Supervisor wlxdc627949ba79").
+- `hostapd`/`dnsmasq` weiterhin **masked/inactive**. `ip_forward=1`.
+- **Wichtig:** Der remote-shell-Kanal egressiert jetzt ebenfalls ueber `end0`
+  (Quelle `192.168.178.4`). Die WLAN-STA ist damit **nicht mehr die einzige
+  Rettungsleine** — ein WLAN→AP-Umbau (P2) kann die Fernverbindung nicht mehr
+  kappen. Die Lockout-Gefahr aus dem Plan ist damit entschaerft.
+
+**Kamera:** `lsusb` zeigt **keine** Kamera (nur RTL9210-NVMe, TP-Link-WLAN, Hubs);
+`/dev/video0` ist weiterhin nur der Amlogic-Decoder, `v4l2-ctl` fehlt. Eine
+**USB-Kamera ist nicht angeschlossen** (Hardware noetig); **IP-Kamera (RTSP/ONVIF)
+ist der einzige Weg ohne Neukauf**.
+
+**Offen bleibt Nutzer-Entscheid:** (a) alten AP **ersetzen** oder **ergaenzen**?
+(b) AP-SSID/Kanal/Passwort. (c) IP-Kamera vorhanden? Sonst P2/Kamera gesperrt.
+P2 (WLAN→AP) ist ohne diese Entscheide **gesperrt**.
+
