@@ -4684,12 +4684,15 @@ static esp_err_t send_http_error_status(httpd_req_t *req,
 
 /* POST /api/reboot: restart from the web UI (auth-gated like /update). The
  * response is sent first and a short one-shot timer does the restart, so the
- * browser gets a clean reply instead of a reset connection. The restart is
- * marked deliberate so the crash journal does not log it as a crash. */
+ * browser gets a clean reply instead of a reset connection. On the sender the
+ * restart is marked deliberate so the crash journal does not log it as a crash. */
 static void reboot_timer_callback(void *arg)
 {
     (void)arg;
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* The crash journal (and its clean-restart marker) is sender-only. */
     crash_journal_mark_clean_restart();
+#endif
     esp_restart();
 }
 
