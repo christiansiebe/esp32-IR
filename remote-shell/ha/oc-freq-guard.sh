@@ -13,7 +13,10 @@
 CAP=$(tr -dc 0-9 < /etc/default/oc-freq-guard 2>/dev/null)
 [ -n "$CAP" ] || CAP=2400000
 
-for p in /sys/devices/system/cpu/cpufreq/policy*; do
+# OC_FREQ_GUARD_SYS ist beim echten Boot leer; der Praefix dient nur den Tests.
+SYS=${OC_FREQ_GUARD_SYS:-/sys/devices/system/cpu/cpufreq}
+
+for p in "$SYS"/policy*; do
         [ -w "$p/scaling_max_freq" ] || continue
         hard=$(cat "$p/cpuinfo_max_freq" 2>/dev/null)
         target=$CAP
