@@ -673,3 +673,19 @@ Host-Tests gruen. **PR #39** gegen `cline/power-history-diag`. Das Overlay ist
 auf dem Board **noch nicht installiert** (Deployment = separater Schritt mit
 Testboot).
 
+**8) Parent f85f7c47: Odroid-Familie abgeschlossen (2026-10-18).** Alle vier
+Kinder fertig und gemerged: #36 (LAN/AP), #37 (Watchdog-Aktor), #38 (PR-Review),
+#35 (Watchdog-Verifikation). Firmware-Kind `9fe65410` fertig: **PR #46** (Basis
+`feat/dfs-clock-visibility`) gemerged `8252d5f` - web_guard-Saturating-Clamp +
+`header_is_valid`-Versionsbereich + `test/test_header_migration.c`. Befund beim
+Review: der web_guard-Hunk war ein **Duplikat** von main-PR #15 (dfs/cline hatten
+ihn nie), der Header-Teil ist **echt neu** und cline hatte dieselbe Luecke.
+Deshalb nur der Header-Commit als **PR #47** gegen `cline/power-history-diag`
+gecherry-picked und gemerged `9822ae4`. Beide neuen Tests unabhaengig verifiziert:
+rot ohne Fix (web_guard 41, header 2 Fehler), gruen mit; `run_host_tests.sh` EXIT=0.
+Geraete-Check Empfaenger `192.168.178.70` ueber den Odroid-Kanal:
+`record_count=7339`, `storage_ready=true`, `write_errors=0`, `capacity=29000` ->
+Persistenz wiederhergestellt. `fleet/agents.json` + `TASKS.json` auf 0 offene
+Aufgaben gesetzt. Keine offene Arbeit im Odroid-Zweig.
+
+
