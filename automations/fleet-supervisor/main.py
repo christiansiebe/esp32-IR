@@ -221,16 +221,18 @@ def sandbox_status(token, sandbox_id):
 
 
 def wake_worker(token, cid, conv):
-    """Resume the sandbox if paused, wait until it is RUNNING, then send the
+    """Resume the sandbox if it is not RUNNING, wait until it is, then send the
     wake message. send-message returns 409 while the sandbox is STARTING, so
-    resuming and sending in one breath silently drops the wake."""
+    resuming and sending in one breath silently drops the wake. The authoritative
+    status is queried because a shared sandbox's per-conversation record can be
+    stale."""
     sandbox_id = conv.get("sandbox_id")
-    if sandbox_id and conv.get("sandbox_status") == "PAUSED":
-        try:
-            cloud(token, "POST", f"/api/v1/sandboxes/{sandbox_id}/resume", {})
-        except Exception:  # noqa: BLE001
-            pass
     if sandbox_id:
+        if sandbox_status(token, sandbox_id) not in ("RUNNING", None):
+            try:
+                cloud(token, "POST", f"/api/v1/sandboxes/{sandbox_id}/resume", {})
+            except Exception:  # noqa: BLE001
+                pass
         deadline = time.monotonic() + RESUME_WAIT_SECONDS
         while time.monotonic() < deadline:
             if sandbox_status(token, sandbox_id) in (None, "RUNNING"):
