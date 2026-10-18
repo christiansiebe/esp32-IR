@@ -38,7 +38,7 @@ if(CONFIG_ESPNOW_ROLE_RECEIVER)
                           "health_policy.c" "health_task.c")
 endif()
 if(CONFIG_ESPNOW_ROLE_SENDER)
-    list(APPEND main_srcs "tx_batch.c" "uart_sleep_window.c")
+    list(APPEND main_srcs "tx_batch.c" "uart_sleep_window.c" "uart_recovery.c")
 endif()
 
 idf_component_register(SRCS ${main_srcs}

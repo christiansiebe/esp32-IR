@@ -60,6 +60,7 @@
 #if CONFIG_ESPNOW_ROLE_SENDER
 #include "sml_adapter.h"
 #include "tx_batch.h"
+#include "uart_recovery.h"
 #endif
 
 static const char *TAG = "espnow_meter";
@@ -394,7 +395,12 @@ static uint32_t g_uart_gap_cause_buffer;
 static uint8_t g_uart_gap_last_cause;
 static uint32_t g_uart_parser_resyncs;
 static uint64_t g_uart_last_byte_us;
-static uint64_t g_uart_last_telegram_us;
+/* Last time the parser made observable progress: a telegram callback fired
+ * (CRC valid or checksum error), or - before the first telegram - the first
+ * byte of the capture arrived. 0 = not armed yet. Drives the stall recovery
+ * (uart_recovery.h) and must NOT be armed by a telegram alone, or a wedge on
+ * the first telegram of a boot is unrecoverable. */
+static uint64_t g_uart_parser_progress_us;
 /* Wall clock learned from the receiver (the only NTP-synced side). Events are
  * stamped with esp_timer uptime plus this offset, so the sender stays
  * self-sufficient between calibrations. */
@@ -2657,7 +2663,7 @@ void sml_adapter_telegram_callback(uint64_t timestamp_us, bool crc_valid,
     portENTER_CRITICAL(&g_uart_stats_lock);
     gap_pending = g_uart_gap_mid_pending;
     g_uart_gap_mid_pending = false;
-    g_uart_last_telegram_us = (uint64_t)esp_timer_get_time();
+    g_uart_parser_progress_us = (uint64_t)esp_timer_get_time();
     if (gap_pending && !crc_valid) {
         ++g_uart_gap_loss;
     }
@@ -2782,11 +2788,11 @@ static void uart_capture_worker(void *arg)
         uint64_t now_us = (uint64_t)esp_timer_get_time();
         uint64_t last_us;
         bool already;
-        uint64_t last_telegram_us;
+        uint64_t progress_us;
         portENTER_CRITICAL(&g_uart_stats_lock);
         last_us = g_uart_last_byte_us;
         already = g_uart_silence_reported;
-        last_telegram_us = g_uart_last_telegram_us;
+        progress_us = g_uart_parser_progress_us;
         portEXIT_CRITICAL(&g_uart_stats_lock);
 
         if (received <= 0) {
@@ -2832,13 +2838,17 @@ static void uart_capture_worker(void *arg)
         }
 
         /* Recovery 2: bytes keep arriving but no telegram has been finalised
-         * for a long time, so the parser is eating the stream. Reset it. */
-        if (last_telegram_us != 0 &&
-            now_us - last_telegram_us >= (uint64_t)UART_TELEGRAM_STALL_MS * 1000ULL) {
+         * for a long time, so the parser is eating the stream. Reset it. The
+         * timer is armed by the first byte of the capture (below), NOT by a
+         * telegram: gating it on "a telegram was finalised before" made a wedge
+         * on the very first telegram after boot permanent, because there was no
+         * prior telegram to arm it (the live "sender delivers no values" bug). */
+        if (uart_parser_stall_recover(now_us / 1000ULL, progress_us / 1000ULL,
+                                      UART_TELEGRAM_STALL_MS)) {
             sml_adapter_reset();
             portENTER_CRITICAL(&g_uart_stats_lock);
             ++g_uart_parser_resyncs;
-            g_uart_last_telegram_us = now_us;
+            g_uart_parser_progress_us = now_us;
             portEXIT_CRITICAL(&g_uart_stats_lock);
             diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "parser resync (no telegram)");
         }
@@ -2914,6 +2924,11 @@ static void uart_capture_worker(void *arg)
         }
         portENTER_CRITICAL(&g_uart_stats_lock);
         g_uart_last_byte_us = now_us;
+        /* Arm the stall timer on the first byte of the capture, so a parser that
+         * wedges before ever finalising a telegram is still recovered. */
+        if (g_uart_parser_progress_us == 0) {
+            g_uart_parser_progress_us = now_us;
+        }
         g_uart_silence_reported = false;
         g_uart_rx_bytes += (uint64_t)received;
         portEXIT_CRITICAL(&g_uart_stats_lock);
