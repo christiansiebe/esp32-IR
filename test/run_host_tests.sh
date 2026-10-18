@@ -306,6 +306,11 @@ python3 "$here/check_dashboard_js.py"
 # real (possibly overclocked) PLL clock instead of the driver's cached OPP.
 python3 "$repo/remote-shell/ha/test_cpu_real_clock.py"
 
+# Brother HL-3040CN print server container (Odroid): the filter chain that makes
+# a host-based GDI printer work on ARM via qemu-i386 - pins the config so an
+# edit cannot silently drop a filter helper or the PPD.
+python3 "$repo/remote-shell/ha/test_brother_cups.py"
+
 # Fleet supervisor decision table (pure, no Cloud API): the cases that let an
 # agent fall asleep and never wake (shared parent sandbox, a failed turn, a
 # finished worker sharing a live sandbox).
