@@ -2601,11 +2601,23 @@ static void store_sml_value(uint64_t timestamp_us, const uint8_t *obis,
         g_sml_latest_power_received_us = (uint64_t)esp_timer_get_time();
         g_sml_latest_power_valid = true;
     }
+
     portEXIT_CRITICAL(&g_sml_history_lock);
 
     /* Feed the health watchdog with the freshest received value (any OBIS), so
      * the "meter data went silent" rule only fires on a real outage. */
     health_task_note_rx();
+
+    /* The cumulative energy counters feed Home Assistant's total_increasing
+     * sensors, which build the statistics history themselves. Publish each
+     * counter only when its own reading arrives, so a not-yet-seen counter is
+     * never sent as a spurious 0 (a total_increasing sensor would read that as a
+     * meter reset). The scaler is applied in mqtt_bridge_publish_*. */
+    if (latest_index == 0) {
+        mqtt_bridge_publish_import(strtod(record.value, NULL), record.scaler);
+    } else if (latest_index == 1) {
+        mqtt_bridge_publish_export(strtod(record.value, NULL), record.scaler);
+    }
 
     ESP_LOGI(TAG, "SML value: OBIS=%s value=%s scaler=%d unit=%u",
              record.obis, record.value, (int)record.scaler,
