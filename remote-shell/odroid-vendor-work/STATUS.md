@@ -12,6 +12,41 @@ and the `Odroid` access point **at the same time**, reboot-proof:
 * AP  VIF `wlxde627949ba79` -> SSID `Odroid`, `10.42.0.1/24`, ch 36, AP-ENABLED.
 * dnsmasq serves DHCP `10.42.0.10-200` on the AP VIF only (port 53 off).
 
+### Why concurrent mode needs the SAME channel (root cause, verified 2026-10-19)
+
+The driver is built with `CONFIG_CONCURRENT_MODE` but **without
+`CONFIG_MCC_MODE`**. `CONFIG_MCC_MODE` is the multi-channel-concurrency feature
+(AP and STA on *different* channels, time-sliced); it is not enabled in the
+Makefile, so `rtw_en_mcc` never appears under
+`/sys/module/88x2bu/parameters/`. Without it the driver supports only
+**single-channel concurrency (SCC)**: both VIFs must sit on one channel.
+
+A/B proof (STA = FB7272 uplink "Wohnzimmer 5 Ghz" on 5180 MHz / channel 36):
+
+| AP channel | result |
+|-----------|--------|
+| 36 (same as STA) | `AP-ENABLED`, both VIFs up at once |
+| 44 (different)   | `nl80211: Failed to set channel (freq=5220): -16 (Device or resource busy)`, hostapd exits |
+
+So "concurrent mode does not work" really means: it works **only** while the
+Odroid AP and the upstream AP are on the same channel. The FB7272 currently
+sits on channel 36, which is why AP+STA works on the bench.
+
+Two consequences:
+
+1. **Ordering matters.** hostapd must claim the channel *before* the STA owns
+   the radio; otherwise the channel set returns `-16 (busy)`. Hence start the AP
+   first, then bring the STA up (`odroid-apsta.sh` v2).
+2. **Channel drift breaks it.** If the FB7272 changes channel (auto-channel),
+   the AP (hard-coded channel 36) diverges and hostapd fails. The robust fix is
+   to read the STA's channel and set the AP to the same value (v2 script does
+   this); true independence needs an MCC build.
+
+**True dual-channel concurrency** (AP and STA on different channels) would
+require rebuilding the module with `CONFIG_MCC_MODE=y`
+(`make ... CONFIG_MCC_MODE=y`, adds `-DCONFIG_MCC_MODE`), then `rtw_en_mcc=1`.
+Not done - the current single-channel setup already meets the goal.
+
 ### What made it work (three changes, in order)
 
 1. **Build with `CONFIG_CONCURRENT_MODE`.** The stock Makefile only sets it for
