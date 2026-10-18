@@ -31,7 +31,7 @@ new_root() {
                 "$ROOT/etc/default" "$ROOT/usr/local/sbin" \
                 "$ROOT/sys/devices/system/cpu/cpufreq/policy0" \
                 "$ROOT/sys/devices/system/cpu/cpufreq/policy2"
-        printf 'verbosity=1\nuser_overlays=lowfreq\nextraargs=rootdev=UUID=1234\n' > "$ROOT/boot/armbianEnv.txt"
+        printf 'verbosity=1\nuser_overlays=\nextraargs=rootdev=UUID=1234\n' > "$ROOT/boot/armbianEnv.txt"
         printf 'MIN_SPEED=15625\nGOVERNOR=schedutil\n' > "$ROOT/etc/default/cpufrequtils"
         : > "$ROOT/boot/overlay-user/lowfreq.dtbo"
 }
@@ -63,7 +63,7 @@ esac
 check "deploy: Cap = Werkswert" "$(tr -dc 0-9 < "$ROOT/etc/default/oc-freq-guard")" "2400000"
 [ -f "$ROOT/etc/systemd/system/oc-test-hold.service" ] && ok "deploy: hold-Unit" || bad "deploy: hold-Unit fehlt"
 
-# --- 4. Boot-Sequenz -------------------------------------------------------
+# --- 4. Boot-Sequenz (ohne anderes Overlay) --------------------------------
 HOLD="$ROOT/usr/local/sbin/oc_test_hold.sh"
 OC_ROOT="$ROOT" sh "$HOLD" >/dev/null 2>&1
 check "boot 1: Overlay scharf" "$(env_line user_overlays)" "user_overlays=oc"
@@ -72,6 +72,16 @@ OC_ROOT="$ROOT" sh "$HOLD" >/dev/null 2>&1
 check "boot 2: zurueck auf Werkswerte" "$(env_line user_overlays)" "user_overlays="
 OC_ROOT="$ROOT" sh "$HOLD" >/dev/null 2>&1
 check "boot 3: idempotent" "$(env_line user_overlays)" "user_overlays="
+
+# --- 4b. Boot-Sequenz mit zweitem Overlay (lowfreq bleibt) -----------------
+new_root
+printf 'verbosity=1\nuser_overlays=lowfreq\nextraargs=rootdev=UUID=1234\n' > "$ROOT/boot/armbianEnv.txt"
+OC_ROOT="$ROOT" sh "$HERE/deploy_oc_safe.sh" >/dev/null 2>&1
+check "deploy: lowfreq bleibt" "$(env_line user_overlays)" "user_overlays=lowfreq"
+OC_ROOT="$ROOT" sh "$ROOT/usr/local/sbin/oc_test_hold.sh" >/dev/null 2>&1
+check "boot 1: oc dazu" "$(env_line user_overlays)" "user_overlays=lowfreq oc"
+OC_ROOT="$ROOT" sh "$ROOT/usr/local/sbin/oc_test_hold.sh" >/dev/null 2>&1
+check "boot 2: nur oc faellt" "$(env_line user_overlays)" "user_overlays=lowfreq"
 
 # --- 5. promote ------------------------------------------------------------
 new_root

@@ -80,15 +80,31 @@ die() { echo "FEHLER: $*" >&2; exit 1; }
 say() { echo "$*"; }
 run() { if [ "$DRY" = 1 ]; then echo "   + $*"; else "$@"; fi; }
 
-set_user_overlays() {  # set_user_overlays <wert>
+# "oc" in user_overlays aufnehmen bzw. entfernen, andere Namen bleiben stehen.
+# ACHTUNG: das Muster wird auch in die eingebettete hold-Unit kopiert - beide
+# Stellen muessen dieselbe Semantik haben.
+set_overlay_oc() {  # set_overlay_oc add|remove
         if [ "$DRY" = 1 ]; then
-                echo "   + armbianEnv.txt: user_overlays=$1"
+                echo "   + armbianEnv.txt: user_overlays $1 oc"
                 return 0
         fi
-        if grep -q '^user_overlays=' "$ENV"; then
-                sed -i "s/^user_overlays=.*/user_overlays=$1/" "$ENV"
+        if [ "$1" = add ]; then
+                cur=$(sed -n 's/^user_overlays=//p' "$ENV" 2>/dev/null)
+                case " $cur " in
+                        *" oc "*) : ;;
+                        *) if grep -q '^user_overlays=' "$ENV"; then
+                                   sed -i "s/^user_overlays=.*/user_overlays=${cur:+$cur }oc/" "$ENV"
+                           else
+                                   echo 'user_overlays=oc' >> "$ENV"
+                           fi ;;
+                esac
         else
-                echo "user_overlays=$1" >> "$ENV"
+                sed -i '/^user_overlays=/ {
+                        s/user_overlays=//
+                        s/\(^\| \)oc\( \|$\)/ /g
+                        s/^ *//; s/ *$//
+                        s/^/user_overlays=/
+                }' "$ENV"
         fi
 }
 
@@ -111,7 +127,7 @@ fi
 # --- --promote: Overlay dauerhaft uebernehmen ------------------------------
 if [ "$ACTION" = promote ]; then
         say '== Overlay dauerhaft uebernehmen (promote) =='
-        set_user_overlays oc
+        set_overlay_oc add
         run rm -f "$MARKER"
         say '   + Aufraeum-Unit entfernen (sonst loescht sie die Zeile beim Boot)'
         run systemctl disable --now oc-test-hold.service
@@ -156,8 +172,8 @@ else
         say "   HINWEIS: keine .dtbo gefunden ($SRC_DTBO) - beim Reboot wird nichts geladen."
 fi
 
-say '== 3. armbianEnv: user_overlays leer lassen, Boot-Governor sichern =='
-set_user_overlays ''
+say '== 3. armbianEnv: oc NICHT aktiv, Boot-Governor sichern =='
+set_overlay_oc remove
 if [ "$DRY" = 1 ]; then
         echo "   + armbianEnv.txt: extraargs += cpufreq.default_governor=performance"
 elif ! grep -q 'cpufreq.default_governor=performance' "$ENV"; then
@@ -198,23 +214,32 @@ else
 # oc_test_hold.sh - runs once per boot.
 #
 # Marker present : arm the oc overlay for the next boot, delete the marker.
-# Marker absent  : clear user_overlays so the boot after the test is stock again.
+# Marker absent  : remove oc from user_overlays (other overlays stay).
 set -u
 # OC_ROOT ist beim echten Boot leer; der Praefix dient nur den Tests.
 ENV=${OC_ROOT:-}/boot/armbianEnv.txt
 MARKER=${OC_ROOT:-}/etc/oc-test.pending
 [ -f "$ENV" ] || exit 0
 if [ -f "$MARKER" ]; then
-        if grep -q '^user_overlays=' "$ENV"; then
-                sed -i 's/^user_overlays=.*/user_overlays=oc/' "$ENV"
-        else
-                echo 'user_overlays=oc' >> "$ENV"
-        fi
+        cur=$(sed -n 's/^user_overlays=//p' "$ENV")
+        case " $cur " in
+                *" oc "*) : ;;
+                *) if grep -q '^user_overlays=' "$ENV"; then
+                           sed -i "s/^user_overlays=.*/user_overlays=${cur:+$cur }oc/" "$ENV"
+                   else
+                           echo 'user_overlays=oc' >> "$ENV"
+                   fi ;;
+        esac
         rm -f "$MARKER"
         logger -t oc-test-hold 'oc overlay armed for the next boot'
 else
-        sed -i 's/^user_overlays=.*/user_overlays=/' "$ENV"
-        logger -t oc-test-hold 'no marker - boot stays on factory clocks'
+        sed -i '/^user_overlays=/ {
+                s/user_overlays=//
+                s/\(^\| \)oc\( \|$\)/ /g
+                s/^ *//; s/ *$//
+                s/^/user_overlays=/
+        }' "$ENV"
+        logger -t oc-test-hold 'no marker - oc overlay dropped'
 fi
 exit 0
 HOLD
