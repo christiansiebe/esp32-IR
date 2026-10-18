@@ -261,6 +261,12 @@ python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"
 python3 "$here/check_dashboard_js.py"
 
+# Odroid AP config generator (remote-shell/ha/odroid_ap_config.py): renders the
+# hostapd/dnsmasq/NAT files from ODROID-LAN-AP-KAMERA.md. Pure host logic, so it
+# must reject placeholders, bad band/channel pairs and an AP subnet overlapping
+# the home network before anything reaches the board.
+python3 "$repo/remote-shell/ha/test_odroid_ap_config.py"
+
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.
 cxx="${CXX:-g++}"
