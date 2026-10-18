@@ -511,4 +511,27 @@ per-Kern-MHz und per-Cluster-Spannung in der tmux-Statuszeile.
   Test: 62 Checks, 0 Fehler, keine Mocks. `sh -n` sauber.
 - **Port-Fakt:** work-1 -> Container-Port 12000, work-2 -> 12001 (Proxy).
   12000 traegt entweder den Desktop oder den OTA-Upload (schliessen sich aus).
+### Watchdog-Luecke nach CPU-Hang (2026-10-18, Doku+Haertung)
+- **Befund (belegt):** Nach dem PLL-Hang bei 2532 MHz hat der 60-s-HW-Watchdog
+  NICHT rebootet. `journalctl --list-boots`: Vor-Boot-Ende 02:15:01, naechster
+  Boot 03:21:33 -> ~66 min Luecke. Erwartet war Reboot nach 60 s
+  (`RuntimeWatchdogUSec=1min`, `panic=10`). Die zuvor zugesagte Sicherheitsleine
+  ist damit **widerlegt** (mind. fuer diesen Hang).
+- **Analyse + Haertung:** `remote-shell/ha/WATCHDOG-GAP.md` (BELEGT vs HYPOTHESE
+  getrennt). Kernpunkt: `panic=10` hilft bei einem *stillen* Hang nicht (kein
+  Panic); alle internen Mechanismen haengen am selben SoC. Hypothesen H1
+  `nowayout=0`+`close()` entwaffnet · H2 systemd-Open busy · H3 Reset kam nicht
+  durch · H4 Timeout/`RebootWatchdogUSec` · H5 Kick-Task (allein unplausibel) ·
+  H6 externer Hold · H7 nur big-Cluster.
+- **Entscheidender Einzelwert (Parent am Board):** `cat
+  /sys/class/watchdog/watchdog0/bootstatus` (1 = Watchdog-Reset war die Ursache).
+  Weitere Befehle in Abschnitt 4 der Doku (bewusst klein, keine rekursiven
+  Suchen — Kanal-Regel!).
+- **Haertung:** off-board Pfad — Board sendet Heartbeat
+  (`watchdog-heartbeat.{sh,service,timer}` + `deploy_heartbeat.sh`), ein Monitor
+  ausserhalb (`watchdog_monitor.py`, reine `decide()`-Logik, host-getestet in
+  `test_watchdog_monitor.py`, 28 Checks) loest einen **unabhaengigen Aktor** aus
+  (`--reboot-cmd` = Power-Cut/Reset). Restrisiken in der Doku.
+- **PR:** #18 (`docs/watchdog-gap-hardening` -> `cline/power-history-diag`).
+
 
