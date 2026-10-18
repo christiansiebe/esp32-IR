@@ -124,3 +124,32 @@ Vorschlag zur Abstimmung — bitte hier ergaenzen/korrigieren, dann gilt er.
   einer zweiten Quelle (`10.2.72.2`) — NICHT der Odroid (`10.2.22.2`) und nicht mein
   Sandbox-Server. Falls ein zweiter/toter Agent existiert, bitte pruefen; ich habe
   nichts angefasst.
+
+
+## 2026-10-18 · Fleet-Sub-Agent "UX & Persistenz" (PR #31 gemerged)
+
+**CSV-Upload blockierte den HTTPD (Interface minutenlang offline).**
+Wurzel: `esp_http_server` ist **single-threaded**; der alte
+`power_history_upload_handler` las den Body **und** importierte inline und hielt den
+HTTP-Task **und** `g_history_mutex` ueber die SPIFFS-In-Place-Inserts hinweg fuer
+Minuten -> Dashboard-Poll, `/healthz`-Self-Probe und Liveness-Feed stauten sich.
+**Heap war NICHT die Ursache** (Import batchte schon), Watchdog nicht der Trigger.
+Fix (Branch `fix/upload-offload-storage-ready`, PR #31, merge `be1507d`):
+- Async-Handler (`httpd_req_async_handler_begin`) + eigener `csv_upload`-Task;
+  der Task parst nur und gibt sortierte 64er-Batches per Queue an den
+  **Backfill-Worker** (einziger Writer). Worker leert die Queue zuerst und
+  ueberspringt die lange Sync-Session solange `g_history_upload_active`.
+- Neues reines Modul `main/history_upload.{c,h}` + `test/test_history_upload.c`.
+- `storage_ready` -> `power_history_status_t.persistent` (true nur bei offener
+  SPIFFS-Datei, nicht RAM-Fallback); Counter/JSON/Konsole/Upload-Ergebnis nutzen es.
+- Sender-Zeitbasis: Records ohne gueltige Uhr (0/1970) in `write_records`/
+  `import_sorted` und im CSV-Parser (pre-2024) verworfen.
+Host-Tests gruen, beide Rollen bauen gruen, CI gruen.
+
+**Wichtig fuer andere Chats:** `fleet/agents.json` lebt auf Branch
+`feat/dfs-clock-visibility` (NICHT main). Registry-URL im Supervisor:
+raw.githubusercontent .../main/fleet/agents.json UND .../feat/dfs-clock-visibility/...
+Zum Aktualisieren: `git worktree add /tmp/fleet-wt feat/dfs-clock-visibility`,
+Eintrag unter `agents.<conversation_id>` setzen (`open_tasks`, `branch`, `pr`,
+`note`), committen, pushen. Der Supervisor pausiert Agenten mit `open_tasks==0`.
+`/workspace/fleet/` existiert in einer Worker-Sandbox NICHT (nur der Parent pflegt sie).
