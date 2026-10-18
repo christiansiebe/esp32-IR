@@ -26,6 +26,14 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 21:20 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 57e010b)
+**Nachtrag 2 zu PR #32:** `main` ist erneut weitergelaufen (`#48` Sender-Link-Fix, `#27`
+Recovery-Button, u.a.), der Branch ist wieder **rebasd** auf `b2eaa51`. Konflikt nur in
+`TODO.md` (rein redaktionell, Health-/Recovery-/MQTT-Eintraege zusammengefuehrt);
+`main.c`/`CMakeLists.txt`/`run_host_tests.sh` merged automatisch und sauber (Health- +
+MQTT-Aufruf koexistieren in `store_sml_value`). **CI gruen** (receiver + receiver-apoff +
+sender + Host-Tests), PR **mergeable**. Lokal Host-Suite gruen, Receiver gruen.
+
 ## 2026-10-18 14:40 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 68a36e9)
 **Nachtrag zu PR #32:** `main` war inzwischen weiter (`#31`/`#28`/`#10` gemerged), der
 Branch ist **rebasd** auf `be1507d` (Konflikte in `main.c`/`CMakeLists.txt`/`TODO.md`/
