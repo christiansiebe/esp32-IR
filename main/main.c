@@ -606,26 +606,19 @@ static bool g_wall_clock_trusted;
 
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* Defined with the sender diagnostics / boot-marker block further down. */
-static uint64_t event_wall_ms(void);
 static void boot_marker_on_clock_valid(void);
 #endif
 
 /* Current wall clock regardless of the role (the receiver seeds time() with
- * settimeofday, the sender keeps the ESP-NOW offset), used for persistence. */
-static int64_t wall_clock_current_utc(void)
-{
-#if CONFIG_ESPNOW_ROLE_SENDER
-    return (int64_t)(event_wall_ms() / 1000);
-#else
-    return (int64_t)time(NULL);
-#endif
-}
+ * settimeofday, the sender keeps the ESP-NOW offset); same as the recorder's
+ * clock. Used only to decide when to persist. */
+static int64_t current_utc_seconds(void);
 
 /* Persist the clock if it is sane and has moved on enough since the last save.
  * Cheap when nothing is due, so it can be called from the periodic paths. */
 static void wall_clock_persist_if_due(void)
 {
-    int64_t now = wall_clock_current_utc();
+    int64_t now = current_utc_seconds();
     if (!wall_clock_utc_is_sane(now)) {
         return;
     }
@@ -648,6 +641,18 @@ static void wall_clock_persist_if_due(void)
  * overwrites it. Returns the seeded time, or 0 when there was nothing usable. */
 static int64_t wall_clock_seed_from_store(void)
 {
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* Never clobber a real calibration: a sync may have arrived during Wi-Fi
+     * bring-up, before this runs. */
+    portENTER_CRITICAL(&g_time_sync_lock);
+    bool already_valid = g_utc_valid;
+    portEXIT_CRITICAL(&g_time_sync_lock);
+#else
+    bool already_valid = system_time_is_valid();
+#endif
+    if (already_valid) {
+        return 0;
+    }
     int64_t stored = 0;
     bool found = false;
     if (wall_clock_store_load(&stored, &found) != ESP_OK || !found ||
