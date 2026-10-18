@@ -59,13 +59,51 @@ insufficient voltage changes the hash.
 | 205 | 2460 | PASS, 25 s soak, 59 runs, 0 errors, 34.8 -> 38.6 C |
 | 206 | 2472 | PASS |
 | 207 | 2484 | PASS |
-| 208 | 2496 | **PASS, 120 s soak, 570 runs, 0 errors** (best long-run point) |
+| 208 | 2496 | PASS, 120 s soak, 570 runs, 0 errors |
 | 209 | 2508 | PASS once (10 s), **hang on the 90 s soak** |
 | 210 | 2520 | marginal: hung once, passed 2x afterwards |
 | 211 | 2532 | **hang** (watchdog reboot) |
 
-So the reliable ceiling is **~2496 MHz (N=208)**, with 2508-2520 MHz marginal
-and 2532 MHz failing. At 2460 MHz the board stays cool (<= 39 C under load).
+### A pass is a statement about the test length, not about margin
+
+`margin_oc.py` was written to find out whether a point that is *about to* fail
+shows bit errors first, so a margin could be measured instead of only a cliff.
+It holds N fixed, runs two independent work patterns, and counts the error
+*rate* over time rather than a single pass/fail hash.
+
+| N | MHz | margin run | result |
+|---|-----|-----------|--------|
+| 204 | 2448 | 20 s, 244 runs | CLEAN, err_rate 0, 32.3 -> 35.8 C |
+| 206 | 2472 | 15 s, 182 runs | CLEAN, err_rate 0, 31.7 -> 42.7 C |
+| 208 | 2496 | - | **hard reset, no bit error logged first** |
+
+The result overturns the earlier reading of this table. **N=208 is not a safe
+ceiling**: it had passed a 120 s soak with 570 runs and 0 errors, and the very
+next run at the same N hard-reset the board. The margin test produced **no bit
+error before the hang** - the reset was abrupt.
+
+### Why bit-error detection does not work here
+
+The failure mode of undervolting is a *timing* violation. A setup/hold violation
+either produces a wrong result - which a hash catches - or it wedges the
+core/bus/PLL with no output at all, which nothing catches. On this board the
+second path dominates:
+
+- No ECC/EDAC: `/sys/devices/system/edac` does not exist, so memory errors are
+  invisible.
+- No RAS records and the ARM SError counter stays 0.
+- `pstore`/ramoops is empty after a hard reset (see `RAMOOPS-README.md`), so
+  a hang leaves no trace at all.
+
+**Consequence: a binary pass/fail test can only ever report "it survived the
+test", never a distance to the edge.** There is no gradient to measure on this
+silicon at these clocks - only a cliff. The only honest statements are "held for
+X seconds" and "hung". Do not describe any N here as "stable"; describe the
+durations that were actually survived.
+
+Practical ceiling observed: **2448 MHz (N=204) and 2472 MHz (N=206) each held a
+clean margin run**, 2496 MHz is not reproducible, and 2508 MHz and above hang.
+At 2460 MHz the board stays cool (<= 39 C under load).
 
 ## Important caveats
 

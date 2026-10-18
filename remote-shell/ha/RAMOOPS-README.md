@@ -86,6 +86,18 @@ lsmod | grep ramoops           # Modul geladen
 - **Nur Warm-Reset.** Ein Kaltstart/Stromausfall loescht den RAM — ramoops hilft
   nur, wenn die Panic-Region den Reset ueberlebt (Warm-Reset/Watchdog). Bei
   echtem Power-Cycle ist die Spur weg.
+- **Nur Panics, keine Hänger.** ramoops wird im Panic-Pfad beschrieben. Ein
+  CPU-/Bus-/PLL-Lockup (z. B. aus einem zu hohen PLL-Overclock) erreicht diesen
+  Pfad **nicht** — das Board rebootet hart, `/sys/fs/pstore` bleibt leer und der
+  Reset erscheint nur als `hard-reset-unknown`. Am 2026-10-18 belegt: die
+  PLL-Margin-Laeufe bei N=208/211 erzeugten **keinen** ramoops-Record, waehrend
+  ein `echo c > /proc/sysrq-trigger` (echter Panic) sofort einen
+  `dmesg-ramoops-N` mit `Kernel panic - not syncing` hinterliess
+  (`systemd-pstore.service` lief dann durch, statt an
+  `ConditionDirectoryNotEmpty` zu scheitern). ramoops ist damit ein
+  **Forensik-Werkzeug fuer Panics, kein Ersatz fuer den Hardware-Watchdog** —
+  gegen einen Hang schuetzt nur der Watchdog (`watchdog-guard`), und die
+  Ursache eines Hangs bleibt unsichtbar.
 - `# CONFIG_PSTORE_CONSOLE is not set` in diesem Kernel: ramoops schreibt den
   **Panic-Record** (`dmesg-ramoops`), nicht den vollen Konsolen-Log. Fuer Panics
   reicht das.
