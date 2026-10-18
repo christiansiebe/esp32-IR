@@ -339,3 +339,36 @@ klemmte bereits auf 80, der **Runtime-`set`-Pfad** nicht.
 **Offen:** der separate Sender-Reboot-Verdacht (20-Min-Takt, Crash-Journal) ist
 weiterhin **nicht** angefasst.
 
+
+## 2026-10-18 · Bau-Chat (Branch feat/link-fallback)
+
+**Thema: „Letzte bekannte Zeit persistieren" (TODO.md) — gebaut.**
+
+**Ursache:** Ohne frischen SNTP-Sync hat das Gerät keine Wanduhr, also bleibt
+`bucket_start` 0 und der Minutenrekorder verwirft jeden Sample bis zum ersten
+Sync (Minuten bis Stunden). Betraf Empfänger *und* Sender (der Sender holt die
+Zeit per ESP-NOW vom Empfänger; starten beide neu, hat keiner eine Uhr).
+
+**Fix (OTA-sicher, nur App):**
+- `main/wall_clock.{c,h}` — reine Logik: Record-Format + CRC32, Seed-/Bucket-
+  Mathematik, Persist-Policy. `main/wall_clock_store.{c,h}` — NVS
+  (`wallclock`/`last`), weist unsinnige Zeiten ab (Schutz vor vergiftetem Store).
+- Beim Boot: letzte UTC aus dem NVS lesen und **vor** dem ersten Sync als
+  Startzeit setzen (Empfänger `settimeofday`, Sender ESP-NOW-Offset), als
+  *untrusted* markiert. Der erste echte Sync (SNTP/ESP-NOW) ersetzt den Seed.
+- Persistenz alle 300 s (eigener kleiner Task, beide Rollen) + sofort beim
+  vertrauenswürdigen Sync → ein Stromausfall/Absturz verliert max. 5 min.
+- `boot_marker_note_and_log()` latcht jetzt nur bei **vertrauenswürdiger** Uhr;
+  vorher hätte der ungenaue Seed die Offline-Lücke als „leer" markiert.
+
+**Format:** unverändert — **kein** `POWER_HISTORY_VERSION`-Bump, `storage`
+(0x320000/0xE0000) unangetastet. Keine Migration nötig.
+
+**Tests:** neu `test/test_wall_clock.c` (40 Checks, in `run_host_tests.sh`):
+schreibt eine bekannte Zeit, „rebootet" per `fork()`, prüft, dass die Uhr
+weiterläuft und `bucket_start != 0` ist; dazu Record-/CRC-/Bounds- und
+Korruptions-Fälle. **Rot/grün verifiziert** (Seed-Mathematik kaputt → 4 FAILs).
+Host-Suite grün, beide Rollen bauen (`tools/build.sh receiver|sender`).
+
+**Commits:** `09e74fe` (Modul + Test), `f25cae1` (main.c-Verdrahtung),
+`74ccd2d` (TODO). PR: siehe `feat/link-fallback`.
