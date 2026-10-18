@@ -50,4 +50,8 @@ systemctl enable cpu-freq-guard.service
 systemctl start cpu-freq-guard.service
 systemctl is-active cpu-freq-guard.service
 
+# / ist ext4 mit commit=120: ohne sync kann ein Reset kurz nach dem Deploy die
+# Schreibzugriffe verschlucken. Nach jedem Deploy flushen.
+sync
+
 echo '== fertig - Reboot noetig =='
