@@ -60,6 +60,12 @@ deshalb der gemeinsame Kanal.
 
 **TODO.md** Zeile ~190 steht auf `[x]`; **TASKS.json** auf `done`; `agents.json` aktualisiert.
 
+**Fleet:** eigene `TASKS.json` auf `open_tasks=0` gesetzt; **Parent**
+(`8c2548251ad045599fbfb6f95f3e7944`) per Nachricht gebeten, `fleet/agents.json`
+(Repo-Kopie, die der Supervisor liest) auf `open_tasks=0` zu setzen. Damit darf
+diese Sandbox pausiert werden. (Die Repo-Registry pflegt der Parent — dieser
+Worker committet nichts nach `main`.)
+
 ## 2026-10-15 07:30 UTC · Kontroll-Chat (Branch cline/auftrag-history-dubletten)
 **Nutzerauftrag: „echtes Desktop-Interface ueber Web auf dem Odroid" — an neuen Chat delegiert.**
 Recherche-Ergebnis (Memory): Auf dem **Odroid N2** (Armbian bookworm) laeuft bereits ein
