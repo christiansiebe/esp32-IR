@@ -35,9 +35,12 @@
   },
   "fa4de3cbc9f34a3f958f95aac45725e9": {
    "name": "ODROID noVNC-extern",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "branch": "feat/novnc-external-tunnel",
-   "note": "externer Zugriff ueber Tunnel 12000: README + Bridge-Skript + Test"
+   "pr": [
+    19
+   ],
+   "note": "fertig: README + start_novnc_bridge.sh + novnc_bridge.py + Test (62 Checks) -> PR #19 gegen cline/power-history-diag, clean"
   },
   "6c9d48a675af44c799ec283e6471a595": {
    "name": "ODROID OC-Overlay",
