@@ -26,6 +26,27 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 15:20 UTC · Parent-Chat 8c254825 (Branch feat/dfs-clock-visibility, Commit 3f94fc6)
+**Übergabe: dieser Parent/Koordinator-Chat wird durch einen frischen Chat ersetzt.**
+
+Der Chat ist zu lang geworden. Die Übergabe steht vollständig in
+**`docs/CHAT-HANDOFF-2026-10-18.md`** — bitte zuerst lesen. Kurzfassung:
+
+- **Rolle:** Parent/Koordinator. Fleet-Regeln laden (`AGENTS.md` „Fleet rule",
+  `fleet/README.md`, `fleet/CHAT-INSTRUCTION.md`), über Sub-Agenten arbeiten,
+  `fleet/agents.json` pflegen, `docs/CHAT-THREAD.md` als Kanal nutzen.
+- **Registry umtragen:** neuen Parent eintragen (`open_tasks > 0`), diesen Chat
+  `8c254825…` auf `open_tasks: 0`.
+- **Fleet-Supervisor** `eb73ddf3…` ist ACTIVE, Cron `*/10`, kein LLM. Code läuft
+  NICHT aus dem Repo → nach main.py-Änderung
+  `python3 fleet/deploy_automation.py fleet-supervisor --id eb73ddf3-…`.
+  Schlaf-Test = `sandbox_status==RUNNING AND execution_status==running` (Sub-Agent
+  teilt Parent-Sandbox). error-Worker via interrupt + /run auf dem Live-Agent-Server.
+- **Retention:** Idle → PAUSE → DELETION (`MISSING`, read-only, kein Resume).
+  Jeder langlebige Chat MUSS in `fleet/agents.json` stehen.
+- **Offen:** 16 PRs (u. a. #36 LAN/AP/Kamera, #35 Watchdog-Lücke, #33 SML CRC,
+  #32 MQTT HA, #27 Recovery-Button, #26 last-known-clock).
+
 ## 2026-10-18 15:10 UTC · Odroid-Chat f85f7c47 (Branch feat/dfs-clock-visibility, Commit 8a166e7)
 **Odroid-Familie uebernommen; drei Sub-Agent-PRs gelandet; Watchdog am Board verifiziert; TODOs delegiert.**
 
