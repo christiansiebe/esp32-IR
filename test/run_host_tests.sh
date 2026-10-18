@@ -266,6 +266,12 @@ python3 "$here/check_dashboard_js.py"
 # must reject placeholders, bad band/channel pairs and an AP subnet overlapping
 # the home network before anything reaches the board.
 python3 "$repo/remote-shell/ha/test_odroid_ap_config.py"
+# Odroid AP deploy/revert/dead-man (remote-shell/ha/deploy_ap.sh + revert_ap.sh
+# + odroid_ap_deadman.sh): runs the whole roll-out/roll-back flow against a
+# scratch AP_ROOT tree (no board, no root, system commands only recorded). Checks
+# dry-run no-op, placeholder rejection, idempotent apply, auto-revert without
+# confirm, and that revert restores the initial state.
+python3 "$repo/remote-shell/ha/test_ap_deploy.py"
 # External watchdog (remote-shell/ha): the off-board observer's decision logic
 # and the actuator adapter are pure functions -> host-tested without mocks,
 # network or board. The real power cut needs hardware and is not exercised.
