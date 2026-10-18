@@ -194,6 +194,19 @@ def main():
         r, t = gen(['--big-mv', '700', '--big-table', '24000=700'], o16)
         check(r.returncode != 0, '--mv und --table zusammen abgelehnt')
 
+        # Regression: gen_oc_dts.py ruft lf.render() auf. Die Kurven-Erweiterung
+        # darf die Signatur nicht entfernen, sonst bricht der OC-Pfad
+        # (gen_oc_dts.py --with-lowfreq) beim Import/Aufruf ab.
+        oc = os.path.join(d, 'oc.dts')
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'gen_oc_dts.py'),
+                            '--rate-mhz', '2472', '--with-lowfreq',
+                            '--big-mv', '700', '--out', oc],
+                           capture_output=True, text=True)
+        check(r.returncode == 0, 'gen_oc_dts --with-lowfreq laeuft (render() bleibt)')
+        ocv = volts(open(oc).read(), None) if os.path.exists(oc) else []
+        check(len(ocv) == 2 and '2472000000' in open(oc).read(),
+              'OC-Overlay: Tief-Takte + 2472-MHz-Punkt')
+
     print('%d Checks, %d Fehler' % (CHECKS, FAILURES))
     return 1 if FAILURES else 0
 

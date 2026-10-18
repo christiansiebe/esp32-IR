@@ -302,3 +302,8 @@ ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_parser_golden"
 # corrupted, truncated, adversarial and boundary inputs must never crash or be
 # accepted as consistent records.
 "$here/stability/run_stability.sh"
+
+# Odroid CPU-overlay DTS generators (pure Python, no board): the lowfreq
+# voltage curve and the overclock OPP overlay.
+python3 "$repo/remote-shell/ha/test_gen_lowfreq_dts.py"
+python3 "$repo/remote-shell/ha/test_gen_oc_dts.py"
