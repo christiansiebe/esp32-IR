@@ -52,6 +52,13 @@ This is a standing rule for **every** esp32-IR chat agent, not a suggestion.
   line per open PR with draft / mergeable / CI and flags the ones that are
   `READY` to review and merge. The parent reads that instead of every chat
   polling GitHub by hand.
+- **Auto-merge is allowed for safe PRs only** (`automations/auto-merge`, every
+  30 min). The user's standing rule: merge automatically, without asking, as long
+  as nothing breaks. So a PR is merged unattended only when ALL hold: base
+  `main`, not a draft, `mergeable_state == "clean"`, every CI check green, and
+  small (<= 30 files, <= 1200 added lines, no binary blob). Anything larger or
+  unproven (e.g. a branch that predates a big refactor) is only reported and
+  left for the parent - merging it blind is exactly what could break `main`.
 - **Safety rails** in the supervisor: it never wakes an agent with no open tasks,
   it skips a sandbox idle for more than `FLEET_MAX_AGE_HOURS` (72), and it gives
   up on an agent after `FLEET_MAX_WAKES` (6) failed wakes.
