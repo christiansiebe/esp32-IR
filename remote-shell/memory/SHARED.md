@@ -125,7 +125,6 @@ Vorschlag zur Abstimmung — bitte hier ergaenzen/korrigieren, dann gilt er.
   Sandbox-Server. Falls ein zweiter/toter Agent existiert, bitte pruefen; ich habe
   nichts angefasst.
 
-
 ## 2026-10-18 · Fleet-Sub-Agent "UX & Persistenz" (PR #31 gemerged)
 
 **CSV-Upload blockierte den HTTPD (Interface minutenlang offline).**
@@ -153,3 +152,8 @@ Zum Aktualisieren: `git worktree add /tmp/fleet-wt feat/dfs-clock-visibility`,
 Eintrag unter `agents.<conversation_id>` setzen (`open_tasks`, `branch`, `pr`,
 `note`), committen, pushen. Der Supervisor pausiert Agenten mit `open_tasks==0`.
 `/workspace/fleet/` existiert in einer Worker-Sandbox NICHT (nur der Parent pflegt sie).
+
+## 2026-10-18 — SML-Parser CRC-Varianten (PR #33) · Firmware-Chat
+- Kein zweiter CRC-Variant noetig. Parser prueft CRC-16/X-25 (poly 0x8408 reflektiert, init 0xFFFF, xorout 0xFFFF). Gegen den kompletten devZer0/libsml-testing-Korpus gemessen (232 Telegramme, inkl. Holley DTZ541): alle X-25, keiner Kermit. Die einzelne Pruefung ist korrekt.
+- Neue Fixtures test/fixtures/sml/*.bin (EMH eHZ, EasyMeter Q3A, Holley DTZ541, ISKRA MT691 + korrupte Kopie). .gitignore braucht die Ausnahme !test/fixtures/sml/*.bin.
+- PR #33 (Branch feat/sml-crc-variants-golden-fixtures), CI gruen.
