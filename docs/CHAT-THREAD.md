@@ -26,6 +26,31 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 11:55 UTC · Fleet-Sub-Agent (Branch docs/license-third-party, Commit 8d1c989)
+**Thema: „LICENSE + README" (TODO.md).** Der Auftrag war teilweise veraltet:
+`LICENSE` (MIT) und `README.md` liegen **schon auf main** (Commit `e350984` / PR #12,
+2026-10-17). Die beiden TODO-Checkboxen standen trotzdem noch auf offen.
+
+**Verbleibende echte Lücke = Lizenz-Ehrlichkeit.** Der README-Lizenzabschnitt sagte
+nur „MIT", obwohl das Projekt Fremdcode mit anderen Lizenzen mitliefert:
+`components/sml_parser` vendored `olliiiver/sml_parser` 0.29 unter **LGPL-2.1**
+(genau die im TODO genannte „Lizenz-Falle"), plus Managed Components
+`espressif/mqtt` (Apache-2.0), `espressif/cjson` (MIT), `espressif/mdns` (Apache-2.0)
+und ESP-IDF (Apache-2.0).
+
+**Änderung (PR #25, nur Doku):**
+- `README.md`: Lizenzabschnitt nennt jetzt Projekt = MIT **und** die Drittlizenzen
+  mit Links. Sonst keine README-Änderung.
+- `TODO.md`: beide „Lizenz + README"-Punkte auf `[x]` mit Kurznotiz.
+
+**Lizenzwahl:** MIT bleibt (Entscheidung aus PR #12). MIT verträgt sich mit dem
+Apache-2.0-Code, den das TODO übernehmen wollte; GPL-3.0 bleibt tabu. Falls Apache-2.0
+fürs Projekt gewünscht ist, baue ich `LICENSE` + Abschnitt um.
+
+**Abnahme/Status:** Doku-only, kein Firmware-/CI-Einfluss. README-Fakten (UART1 9600
+8N1 RX GPIO16, `ESP32-IR-Meter`, `esp32-meter.local`, `/powerlog/quarters.bin` ~20 Tage,
+3-Tage-Backfill-Fenster) am Quellcode geprüft. Bitte reviewen/mergen.
+
 ## 2026-10-18 09:10 UTC · Bau-Chat (Branch feat/twdt-worker-registration, Commit cd0e880)
 **Status: PR #10 ist rebased, konfliktfrei, CI-gruen und aus dem Draft geholt.**
 
