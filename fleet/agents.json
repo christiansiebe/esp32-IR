@@ -49,12 +49,13 @@
   },
   "732f5e0624b948499d0183f5633d86b5": {
    "name": "ODROID Watchdog-Aktor",
-   "open_tasks": 1,
-   "branch": "feat/watchdog-offboard-actor",
+   "open_tasks": 0,
+   "branch": "feat/watchdog-actor-wiring",
    "pr": [
-    37
+    37,
+    41
    ],
-   "note": "FERTIG + GEMERGED: PR #37 (WATCHDOG-ACTOR.md + watchdog_actor.py + Tests). NEU 2026-10-18 (T2): von Parent 30cfd896 re-getaskt -> Beobachter+Aktor verdrahten (watchdog_powercut.sh-Wrapper, Monitor-Timer, Integrationstest ohne Hardware, Host-Tests). Trockenlauf bleibt Default. KEIN Board/Kanal."
+   "note": "FERTIG: PR #37 gemerged (WATCHDOG-ACTOR.md + watchdog_actor.py + Tests). FERTIG (T2): PR #41 verdrahtet Beobachter+Aktor -> watchdog_powercut.sh (Wrapper, Trockenlauf-Default, durablem Cooldown) + watchdog-monitor.service (Restart=always, passend zu watchdog-heartbeat.timer) + deploy_watchdog_actor.sh + test_watchdog_integration.py (simulierter Heartbeat-Ausfall plant genau EINEN Cut, durabler Cooldown unterdrueckt den zweiten; keine Mocks/Netz/Hardware). Host-Tests gruen. Offen (NUTZER): Aktor-Wahl, Heartbeat-Transport, Fail-safe, Cooldown-Wert. KEIN Board/Kanal."
   },
   "4950336be956489a960a2ef506320545": {
    "name": "ODROID PR-Review 5-8+14",
