@@ -2,6 +2,10 @@
 
 Basis-Branch: `cline/power-history-diag`
 Basis-Stand bei dieser Pruefung: `6ba6af3` (HEAD, nach den Merges #18, #19, #20)
+Nachpruefung: `bcb9938` — die drei Commits dazwischen (`57516a3`, `c6598fb`,
+`bcb9938`) aendern **nur** `remote-shell/memory/SHARED.md`. Alle Befunde,
+Zeilennummern und der #6-Merge-Konflikt wurden gegen `bcb9938` erneut
+verifiziert und sind unveraendert.
 Erstellt: 2026-10-18, reine Host-/Repo-Arbeit.
 
 > **Geltungsbereich.** Es wurde **kein Board angefasst** und **kein
