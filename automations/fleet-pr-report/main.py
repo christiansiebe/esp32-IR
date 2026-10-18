@@ -18,20 +18,15 @@ REPO = os.environ.get("FLEET_REPO", "christiansiebe/esp32-IR")
 API = "https://api.github.com"
 
 
-def token():
-    return (os.environ.get("GITHUB_WRITE_TOKEN") or os.environ.get("GITHUB_TOKEN")
-            or os.environ.get("GH_TOKEN") or "")
-
-
 def gh(path):
+    # The repo is public, so read unauthenticated: no token to expire or be
+    # wrong in the automation sandbox. 60 requests/hour is plenty (one run uses
+    # about 14 every 6 hours).
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "esp32-ir-fleet-pr-report",
     }
-    tok = token()
-    if tok:  # optional: the repo is public, so unauthenticated reads also work
-        headers["Authorization"] = f"Bearer {tok}"
     req = urllib.request.Request(API + path, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode())

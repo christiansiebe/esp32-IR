@@ -22,11 +22,11 @@
   },
   "1b043863d80d41a08f7b161036f65649": {
    "name": "MQTT-reboot",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "pr": [
     9
    ],
-   "note": "PR #9 finalisieren + MQTT-Service-Events Reboot-Grund (TODO ~336)"
+   "note": "FERTIG: PR #9 gruen+mergebar, MQTT-Reboot-Event implementiert+getestet; darf schlafen"
   },
   "7a894c13678043e58935dd1509217a75": {
    "name": "parent (XFCE-Desktop/Odroid-Chat)",
