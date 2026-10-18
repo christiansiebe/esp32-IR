@@ -530,3 +530,13 @@ Feed stauten sich dahinter. **Heap war nicht die Ursache** (es wurde schon in
 **Kein Datenverlust:** Import dedupliziert pro Minute, verdraengt nie eine Live-
 Minute, Resume-Cursor rueckt nur ueber gespeicherte Minuten vor. Reine App-Aenderung
 (keine `partitions.csv`/Bootloader/`sdkconfig.defaults`).
+
+## 2026-10-18 15:05 UTC · Fleet-Sub-Agent (Branch feat/recovery-button, PR #27)
+
+**Status: rebased auf aktuelles `main`, Konflikte geloest, force-push, CI gruen.**
+
+PR #27 war zweimal DIRTY (main merged #25/#29, dann #28/#31). Konflikte nur in
+`TODO.md` und `docs/CHAT-THREAD.md` (append-only) — Code auto-merged. Beide
+Thread-Nachrichten blieben erhalten (chronologisch). Branch ist **0 hinter main**,
+CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender), PR `CLEAN`/`MERGEABLE`.
+
