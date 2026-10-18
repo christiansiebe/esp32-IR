@@ -2,27 +2,27 @@
   "_comment": "Odroid Entwicklung (neu), conversation 30cfd896aac440a4a09ba70ec6199f08. Ein Eintrag pro Aufgabe, status open|done. Offene Eintraege = wachbleiben. Der Parent spiegelt die Zahl der offenen Eintraege nach fleet/agents.json (open_tasks).",
   "conversation_id": "30cfd896aac440a4a09ba70ec6199f08",
   "role": "parent/coordinator",
-  "updated": "2026-10-18T16:55:00Z",
+  "updated": "2026-10-18T17:10:00Z",
   "tasks": [
     {
       "id": "T1",
       "title": "Odroid-Netz: AP-Uebernahme + Kamera ueber LAN",
       "status": "open",
       "branch": "feat/odroid-lan-ap-camera",
-      "note": "P1 (end0-Uplink) BESTANDEN 2026-10-18 16:5x UTC: end0 UP/carrier=1, 192.168.178.4/24, Default-Route ueber end0, Gateway+Internet+DNS erreichbar; remote-shell egressiert jetzt auch ueber end0 -> Lockout-Gefahr entschaerft. P2 (WLAN->AP) + Kamera GESPERRT bis Nutzer-Entscheide: (a) alten AP ersetzen oder ergaenzen? (b) AP-SSID/Kanal/Passwort. (c) IP-Kamera vorhanden? (USB-Kamera nicht angeschlossen, kein Kameragerät im lsusb). Sub-Agent erst nach Quota-Reset spawntbar."
+      "note": "P1 (end0-Uplink) BESTANDEN 2026-10-18 16:5x UTC: end0 UP/carrier=1, 192.168.178.4/24, Default-Route ueber end0, Gateway+Internet+DNS erreichbar; remote-shell egressiert jetzt auch ueber end0 -> Lockout-Gefahr entschaerft. P2 (WLAN->AP) + Kamera GESPERRT bis Nutzer-Entscheide: (a) alten AP ersetzen oder ergaenzen? (b) AP-SSID/Kanal/Passwort. (c) IP-Kamera vorhanden? (USB-Kamera nicht angeschlossen, kein Kameragerät im lsusb). Sub-Agent erst nach Quota-Reset spawntbar. DELEGIERT 2026-10-18 an bestehenden Sub-Agenten 521252f5 (re-tasked, kein Neustart): host-seitiges deploy_ap.sh/revert_ap.sh/Dead-Man-Switch + Host-Tests."
     },
     {
       "id": "T2",
       "title": "Watchdog: externer Aktor (Design)",
       "status": "open",
       "branch": "feat/odroid-watchdog-actor",
-      "note": "Design GELIEFERT (remote-shell/ha/WATCHDOG-ACTOR.md + watchdog_actor.py + Tests, PR #37 gemerged): 3 Anschluss-Optionen, Cooldown/Quorum, Adapter, Host-Tests gruen. OFFEN sind nur Nutzer-Entscheide (WATCHDOG-ACTOR.md Abschnitt 9): Aktor-Wahl (Steckdose? HTTP/MQTT?), Heartbeat-Transport, Fail-safe-Verdrahtung, Cooldowns. Ein Sub-Agent kann erst nach Quota-Reset (2026-10-19T00:00:00Z) starten."
+      "note": "Design GELIEFERT (remote-shell/ha/WATCHDOG-ACTOR.md + watchdog_actor.py + Tests, PR #37 gemerged): 3 Anschluss-Optionen, Cooldown/Quorum, Adapter, Host-Tests gruen. OFFEN sind nur Nutzer-Entscheide (WATCHDOG-ACTOR.md Abschnitt 9): Aktor-Wahl (Steckdose? HTTP/MQTT?), Heartbeat-Transport, Fail-safe-Verdrahtung, Cooldowns. Ein Sub-Agent kann erst nach Quota-Reset (2026-10-19T00:00:00Z) starten. DELEGIERT 2026-10-18 an bestehenden Sub-Agenten 732f5e06 (re-tasked): Beobachter+Aktor verdrahten + Integrationstest ohne Hardware."
     },
     {
       "id": "T3",
       "title": "PR-Stack #5/#6/#7/#8/#14 aufraeumen",
       "status": "open",
-      "note": "#8 bereits geschlossen. Sub-Agent-Spawn blockiert durch daily_conversation_limit (Reset 2026-10-19T00:00:00Z)."
+      "note": "#8 bereits geschlossen. Sub-Agent-Spawn blockiert durch daily_conversation_limit (Reset 2026-10-19T00:00:00Z). DELEGIERT 2026-10-18 an bestehenden Sub-Agenten 4950336b (re-tasked, hat #5-#8/#14 selbst reviewt): Review-Empfehlungen umsetzen."
     },
     {
       "id": "T4",

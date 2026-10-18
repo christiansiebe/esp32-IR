@@ -40,27 +40,27 @@
   },
   "521252f5a71b42c28165ad7e74ed13ec": {
    "name": "ODROID LAN/AP + Kamera",
-   "open_tasks": 0,
+   "open_tasks": 1,
    "branch": "docs/odroid-lan-ap-kamera",
    "pr": [
     36
    ],
-   "note": "FERTIG + GEMERGED: PR #36 squash-gemerged nach cline/power-history-diag (51f87cd). ODROID-LAN-AP-KAMERA.md + odroid_ap_config.py + 52 Host-Checks."
+   "note": "FERTIG + GEMERGED: PR #36 (ODROID-LAN-AP-KAMERA.md + odroid_ap_config.py, 52 Host-Checks). NEU 2026-10-18 (T1): von Parent 30cfd896 re-getaskt -> host-seitiges Ausroll-/Ruecknahme-Werkzeug bauen (deploy_ap.sh, revert_ap.sh, Dead-Man-Switch, Host-Tests), analog deploy_oc_safe.sh. P1 (end0-Uplink) am Board bestaetigt; P2 bleibt bis Nutzer-Entscheid gesperrt. KEIN Board/Kanal."
   },
   "732f5e0624b948499d0183f5633d86b5": {
    "name": "ODROID Watchdog-Aktor",
-   "open_tasks": 0,
+   "open_tasks": 1,
    "branch": "feat/watchdog-offboard-actor",
    "pr": [
     37
    ],
-   "note": "FERTIG + GEMERGED: PR #37 squash-gemerged nach cline/power-history-diag (cc47b20). WATCHDOG-ACTOR.md + watchdog_actor.py + Tests. Branch musste auf diag rebased werden (Konflikt in run_host_tests.sh)."
+   "note": "FERTIG + GEMERGED: PR #37 (WATCHDOG-ACTOR.md + watchdog_actor.py + Tests). NEU 2026-10-18 (T2): von Parent 30cfd896 re-getaskt -> Beobachter+Aktor verdrahten (watchdog_powercut.sh-Wrapper, Monitor-Timer, Integrationstest ohne Hardware, Host-Tests). Trockenlauf bleibt Default. KEIN Board/Kanal."
   },
   "4950336be956489a960a2ef506320545": {
    "name": "ODROID PR-Review 5-8+14",
-   "open_tasks": 0,
+   "open_tasks": 1,
    "branch": "docs/odroid-pr-review-5-8",
-   "note": "FERTIG + GEMERGED: PR #38 (PR-REVIEW-ODROID.md, Review #5/#6/#7/#8/#14) squash-gemerged (f1cd7c7). Empfehlungen: #8 CLOSE (erledigt: PR #8 geschlossen als ueberholt), #5/#6/#7/#14 UPDATE -> Sub-Agent fix/odroid-pr-stack (Launcher remote-shell/ha/start_odroid_stack_cleanup.py), blockiert bis 2026-10-19 00:00 UTC (Tages-Limit 20 Konversationen erreicht).",
+   "note": "FERTIG + GEMERGED: PR #38 (PR-REVIEW-ODROID.md). NEU 2026-10-18 (T3): von Parent 30cfd896 re-getaskt -> die Review-Empfehlungen UMSETZEN (#5/#6/#7/#14 UPDATE, #8 schon geschlossen), je PR eigener Branch + PR gegen cline/power-history-diag. #6 blockierend (Konflikt gen_lowfreq_dts.py, darf OC-Pfad nicht brechen). Re-use statt Neustart (Tages-Limit 20 erreicht).",
    "pr": [
     38
    ]
