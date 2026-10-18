@@ -3,7 +3,54 @@
 Status snapshot. Board work happens over the shared sandbox command channel
 (one agent at a time; board work stays with the parent).
 
-## What works today (verified on the board, 2026-10-18)
+## AP + STA CONCURRENT WORKS (verified after reboot, 2026-10-18)
+
+**The goal is met.** The vendor `88x2bu` driver runs the WLAN station (uplink)
+and the `Odroid` access point **at the same time**, reboot-proof:
+
+* STA VIF `wlxdc627949ba79` -> "Wohnzimmer 5 Ghz", `192.168.178.71`, ch 36.
+* AP  VIF `wlxde627949ba79` -> SSID `Odroid`, `10.42.0.1/24`, ch 36, AP-ENABLED.
+* dnsmasq serves DHCP `10.42.0.10-200` on the AP VIF only (port 53 off).
+
+### What made it work (three changes, in order)
+
+1. **Build with `CONFIG_CONCURRENT_MODE`.** The stock Makefile only sets it for
+   Android/NV_TK1 platforms, so `CONFIG_IFACE_NUMBER` was 1 and a second VIF
+   could not be created (`RTW: WARN adapter pool empty!`, `-ENODEV`). Fix: add
+   `EXTRA_CFLAGS += -DCONFIG_CONCURRENT_MODE` to the **feature block** near the
+   top of the Makefile (line ~55), *not* the platform blocks further down.
+2. **Disable Wi-Fi P2P in NetworkManager** (`/etc/NetworkManager/conf.d/99-no-p2p.conf`:
+   `[device]` / `wifi.p2p=0`). Without it NM asks the driver for a third
+   (P2P) interface, the pool is empty again, and the STA gets torn down every
+   few seconds (`device-managed ... args=false` in the NM journal).
+3. **Keep the AP VIF out of NetworkManager** and let hostapd own it; the STA
+   VIF stays with NM (`autoconnect=yes`, bound via `connection.interface-name`).
+   AP channel must equal the STA channel (concurrent mode, MCC off).
+
+### Reboot-proof layout
+
+* Module installed at `/lib/modules/$(uname -r)/extra/88x2bu.ko`, loaded via
+  `/etc/modules-load.d/88x2bu.conf`.
+* `/etc/modprobe.d/88x2bu.conf`: `blacklist rtw88_8822bu` + power options
+  (`rtw_power_mgnt=2 rtw_ips_mode=0 rtw_smart_ps=2 rtw_enusbss=0`).
+* `/usr/local/sbin/odroid-apsta.sh` - picks STA/AP VIFs, matches the AP channel
+  to the STA, writes hostapd + dnsmasq conf, runs hostapd in the foreground.
+* `odroid-apsta.service` (enabled, Restart=always) + `odroid-apsta-dnsmasq.service`.
+* **Safety:** the script never touches the STA VIF, so the LAN (`end0`) and the
+  WLAN station (`192.168.178.71`) stay reachable regardless of AP state.
+
+### Gotcha that cost an outage
+
+`odroid-ap.service` (the old *standalone* AP service) was left **enabled** from
+the in-kernel phase. It called `/usr/bin/iw` (the binary is at `/usr/sbin/iw`),
+failed, and restart-looped (restart counter 261). Each restart ran
+`nmcli dev set <sta> managed no`, tearing the STA down every 5 s and dropping
+`192.168.178.71`. **Disable the old service** when switching to the vendor
+driver: `systemctl disable --now odroid-ap.service`.
+
+## Earlier phase: standalone AP (in-kernel rtw88, no concurrency)
+
+## What worked then (verified on the board, 2026-10-18)
 
 * **Standalone AP `Odroid` is up and visible** on the phone.
   - in-kernel `rtw88_8822bu` driver, 5 GHz channel 36 (`hw_mode=a`).
