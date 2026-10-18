@@ -26,6 +26,40 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 09:29 UTC · Bau-Chat (Branch feat/mqtt-reboot-event, Commit 67568ee)
+**Status: TODO „MQTT-Service-Events (Reboot-Grund)" fertig — PR #9 ist final (ready for review).**
+
+- **Umsetzung** (aus einem Parallel-Chat übernommen, `fe6e23d` + `67568ee`): Receiver
+  publiziert beim Connect ein **retained** Event auf `<prefix>/event/reboot`
+  (`{"event":"reboot","reason":<code>,"reason_name":"<name>","version":"<fw>",
+  "deliberate":<bool>}`, plus `"journal":{...}` wenn ein Crash-Journal vorliegt).
+  Topic aus `main/mqtt_topics.c`; Payload-Bauer `main/mqtt_events.{c,h}` (rein, host-getestet
+  `test/test_mqtt_events.c`, 33 Checks). Reset-Grund→Text **single-sourced** in
+  `crash_journal_reset_reason_name()`. Nur Empfänger (`CMakeLists.txt`).
+- **PR #9**: aus dem Draft geholt (`gh pr ready`), Beschreibung vervollständigt,
+  **MERGEABLE/CLEAN**, 6/6 Checks grün (Host tests, Build receiver, Build sender × push+PR).
+  https://github.com/christiansiebe/esp32-IR/pull/9
+- **Verifiziert (dieser Chat):** `./test/run_host_tests.sh` **EXIT=0** (u. a. `mqtt events:
+  33 checks, 0 failures`, `mqtt topics: 31 checks, 0 failures`); Receiver-/Sender-Build grün;
+  Receiver-Image enthält `event/reboot`, Sender-Image nicht (Rollen-Isolation).
+- **Unabhängiger Review-Sub-Agent** (eigene Conversation, frischer Kontext): Urteil **PASS**
+  für alle 6 Punkte (Diff, Mapping, Topic/Rollen-Gate, MQTT-aus-Pfad, Host-Test, Korrektheit
+  von Puffer/Escaping/Retain/Republish). Buffer-Worst-Case 309 B in `payload[512]`; Version
+  escaped; retain=1; Fakten einmalig in `mqtt_bridge_start()` gesnapshottet → Reconnect
+  publiziert dasselbe Boot-Event.
+- **Offener, nicht-blockierender Befund (MEDIUM):** Der `"journal"`-Block ist auf einem
+  **Empfänger allein zur Laufzeit unerreichbar** — das Crash-Journal wird ausschließlich vom
+  **Sender** geschrieben (`crash_journal_init()` nur in `run_sender()`, `main.c:7457`), der
+  Empfänger liest es nur über ESP-NOW für die Web-Seite. Damit greift „journal summary **if
+  available**" faktisch nur im Host-Test (fabrizierter Record), nicht am Gerät. Bewusste,
+  in `AGENTS.md` dokumentierte Grenze; **kein** Blocker für diesen Auftrag. Falls gewünscht,
+  könnte ein Folge-Task den `crash`-Abschnitt beim Sender abholen und persistieren.
+- **Hinweis (LOW, nicht von uns):** Eine zweite, reichere Reset-Grund-Abbildung existiert in
+  `main.c:4721` (`reset_reason_name()`, Restart-Sim) — **vorhanden auf der Basis**, wird vom
+  MQTT-Pfad nicht genutzt, daher hier unkritisch.
+
+**TODO.md** Zeile ~190 steht auf `[x]`; **TASKS.json** auf `done`; `agents.json` aktualisiert.
+
 ## 2026-10-15 07:30 UTC · Kontroll-Chat (Branch cline/auftrag-history-dubletten)
 **Nutzerauftrag: „echtes Desktop-Interface ueber Web auf dem Odroid" — an neuen Chat delegiert.**
 Recherche-Ergebnis (Memory): Auf dem **Odroid N2** (Armbian bookworm) laeuft bereits ein
