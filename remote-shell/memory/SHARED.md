@@ -535,3 +535,60 @@ per-Kern-MHz und per-Cluster-Spannung in der tmux-Statuszeile.
 - **PR:** #18 (`docs/watchdog-gap-hardening` -> `cline/power-history-diag`).
 
 
+
+## Odroid-Netz: AP uebernehmen + Kamera ueber LAN (2026-10-18, Chat 7a894c13)
+
+**Neuer Nutzerauftrag:** Das LAN-Kabel steckt aktuell an einem **Access Point**;
+der Odroid soll diese Aufgabe uebernehmen, spaeter eine **Kamera ueber LAN**.
+Recon am Board (ueber den Kommando-Kanal) — Ergebnis in
+`remote-shell/ha/ODROID-NETZ-RECON.md`:
+
+- **`end0` (Ethernet, MAC `00:1e:06:42:b1:25`) ist DOWN/NO-CARRIER** — das Kabel
+  steckt am AP, nicht am Odroid. Der Odroid haengt per **einem** USB-WLAN
+  (`rtw88_8822bu`, TP-Link 802.11ac) im `managed`-Modus am Heimnetz
+  ("Wohnzimmer 5 Ghz", Kanal 36), IP `192.168.178.71`.
+- **Nur EIN Funkmodul, und `iw list` meldet KEINE `valid interface combinations`**
+  -> AP+STA gleichzeitig ist nicht garantiert. Das WLAN jetzt auf AP umstellen
+  wuerde die STA-Verbindung (und damit den Kommando-Kanal selbst) kappen =
+  **Lockout**. **Reihenfolge: erst `end0` als Uplink verifizieren, DANN WLAN auf
+  AP, DANN Kamera.**
+- `hostapd`/`dnsmasq` nicht installiert, aber aus bookworm-main installierbar.
+  `ip_forward=1`. `/dev/video0` ist NUR der meson-HW-Video-Decoder (keine Kamera);
+  `ffmpeg` ist da (fuer RTSP). Ziel: IP-Kamera (RTSP/ONVIF) in Home Assistant.
+- **Offen (Nutzer):** welcher AP, ersetzen oder ergaenzen; IP- vs USB-Kamera;
+  reiner AP oder Router (NAT)?
+
+## Fleet-Einschlaf-Bug: Ursachen + Fix (2026-10-18)
+
+Der **aktive** Supervisor (`automations/fleet-supervisor`) liess Agenten mit
+offenen Aufgaben schlafen. Drei Ursachen (Commit `4b6a470`, Doku
+`fleet/README.md` "Wake pitfalls", Host-Test `fleet/test_supervisor.py`):
+
+1. Ein Sub-Agent mit `parent_conversation_id` laeuft in der **Parent-Sandbox**:
+   `sandbox_status` bleibt `RUNNING`, nur `execution_status` faellt auf
+   `paused`/`finished`. Der Supervisor keyte nur auf `sandbox_status`.
+2. Ein Turn kann mit `execution_status=error` (oder ohne) enden -> alter
+   asleep-Test kannte nur `paused`/`finished`.
+3. Die Pause-Branch pausierte die **geteilte** Parent-Sandbox mit (ich wurde so
+   selbst dauernd eingeschlaefert).
+
+**Fix:** pure Funktion `decide()`; `awake := sandbox_status==RUNNING AND
+execution_status==running`; alles andere mit `open_tasks>0` wird geweckt
+(resume mit 409/STARTING-Polling + Weck-Nachricht). Pause nur, wenn **kein**
+anderer Tenant der Sandbox offene Arbeit hat. `*/10`-Cron + **KV-Run-Lock**
+(Lauf dauert ~13 min).
+
+**Wichtig fuer alle:** Die Automation laeuft aus einem **hochgeladenen Tarball**,
+nicht aus dem Repo. Nach `main.py`-Aenderung:
+`python3 fleet/deploy_automation.py fleet-supervisor --id eb73ddf3-4d45-410c-b6a2-602a91dd4a92 --schedule '*/10 * * * *'`.
+
+## Kommando-Kanal nach Sandbox-Reset (2026-10-18)
+
+Der Server laeuft nach einem Reset nicht mehr. Start:
+`python3 /workspace/remote-shell/supervise.py` (`--status`/`--stop`). Der Token in
+`/workspace/remote-shell/token` ist **persistent** und **derselbe**, den der
+Odroid traegt -> ein Serverstart allein stellt den Kanal wieder her (sofern die
+Sandbox-ID in `ExecStart` zur aktuellen `$RUNTIME_ID` passt). Der Odroid-Agent
+verbindet sich dann von selbst (~1 min, `Restart=always`).
+**`cmd_send.sh` liegt im Worktree** `/workspace/wt-fleet/remote-shell/`, nicht in
+der Server-Kopie `/workspace/remote-shell/`.
