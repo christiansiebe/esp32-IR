@@ -76,7 +76,13 @@ web_guard_action_t web_guard_tick(web_guard_t *guard, uint64_t now_ms)
     }
 
     uint64_t last = web_guard_last_activity_ms(guard);
-    if (now_ms - last <= guard->policy.threshold_ms) {
+    /* Saturating: the probe's /healthz handler stamps last_request_ms a few ms
+     * after the tick captured now_ms, so `last` can be slightly greater than
+     * `now_ms`. `now_ms - last` on uint64_t then wraps to a near-2^64 value that
+     * reads as an endless silence (> threshold) and made the guard restart the
+     * server roughly every restart_timeout while idle. Clamp instead. */
+    uint64_t silence = now_ms >= last ? now_ms - last : 0;
+    if (silence <= guard->policy.threshold_ms) {
         guard->dead_since_ms = 0;
         guard->dead = false;
         return WEB_GUARD_OK;
@@ -101,7 +107,7 @@ web_guard_action_t web_guard_tick(web_guard_t *guard, uint64_t now_ms)
         now_ms - guard->last_attempt_ms >= guard->policy.restart_timeout_ms) {
         return WEB_GUARD_REBOOT;
     }
-    if (now_ms - last >= guard->policy.threshold_ms &&
+    if (silence >= guard->policy.threshold_ms &&
         now_ms - guard->last_attempt_ms >= guard->policy.restart_timeout_ms) {
         return WEB_GUARD_RESTART;
     }

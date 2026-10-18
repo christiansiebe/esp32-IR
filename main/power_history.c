@@ -132,8 +132,15 @@ static bool record_is_valid(const power_history_record_t *record)
 
 static bool header_is_valid(const power_history_header_t *header)
 {
+    /* The header layout (magic..next_slot) has been stable since v1, so an
+     * older header version is still readable: accept any version in the
+     * supported range instead of demanding the exact current one. Demanding
+     * equality made a store written by an older firmware look "empty", so the
+     * whole history was dropped on a version upgrade even though the records
+     * inside migrate cleanly (see power_history_migrate_record). */
     return header->magic == POWER_HISTORY_MAGIC &&
-           header->version == POWER_HISTORY_VERSION &&
+           header->version >= POWER_HISTORY_OLDEST_SUPPORTED_VERSION &&
+           header->version <= POWER_HISTORY_VERSION &&
            header->next_sequence != 0 &&
            header->record_count <= POWER_HISTORY_CAPACITY &&
            header->next_slot < POWER_HISTORY_CAPACITY &&
@@ -833,6 +840,23 @@ esp_err_t power_history_init(void)
         } else {
             g_active_header_copy = valid[1] ? 1 : 0;
             g_history_header = headers[g_active_header_copy];
+        }
+
+        /* An older firmware wrote a lower header version. The layout is
+         * compatible and the records migrate on read, so the history is kept;
+         * stamp the current version once so later boots need no upgrade. */
+        if (g_history_file != NULL &&
+            g_history_header.version != POWER_HISTORY_VERSION) {
+            ESP_LOGI(TAG, "Upgrading persistent history header v%u -> v%u",
+                     (unsigned)g_history_header.version,
+                     (unsigned)POWER_HISTORY_VERSION);
+            g_history_header.version = POWER_HISTORY_VERSION;
+            ++g_history_header.generation;
+            g_history_header.checksum = header_checksum(&g_history_header);
+            uint8_t next_copy = (uint8_t)(1u - g_active_header_copy);
+            if (write_header_copy(next_copy, &g_history_header)) {
+                g_active_header_copy = next_copy;
+            }
         }
     }
 
