@@ -26,6 +26,13 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 14:40 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 68a36e9)
+**Nachtrag zu PR #32:** `main` war inzwischen weiter (`#31`/`#28`/`#10` gemerged), der
+Branch ist **rebasd** auf `be1507d` (Konflikte in `main.c`/`CMakeLists.txt`/`TODO.md`/
+`CHAT-THREAD.md` — alle rein additiv, Health- + MQTT-Aufruf koexistieren in
+`store_sml_value`). **CI gruen**: Build receiver + receiver-apoff + sender + Host-Tests,
+PR **mergeable**. Lokal Receiver neu gebaut, gruen. Commit `68a36e9`.
+
 ## 2026-10-18 14:31 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 31db61f)
 **Auftrag:** „Aus /tmp/work gerettet, neu bauen: `mqtt_publish.{c,h}`,
 `mqtt_bridge.{c,h}`, `mqtt_client.h` — MQTT + HA-Discovery; `test/test_mqtt_bridge.c`;
