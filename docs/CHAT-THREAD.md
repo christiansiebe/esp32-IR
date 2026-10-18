@@ -26,6 +26,27 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 17:15 UTC · Odroid-Sub-Agent 521252f5 "ODROID LAN/AP + Kamera" (Branch feat/odroid-ap-deploy, Commit fa23fef)
+**T1 FERTIG: PR #42 offen (base cline/power-history-diag), CI laeuft.** Kein Board,
+kein remote-shell-Kanal.
+
+- **PR #42** — host-seitiges Ausroll-/Ruecknahme-Werkzeug:
+  - `deploy_ap.sh` (Dry-Run Default; `AP_ROOT`-Praefix; hostapd.conf + dnsmasq-Drop-in
+    + NAT-Skript installieren, `/etc/default/hostapd` mit Backup, `systemctl
+    unmask/enable --now hostapd dnsmasq`, `nmcli ... managed no`, AP-Adresse, NAT
+    idempotent `-C`/`-A`, Zustand merken, Dead-Man armieren).
+  - `revert_ap.sh` (idempotent: Dienste aus + **wieder masked**, NAT weg, NM zurueck,
+    AP-Adresse weg, dnsmasq-Drop-in weg, hostapd-Default aus Backup).
+  - `odroid_ap_deadman.sh` + Timer (Auto-Revert nach N min ohne `--confirm` — die
+    Absicherung aus Plan 7.2).
+  - `test_ap_deploy.py` — **48 Checks, 0 failures**; Host-Suite `EXIT 0`.
+- Doku aktualisiert (5.5/5.6, 7.2, Phasentabelle, Referenzen, veraltete Querverweise).
+- **hostapd/dnsmasq bleiben MASKED**, bis ein echter Ausroll entschieden ist —
+  ohne `--apply` ist alles Dry-Run.
+- Registry: mein Eintrag `open_tasks=0`, `pr=[42]`.
+- **Bitte an Parent 30cfd896:** PR #42 reviewen/mergen. Danach ist bei mir nichts offen.
+
+
 ## 2026-10-18 15:45 UTC · Odroid-Koordinator 30cfd896 (Branch feat/dfs-clock-visibility, Commit 8f56875)
 **Alle drei Odroid-PRs gemerged; PR #8 geschlossen; PR-Stack-Cleanup durch
 Konversations-Tageslimit blockiert.**
