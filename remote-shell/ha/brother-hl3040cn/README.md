@@ -55,6 +55,11 @@ direkt auf Port 631.
 - Auf anderen Rechnern (Windows/macOS/Linux) die Queue per IPP/socket
   hinzufuegen: `ipp://<odroid-ip>:631/printers/HL3040CN`.
 
+Der Drucker selbst ist unter `http://192.168.178.50/` erreichbar. Sein Web-UI
+hat **keinen Login**, solange kein Passwort gesetzt wurde (Brothers Default
+waere `access`). Die Ports `PCL_P1` / `POSTSCRIPT_P1` dort **nicht** benutzen —
+sie sind bei diesem Modell Attrappen (s. o.).
+
 ## Wie die Filterkette laeuft
 
 ```

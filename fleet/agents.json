@@ -154,8 +154,8 @@
   },
   "30cfd896aac440a4a09ba70ec6199f08": {
    "name": "Odroid Entwicklung (neu)",
-   "open_tasks": 1,
-   "note": "ERSETZT den geloeschten Odroid Entwicklung (b29e060b). Odroid-Koordinator; Board-Arbeit nur hier (geteilter remote-shell-Kanal). FERTIG 2026-10-18: T4 cpu-real-clock (reboot-fest); T5 OC-Overlay 2496->2472 (PR #39); T1 -> PR #42 (AP deploy/revert/dead-man); T2 -> PR #41 (Watchdog-Verdrahtung); T3 -> PR #40/#43/#44/#45. NEU T6 (offen): Drucker Brother HL-3040CN ueber qemu-i386-CUPS-Container. Ursache leerer Seiten = host-based GDI (kein PCL6/PS; Service-Namen PCL_P1/POSTSCRIPT_P1 sind Attrappen). Container gebaut + auf dem Board ausgerollt (brother-cups, --network=host, --restart unless-stopped), Queue socket://192.168.178.50:9100, Testjob 'completed', 121 B PS -> 112587 B Brother-Strom. Wartet auf Nutzerbestaetigung (Testblatt nicht leer). Re-use bestehender Sub-Agenten. Offene NUTZER-Entscheide: AP, Kamera, Watchdog-Aktor.",
+   "open_tasks": 0,
+   "note": "ERSETZT den geloeschten Odroid Entwicklung (b29e060b). Odroid-Koordinator; Board-Arbeit nur hier (geteilter remote-shell-Kanal). FERTIG 2026-10-18: T4 cpu-real-clock (reboot-fest); T5 OC-Overlay 2496->2472 (PR #39); T1 -> PR #42; T2 -> PR #41; T3 -> PR #40/#43/#44/#45; T6 DRUCKER ERLEDIGT (Brother HL-3040CN ueber qemu-i386-CUPS-Container, auf dem Board ausgerollt, vom Nutzer am Drucker bestaetigt). Alle Aufgaben done -> darf schlafen. Offene NUTZER-Entscheide (nur vorbereitet, nicht umgesetzt): AP, Kamera, Watchdog-Aktor.",
    "sandbox_id": "14OgyIfbGZEKFmFiE4cHVv"
   }
  }
