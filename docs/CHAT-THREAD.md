@@ -582,6 +582,48 @@ Feed stauten sich dahinter. **Heap war nicht die Ursache** (es wurde schon in
 Minute, Resume-Cursor rueckt nur ueber gespeicherte Minuten vor. Reine App-Aenderung
 (keine `partitions.csv`/Bootloader/`sdkconfig.defaults`).
 
+## 2026-10-18 14:40 UTC · Fleet-Sub-Agent (Branch feat/sml-crc-variants-golden-fixtures, Commit 3b023f4, PR #33)
+
+**Thema: SML-Robustheit — CRC-Varianten geprüft + echte Golden-Fixtures.**
+
+**Auftrag:** "CRC-Varianten prüfen/ergänzen (Lehre aus
+spacemanspiff2007/sml2mqtt) und SML-Golden-Fixtures unter test/fixtures/sml/*.bin
+mit echten Telegrammen anlegen, plus Host-Test."
+
+**Befund (wichtig, gegen die Vermutung im TODO):** sml2mqtt/SmlLib prüft per
+Default `crc=['x25','kermit']`. Gegen den **kompletten** öffentlichen
+`devZer0/libsml-testing`-Korpus gemessen (232 Telegramme: EMH eHZ/ED300L/mME,
+EasyMeter Q3A, **Holley DTZ541**, ISKRA MT175/MT631/MT691, DZG DVS/DWSB, ITRON
+OpenWay, eBZ DD3, DrNeuhaus SMARTY): **alle 232 sind CRC-16/X-25**
+(`init 0xFFFF`, final XOR `0xFFFF`, poly 0x8408 reflektiert), **kein einziges
+Kermit**. Der Holley DTZ541-ZDBA (der vermutete Kermit-Zähler) ist ein
+stinknormales X-25-Telegramm. ⇒ Die einzelne CRC-Prüfung im Parser ist
+**korrekt**; ein blinder zweiter Variant wäre eine Regression gewesen.
+
+**Was gebaut wurde (PR #33, `feat(both)`):**
+- `components/sml_parser/src/sml_crc16.{c,h}`: eine geteilte Tabelle,
+  `sml_crc16_x25()` (nutzt der Parser) + `sml_crc16_kermit()` (init 0x0000, kein
+  XOR) als **verifizierter Baustein** für einen späteren Kermit-Zähler — NICHT
+  blind in den Parser verdrahtet. `sml.cpp`'s `crc16()` ruft jetzt
+  `sml_crc16_update()` (verhaltensidentisch).
+- `test/fixtures/sml/*.bin`: echte Einzel-Telegramme (EMH eHZ, EasyMeter Q3A,
+  Holley DTZ541, ISKRA MT691) + absichtlich korrupte Kopie. `.gitignore`:
+  `!test/fixtures/sml/*.bin`.
+- `test/test_sml_crc16.c` (17 Checks: X-25=0x906E, Kermit=0x2189,
+  Tabellen-Äquivalenz, alle Fixtures X-25, korrupt nicht) und
+  `test/test_sml_golden_bin.cpp` (30 Checks: **Produktions-Adapter** dekodiert
+  die echten Telegramme exakt; korrupte Kopie → `crc_valid=false`, keine Werte).
+  Beide im `run_host_tests.sh` (ASan+UBSan).
+
+**Verifikation:** `./test/run_host_tests.sh` EXIT 0 (ganze Suite grün);
+Negativ-Test rot verifiziert; `tools/build.sh receiver|sender` beide OK
+(`sml_crc16.c`/`sml.cpp` sauber; die zwei `main.c`-Warnungen sind pre-existing).
+
+**Kein Datenverlust:** reine App-Änderung, Parser bleibt X-25, Wire-Format +
+ESP-NOW unverändert. Keine `partitions.csv`/Bootloader/`sdkconfig.defaults`.
+
+**Offen:** CI von PR #33 abwarten (läuft). Kein weiterer Fix nötig.
+
 ## 2026-10-18 15:05 UTC · Fleet-Sub-Agent (Branch feat/recovery-button, PR #27)
 
 **Status: rebased auf aktuelles `main`, Konflikte geloest, force-push, CI gruen.**
