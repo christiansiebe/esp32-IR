@@ -26,6 +26,39 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 15:35 UTC · Odroid-Koordinator 30cfd896 "Odroid Entwicklung (neu)" (Branch feat/dfs-clock-visibility, Commit 8f56875)
+**Neuer Parent uebernimmt die Odroid-Familie; Board wieder erreichbar; 3 Odroid-PRs entschieden.**
+
+**1) Rollenuebernahme.** Der geloeschte "Odroid Entwicklung" (`b29e060b`, Sandbox
+MISSING) ist durch diesen Chat `30cfd896` ersetzt. Registry korrigiert: eigener
+Eintrag `open_tasks: 4` + `sandbox_id`, der alte Parent `8c254825` auf `0`
+(Handoff `docs/CHAT-HANDOFF-2026-10-18.md`). Commit `2a2e319`.
+
+**2) Board-Kanal laeuft wieder.** Ein doppelter Supervisor (`supervise.py`, PID
+2537, konnte Port 12001 nicht binden) wurde entfernt; der Kanal antwortet
+(`KANAL_OK`, `odroidn2`). Board-Recon **read-only** wiederholt — Nachtrag in
+`ODROID-NETZ-RECON.md`:
+- `end0` **weiter DOWN/carrier=0** → P1 (end0-Uplink) nicht begonnen, P2
+  (WLAN→AP) bleibt gesperrt (Lockout).
+- WLAN-STA haengt an der **FRITZ!Box** ("Wohnzimmer 5 Ghz", Kanal 36, −33 dBm);
+  **kein** fremder AP mit eigener SSID sichtbar → offene Frage "ersetzen vs.
+  ergaenzen" bleibt.
+- `hostapd`+`dnsmasq` jetzt **installiert + masked**; USB-WLAN = TP-Link
+  `2357:0138` (rtw88_8822bu); `/dev/video0` weiter nur der Amlogic-Decoder.
+
+**3) Odroid-PRs entschieden (Zielbranch `cline/power-history-diag`):**
+- **#35** (Watchdog-Luecke Parent-Verify) — **squash-gemerged** (`3b267e5`).
+- **#36** (LAN/AP+Kamera-Plan + `odroid_ap_config.py`, 52 Host-Checks) —
+  **squash-gemerged** (`51f87cd`).
+- **#37** (Watchdog-Aktor + `WATCHDOG-ACTOR.md`) — Branch auf diag **rebasen**
+  muessen (Konflikt nur in `test/run_host_tests.sh`, beide Bloecke behalten),
+  Host-Tests lokal gruen (28/50 Checks). **Wartet auf CI** (`feat/watchdog-offboard-actor`).
+
+**4) Host-Suite gruen:** `./test/run_host_tests.sh` → EXIT 0, 34× "0 failures".
+
+**Bitte an den Nutzer (Netz/Kamera):** welcher AP (Modell)? Odroid soll ihn
+**ersetzen** oder nur **ergaenzen**? Kamera **IP (RTSP/ONVIF)** oder **USB**?
+
 ## 2026-10-18 15:25 UTC · Odroid-Sub-Agent 521252f5 "ODROID LAN/AP + Kamera" (Branch docs/odroid-lan-ap-kamera, Commit 6a7d8fd)
 **FERTIG: PR #36 offen, mergeable=clean, CI gruen.** Kein Board-Zugriff, kein
 remote-shell-Kanal (Auftrag).
