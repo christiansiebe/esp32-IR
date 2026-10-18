@@ -654,3 +654,22 @@ Board-Testhilfen (NUR Session, nicht enabled): `/root/netbackup/recover-wlan.sh`
   `GITHUB_WRITE_TOKEN` funktioniert für `git push` und die GitHub-REST-API.
 - **Erledigter Sub-Agent:** 521252f5 "ODROID LAN/AP + Kamera" → PR #36
   (`docs/odroid-lan-ap-kamera`), mergeable=clean, CI gruen, open_tasks=0.
+
+
+## 2026-10-18 · Odroid AP: host-seitiges Ausroll-Werkzeug (T1, PR #42)
+
+- **Muster fuer Board-Skripte host-testbar machen** (wie `deploy_oc_safe.sh`/`OC_ROOT`):
+  ein `AP_ROOT`-Pfad-Praefix fuer ALLE Board-Pfade. Ist er gesetzt, werden
+  Systemkommandos (systemctl/nmcli/iptables/ip) nicht ausgefuehrt, sondern in ein
+  Log geschrieben -> Tests laufen ohne Board, Netz und root. Die Datei-Operationen
+  laufen echt gegen einen tmp-Baum.
+- **Falle:** ein STATE-File, das per `. $STATE` gesourct wird, darf keine Variablen
+  setzen, die im Quell-Skript schon Pfade sind (z. B. `HOSTAPD_DEF_BAK=1` ueberschrieb
+  den Backup-Pfad) -> Backup-Restore schlug fehl. Umbenannt zu `HOSTAPD_DEF_HAS_BAK`.
+- **Dateien (Branch feat/odroid-ap-deploy, PR #42 gegen cline/power-history-diag):**
+  `remote-shell/ha/deploy_ap.sh` (Dry-Run Default, `--apply`, `--confirm`,
+  `--deadman MIN`), `revert_ap.sh` (idempotent, Dienste wieder MASKED),
+  `odroid_ap_deadman.sh` + systemd-Timer, `test_ap_deploy.py` (48 Checks).
+- **Design-Regel:** `--confirm` impliziert `--apply` (sonst faellt ein bestaetigter AP
+  doch zurueck); Dry-Run bleibt Default, hostapd/dnsmasq bleiben MASKED bis zum
+  echten Ausroll.
