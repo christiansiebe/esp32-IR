@@ -59,6 +59,13 @@ This is a standing rule for **every** esp32-IR chat agent, not a suggestion.
   small (<= 30 files, <= 1200 added lines, no binary blob). Anything larger or
   unproven (e.g. a branch that predates a big refactor) is only reported and
   left for the parent - merging it blind is exactly what could break `main`.
+- **Renew `GITHUB_WRITE_TOKEN` before it expires** (`automations/token-reminder`,
+  daily, no LLM). GitHub returns the expiry in the
+  `github-authentication-token-expiration` header; inside the warning window
+  (default 7 days) the run opens one GitHub issue as a visible reminder. The
+  token can create but not edit issues, so the reminder is create-only and
+  deduped by title; close it by hand after renewing. Expiry seen 2026-10-18:
+  **2026-11-11 15:42 UTC**.
 - **Safety rails** in the supervisor: it never wakes an agent with no open tasks,
   it skips a sandbox idle for more than `FLEET_MAX_AGE_HOURS` (72), and it gives
   up on an agent after `FLEET_MAX_WAKES` (6) failed wakes.
