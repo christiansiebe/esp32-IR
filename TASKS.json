@@ -16,7 +16,7 @@
       "title": "Watchdog: externer Aktor (Design)",
       "status": "open",
       "branch": "feat/odroid-watchdog-actor",
-      "note": "60-s-HW-Watchdog feuerte nach 2532-Hang nicht. Sub-Agent erst nach Quota-Reset spawntbar."
+      "note": "Design GELIEFERT (remote-shell/ha/WATCHDOG-ACTOR.md + watchdog_actor.py + Tests, PR #37 gemerged): 3 Anschluss-Optionen, Cooldown/Quorum, Adapter, Host-Tests gruen. OFFEN sind nur Nutzer-Entscheide (WATCHDOG-ACTOR.md Abschnitt 9): Aktor-Wahl (Steckdose? HTTP/MQTT?), Heartbeat-Transport, Fail-safe-Verdrahtung, Cooldowns. Ein Sub-Agent kann erst nach Quota-Reset (2026-10-19T00:00:00Z) starten."
     },
     {
       "id": "T3",
