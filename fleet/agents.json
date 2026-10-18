@@ -65,9 +65,9 @@
   },
   "b6b11eb9dd704eaca389ecbaa5cb7de8": {
    "name": "Backfill-Dubletten",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "branch": "fleet/backfill-dedup",
-   "note": "TODO: doppelte Minuten nach Backfill, unsortierter Bestand, sequence monoton, Batch-Dedup, errors-Zaehlung"
+   "note": "FERTIG: PR #28 (Backfill-Seitenverlust nur einmal zaehlen) rebased + gemerged (2026-10-18)."
   },
   "843d8fde02eb4530a5a185d90db68650": {
    "name": "AMS Health-Monitor",
