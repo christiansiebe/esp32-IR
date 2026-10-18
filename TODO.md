@@ -667,14 +667,35 @@ liefert **keine** doppelten Minuten; (5) vorab unsortierter Ring + Export-Monoto
 **Umgesetzt:** `test_history_backfill_merge` (Punkte 1–4, `test_out_of_order_backfill_keeps_sorted`),
 `test_history_ring_repair` (Punkt 5, unsortierter Bestand + Monotonie).
 
-### 🐛 UX: Interface minutenlang offline nach CSV-Upload (NEU, 2026-10-14)
+### ✅ UX: Interface minutenlang offline nach CSV-Upload (BEHOBEN, 2026-10-18)
 Nach dem Re-Import einer großen CSV (`POST /api/power-history-upload`) ist die Weboberfläche
 des Empfängers **minutenlang nicht erreichbar**. Der Handler rebootet **nicht** (kein
-`esp_restart()`), sondern streamt den Body und reiht die Minuten ein. Vermutete Ursache: die
-große Upload-Transaktion blockiert den HTTPD-Task; zusätzlich belastet die Dashboard-
-Auto-Aktualisierung (`updateHistory` alle 1,5 s) den Server.
-- [ ] Ursache eingrenzen (HTTPD-Task blockiert vs. Heap/SPIFFS-Druck vs. Watchdog).
-- [ ] Upload in den Backfill-Worker verlagern bzw. HTTPD während des Imports nicht blockieren.
+`esp_restart()`), sondern streamt den Body und reiht die Minuten ein.
+- [x] Ursache eingrenzen (HTTPD-Task blockiert vs. Heap/SPIFFS-Druck vs. Watchdog).
+- [x] Upload in den Backfill-Worker verlagern bzw. HTTPD während des Imports nicht blockieren.
+
+**2026-10-18 (Fleet-Sub-Agent, Branch `fix/upload-offload-storage-ready`, PR #31 gemerged
+`be1507d`) — Wurzel behoben:**
+**Ursache = HTTPD blockiert.** `esp_http_server` führt **jeden** URI-Handler auf **einem**
+Thread aus; der alte Handler las den Body **und** importierte inline und hielt dabei den
+HTTP-Task **und** `g_history_mutex` über die SPIFFS-In-Place-Inserts hinweg für Minuten.
+Dashboard-Poll, `/healthz`-Selbst-Probe und Liveness-Feed stauten sich dahinter. **Heap war
+nicht die Ursache** (es wurde schon in 64er-Batches importiert), der **Task-Watchdog** war
+nicht der direkte Auslöser.
+- Body lesen/parsen läuft jetzt in einem **eigenen Task**
+  (`httpd_req_async_handler_begin`), der HTTP-Thread kehrt sofort zurück.
+- Der Task **parst nur**; jede sortierte 64er-Batch geht per **Queue** an den
+  **Backfill-Worker** (der einzige History-Writer) — Mutex + SPIFFS-Insert nie auf einem
+  HTTP-Thread. Der Worker zieht die Queue zuerst leer und **überspringt seine lange
+  Sync-Session**, solange ein Upload läuft (`g_history_upload_active`).
+- Neues reines, host-getestetes Modul `main/history_upload.{c,h}` (`test/test_history_upload.c`,
+  27 Checks).
+- **`storage_ready` präzisiert**: `power_history_status_t.persistent` (nur true, wenn die
+  SPIFFS-Datei wirklich offen ist, nicht der RAM-Fallback). Diag-Counter, Dashboard-JSON,
+  Konsole und Upload-Ergebnis nutzen es.
+- **Sender-Zeitbasis**: Records vor der gültigen Uhr (0 / 1970) werden in `write_records` und
+  `import_sorted` verworfen, der CSV-Parser lehnt pre-2024 ab — eine solche Minute kann nie
+  vor allen gespeicherten einsortiert werden.
 
 **2026-10-14 (Bau-Chat, Branch `cline/auftrag-history-dubletten`) — teilweise behoben:**
 Der `AbortError`/„minutenlang offline" hat zwei Ursachen, beide jetzt entschärft:
