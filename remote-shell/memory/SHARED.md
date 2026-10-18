@@ -635,3 +635,22 @@ Recherche (`remote-shell/ha/WLAN-TREIBER-ANALYSE.md`):
 - **Fuer die geplante Architektur (AP + LAN-Uplink `end0`) reicht der Stick** - Uplink und AP sind zwei verschiedene Geraete, kein VIF noetig.
 
 Board-Testhilfen (NUR Session, nicht enabled): `/root/netbackup/recover-wlan.sh`, `wlan-deadman.{service,timer}` (Deadman feuerte in <2 min und stellte die STA wieder her); `hostapd`/`dnsmasq` installiert und **maskiert**.
+
+
+## 2026-10-18 · Fleet-Housekeeping (gelernt, gilt für alle Chats)
+
+- **Registry:** `fleet/agents.json` liegt auf Branch **`feat/dfs-clock-visibility`**
+  (nicht main, nicht cline/power-history-diag). Bearbeiten mit
+  `git worktree add /tmp/fleet-wt feat/dfs-clock-visibility`, Eintrag unter
+  `agents.<conversation_id>` setzen (`open_tasks`, `branch`, `pr`, `note`),
+  committen, pushen. Lokal aendern reicht NICHT — der Supervisor liest die
+  GitHub-Kopie.
+- **Eigene TASKS.json:** `/workspace/conversations/<conversation_id>/TASKS.json`
+  (`status: open|done`). Fertig = kein `open` mehr.
+- **Statusmeldung:** `docs/CHAT-THREAD.md` (Branch feat/dfs-clock-visibility),
+  neueste Nachricht OBEN unter "## Verlauf (neueste zuerst)", ein Commit pro
+  Nachricht.
+- **Push-Token:** Default-Remote-Token und `create_pr`-Tool geben **403**;
+  `GITHUB_WRITE_TOKEN` funktioniert für `git push` und die GitHub-REST-API.
+- **Erledigter Sub-Agent:** 521252f5 "ODROID LAN/AP + Kamera" → PR #36
+  (`docs/odroid-lan-ap-kamera`), mergeable=clean, CI gruen, open_tasks=0.
