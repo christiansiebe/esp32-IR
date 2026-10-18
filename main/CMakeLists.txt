@@ -1,6 +1,7 @@
 set(main_requires
     app_update
     esp_partition
+    esp_driver_gpio
     esp_driver_uart
     esp_event
     esp_http_client
@@ -24,7 +25,8 @@ set(main_requires
 # not need to be named in REQUIRES (see the IDF v6 migration guide for cJSON).
 set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "runtime_config.c"
-              "boot_policy.c" "boot_confirm.c" "boot_log.c"
+              "boot_policy.c" "boot_confirm.c" "recovery_button.c"
+              "recovery_start.c" "boot_log.c"
               "crash_journal.c" "crash_journal_store.c"
               "mqtt_topics.c" "history_backfill.c" "history_sync.c"
               "history_csv_import.c" "history_upload.c"

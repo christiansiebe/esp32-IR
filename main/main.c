@@ -33,6 +33,7 @@
 #include "nvs.h"
 #include "boot_confirm.h"
 #include "boot_log.h"
+#include "recovery_start.h"
 #include "history_backfill.h"
 #include "history_sync.h"
 #include "history_csv_import.h"
@@ -7958,6 +7959,12 @@ void app_main(void)
         }
     }
 #else
+    /* Manual recovery: holding the BOOT button at startup forces a rollback to
+     * the previous firmware, even when this image was already confirmed. Runs
+     * before the OTA confirmation so it can always rescue a confirmed-but-broken
+     * build, which the automatic policy can no longer roll back. A normal boot
+     * (button not pressed) returns immediately. */
+    (void)recovery_button_check();
     /* Receiver: do not accept the running image right away. It is confirmed
      * only after the dashboard is up and a stability window has passed; an
      * image that never comes up is rolled back to the previous OTA slot. This

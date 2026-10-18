@@ -462,6 +462,37 @@ klemmte bereits auf 80, der **Runtime-`set`-Pfad** nicht.
 weiterhin **nicht** angefasst.
 
 
+## 2026-10-18 12:10 UTC · Fleet-Sub-Agent (Branch feat/recovery-button, PR #27)
+
+**Thema: BOOT-Tasten-Recovery integriert (aus `recovered/ams-features-salvage`).**
+
+**Befund bei der Aufnahme:** `boot_confirm.{c,h}`, `boot_policy.{c,h}` und
+`test/test_boot_policy.c` sind **schon auf `main`** (PR #14/#16) — die Aufgabe
+„neu bauen" war für diesen Teil bereits erledigt. Es fehlte nur das
+Recovery-Button-Modul.
+
+**Umgesetzt (PR #27, CI grün: Host-Tests + Builds receiver/receiver-apoff/sender):**
+- `main/recovery_button.{c,h}` — reine, host-getestete Gestenlogik (Hold →
+  `RECOVERY_FORCE`, Loslassen setzt den Timer zurück).
+- `main/recovery_start.{c,h}` — IDF-Glue, ruft
+  `esp_ota_mark_app_invalid_rollback_and_reboot()`. **Nur Empfänger**; Sender
+  (kein USB, nur ESP-NOW) und `CONFIG_RECOVERY_BUTTON_GPIO=-1` kompilieren zu
+  No-op-Stubs.
+- `main.c` ruft `recovery_button_check()` **vor** `boot_confirm_init()` — die
+  manuelle Rettung für ein „confirmed but broken"-Image, das die automatische
+  Policy nicht mehr zurückrollen kann.
+- Kconfig `RECOVERY_BUTTON_GPIO` (Default 0 am Empfänger, sonst -1) +
+  `RECOVERY_BUTTON_HOLD_MS` (Default 3000).
+- `main/CMakeLists.txt`: zwei Quellen + `esp_driver_gpio`.
+- `test/test_recovery_button.c` (12 Checks) in `run_host_tests.sh`; `driver/gpio.h`
+  Host-Stub + CI-Syntax-Check gegen stilles Verrotten.
+- `recovery_button_hw.h` aus der Bergung **entfiel** (doppelte Deklaration).
+
+**Kein Datenverlust-Risiko:** reine App-Änderung, keine
+`partitions.csv`/Bootloader/`sdkconfig.defaults`-Änderung; die Recovery rollt in
+den **anderen** OTA-Slot und schreibt die SPIFFS-`storage`-Partition nie.
+
+**Offen:** Hardware-Verifikation des echten Tasten→Rollback-Pfads am Gerät.
 
 ## 2026-10-18 14:30 UTC · Fleet-Sub-Agent (Branch fix/upload-offload-storage-ready, PR #31)
 
@@ -499,3 +530,13 @@ Feed stauten sich dahinter. **Heap war nicht die Ursache** (es wurde schon in
 **Kein Datenverlust:** Import dedupliziert pro Minute, verdraengt nie eine Live-
 Minute, Resume-Cursor rueckt nur ueber gespeicherte Minuten vor. Reine App-Aenderung
 (keine `partitions.csv`/Bootloader/`sdkconfig.defaults`).
+
+## 2026-10-18 15:05 UTC · Fleet-Sub-Agent (Branch feat/recovery-button, PR #27)
+
+**Status: rebased auf aktuelles `main`, Konflikte geloest, force-push, CI gruen.**
+
+PR #27 war zweimal DIRTY (main merged #25/#29, dann #28/#31). Konflikte nur in
+`TODO.md` und `docs/CHAT-THREAD.md` (append-only) — Code auto-merged. Beide
+Thread-Nachrichten blieben erhalten (chronologisch). Branch ist **0 hinter main**,
+CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender), PR `CLEAN`/`MERGEABLE`.
+
