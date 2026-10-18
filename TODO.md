@@ -87,6 +87,32 @@ und Funk-Powersave/DFS nicht gleichzeitig zu haben.** Am Gerät verifiziert.
 - Hinweis: Mit `test sleep pin 80` läuft der Takt manuell auf 80 MHz; mit
       `test sleep restore` zurück auf die Obergrenze. `test cpu` zeigt jetzt
       „40-80 MHz … 0 steps" (Takt bleibt oben, weil der Funk den APB-Lock hält).
+- [~] **40-MHz-Step-Down messbar machen (Sender):** Die einzige Ursache, die DFS
+      auf dem Sender unter die Decke drückt, ist der WiFi-Powersave
+      (`esp_wifi_set_ps(WIFI_PS_MIN_MODEM)` + ESP-NOW-Wake-Window): nur dann gibt
+      der Treiber `ESP_PM_APB_FREQ_MAX` frei. Weil dieser Pfad den ESP-NOW-Link
+      brach, ist er opt-in. Neu: eine **experimentelle CI-Variante `sender-dfs`**
+      (`CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=y`) wird neben dem Default gebaut
+      (`.github/workflows/esp-idf-build.yml`), damit die Kombination
+      „40 MHz **und** Link stabil" am Gerät messbar ist, ohne den Default zu
+      ändern. Der Fortschritt wird über die 1-Hz-Histogramme
+      `cpu_freq_hist_40/80/160/240` + `cpu_freq_below_ceiling_seen` (Commit
+      `d7d8cd8`) sichtbar. **Am Gerät noch zu verifizieren.**
+
+### ⏳ Relay-Kanal (Sandbox↔Odroid) — Zuverlässigkeit
+Beobachtet 2026-10-18: Nach einem Sandbox-Reset **sterben die beiden Helfer**
+(`channel_server.py:12001`, `upload-server:12000`) und der Odroid-Agent
+(`odroid_agent.sh`, `while true; poll; sleep 5`) **bleibt am laufenden Auftrag
+hängen** — ein `curl` ohne `-m` (Datei-Download) blockiert den einzigen
+Poll-Loop, danach werden keine neuen Aufträge mehr abgeholt. Ergebnis: der Agent
+wirkt tot, obwohl er nur feststeckt.
+- Sofort-Maßnahme: `setsid nohup bash /workspace/remote-shell/keepalive.sh &`
+  (startet die Helfer neu) und den hängenden Auftrag verwerfen; danach wieder
+  eine Aufgabe schicken (der Agent hängt am `bash -lc "$cmd"`, nicht am Poll).
+- Zu tun (Geräteseite): **jeden** `curl` im Agenten mit `-m`/`--max-time`
+  versehen (v. a. den Datei-Download), damit ein langsamer Transfer den Agenten
+  nicht dauerhaft blockiert; ggf. `timeout` um `bash -lc` legen.
+
 
 Stand: Branch `cline/power-history-diag` (Basis: On-Demand-Diagnose + Leistungshistorie).
 Letzter Commit: `f5239c7` – CI **grün** (Push-Run `38466461726`, PR-Run `38466468521`:
@@ -795,13 +821,18 @@ und tunnelt jede Anfrage ueber den bestehenden Diag-Kanal (`sender_diag_exchange
       bleiben. CI prueft `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80` in beiden Rollen.
 
 ### Bedienung / Diagnose (neu)
-- [ ] **Reboot-Taste im Dashboard** (`POST /api/reboot`, Auth-Gate wie `/update`,
+- [x] **Reboot-Taste im Dashboard** (`POST /api/reboot`, Auth-Gate wie `/update`,
       Antwort senden, dann `esp_restart()`). Nuetzlich fuer den Persistenz-Test
       (Reboot ohne Stecker ziehen) und generell zum Neustart aus der Weboberflaeche.
       Muss auf der AP-Seite auch ohne STA-Verbindung funktionieren.
-      **Teilweise erledigt:** die Web-Konsole (`web_console.c`, `/api/console`) hat
-      bereits den Befehl `reboot` (`console_cmd_reboot` -> `esp_restart()`); es fehlt
-      nur noch die prominente Taste im Dashboard.
+      **Erledigt:** der Handler (`reboot_handler`) sendet die Antwort zuerst und
+      startet dann ueber einen One-Shot-`esp_timer` (500 ms) neu; der Neustart wird
+      als *geplant* markiert (`crash_journal_mark_clean_restart`), damit er nicht als
+      Crash im Journal auftaucht. Die Dashboard-Taste fragt den OTA-Key per `prompt()`
+      ab und laedt die Seite nach 8 s neu. Zusaetzlich gab es bereits den
+      Konsolen-Befehl `reboot` (`console_cmd_reboot`). Host-Check: Dashboard-JS
+      syntaktisch gruen. **Am Geraet noch zu verifizieren** (Reboot + `record_count`
+      danach).
 - [~] **Debug-Konsole mit Eingabe** — **teilweise erledigt:** Web-Konsole existiert
       (`/api/console`, `web_console.c`) mit Befehlen `help`, `status`, `history`,
       `time`, `wifi`, `power`, `reboot` (Registrierung `web_console_register_commands`).
