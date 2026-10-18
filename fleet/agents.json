@@ -127,9 +127,12 @@
   },
   "2001aa2feb0a4efc90f339404a7e2b0e": {
    "name": "AMS MQTT-Bridge",
-   "open_tasks": 1,
-   "branch": "fleet/ams-mqtt",
-   "note": "TODO: mqtt_publish/mqtt_bridge salvage + HA-Discovery + Live-Push (TODO ~910)"
+   "open_tasks": 0,
+   "branch": "feat/mqtt-ha-live-minutes",
+   "pr": [
+    32
+   ],
+   "note": "FERTIG 2026-10-18: PR #32 (HA-Energie-Entitaeten import/export + Bare-Number-Live-Power statt kaputtem JSON, Live-Minuten-Push aus store_sml_value, neues reines mqtt_publish.{c,h} + test/test_mqtt_bridge.c 36 Checks). Additiv/receiver-only, keine partitions/sdkconfig-Aenderung. Zweimal auf vorrueckendes main rebased, CI gruen (receiver + receiver-apoff + sender + Host-Tests), PR mergeable. Darf schlafen."
   },
   "e6c5a6cb7a794da6a88ee7449a5555c9": {
    "name": "AMS Boot-Rollback",
