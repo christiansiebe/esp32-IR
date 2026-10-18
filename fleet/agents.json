@@ -36,7 +36,7 @@
   "f85f7c473e7748259d2751fc1085b2b2": {
    "name": "parent (Odroid N2: VNC-Desktop & CPU-PLL-OC)",
    "open_tasks": 1,
-   "note": "uebernimmt die Odroid-Familie: Board-Arbeit ueber den geteilten Kanal. Hat PR #18/#19/#20 gelandet + Watchdog-Verifikation (PR #35). Offen: LAN/AP-Uebernahme + Kamera. 4 Kinder gestartet (LAN/AP, Watchdog-Aktor, PR-Review, Firmware)."
+   "note": "uebernimmt die Odroid-Familie: Board-Arbeit ueber den geteilten Kanal. Gelandet: #18/#19/#20, Watchdog-Verifikation (#35). 4 Kinder gestartet: LAN/AP (#36), Watchdog-Aktor (#37), PR-Review (#38) alle gemerged; Firmware (9fe65410) laeuft noch. 2472-MHz-30-min-Soak reproduziert CLEAN + Treiber-Precondition dokumentiert (docs/uv-software-limit-report b60d307). Board-Befund: big-Cluster laeuft stock 2400 MHz, kein OC-Overlay. Offen: Firmware-Kind abwarten."
   },
   "521252f5a71b42c28165ad7e74ed13ec": {
    "name": "ODROID LAN/AP + Kamera",
