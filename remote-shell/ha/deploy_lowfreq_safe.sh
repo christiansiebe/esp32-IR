@@ -6,13 +6,13 @@
 # again automatically, unless it is explicitly promoted to a permanent install.
 #
 # How the one-boot window works (arm -> test -> auto-revert):
-#   * This run leaves user_overlays= EMPTY in /boot/armbianEnv.txt and drops a
-#     marker file /etc/lowfreq-test.pending. The running system therefore still
-#     uses factory clocks when the script finishes.
+#   * This run REMOVES lowfreq from user_overlays in /boot/armbianEnv.txt (other
+#     overlay names stay) and drops a marker file /etc/lowfreq-test.pending. The
+#     running system therefore still uses factory clocks when the script finishes.
 #   * lowfreq-test-hold.service runs once per boot, right after sysinit:
-#       marker present -> it writes user_overlays=lowfreq and DELETES the
+#       marker present -> it adds lowfreq to user_overlays and DELETES the
 #                         marker. The overlay is now armed for the next boot.
-#       marker absent  -> it clears user_overlays back to empty, so the boot
+#       marker absent  -> it removes lowfreq from user_overlays, so the boot
 #                         after the test returns to factory clocks.
 #   * Boot sequence after a fresh deploy:
 #       boot 1  factory clocks, hold service arms the overlay
@@ -26,6 +26,10 @@
 #     maximum frequency.
 #   * cpu-freq-guard.service pins scaling_min_freq to 1.0 GHz right after
 #     sysinit, so the new low points are only reachable by an explicit probe.
+#   * MIN_SPEED=1000000 in /etc/default/cpufrequtils closes the Armbian hole:
+#     armbian-hardware-optimization reads MIN_SPEED and re-sets scaling_min_freq
+#     AFTER cpu-freq-guard.service, so without this line the floor can be
+#     undercut (LOWFREQ-README.md, "zwei Stellen fuer die Untergrenze").
 #
 # Everything installed here is removed again by restore-stock.sh.
 set -u
@@ -87,16 +91,50 @@ die() { echo "FEHLER: $*" >&2; exit 1; }
 say() { echo "$*"; }
 run() { if [ "$DRY" = 1 ]; then echo "   + $*"; else "$@"; fi; }
 
-# user_overlays auf einen Wert setzen (leer = kein Overlay).
-set_user_overlays() {  # set_user_overlays <wert>
+# "lowfreq" in user_overlays aufnehmen bzw. entfernen; andere Namen bleiben
+# stehen (analog deploy_oc_safe.sh). WICHTIG: dasselbe Muster steht auch in der
+# eingebetteten hold-Unit - beide Stellen muessen dieselbe Semantik haben.
+set_overlay_lowfreq() {  # add|remove
 	if [ "$DRY" = 1 ]; then
-		echo "   + armbianEnv.txt: user_overlays=$1"
+		echo "   + armbianEnv.txt: user_overlays $1 lowfreq"
 		return 0
 	fi
-	if grep -q '^user_overlays=' "$ENV"; then
-		sed -i "s/^user_overlays=.*/user_overlays=$1/" "$ENV"
+	if [ "$1" = add ]; then
+		cur=$(sed -n 's/^user_overlays=//p' "$ENV" 2>/dev/null)
+		case " $cur " in
+			*" lowfreq "*) : ;;
+			*) if grep -q '^user_overlays=' "$ENV"; then
+			           sed -i "s/^user_overlays=.*/user_overlays=${cur:+$cur }lowfreq/" "$ENV"
+			   else
+			           echo 'user_overlays=lowfreq' >> "$ENV"
+			   fi ;;
+		esac
 	else
-		echo "user_overlays=$1" >> "$ENV"
+		sed -i '/^user_overlays=/ {
+			s/user_overlays=//
+			s/\(^\| \)lowfreq\( \|$\)/ /g
+			s/^ *//; s/ *$//
+			s/^/user_overlays=/
+		}' "$ENV"
+	fi
+}
+
+# MIN_SPEED in /etc/default/cpufrequtils auf die 1.0-GHz-Untergrenze ziehen.
+# Armbians armbian-hardware-optimization liest MIN_SPEED daraus und setzt
+# scaling_min_freq NOCH NACH cpu-freq-guard.service (laeuft als Kind weiter).
+# Ohne diese Zeile kann der Boden unterlaufen werden (LOWFREQ-README.md,
+# "zwei Stellen fuer die Untergrenze"). Vorbild: lowfreq_set_floor.sh.
+set_cpufrequtils_floor() {
+	if [ "$DRY" = 1 ]; then
+		echo "   + cpufrequtils: MIN_SPEED=1000000"
+		return 0
+	fi
+	if [ -w "$CPUFREQUTILS" ]; then
+		sed -i 's/^MIN_SPEED=.*/MIN_SPEED=1000000/' "$CPUFREQUTILS"
+		grep -q '^MIN_SPEED=' "$CPUFREQUTILS" || echo 'MIN_SPEED=1000000' >> "$CPUFREQUTILS"
+		say "   cpufrequtils MIN_SPEED: $(sed -n 's/^MIN_SPEED=//p' "$CPUFREQUTILS")"
+	else
+		say "   HINWEIS: $CPUFREQUTILS nicht beschreibbar - MIN_SPEED unveraendert."
 	fi
 }
 
@@ -123,7 +161,7 @@ fi
 # --- --promote: Overlay dauerhaft uebernehmen ------------------------------
 if [ "$ACTION" = promote ]; then
 	say '== Overlay dauerhaft uebernehmen (promote) =='
-	set_user_overlays lowfreq
+	set_overlay_lowfreq add
 	run rm -f "$MARKER"
 	say '   + Aufraeum-Unit entfernen (sonst loescht sie die Zeile beim Boot)'
 	run systemctl disable --now lowfreq-test-hold.service
@@ -142,9 +180,15 @@ DTS=$HERE/lowfreq.dts
 [ -f "$DTS" ] || DTS=/root/lowfreq.dts
 if [ -f "$DTS" ] && command -v dtc >/dev/null 2>&1; then
 	run dtc -@ -I dts -O dtb -o /tmp/lowfreq.dtbo "$DTS" || die "dtc fehlgeschlagen"
-	[ -f "$DTB" ] || die "$DTB fehlt - Overlay nicht gegen das Board-DTB pruefbar"
-	run fdtoverlay -i "$DTB" -o /tmp/merged.dtb /tmp/lowfreq.dtbo || die "fdtoverlay fehlgeschlagen"
-	if [ "$DRY" != 1 ]; then
+	if [ -f "$DTB" ]; then
+		run fdtoverlay -i "$DTB" -o /tmp/merged.dtb /tmp/lowfreq.dtbo || die "fdtoverlay fehlgeschlagen"
+	elif [ "$DRY" = 1 ] || [ -n "$ROOT" ]; then
+		# Ohne Board(-Baum) ist die OPP-Pruefung nicht moeglich: nur warnen.
+		say "   HINWEIS: $DTB fehlt - ueberspringe die DTB-/OPP-Pruefung (Dry-Run/Test)."
+	else
+		die "$DTB fehlt - Overlay nicht gegen das Board-DTB pruefbar"
+	fi
+	if [ "$DRY" != 1 ] && [ -f "$DTB" ]; then
 		dtc -I dtb -O dts /tmp/merged.dtb > /tmp/merged.dts 2>/dev/null
 		for f in 666666666 500000000 250000000 200000000 125000000 100000000 62500000 50000000 40000000 31250000 25000000 20000000 15625000 24000000; do
 			# Anker " {" noetig: "opp-100000000" ist Praefix von "opp-1000000000".
@@ -170,8 +214,10 @@ else
 	say "   HINWEIS: keine .dtbo gefunden ($SRC_DTBO) - beim Reboot wird nichts geladen."
 fi
 
-say '== 3. armbianEnv: user_overlays leer lassen, Boot-Governor sichern =='
-set_user_overlays ''
+say '== 3. armbianEnv: lowfreq NICHT eintragen, Boot-Governor sichern =='
+set_overlay_lowfreq remove
+say '== 3b. Boot-Schutz: MIN_SPEED in cpufrequtils (Armbian-Falle) =='
+set_cpufrequtils_floor
 if [ "$DRY" = 1 ]; then
 	echo "   + armbianEnv.txt: extraargs += cpufreq.default_governor=performance"
 elif ! grep -q 'cpufreq.default_governor=performance' "$ENV"; then
@@ -212,15 +258,24 @@ ENV=${LOWFREQ_ROOT:-}/boot/armbianEnv.txt
 MARKER=${LOWFREQ_ROOT:-}/etc/lowfreq-test.pending
 [ -f "$ENV" ] || exit 0
 if [ -f "$MARKER" ]; then
-	if grep -q '^user_overlays=' "$ENV"; then
-		sed -i 's/^user_overlays=.*/user_overlays=lowfreq/' "$ENV"
-	else
-		echo 'user_overlays=lowfreq' >> "$ENV"
-	fi
+	cur=$(sed -n 's/^user_overlays=//p' "$ENV" 2>/dev/null)
+	case " $cur " in
+		*" lowfreq "*) : ;;
+		*) if grep -q '^user_overlays=' "$ENV"; then
+		           sed -i "s/^user_overlays=.*/user_overlays=${cur:+$cur }lowfreq/" "$ENV"
+		   else
+		           echo 'user_overlays=lowfreq' >> "$ENV"
+		   fi ;;
+	esac
 	rm -f "$MARKER"
 	logger -t lowfreq-test-hold 'lowfreq overlay armed for the next boot'
 else
-	sed -i 's/^user_overlays=.*/user_overlays=/' "$ENV"
+	sed -i '/^user_overlays=/ {
+		s/user_overlays=//
+		s/\(^\| \)lowfreq\( \|$\)/ /g
+		s/^ *//; s/ *$//
+		s/^/user_overlays=/
+	}' "$ENV"
 	logger -t lowfreq-test-hold 'no marker - boot stays on factory clocks'
 fi
 exit 0

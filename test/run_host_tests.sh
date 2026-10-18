@@ -291,3 +291,7 @@ ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_parser_golden"
 # corrupted, truncated, adversarial and boundary inputs must never crash or be
 # accepted as consistent records.
 "$here/stability/run_stability.sh"
+
+# Host-side checks for the Odroid CPU-overlay deploy/restore scripts (no board,
+# no root: they run against a scratch LOWFREQ_ROOT with a stub systemctl).
+sh "$repo/remote-shell/ha/test_lowfreq_safe.sh"

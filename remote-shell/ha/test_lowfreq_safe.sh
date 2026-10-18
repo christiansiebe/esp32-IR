@@ -59,6 +59,8 @@ case "$(env_line extraargs)" in
 esac
 [ -f "$ROOT/etc/systemd/system/cpu-freq-guard.service" ] && ok "deploy: guard-Unit" || bad "deploy: guard-Unit fehlt"
 [ -f "$ROOT/etc/systemd/system/lowfreq-test-hold.service" ] && ok "deploy: hold-Unit" || bad "deploy: hold-Unit fehlt"
+check "deploy: MIN_SPEED auf 1.0 GHz gesetzt" \
+	"$(sed -n 's/^MIN_SPEED=//p' "$ROOT/etc/default/cpufrequtils")" "1000000"
 
 # --- 4. Boot-Sequenz -------------------------------------------------------
 HOLD="$ROOT/usr/local/sbin/lowfreq_test_hold.sh"
@@ -77,6 +79,28 @@ LOWFREQ_ROOT="$ROOT" sh "$HERE/deploy_lowfreq_safe.sh" --promote >/dev/null 2>&1
 check "promote: Overlay bleibt" "$(env_line user_overlays)" "user_overlays=lowfreq"
 [ -f "$ROOT/etc/lowfreq-test.pending" ] && bad "promote: Marker blieb" || ok "promote: Marker weg"
 [ -f "$ROOT/etc/systemd/system/lowfreq-test-hold.service" ] && bad "promote: hold-Unit blieb" || ok "promote: hold-Unit weg"
+
+# --- 5b. deploy/promote sind additiv: fremder Overlay-Name bleibt stehen ----
+new_root
+printf 'verbosity=1\nuser_overlays=spi1\nextraargs=rootdev=UUID=1234\n' > "$ROOT/boot/armbianEnv.txt"
+LOWFREQ_ROOT="$ROOT" sh "$HERE/deploy_lowfreq_safe.sh" >/dev/null 2>&1
+check "deploy additiv: fremder Name bleibt" "$(env_line user_overlays)" "user_overlays=spi1"
+LOWFREQ_ROOT="$ROOT" sh "$HERE/deploy_lowfreq_safe.sh" --promote >/dev/null 2>&1
+check "promote additiv: lowfreq ergaenzt" "$(env_line user_overlays)" "user_overlays=spi1 lowfreq"
+LOWFREQ_ROOT="$ROOT" sh "$HERE/restore-stock.sh" >/dev/null 2>&1
+check "restore additiv: nur lowfreq entfernt" "$(env_line user_overlays)" "user_overlays=spi1"
+
+# --- 5c. Dry-Run ohne Board-DTB: nur Warnung, kein Abbruch -----------------
+new_root
+rm -rf "$ROOT/boot/dtb"
+out=$(LOWFREQ_ROOT="$ROOT" sh "$HERE/deploy_lowfreq_safe.sh" --dry-run 2>&1)
+rc=$?
+case "$out" in
+	*"ueberspringe die DTB-/OPP-Pruefung"*|*"dtc oder lowfreq.dts fehlt"*)
+		ok "dry-run ohne DTB warnt (statt Abbruch)" ;;
+	*) bad "dry-run ohne DTB Warnung" ;;
+esac
+check "dry-run ohne DTB: rc=0" "$rc" "0"
 
 # --- 6. restore-stock ------------------------------------------------------
 new_root

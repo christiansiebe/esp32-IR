@@ -86,7 +86,14 @@ say '== Werkszustand wiederherstellen =='
 
 say ''
 say '== 1. /boot/armbianEnv.txt bereinigen =='
-run_sed "$ENV" '/^user_overlays=/d'
+# Nur "lowfreq" entfernen; andere Overlay-Namen bleiben stehen.
+run_sed "$ENV" '/^user_overlays=/ {
+	s/user_overlays=//
+	s/\(^\| \)lowfreq\( \|$\)/ /g
+	s/^ *//; s/ *$//
+	/^$/d
+	s/^/user_overlays=/
+}'
 run_sed "$ENV" 's/ cpufreq.default_governor=performance//'
 if [ "$DRY" != 1 ]; then
 	grep -nE 'user_overlays|extraargs' "$ENV" || true
