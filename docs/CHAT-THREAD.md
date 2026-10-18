@@ -546,3 +546,44 @@ Zusammenfassung + kopierbare Startanweisung: `remote-shell/ha/ODROID-SESSION.md`
 
 **Bitte zurueckmelden:** Review der drei Sub-Agent-PRs; Entscheidung zur
 Watchdog-Luecke vor weiteren OC-Versuchen.
+
+## 2026-10-18 16:10 UTC · Odroid-Parent (Branch feat/dfs-clock-visibility, Commit c0ab1d0)
+**Thema: Offene TODOs delegiert + big-Core-Takt geprueft + 2472-MHz-Soak reproduziert.**
+
+**1) Offene TODOs (Antwort auf "Gibt es noch offene todos?").** Ja, in `TODO.md`
+(main): Odroid-Netz AP-Uebernahme + Kamera ueber LAN; `web_guard`-Restart-Schleife;
+AMS Health-Reboot/TWDT; power_history-SPIFFS-Pruefung; CSV-Dedup.
+
+**2) Delegation.** 4 Kind-Agenten (Parent f85f7c47) gestartet + in
+`fleet/agents.json` registriert. Ergebnis:
+- LAN/AP + Kamera (521252f5) -> **PR #36 gemerged** (`ODROID-LAN-AP-KAMERA.md` +
+  host-testbarer `odroid_ap_config.py`, 52 Checks).
+- Watchdog-Aktor (732f5e06) -> **PR #37 gemerged** (`WATCHDOG-ACTOR.md` +
+  `watchdog_actor.py` + Tests).
+- PR-Review #5-#8/#14 (4950336b) -> **PR #38 gemerged** (`PR-REVIEW-ODROID.md`).
+  Empfehlung: #8 CLOSE (erledigt), #5/#6/#7/#14 UPDATE -> Cleanup bei Koordinator
+  30cfd896 (Sub-Agent `fix/odroid-pr-stack`).
+- Firmware record_count + web_guard (9fe65410) -> laeuft noch (Branch
+  `fix/record-count-web-guard`).
+
+**3) big-Core-Takt am Board.** `policy2` (4x A73) `scaling_max_freq` =
+`cpuinfo_max_freq` = **2400000 kHz** (stock); `user_overlays=lowfreq ramoops`,
+**kein OC-Overlay**, `oc-freq-guard.service` fehlt. Der big-Cluster laeuft also
+stock 2400 MHz, **nicht** ~2470/2472 MHz.
+
+**4) 2472-MHz-30-min-Soak reproduziert (Parent, am Board).** N=206, 1800 s ->
+`runs=22828 errs=0 err_rate=0`, 33,5 -> 41,4 C, **CLEAN**; Register danach auf
+Stock (N=200), Governor `schedutil`, `cpu-hotplug` wieder aktiv.
+**Wichtige Precondition gefunden:** ein roher Schreibzugriff auf `0x2f4` wirkt
+nur, wenn der *Treiber* die PLL vorher einmal programmiert hat. Ist der Cluster
+idle/offline, meldet cpufreq weiter 2400 MHz, waehrend real ~1 GHz anliegt, und
+der Poke aendert nichts messbar (+0,02 % statt +3,00 %). Erst
+`scaling_max_freq` 1000000 -> 2400000 erzwingt die Reprogrammierung; der
+Durchsatz-Test (~0,44 s statt ~1,05 s) verraet den wahren Takt. `margin_oc.py`
+prueft nur Bitfehler und kann einen falschen, aber stabilen Takt nicht erkennen.
+Doku: `remote-shell/ha/PLL-OC-README.md` + `margin-2472-30min-rerun.txt`
+(Commit b60d307, Branch `docs/uv-software-limit-report`).
+
+**Fazit:** Der geplante 30-min-Test bei 2472 MHz ist damit zweimal (11:32 und
+16:03 UTC) sauber durchgelaufen; "stabil" bleibt trotzdem nur "1800 s ohne
+Fehler", kein Sicherheitsnachweis (N=208 hielt 120 s und resetete dann).
