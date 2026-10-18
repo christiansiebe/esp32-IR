@@ -16,6 +16,34 @@ Two firmware roles are built from one source tree.
 - Commit and push small steps promptly; never leave important work only in
   `/tmp`.
 
+## Fleet rule: agents work through sub-agents and keep each other awake
+This is a standing rule for **every** esp32-IR chat agent, not a suggestion.
+
+- **Work through sub-agents.** Break work into sub-conversations (each with
+  `parent_conversation_id` set). The parent coordinates and reviews; the
+  sub-agents do the long work.
+- **A conversation must not sleep while it has open work.** An idle sandbox is
+  paused by the platform, and a paused agent cannot wake itself - nothing is
+  running in it. So the agents watch each other.
+- **Every agent keeps a `TASKS.json`** in its workspace with one entry per task
+  and `"status": "open" | "done"`. Open entries are the signal that the agent
+  must stay awake. A conversation may only be considered finished when it has no
+  open entries.
+- **The parent keeps `/workspace/fleet/agents.json`** current: for each worker
+  it stores `open_tasks` (0 = may sleep) and a short note. This is the registry
+  the watchdog trusts.
+- **The fleet watchdog** (`/workspace/fleet/fleet.py`, kept alive by
+  `keepalive.sh`) polls every conversation, and for any agent whose sandbox is
+  `PAUSED` **while `open_tasks > 0`** it resumes the sandbox and sends the agent
+  a message pointing at its open work. So a paused sandbox is not a hang - the
+  next cycle brings it back.
+- **Safety rails** in the watchdog: `--task-only` (never wake an agent with no
+  open tasks), `--max-age-hours` (do not resurrect agents idle for days),
+  `--max-wakes-per-day` (if one agent dies repeatedly, stop and report it as
+  broken instead of looping). Finished agents therefore stay asleep.
+- **If you finish all your work:** set your `TASKS.json` entries to `done` and
+  update `/workspace/fleet/agents.json`, then you may sleep.
+
 ## Roles
 - **Sender**: UART SML decoder (9600 baud 8N1 on UART1, RX GPIO16) and ESP-NOW
   value transport. No web server, no WLAN/IP of its own. Its page is hosted by
@@ -747,7 +775,11 @@ dem Odroid, Key in KEY, Doku in README.md).
   `curl -s http://192.168.178.70/api/sender-diag -H "X-OTA-Key: <key>"`
   (der Empfaenger leitet per ESP-NOW weiter).
 - **OTA-Key** fuer die Auth-Header liegt in `/workspace/remote-shell/.ota_key`.
-- **Sandbox-Helfer** (`channel_server.py:12001`, `upload-server:12000`) werden
-  jetzt idempotent aus `~/.bashrc` via `keepalive.sh` gestartet, sobald eine
-  Shell aufgeht — kein manueller Neustart nach einem Sandbox-Reset noetig.
+- **Sandbox-Helfer** (`channel_server.py:12001`, `upload-server:12000`, fleet
+  watchdog) werden von `keepalive.sh` idempotent am Leben gehalten. Der
+  `~/.bashrc`-Hook greift bei Agent-Tool-Befehlen **nicht** (die Shell ist
+  langlebig, `.bashrc` wird nicht neu geladen); die Selbstheilung sitzt daher in
+  `channel.py` (prueft vor jedem `send` den `/health` und startet `keepalive.sh`)
+  und in `keepalive.sh` selbst (flock, eininstanzig). Kein manueller Neustart
+  nach einem Sandbox-Reset noetig.
 - Hinweis: `192.168.178.71` ist der **Odroid selbst** (nginx), nicht der ESP32.

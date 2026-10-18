@@ -37,9 +37,19 @@ ensure_upload() {
   log "started upload-server (12000)"
 }
 
+# Keep the fleet watchdog alive: it wakes sibling chat agents whose sandbox was
+# paused while they still have open work. It holds its own lock, so starting it
+# when one is already running is a no-op.
+ensure_fleet() {
+  pgrep -f "fleet/fleet.py --loop" >/dev/null && return
+  ( cd /workspace/fleet && exec setsid nohup python3 /workspace/fleet/fleet.py --loop --interval 300 >>/workspace/fleet/fleet.log 2>&1 9>&- ) &
+  log "started fleet watchdog"
+}
+
 log "keepalive up (pid $$)"
 while true; do
   ensure_channel
   ensure_upload
+  ensure_fleet
   sleep 20 9>&-
 done

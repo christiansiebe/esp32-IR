@@ -1,0 +1,34 @@
+{
+ "_comment": "Worker-Registry des esp32-IR-Fleet. Der Parent pflegt sie; der Fleet-Watchdog liest sie. open_tasks=0 -> Agent darf schlafen.",
+ "agents": {
+  "8c2548251ad045599fbfb6f95f3e7944": {
+   "name": "parent (dieser Chat)",
+   "open_tasks": 1,
+   "note": "koordiniert, haelt die Registry aktuell"
+  },
+  "a3484f59487c4e6a9f1c5a40664506ba": {
+   "name": "UTC-persist",
+   "open_tasks": 0,
+   "pr": [
+    16
+   ],
+   "note": "PR #16 gruen+mergeable, fertig"
+  },
+  "335a48a5e35442e69b8f1cb1c9321480": {
+   "name": "TWDT",
+   "open_tasks": 1,
+   "pr": [
+    10
+   ],
+   "note": "PR #10 DRAFT + CONFLICTING: rebasen, Konflikte loesen, ready"
+  },
+  "1b043863d80d41a08f7b161036f65649": {
+   "name": "MQTT-reboot",
+   "open_tasks": 1,
+   "pr": [
+    9
+   ],
+   "note": "PR #9 DRAFT, gruen+mergeable: finalisieren, ready"
+  }
+ }
+}

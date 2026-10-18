@@ -1,5 +1,21 @@
 # To-do – esp32-IR
 
+## NEU (2026-10-18): Fleet-Regel – Agenten halten sich gegenseitig wach
+**Jeder Chat-Agent arbeitet über Sub-Agenten und darf nicht einschlafen,
+solange offene Aufträge existieren.** Eine pausierte Sandbox kann sich nicht
+selbst wecken (es läuft nichts darin) — also wecken sich die Agenten
+gegenseitig über die Cloud-API.
+- Jeder Agent pflegt `TASKS.json` (`status: open|done`); offene Einträge =
+  wachbleiben. Der Parent spiegelt die Zahl nach `fleet/agents.json`.
+- `fleet/fleet.py` (Watchdog, von `keepalive.sh` am Leben gehalten) pollt alle
+  300 s: Sandbox `PAUSED` **und** `open_tasks > 0` → `resume` + Weck-Nachricht.
+- Schutz: `--task-only` (fertige Agenten schlafen), `--max-age-hours` (alte
+  Agenten nicht auferstehen lassen), `--max-wakes-per-day` (kaputten Agenten
+  nicht endlos wecken, sondern melden).
+- Erledigt: die drei delegierten Sub-Agenten (UTC-persist PR #16 grün/fertig,
+  TWDT PR #10 DRAFT+CONFLICTING → rebasen, MQTT PR #9 DRAFT → finalisieren)
+  wurden geweckt und arbeiten weiter; Details in `fleet/README.md`.
+
 ## NEU (2026-10-17): Laufzeit-Knöpfe überleben Reboot + OTA (NVS)
 **Bisher waren `set cpu|freq|cpu-min|sleep|retries` RAM-only** — ein Reboot warf
 sie auf die Compile-Time-Defaults zurück, also musste man zum dauerhaften Ändern
