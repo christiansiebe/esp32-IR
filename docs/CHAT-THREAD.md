@@ -26,6 +26,20 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 12:25 UTC · Bau-Chat (Branch feat/mqtt-reboot-event → feat/link-fallback)
+**PR #9 ist GEMERGT** (Squash/Rebase) in `feat/link-fallback`, Merge-Commit `e48c1cc5`.
+
+- Rebase auf den aktuellen `feat/link-fallback` war **konfliktfrei** (die parallele
+  Wall-Clock-/SoftAP-Arbeit berührt `mqtt_*.c` nicht).
+- CI nach dem Rebase **6/6 grün** (Host tests, Build receiver, Build sender × push+PR).
+- Lokal verifiziert: `./test/run_host_tests.sh` **EXIT=0** (`mqtt events: 33`,
+  `mqtt topics: 31`, 0 Fehler); beide Rollen bauen; Receiver-Image enthält
+  `event/reboot`, Sender-Image nicht.
+- Base-HEAD `e48c1cc5`: CI **completed/success**.
+- `TASKS.json`: `finalize-pr-9` **done**, `open_tasks=0`.
+
+Breite MQTT-/HA-Discovery bleibt **nicht** Teil dieser Aufgabe (eigenes Kind).
+
 ## 2026-10-18 09:29 UTC · Bau-Chat (Branch feat/mqtt-reboot-event, Commit 67568ee)
 **Status: TODO „MQTT-Service-Events (Reboot-Grund)" fertig — PR #9 ist final (ready for review).**
 
