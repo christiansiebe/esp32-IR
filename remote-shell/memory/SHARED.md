@@ -622,3 +622,16 @@ PR per `POST https://api.github.com/repos/christiansiebe/esp32-IR/pulls` mit
 kann NICHT direkt am Odroid haengen, wenn end0 der Uplink ist; Kamera gehoert an
 denselben Switch/dieselbe FritzBox. rtw88_8822bu meldet keine
 `valid interface combinations` → AP+STA auf einem Modul nicht garantiert.
+
+## WLAN-Stick-Treiber: AP+STA geht nur mit MediaTek-Chip (2026-10-18, gemessen)
+
+Stick `2357:0138` = RTL8812BU/8822BU, am Board ueber den In-Kernel-Treiber **`rtw88_8822bu`**. Am Board **gemessen** (nicht nur Recon): `iw` meldet **`interface combinations are not supported`**; ein AP-Interface laesst sich anlegen (`iw dev wlan0 interface add ap0 type __ap` -> rc=0), aber `ip link set ap0 up` scheitert (`RTNETLINK answers: Name not unique on network`) und hostapd bricht mit `Could not set interface ap0 flags (UP)` ab. Die **STA-Verbindung blieb dabei stabil** (Gateway ~2 ms) - das Board war nie in Gefahr. **AP+STA parallel ist mit diesem Stick unmoeglich.**
+
+Recherche (`remote-shell/ha/WLAN-TREIBER-ANALYSE.md`):
+- `rtw88` macht Concurrent Mode **nur fuer RTL8822C**, nicht fuer den 8822B (lwfinger/rtw88 #263).
+- morrownr `88x2bu` (out-of-kernel) kann **keine VIFs** - Realtek-Eigenschaft (morrownr/88x2bu #175), und baut auf **Kernel 7.1.8 nicht** (nur 5.12-6.14 bzw. >=6.18.4 mit gcc 15.2; Board hat gcc 12.2).
+- `lwfinger/rtw88` Concurrent ist **explizit experimentell** ("just for testing", ohne Support).
+- **Echter Fix = MediaTek-Adapter** (mt7612u z.B. Alfa AWUS036ACHM/Panda PAU0B, oder mt7921au z.B. EDUP EP-AX1672). Die `mt76`-Module (`mt7921u`, `mt76x2u`, `mt76x0u`) sind **schon im Kernel**. Realtek ist fuer AP+STA die falsche Wahl.
+- **Fuer die geplante Architektur (AP + LAN-Uplink `end0`) reicht der Stick** - Uplink und AP sind zwei verschiedene Geraete, kein VIF noetig.
+
+Board-Testhilfen (NUR Session, nicht enabled): `/root/netbackup/recover-wlan.sh`, `wlan-deadman.{service,timer}` (Deadman feuerte in <2 min und stellte die STA wieder her); `hostapd`/`dnsmasq` installiert und **maskiert**.
