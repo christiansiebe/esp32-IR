@@ -26,6 +26,52 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 15:10 UTC · Odroid-Chat f85f7c47 (Branch feat/dfs-clock-visibility, Commit 8a166e7)
+**Odroid-Familie uebernommen; drei Sub-Agent-PRs gelandet; Watchdog am Board verifiziert; TODOs delegiert.**
+
+**1) Odroid-Uebernahme.** Der bisherige Odroid-Parent `7a894c13` ist laut Nutzer
+zu „HA WP entwicklung" umgezogen; dieser Chat (`f85f7c47`, „Odroid N2: VNC-Desktop
+& CPU-PLL-OC") uebernimmt die Odroid-Familie. Board-Arbeit bleibt am geteilten
+Kanal, nur hier.
+
+**2) Die drei Odroid-Sub-Agent-PRs sind GELANDET** (alle in `cline/power-history-diag`):
+- **#19** noVNC extern (Merge `a248c0b`) — 62 Checks gruen.
+- **#20** OC-Overlay 2496 MHz umkehrbar (Merge `af08832`) — 24 Checks gruen.
+- **#18** Watchdog-Luecke Doku+Haertung (Merge `faad569`) — Rebase noetig: der
+  Konflikt lag nur in der auto-synchronisierten `remote-shell/memory/SHARED.md`
+  (beide Seiten haengten einen Abschnitt an); beide behalten, 28 Checks gruen.
+
+**3) Watchdog-Verifikation am Board (PR #35).** Kernbefunde:
+- `bootstatus` ist auf dieser Hardware **immer 0** (das Board-eigene
+  `boot_journal.py` sagt es selbst) → der in der Doku als „Kernnachweis"
+  bezeichnete Wert entscheidet **nichts**.
+- **H2 widerlegt:** systemd oeffnet/haelt `/dev/watchdog0` (PID 1), 60 s.
+- **H1 widerlegt:** `watchdog-guard.sh` liest nur das sysfs-`state`, oeffnet das
+  Char-Device nicht → kein entwaffnendes `close()`; im Hang-Boot kein Shutdown.
+- Boot-Journal klassifiziert den Recovery-Boot als `hard-reset-unknown`
+  (kein Panic, kein pstore) → **H3** (Reset kam nicht durch) bleibt beste
+  Erklaerung. **Das 60-s-HW-Watchdog ist fuer rohe PLL-OC-Experimente nicht
+  verlaesslich.** Doku: `remote-shell/ha/WATCHDOG-GAP.md` Abschnitt 8.
+
+**4) Takt-Check (Nutzerfrage).** Am Board gemessen: big-Cluster `policy2`
+**max = 2.400.000 kHz (Stock)**, aktuell 1.0 GHz, `cpuinfo_max = 2400`. Kein
+OC-Overlay aktiv (`user_overlays=lowfreq ramoops`); kein 2470/2472-Punkt laeuft.
+Hinweis: big-Cluster-CPUs werden von `cpu-hotplug.service` bei Leerlauf
+offline genommen → cpufreq-Reads auf `policy2` liefern dann `EBUSY` (kein Fehler).
+
+**5) TODOs delegiert (4 Kind-Agenten, parent=`f85f7c47`, alle RUNNING):**
+- `521252f5` LAN/AP-Uebernahme + Kamera (Plan + hostapd/dnsmasq-Vorlagen, HA).
+- `732f5e06` Watchdog: externer Aktor (Design + host-testbarer Adapter).
+- `4950336b` Review der gestapelten Odroid-PRs #5/#6/#7/#8/#14.
+- `9fe65410` Firmware host-seitig: `record_count`-Wiederherstellung + `web_guard`.
+
+Registry: `fleet/agents.json` (Commit `8a166e7`). Launcher:
+`remote-shell/ha/start_odroid_children.py`.
+
+**Offen / bitte zurueckmelden:** Review der Kinder-PRs; **Nutzer-Entscheidungen
+zum Netz** (welcher AP? ersetzen oder ergaenzen? IP- vs. USB-Kamera? AP vs.
+Router?) — ohne sie bleibt der LAN/AP-Umbau beim Plan.
+
 ## 2026-10-18 14:45 UTC · Kontroll-Chat (Branch feat/dfs-clock-visibility, Commit 4b6a470)
 **Neuer Auftrag: LAN/AP/Kamera am Odroid — und der Fleet-Einschlaf-Bug ist gefixt.**
 
