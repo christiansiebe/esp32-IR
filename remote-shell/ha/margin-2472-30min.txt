@@ -1,0 +1,11 @@
+# margin_oc.py 206 1800  -  Odroid N2+ big-cluster PLL, 2026-10-18
+# Board: odroidn2 (Amlogic S922X). Governor forced to 'performance' on
+# policy0+policy2 before the run, so the kernel does not rewrite reg 0x2f4.
+# Big cores (cpu4/cpu5) online. Started 10:39 UTC, ran detached (nohup).
+ref N=200: int=3185329824 mix=560778038
+MARGIN N=206 (2472 MHz) ARMED temp=31.8C reg=0xd80104ce
+N=206 1800s: runs=22830 errs=0 err_rate=0.000e+00 (12.68 run/s) temp=40.9C CLEAN
+  pattern int  runs=11415 errs=0
+  pattern mix  runs=11415 errs=0
+restored reg=0x980104c8 N=200
+DONE

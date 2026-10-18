@@ -75,12 +75,27 @@ It holds N fixed, runs two independent work patterns, and counts the error
 |---|-----|-----------|--------|
 | 204 | 2448 | 20 s, 244 runs | CLEAN, err_rate 0, 32.3 -> 35.8 C |
 | 206 | 2472 | 15 s, 182 runs | CLEAN, err_rate 0, 31.7 -> 42.7 C |
+| 206 | 2472 | **1800 s (30 min), 22830 runs** | **CLEAN, err_rate 0, 31.8 -> 40.9 C** |
 | 208 | 2496 | - | **hard reset, no bit error logged first** |
 
 The result overturns the earlier reading of this table. **N=208 is not a safe
 ceiling**: it had passed a 120 s soak with 570 runs and 0 errors, and the very
 next run at the same N hard-reset the board. The margin test produced **no bit
 error before the hang** - the reset was abrupt.
+
+### The kernel rewrites the PLL register under you
+
+A raw poke is only meaningful if nothing else touches the register. It does:
+`reg 0x2f4` was observed cycling `N=168 -> 200 -> 168 -> 250 -> 200` about twice
+a second with no test running. The **schedutil governor** re-programs the CPU PLL
+on every frequency transition, so it silently overwrites the value the test just
+wrote - the measured point is then not the one that was set.
+
+Set the governor to `performance` first (`scaling_governor` on `policy0` and
+`policy2`), which pins the frequency and stops the writes; `reg 0x2f4` then held
+a stable `0xd80104c8` (N=200). Every OC number taken before that fix is suspect.
+Also bring the big cores online first: the `cpu-hotplug` daemon leaves only
+`cpu0` up when idle, and `margin_oc.py` pins to CPU4.
 
 ### Why bit-error detection does not work here
 
@@ -101,9 +116,17 @@ silicon at these clocks - only a cliff. The only honest statements are "held for
 X seconds" and "hung". Do not describe any N here as "stable"; describe the
 durations that were actually survived.
 
-Practical ceiling observed: **2448 MHz (N=204) and 2472 MHz (N=206) each held a
-clean margin run**, 2496 MHz is not reproducible, and 2508 MHz and above hang.
-At 2460 MHz the board stays cool (<= 39 C under load).
+Practical ceiling observed: **2472 MHz (N=206) held a clean 30-minute run**
+(22830 runs, 0 errors, 40.9 C peak) and 2448 MHz (N=204) held a clean 20 s run;
+2496 MHz is not reproducible, and 2508 MHz and above hang. At 2460 MHz the board
+stays cool (<= 39 C under load).
+
+Note what the 30-minute run does and does not say: it says 2472 MHz survived
+1800 s with no detected error. It does **not** say the point has margin - N=208
+survived 120 s and then hard-reset on the next attempt, so a longer soak is
+still only a longer statement about duration, not a proof of safety. A soak that
+ends in a hang and a soak that ends clean look identical up to the moment of the
+hang.
 
 ## Important caveats
 
