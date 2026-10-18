@@ -26,6 +26,48 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 14:45 UTC · Kontroll-Chat (Branch feat/dfs-clock-visibility, Commit 4b6a470)
+**Neuer Auftrag: LAN/AP/Kamera am Odroid — und der Fleet-Einschlaf-Bug ist gefixt.**
+
+**1) NEUER AUFTRAG (Nutzer, 2026-10-18): Netzwerk + Kamera am Odroid.**
+- Das **LAN-Kabel steckt aktuell an einem Access Point**; der Odroid soll diese
+  Aufgabe (den AP bzw. das Netz) **übernehmen**. Zu klaeren: Welcher AP? Soll der
+  Odroid selbst AP werden (`hostapd`+`dnsmasq`), oder nur als Router/Bridge dienen?
+- **Zukuenftig soll eine Kamera ueber LAN am Odroid angeschlossen werden.**
+  Zu klaeren: Kamera-Typ (IP-Kamera vs. USB/UVC), Protokoll (RTSP/ONVIF vs. V4L2),
+  und wie sie in Home Assistant eingebunden wird (HA laeuft bereits auf dem Odroid).
+- Board-Zugang derzeit **nicht moeglich**: Der Odroid-Agent verbindet sich nicht
+  (Kanal-Server laeuft, Port 12001 offen, Token vorhanden). Plausibel, weil das
+  LAN-Kabel gerade umgesteckt wird / der AP den Weg ins Heimnetz aendert. Sobald
+  der Odroid wieder Netz hat und `ExecStart` auf
+  `wss://work-2-<sandbox-id>.prod-runtime.all-hands.dev/` zeigt, verbindet er sich
+  selbst (`Restart=always`). Dann: `remote-shell/cmd_send.sh "<befehl>" 300`.
+- Der Auftrag gehoert in die Odroid-Familie (Board-Arbeit bleibt am geteilten Kanal).
+
+**2) Fleet-Einschlaf-Bug GEFIXT (meine Hauptarbeit dieser Session).** "Hier gibts
+grosse Einschlafprobleme" hatte drei Ursachen, alle im **aktiven** Supervisor
+(`automations/fleet-supervisor`, der alte `fleet-watchdog` ist inaktiv):
+1. Ein Worker mit `parent_conversation_id` laeuft in der **Sandbox des Parents**:
+   `sandbox_status` bleibt `RUNNING`, waehrend `execution_status` nach dem Turn auf
+   `paused`/`finished` faellt. Der Supervisor keyte nur auf `sandbox_status` und
+   weckte solche Worker nie.
+2. Ein Turn kann mit `execution_status=error` (oder ohne Status) enden, waehrend
+   die Sandbox laeuft — der `asleep`-Test kannte nur `paused`/`finished`, ein
+   fehlgeschlagener Turn schlief ewig. (Traf den Koordinator `8c254825`.)
+3. Die Pause-Branch pausierte die Sandbox **jedes** fertigen Workers — auch die
+   geteilte Parent-Sandbox. Das pausierte den Parent mit (meine eigene Sandbox
+   `47twLrQjUfrPuvvCq0mFAL` wurde so immer wieder eingeschlaefert).
+Fix: eine pure Funktion `decide()` — *awake* heisst exakt
+`sandbox_status == RUNNING and execution_status == running`; alles andere mit
+offenen Aufgaben wird geweckt. Pause nur, wenn **kein** anderer Tenant der Sandbox
+offene Arbeit hat (oder in `NEVER_PAUSE` steht). Laeufe dauern ~13 min, daher
+`*/10`-Cron **plus KV-Run-Lock** (single-flight statt Stapelung). Transport-Haertung
+(409/STARTING-Polling, autoritativer Sandbox-Status) und mein Fix sind in
+`4b6a470` zusammengefuehrt. Host-Test `fleet/test_supervisor.py` (12 Checks) haengt
+in `test/run_host_tests.sh`. **Wichtig:** Die Automation laeuft aus einem
+hochgeladenen Tarball, nicht aus dem Repo — `fleet/deploy_automation.py <name>`
+baut+laedt hoch und patcht die Automation; `main.py` allein aendern wirkt nichts.
+
 ## 2026-10-15 07:30 UTC · Kontroll-Chat (Branch cline/auftrag-history-dubletten)
 **Nutzerauftrag: „echtes Desktop-Interface ueber Web auf dem Odroid" — an neuen Chat delegiert.**
 Recherche-Ergebnis (Memory): Auf dem **Odroid N2** (Armbian bookworm) laeuft bereits ein

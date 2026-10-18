@@ -1,5 +1,21 @@
 # To-do – esp32-IR
 
+## NEU (2026-10-18): Odroid-Netz — AP-Aufgabe übernehmen + Kamera über LAN
+**Nutzerauftrag.** Das LAN-Kabel steckt aktuell an einem **Access Point**; der
+Odroid soll diese Aufgabe übernehmen, und künftig soll eine **Kamera über LAN**
+am Odroid hängen.
+- **Recon am Board** (sobald der Kanal wieder läuft): welcher AP ist das, wie
+  ist er konfiguriert, hängt das Heimnetz daran? Entscheiden, ob der Odroid
+  **selbst AP** wird (`hostapd` + `dnsmasq`) oder nur **Router/Bridge** spielt.
+- **Kamera:** Typ klären (IP-Kamera/RTSP/ONVIF vs. USB-UVC/V4L2) und die
+  Einbindung in **Home Assistant** (läuft bereits auf dem Odroid, docker).
+- Board-Zugang aktuell blockiert: Odroid-Agent verbindet sich nicht (Kanal
+  läuft, Port 12001 offen, Token da) — plausibel wegen des laufenden Umsteckens.
+  Sobald der Odroid Netz hat und `ExecStart` auf die aktuelle Sandbox-URL zeigt,
+  verbindet er sich selbst. Dann `remote-shell/cmd_send.sh "<befehl>" 300`.
+- **Wichtig:** nichts an der bestehenden WLAN-STA-Konfiguration zerstören
+  (der Odroid hängt per USB-WLAN im Heimnetz, `192.168.178.71`).
+
 ## NEU (2026-10-18): Fleet-Regel – Agenten halten sich gegenseitig wach
 **Jeder Chat-Agent arbeitet über Sub-Agenten und darf nicht einschlafen,
 solange offene Aufträge existieren.** Eine pausierte Sandbox kann sich nicht
