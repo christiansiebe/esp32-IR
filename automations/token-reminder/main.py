@@ -18,8 +18,7 @@ import urllib.request
 
 REPO = os.environ.get("FLEET_REPO", "christiansiebe/esp32-IR")
 API = "https://api.github.com"
-WARN_DAYS = int(os.environ.get("TOKEN_WARN_DAYS", "7"))
-TITLE = "Reminder: GITHUB_WRITE_TOKEN expires soon"
+WARN_DAYS = int(os.environ.get("TOKEN_WARN_DAYS", "10"))
 
 
 def get_secret(name):
@@ -96,24 +95,26 @@ def main():
             "_Automated reminder (token-reminder automation)._\n\n"
             "This token can create but not edit issues, so a renewed token leaves this issue "
             "open: close it by hand once the token is renewed.")
-    # The token may lack the "Issues: write" scope to update/close an issue, so
-    # this is create-only and dedupes by title over the open issues (which it can
-    # read). One reminder per expiry window is enough.
+    # Title carries the expiry date so a *renewed* token yields a fresh reminder
+    # even if the old issue was never closed. Create-only: the PAT cannot edit
+    # or close issues, so dedupe is by exact title over the open issues it can
+    # read (one reminder per expiry window is enough).
+    title = f"Reminder: GITHUB_WRITE_TOKEN expires {expiry:%Y-%m-%d}"
     open_issues = json.loads(gh(token, f"/repos/{REPO}/issues?state=open&per_page=100")[1])
     match = next((i for i in open_issues
-                  if i.get("title") == TITLE and "pull_request" not in i), None)
+                  if i.get("title") == title and "pull_request" not in i), None)
     if match:
         print(f"Reminder issue #{match['number']} already open; nothing to do.")
         return
     try:
         res = json.loads(gh(token, f"/repos/{REPO}/issues", "POST",
-                            {"title": TITLE, "body": body, "labels": ["token-reminder"]})[1])
+                            {"title": title, "body": body, "labels": ["token-reminder"]})[1])
         print(f"Opened reminder issue #{res['number']}.")
     except urllib.error.HTTPError as exc:
         # A token without the label scope still creates the issue; retry bare.
         if exc.code in (403, 422):
             res = json.loads(gh(token, f"/repos/{REPO}/issues", "POST",
-                                {"title": TITLE, "body": body})[1])
+                                {"title": title, "body": body})[1])
             print(f"Opened reminder issue #{res['number']} (without label).")
         else:
             raise
