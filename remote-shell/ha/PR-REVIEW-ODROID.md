@@ -366,6 +366,34 @@ Merge in der aktuellen Form.
 
 ---
 
+## Nachtraegliche Eigenverifikation (2026-10-18)
+
+Nach dem Wecken wurde jede tragende Behauptung gegen den Code erneut
+nachgerechnet. Ergebnis: **alle BESTAETIGT**.
+
+| Behauptung | Beleg | Ergebnis |
+|-----------|-------|----------|
+| #5 `CPUFREQUTILS` toter Code | `grep -n CPUFREQUTILS deploy_lowfreq_safe.sh` | 1 Treffer (nur Deklaration `:84`) -> **bestaetigt** |
+| #5 `--dry-run` bricht ohne Board-DTB ab | `LOWFREQ_ROOT=<stub> sh deploy_lowfreq_safe.sh --dry-run` | `FEHLER: ...meson-g12b-odroid-n2-plus.dtb fehlt`, exit 1 -> **bestaetigt** |
+| #5 Test 28/28 ohne `dtc`, 21/28 mit | `test_lowfreq_safe.sh` mit/ohne `dtc` | 28 ok/0 FAIL (ohne) bzw. 21 ok/7 FAIL (mit) -> **bestaetigt** |
+| #6 Merge-Konflikt | `git merge-tree --write-tree ... origin/feat/lowfreq-voltage-curve` | `CONFLICT in gen_lowfreq_dts.py` -> **bestaetigt** |
+| #6 entfernt `render()` | `grep -c "def render" gen_lowfreq_dts.py` auf PR-Branch | 0 -> **bestaetigt** |
+| #6 `gen_oc_dts.py --with-lowfreq` bricht | `python3 gen_oc_dts.py --with-lowfreq` | `AttributeError: module 'gen_lowfreq_dts' has no attribute 'render'` -> **bestaetigt** |
+| #6 Boden 680 mV greift | `gen_lowfreq_dts.py --big-mv 679` | rc=1, "Regler-Grenze 680 mV" -> **bestaetigt** |
+| #6 Standardausgabe byte-identisch | `diff` gegen `lowfreq.dts` | identisch -> **bestaetigt** |
+| #7 Registerformel vertauscht | `PWM-REGULATOR-NOTES.md:163` vs. `:169` | C-Code `hi=duty, lo=cnt-duty` (HIGH=31..16), Text `((cnt-duty)<<16)\|duty` -> **bestaetigt** |
+| #7 vakuumer Test | `test_pwm_reg_model.py:102-103` | `table_select(900000,900000,table)[1] == ...(identisch)` -> **bestaetigt** |
+| #8 vor #18-#20 | `log -1 origin/docs/pr-review-5-6-7` = `5ec1afd` 2026-10-17 11:29 | Merges #18/#19/#20 am 2026-10-18 -> **bestaetigt** |
+| #8 nennt #6 "merge-faehig" | `PR-REVIEW.md:17,170` | seit #20 ueberholt -> **bestaetigt** |
+| #14 `ramoops.dts` == `render()` | `python3 -c "gen_ramoops_dts.render()"` + `diff` | identisch -> **bestaetigt** |
+| #14 Adresse kollisionsfrei | `gen_ramoops_dts.py:13,17,32` | `0x50000000` im freien Fenster `0x40000000..0xdfd2dfff` -> **bestaetigt** |
+
+**Sub-Agent-Blockade:** Die Regel "arbeite ueber Sub-Agenten" konnte nicht
+eingehalten werden - die Cloud meldete beim Startversuch
+`429 daily_conversation_limit_reached` (Limit 20/Tag erreicht, Reset
+2026-10-19T00:00Z). Die Verifikation wurde deshalb vom Parent-Chat selbst mit
+den oben dokumentierten, reproduzierbaren Befehlen durchgefuehrt.
+
 ## Zusammenfassung
 
 | PR | Empfehlung | Kernpunkt |
