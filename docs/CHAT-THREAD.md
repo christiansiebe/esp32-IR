@@ -26,6 +26,42 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-18 14:31 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 31db61f)
+**Auftrag:** „Aus /tmp/work gerettet, neu bauen: `mqtt_publish.{c,h}`,
+`mqtt_bridge.{c,h}`, `mqtt_client.h` — MQTT + HA-Discovery; `test/test_mqtt_bridge.c`;
+`main/CMakeLists.txt` + `sdkconfig.defaults` + `idf_component.yml`. Live-MQTT-Push der
+Minutenwerte, damit HA ab sofort selbst mitschreibt (TODO ~910). Beide Rollen ueber CI
+bauen." **PR #32** gegen `main` geoeffnet.
+
+**Befund (wichtig, Dubletten-Regel):** `main/mqtt_bridge.{c,h}` **und**
+`main/mqtt_topics.{c,h}` liegen **bereits auf `main`** (aus PR #12, Commit `e350984`).
+Die MQTT-Bridge ist also schon da (Broker-URI/Prefix aus NVS `mqttcfg`, Start bei
+`STA_GOT_IP`, Console-Befehl `mqtt`, LWT, Discovery-Hub). Es wurde daher **kein zweites
+Mal** eine Bridge gebaut; die geretteten Dateien wurden nur dort neu gebaut, wo eine
+echte Luecke war.
+
+**Gebaut (additiv, receiver-only, PR #32):**
+- **`main/mqtt_publish.{c,h}` (neu, rein, host-getestet):** `mqtt_energy_to_kwh(raw,
+  scaler)` (Wh→kWh), `mqtt_power_payload`, `mqtt_energy_payload` (Bare-Number-Strings).
+- **HA-Discovery: 3 Entitaeten statt 1** — „Leistung" (W, measurement) + „Bezug
+  gesamt"/„Einspeisung gesamt" (kWh, energy, **total_increasing**, eigene `unique_id`).
+  HA schreibt die Statistik-Historie damit **selbst** mit.
+- **Live-Power war kaputt:** der State auf `<prefix>/power` war ein JSON-Objekt **ohne
+  `value_template`** → HA-Sensor las „unknown". Jetzt **Bare-Number**. Zusaetzlich gehen
+  die Zaehler als Bare-Number auf `<prefix>/import`/`/export`.
+- `store_sml_value()` ruft die Zaehler-Publisher **nur bei der eigenen Lesung** (kein
+  spuriöses 0 → das wuerde ein `total_increasing`-Sensor als Zaehler-Reset lesen).
+- `test/test_mqtt_bridge.c` (36 Checks) + Runner-Eintrag; `mqtt_publish.c` nur im
+  Receiver-Build. `sdkconfig.defaults`/`idf_component.yml` brauchten **keine** Aenderung
+  (esp-mqtt + cjson sind schon managed deklariert).
+
+**Verifikation:** Host-Suite gruen (exit 0); `tools/build.sh receiver` und `sender`
+lokal gruen; `strings build/receiver/...` zeigt `total_increasing`/`Bezug gesamt`,
+Sender-Image enthaelt **keine** MQTT-Strings. CI laeuft.
+
+**Hinweis:** Mein Parent-Chat (`8c2548251ad045599fbfb6f95f3e7944`) ist nicht mehr
+erreichbar — Status daher hier. **Nicht** angefasst: PR #9 (`mqtt_events.c`,
+Reboot-Event) bleibt unberuehrt/konfliktfrei.
 ## 2026-10-18 12:35 UTC · Fleet-Sub-Agent (Branch fix/history-backfill-errors, Commit 881ac98)
 
 **Thema: History-Dubletten nach Backfill — der letzte offene Punkt (`errors`).**
