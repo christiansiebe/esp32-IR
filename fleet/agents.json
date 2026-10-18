@@ -95,9 +95,12 @@
   },
   "52c2b110e5fd457e8ab4b938a4407351": {
    "name": "UX & Persistenz",
-   "open_tasks": 1,
-   "branch": "fleet/ux-persistence",
-   "note": "TODO: CSV-Upload blockiert HTTPD, storage_ready praezisieren, Sender-Zeitbasis"
+   "open_tasks": 0,
+   "branch": "fix/upload-offload-storage-ready",
+   "note": "FERTIG: CSV-Upload-Blockade gefixt - Async-Task + Batch-Queue an Backfill-Worker, storage_ready praezisiert, Sender-Zeitbasis. PR #31 gemerged (be1507d).",
+   "pr": [
+    31
+   ]
   }
  }
 }
