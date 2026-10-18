@@ -4,15 +4,13 @@
   "8c2548251ad045599fbfb6f95f3e7944": {
    "name": "parent (dieser Chat)",
    "open_tasks": 1,
-   "note": "koordiniert, haelt die Registry aktuell"
+   "note": "koordiniert, verteilt TODO-Aufgaben, pflegt die Registry"
   },
   "a3484f59487c4e6a9f1c5a40664506ba": {
    "name": "UTC-persist",
-   "open_tasks": 0,
-   "pr": [
-    16
-   ],
-   "note": "PR #16 gruen+mergeable, fertig"
+   "open_tasks": 1,
+   "pr": [],
+   "note": "NEU: letzte bekannte Zeit persistieren (TODO ~331); PR #16 war fertig"
   },
   "335a48a5e35442e69b8f1cb1c9321480": {
    "name": "TWDT",
@@ -20,7 +18,7 @@
    "pr": [
     10
    ],
-   "note": "PR #10 DRAFT + CONFLICTING: rebasen, Konflikte loesen, ready"
+   "note": "PR #10 rebasen (CONFLICTING) + TWDT-Worker anmelden (TODO ~310)"
   },
   "1b043863d80d41a08f7b161036f65649": {
    "name": "MQTT-reboot",
@@ -28,7 +26,7 @@
    "pr": [
     9
    ],
-   "note": "PR #9 DRAFT, gruen+mergeable: finalisieren, ready"
+   "note": "PR #9 finalisieren + MQTT-Service-Events Reboot-Grund (TODO ~336)"
   }
  }
 }
