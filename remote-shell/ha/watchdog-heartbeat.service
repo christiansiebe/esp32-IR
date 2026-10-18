@@ -1,0 +1,17 @@
+[Unit]
+Description=Write the external-watchdog heartbeat
+Documentation=file:/usr/local/share/remote-shell/WATCHDOG-GAP.md
+# Der Heartbeat muss laufen, sobald das System steht - auch waehrend ein
+# Nutzlast-Dienst haengt. Bewusst spaet im Boot und ohne Abhaengigkeit von
+# Netz/HA, damit ein HA-Hang den Heartbeat NICHT mitzieht.
+After=sysinit.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/watchdog-heartbeat.sh
+# Nie den ganzen Dienst killen, nur diese kurze Instanz.
+TimeoutStartSec=10
+
+[Install]
+WantedBy=multi-user.target
