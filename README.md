@@ -105,4 +105,14 @@ Read it before changing anything.
 
 ## License
 
-MIT. See `LICENSE`.
+The project's own source is **MIT** — see [`LICENSE`](LICENSE).
+
+Bundled third-party code keeps its own license:
+
+- [`components/sml_parser`](components/sml_parser) vendors
+  [`olliiiver/sml_parser`](https://github.com/olliiiver/sml_parser) 0.29 under
+  **LGPL-2.1**; the upstream `LICENSE` is kept in that directory. The SML
+  decoding therefore links an LGPL-2.1 library, not MIT code.
+- The managed components pulled by [`main/idf_component.yml`](main/idf_component.yml)
+  and ESP-IDF keep their upstream licenses: `espressif/mqtt` (Apache-2.0),
+  `espressif/cjson` (MIT), `espressif/mdns` (Apache-2.0) and ESP-IDF (Apache-2.0).

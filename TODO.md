@@ -210,8 +210,11 @@ Aus dem Event-Log rekonstruiert und gesichert.
 
 ### AMS-Reader-Vergleich (`amsreader-firmware`) — Übernahmen
 Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
-- [ ] **LICENSE + README** fehlen komplett (unabhängig, ~30 Min).
+- [x] **LICENSE + README** fehlen komplett (unabhängig, ~30 Min).
       Lizenz wählen (MIT/Apache für dieses Projekt); README mit Build-/Flash-Anleitung.
+      **Erledigt** (MIT `LICENSE` + `README.md` in `e350984`/PR #12, 2026-10-17);
+      README-Lizenzabschnitt um die Drittlizenzen ergänzt (LGPL-2.1 `sml_parser`,
+      Apache-2.0/MIT der Managed Components).
 - [x] **Persistenz-Migration** (echte Lücke, **erledigt** `4af921a`): `record_is_valid()`
       verwarf `format_version != POWER_HISTORY_VERSION` hart -> bei Versionssprung wurden **alle**
       Altbestände ungültig und `read`/`aggregate` übersprangen sie still (Datenverlust nach Update).
@@ -967,10 +970,15 @@ das **Drumherum**. Reihenfolge nach Nutzen/Aufwand (schnell → kompliziert).
 **⚠️ Lizenz-Falle zuerst:** `SMLReader`, `sml2mqtt`, `libsml` (volkszaehler) und
 `vzlogger` sind **GPL-3.0** → nur Konzepte/Lehren übernehmen, **keinen Code
 kopieren** (sonst wird das ganze Projekt GPL). `lrswss/esp32-sml-multi-reader`
-ist **Apache-2.0** (Code mit Namensnennung erlaubt). Lizenz des Projekts noch
-offen (s. u.) — **vor** dem Kopieren fremden Codes entscheiden.
+ist **Apache-2.0** (Code mit Namensnennung erlaubt). Lizenz des Projekts: **MIT**
+(entschieden, `LICENSE` + `README.md` seit `e350984`/PR #12) — Code-Übernahme aus
+Apache-2.0 ist damit möglich, GPL-3.0 bleibt tabu.
 
-- [ ] **Lizenz + README festlegen** (blockiert Code-Übernahme, ~30 Min).
+- [x] **Lizenz + README festlegen** (blockiert Code-Übernahme, ~30 Min).
+      **Erledigt:** MIT `LICENSE`, `README.md` (Build/Flash/OTA/Features/Backfill);
+      der README-Lizenzabschnitt nennt jetzt auch die **Drittlizenzen** des
+      mitgelieferten Codes (`components/sml_parser` = LGPL-2.1, Managed Components
+      = Apache-2.0/MIT), damit die Angabe ehrlich ist.
 - [ ] **CRC-Varianten (schnell, Lifestyle-Lehre aus `spacemanspiff2007/sml2mqtt`):**
       Nicht jeder Zähler nutzt den Standard-SML-CRC. Der **Holley DTZ541** verlangt
       die **Kermit-CRC** (Reflected 0x8408); sml2mqtt wählt die CRC automatisch.
