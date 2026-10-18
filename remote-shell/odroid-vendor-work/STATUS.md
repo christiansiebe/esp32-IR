@@ -43,12 +43,52 @@ Built at `/usr/src/rtl88x2bu-git`. Progress against kernel `7.1.8-edge-meson64`:
 | 4 | `halrf/halrf_psd.h` not found | fixed by #1 | done |
 | 5 | `struct pppoe_tag/hdr` member changes in `core/rtw_br_ext.c` | `CONFIG_BR_EXT = n` (NAT25/Internet-sharing only; irrelevant for AP+STA) | done |
 | 6 | driver `hmac_sha256` conflicts with kernel `crypto/sha2.h` | rename to `rtw_hmac_sha256` (word-boundary sed) | done |
-| 7 | **`cfg80211_ops` callbacks: kernel 7.x passes `struct wireless_dev *` (was `struct net_device *`), plus new `radio_idx`/`link_id` args** | retype the 12 callbacks + derive `ndev = wdev_to_ndev(wdev)` | **in progress (3 errors left)** |
+| 7 | **`cfg80211_ops` callbacks: kernel 7.x passes `struct wireless_dev *` (was `struct net_device *`), plus new `radio_idx`/`link_id` args** | retype the 12 callbacks + derive `ndev = wdev_to_ndev(wdev)`; `set_wiphy_params`/`set_tx_power`/`get_tx_power` gain `radio_idx` (+`link_id`); `cfg80211_new_sta`/`del_sta` now take `wdev` | **done** |
 
-Remaining errors after patch #7 (first pass):
-* 2x `initialization of 'int (*)(struct wiphy *...` (ops entries)
-* 1x `cfg_new_sta` incompatible pointer type
-* 1x `cfg_del_sta` incompatible pointer type
+### BUILD + LOAD SUCCEED (2026-10-18)
+
+**The module now builds AND loads on kernel 7.1.8.**
+
+Recipe (the two things that matter beyond the source patches above):
+1. **Build with the kernel's own compiler, GCC 14.2.0-19**, not the host GCC 12.
+   The kernel is built with `aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0` +
+   binutils 2.44. A GCC-12 module trips ftrace validation at load time
+   (`ftrace_call_adjust` warning + `kernel BUG at arch/arm64/kernel/patching.c`).
+   Armbian bookworm has no gcc-14, but **Docker does**: build inside
+   `debian:trixie-slim` (ships exactly GCC 14.2.0-19 + binutils 2.44).
+2. **`strip --strip-debug` the .ko** before insmod (the unstripped module is
+   77 MB of debug info; the stripped one is 6.5 MB and loads clean).
+
+Build command (on the board):
+```
+docker run --rm \
+  -v /usr/src/rtl88x2bu-git:/src \
+  -v /usr/src/linux-headers-$(uname -r):/lib/modules/$(uname -r)/build \
+  -w /src debian:trixie-slim sh -c '
+    apt-get update -qq && apt-get install -y -qq gcc make binutils bc \
+      libssl-dev libelf-dev flex bison kmod
+    make clean; make -j4 ARCH=arm64 KSRC=/lib/modules/$(uname -r)/build
+    strip --strip-debug 88x2bu.ko'
+```
+Note: with GCC 14 do **not** pass `CONFIG_CC_HAS_MIN_FUNCTION_ALIGNMENT=`
+(that override was only needed for GCC 12, which does not know
+`-fmin-function-alignment`).
+
+Result: `insmod` succeeds, `dmesg` shows
+`RTW: rtl88x2bu v5.13.1-30-g37e60b26a ... module init ret=0`.
+Working module backed up on the board:
+`/root/netbackup/88x2bu-gcc14-stripped-20261018-2008.ko`.
+
+Build log `/root/netbackup/vendor-build14.log` (GCC 12, builds but does not
+load); the loading build is the trixie/gcc-14 one.
+
+### Next: device takeover
+
+The USB dongle is `2357:0138` (TP-Link 802.11ac NIC, an RTL88x2BU). Our module
+lists that alias, but the **in-kernel `rtw88_8822bu` currently binds the
+device** (`/sys/bus/usb/drivers/rtw88_8822bu/2-1.1:1.0`). To hand it to the
+vendor driver: unbind from `rtw88_8822bu` (and unload it / blacklist it), then
+let `88x2bu` probe. Then test AP + STA concurrent.
 
 Patch scripts (in `remote-shell/odroid-vendor-work/`):
 * `patch-vendor.sh` / `patch-vendor2.sh` - #1-#4 (Makefile + timer shim)
