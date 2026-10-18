@@ -103,6 +103,12 @@ static bool parse_line(const char *line, size_t len, power_history_record_t *rec
     if (!parse_iso_utc(timestamp, &minute)) {
         return false;
     }
+    /* Reject a pre-2024 timestamp (1970 epoch / zero, i.e. a device that never
+     * had a wall clock): it is not a real measurement and would sort before
+     * every stored minute. Counted malformed by the caller. */
+    if (minute < POWER_HISTORY_MIN_VALID_UTC) {
+        return false;
+    }
     char *end = NULL;
     double average_w = strtod(watts, &end);
     if (end == watts) {

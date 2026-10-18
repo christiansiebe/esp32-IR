@@ -348,6 +348,12 @@ static bool write_records(power_history_record_t *records, size_t record_count)
     }
 
     for (size_t i = 0; i < record_count; ++i) {
+        /* A minute before the valid-clock bound (0 / 1970 without a wall clock)
+         * is not a real measurement and would sort before every stored minute;
+         * drop it so the time-ordered ring stays consistent. */
+        if (records[i].interval_start_utc < POWER_HISTORY_MIN_VALID_UTC) {
+            continue;
+        }
         /* Dedupe by minute against what is already stored (including records this
          * batch has already placed): a minute must exist only once. */
         if (minute_is_stored_geom(updated.next_slot, updated.record_count,
@@ -959,6 +965,10 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
                 ++skipped;
                 continue;
             }
+            if (records[i].interval_start_utc < POWER_HISTORY_MIN_VALID_UTC) {
+                ++skipped;
+                continue;
+            }
             power_history_record_t record = records[i];
             record.sequence = g_history_header.next_sequence;
             record.format_version = POWER_HISTORY_VERSION;
@@ -986,6 +996,12 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
         /* A restore must never push a live minute out of a full ring: drop the
          * imported record instead of the oldest stored one. */
         if (updated.record_count >= POWER_HISTORY_CAPACITY) {
+            ++skipped;
+            continue;
+        }
+        /* Same valid-clock guard as the live/merge path: a 0/1970 minute would
+         * sort before every stored minute and break the time-ordered ring. */
+        if (record.interval_start_utc < POWER_HISTORY_MIN_VALID_UTC) {
             ++skipped;
             continue;
         }
@@ -1087,6 +1103,9 @@ void power_history_get_status(power_history_status_t *status)
     }
     memset(status, 0, sizeof(*status));
     status->ready = g_history_ready;
+    /* `ready` is also true in the RAM-only fallback, so report the real
+     * persistence separately: only an open SPIFFS file survives a reboot. */
+    status->persistent = g_history_ready && g_history_file != NULL;
     if (g_history_ready && xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) == pdTRUE) {
         status->record_count = g_history_header.record_count;
         status->latest_sequence = g_history_header.next_sequence - 1u;

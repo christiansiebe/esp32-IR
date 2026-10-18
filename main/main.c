@@ -36,6 +36,7 @@
 #include "history_backfill.h"
 #include "history_sync.h"
 #include "history_csv_import.h"
+#include "history_upload.h"
 #include "json_escape.h"
 #include "link_fallback.h"
 #include "power_history.h"
@@ -1648,7 +1649,7 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .time_requests = time_requests,
         .batch_pending = batch_pending,
         .batch_missing = batch_missing,
-        .storage_ready = storage.ready ? 1 : 0,
+        .storage_ready = storage.persistent ? 1 : 0,
         .sleep_state = (uint8_t)g_sleep_state,
         .cpu_freq_mhz = current_freq_mhz,
         .cpu_freq_max_mhz = (uint8_t)(pm_config.max_freq_mhz > 0 ? pm_config.max_freq_mhz : 0),
@@ -3865,7 +3866,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 "\"aggregated\":true,\"window_hours\":%.2f,\"bucket_seconds\":%lld,"
                 "\"day_start_utc\":%lld,\"capacity\":%u,\"records\":[",
                 system_time_is_valid() ? "true" : "false",
-                status.ready ? "true" : "false",
+                status.persistent ? "true" : "false",
                 (unsigned int)current_sample_count_agg,
                 (unsigned long)status.oldest_sequence,
                 (unsigned long)status.latest_sequence,
@@ -3943,7 +3944,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
         "\"capacity\":%u,\"records\":[",
         system_time_is_valid() ? "true" : "false",
-        status.ready ? "true" : "false",
+        status.persistent ? "true" : "false",
         (unsigned int)current_sample_count,
         (unsigned long)status.oldest_sequence,
         (unsigned long)status.latest_sequence,
@@ -4114,76 +4115,188 @@ static esp_err_t db_refresh_handler(httpd_req_t *req)
     return httpd_resp_send(req, payload, len);
 }
 
-/* CSV restore upload ("verlorene Minuten aus dem Backup einspielen"). The body
- * is streamed line by line so a full-store backup (~29000 rows) never has to fit
- * in the heap; rows are parsed and appended in small sorted batches through
- * power_history_import_sorted(), which dedupes by minute and never evicts a live
- * minute from a full ring. */
-#define POWER_HISTORY_UPLOAD_BATCH 64
+/* CSV restore upload ("verlorene Minuten aus dem Backup einspielen").
+ *
+ * esp_http_server runs every URI handler on a single thread, so a large import
+ * done inline blocked the whole dashboard for minutes (the "interface offline
+ * after CSV upload" report: the dashboard poll, the /healthz self-probe and the
+ * liveness feed all queued behind the running handler). Two changes keep the
+ * HTTP task responsive:
+ *
+ *  1. The request is handed to a dedicated task with
+ *     httpd_req_async_handler_begin(), so the HTTP thread returns at once.
+ *  2. That task only parses; it hands each sorted batch to the backfill worker
+ *     (the single history writer) over a queue, so power_history's mutex and the
+ *     SPIFFS insert run on the worker, never on an HTTP thread.
+ *
+ * The body is streamed line by line (a full backup is ~29000 rows, far more than
+ * fits in the heap) by the pure, host-tested history_upload module. */
 #define POWER_HISTORY_MAX_UPLOAD_BYTES (8u * 1024u * 1024u)
+#define HISTORY_UPLOAD_TASK_STACK 4096
+#define HISTORY_UPLOAD_QUEUE_LEN 2u
+#define HISTORY_UPLOAD_QUEUE_TIMEOUT_MS 30000u
 
+/* One parsed batch handed from the upload task to the import worker. */
 typedef struct {
-    power_history_record_t batch[POWER_HISTORY_UPLOAD_BATCH];
-    size_t batch_count;
-    size_t parsed;
+    power_history_record_t records[HISTORY_UPLOAD_BATCH];
+    size_t count;
     size_t imported;
-    size_t duplicates;
-    size_t malformed;
-    int64_t last_utc;
-    bool have_last;
-    bool unsorted;
-    bool first_line;
-} csv_upload_state_t;
+    size_t skipped;
+    bool ok;
+    volatile bool *done;
+} history_upload_batch_t;
 
-static void csv_upload_flush(csv_upload_state_t *state)
+/* Upload-task state. Heap-allocated (the accumulator alone is ~2 kB), so the
+ * upload task stack only needs room for locals. */
+typedef struct {
+    history_upload_t upload;
+    history_upload_batch_t xfer;
+    volatile bool xfer_done;
+} history_upload_ctx_t;
+
+/* Handed to the backfill worker, which is the single history writer. */
+static QueueHandle_t g_history_upload_queue;
+
+/* True while a CSV-restore upload is streaming. The backfill worker skips its
+ * (long, ESP-NOW bound) sync session while set, so a batch handed over mid-run
+ * is imported within the upload task's wait window instead of timing out. */
+static volatile bool g_history_upload_active;
+
+/* Runs on the backfill worker: import one parsed batch under the store lock.
+ * Because it is the same task as the periodic merge, the two can never race. */
+static void history_upload_import_batch(history_upload_batch_t *batch)
 {
-    if (state->batch_count == 0) {
-        return;
-    }
-    history_csv_sort(state->batch, state->batch_count);
     size_t imported = 0;
     size_t skipped = 0;
-    if (power_history_import_sorted(state->batch, state->batch_count,
-                                    &imported, &skipped) == ESP_OK) {
-        state->imported += imported;
-        state->duplicates += skipped;
+    batch->ok = (power_history_import_sorted(batch->records, batch->count,
+                                             &imported, &skipped) == ESP_OK);
+    batch->imported = imported;
+    batch->skipped = skipped;
+    if (batch->done != NULL) {
+        *batch->done = true;
     }
-    state->batch_count = 0;
 }
 
-static void csv_upload_line(csv_upload_state_t *state, const char *line, size_t len)
+/* Runs on the upload task: history_upload calls this for every full batch. It
+ * blocks until the worker has imported the batch, so the transfer buffer is
+ * never overwritten while in use and the returned counts are the store's. */
+static bool history_upload_flush_cb(void *ctx, power_history_record_t *records,
+                                    size_t count, size_t *imported_out,
+                                    size_t *skipped_out)
 {
-    bool blank = true;
-    for (size_t k = 0; k < len; ++k) {
-        if (line[k] != ' ' && line[k] != '\t' && line[k] != '\r') {
-            blank = false;
+    history_upload_ctx_t *u = (history_upload_ctx_t *)ctx;
+    if (u == NULL || count > HISTORY_UPLOAD_BATCH) {
+        return false;
+    }
+    memcpy(u->xfer.records, records, count * sizeof(records[0]));
+    u->xfer.count = count;
+    u->xfer.imported = 0;
+    u->xfer.skipped = 0;
+    u->xfer.ok = false;
+    u->xfer.done = &u->xfer_done;
+    u->xfer_done = false;
+
+    history_upload_batch_t *batch = &u->xfer;
+    if (xQueueSend(g_history_upload_queue, &batch,
+                   pdMS_TO_TICKS(HISTORY_UPLOAD_QUEUE_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "CSV upload: import queue full");
+        return false;
+    }
+    uint32_t waited = 0;
+    while (!u->xfer_done && waited < HISTORY_UPLOAD_QUEUE_TIMEOUT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+        waited += 5;
+    }
+    if (!u->xfer_done) {
+        ESP_LOGE(TAG, "CSV upload: import timed out");
+        return false;
+    }
+    if (imported_out != NULL) {
+        *imported_out = u->xfer.imported;
+    }
+    if (skipped_out != NULL) {
+        *skipped_out = u->xfer.skipped;
+    }
+    return u->xfer.ok;
+}
+
+static void power_history_upload_task(void *arg)
+{
+    httpd_req_t *req = (httpd_req_t *)arg;
+    history_upload_ctx_t *u = calloc(1, sizeof(*u));
+    if (u == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Out of memory for the CSV upload");
+        httpd_req_async_handler_complete(req);
+        vTaskDelete(NULL);
+        return;
+    }
+    history_upload_init(&u->upload, history_upload_flush_cb, u);
+
+    char chunk[256];
+    size_t remaining = (size_t)req->content_len;
+    bool read_ok = true;
+    while (remaining > 0) {
+        size_t want = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        int got = httpd_req_recv(req, chunk, want);
+        if (got == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (got <= 0) {
+            read_ok = false;
             break;
         }
-    }
-    if (blank) {
-        return;
-    }
-    power_history_record_t record;
-    if (!history_csv_parse_line(line, len, &record)) {
-        /* The first non-blank line may be the column header; only later bad
-         * rows are counted as malformed. */
-        if (!state->first_line) {
-            ++state->malformed;
+        remaining -= (size_t)got;
+        history_upload_feed(&u->upload, chunk, (size_t)got);
+        if (u->upload.aborted) {
+            read_ok = false;
+            break;
         }
-        state->first_line = false;
-        return;
+        /* Keep the liveness guard happy and let lower-priority work run: this
+         * task can stream for a while on a large backup. */
+        liveness_note_alive();
+        vTaskDelay(1);
     }
-    state->first_line = false;
-    ++state->parsed;
-    if (state->have_last && record.interval_start_utc < state->last_utc) {
-        state->unsorted = true;
+    if (read_ok && !u->upload.aborted) {
+        history_upload_finish(&u->upload);
     }
-    state->last_utc = record.interval_start_utc;
-    state->have_last = true;
-    state->batch[state->batch_count++] = record;
-    if (state->batch_count == POWER_HISTORY_UPLOAD_BATCH) {
-        csv_upload_flush(state);
+
+    power_history_status_t status;
+    power_history_get_status(&status);
+    const history_upload_t *up = &u->upload;
+
+    char payload[352];
+    int len = -1;
+    if (!read_ok) {
+        len = snprintf(payload, sizeof(payload),
+                       "{\"error\":\"Could not read CSV body\",\"parsed\":%lu}",
+                       (unsigned long)up->parsed);
+        if (len > 0 && (size_t)len < sizeof(payload)) {
+            httpd_resp_set_status(req, "400 Bad Request");
+        }
+    } else {
+        len = snprintf(payload, sizeof(payload),
+                       "{\"parsed\":%lu,\"imported\":%lu,\"duplicates\":%lu,"
+                       "\"malformed\":%lu,\"unsorted\":%s,\"record_count\":%lu,"
+                       "\"capacity\":%u,\"persistent\":%s}",
+                       (unsigned long)up->parsed, (unsigned long)up->imported,
+                       (unsigned long)up->duplicates, (unsigned long)up->malformed,
+                       up->unsorted ? "true" : "false",
+                       (unsigned long)status.record_count, POWER_HISTORY_CAPACITY,
+                       status.persistent ? "true" : "false");
     }
+    if (len < 0 || (size_t)len >= sizeof(payload)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "CSV upload result too large");
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        (void)httpd_resp_send(req, payload, len);
+    }
+    free(u);
+    httpd_req_async_handler_complete(req);
+    g_history_upload_active = false;
+    vTaskDelete(NULL);
 }
 
 static esp_err_t power_history_upload_handler(httpd_req_t *req)
@@ -4200,69 +4313,25 @@ static esp_err_t power_history_upload_handler(httpd_req_t *req)
                                       "CSV exceeds the upload limit");
     }
 
-    csv_upload_state_t state;
-    memset(&state, 0, sizeof(state));
-    state.first_line = true;
-
-    char line[192];
-    size_t line_len = 0;
-    bool line_overflow = false;
-    char chunk[256];
-    size_t remaining = (size_t)req->content_len;
-
-    while (remaining > 0) {
-        size_t want = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
-        int got = httpd_req_recv(req, chunk, want);
-        if (got == HTTPD_SOCK_ERR_TIMEOUT) {
-            continue;
-        }
-        if (got <= 0) {
-            return send_http_error_status(req, "400 Bad Request",
-                                          "Could not read CSV body");
-        }
-        remaining -= (size_t)got;
-        for (int i = 0; i < got; ++i) {
-            char c = chunk[i];
-            if (c == '\n') {
-                if (line_overflow) {
-                    ++state.malformed;
-                } else {
-                    csv_upload_line(&state, line, line_len);
-                }
-                line_len = 0;
-                line_overflow = false;
-            } else if (line_len < sizeof(line) - 1) {
-                line[line_len++] = c;
-            } else {
-                line_overflow = true;
-            }
-        }
+    /* Hand the request to its own task and return immediately, so the single
+     * HTTP thread keeps serving the dashboard and /healthz while the (large)
+     * body is read and imported. */
+    httpd_req_t *copy = NULL;
+    esp_err_t err = httpd_req_async_handler_begin(req, &copy);
+    if (err != ESP_OK || copy == NULL) {
+        return send_http_error_status(req, "500 Internal Server Error",
+                                      "Could not start the CSV import");
     }
-    if (line_overflow) {
-        ++state.malformed;
-    } else if (line_len != 0) {
-        csv_upload_line(&state, line, line_len);
+    g_history_upload_active = true;
+    if (xTaskCreate(power_history_upload_task, "csv_upload",
+                    HISTORY_UPLOAD_TASK_STACK, copy, 3, NULL) != pdPASS) {
+        g_history_upload_active = false;
+        httpd_req_async_handler_complete(copy);
+        return send_http_error_status(req, "500 Internal Server Error",
+                                      "Could not start the CSV import task");
     }
-    csv_upload_flush(&state);
-
-    power_history_status_t status;
-    power_history_get_status(&status);
-
-    char payload[320];
-    int len = snprintf(payload, sizeof(payload),
-                       "{\"parsed\":%lu,\"imported\":%lu,\"duplicates\":%lu,"
-                       "\"malformed\":%lu,\"unsorted\":%s,\"record_count\":%lu,"
-                       "\"capacity\":%u}",
-                       (unsigned long)state.parsed, (unsigned long)state.imported,
-                       (unsigned long)state.duplicates, (unsigned long)state.malformed,
-                       state.unsorted ? "true" : "false",
-                       (unsigned long)status.record_count, POWER_HISTORY_CAPACITY);
-    if (len < 0 || (size_t)len >= sizeof(payload)) {
-        return ESP_FAIL;
-    }
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, payload, len);
+    /* The import task owns the async request copy and sends the response. */
+    return ESP_OK;
 }
 
 static esp_err_t rssi_api_handler(httpd_req_t *req)
@@ -4683,7 +4752,9 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         "records: %u / %u\n"
         "sequence: oldest %u, latest %u\n"
         "write errors: %u, queue drops: %u\n",
-        status.ready ? "ready" : "unavailable",
+        !status.ready ? "unavailable"
+                      : (status.persistent ? "ready (SPIFFS)"
+                                           : "RAM fallback (not persistent)"),
         (unsigned int)status.record_count, (unsigned int)POWER_HISTORY_CAPACITY,
         (unsigned int)status.oldest_sequence,
         (unsigned int)status.latest_sequence,
@@ -5848,6 +5919,24 @@ static void history_backfill_worker(void *arg)
     history_sync_cursor_load();
     vTaskDelay(pdMS_TO_TICKS(15000));
     while (1) {
+        /* Drain any CSV-restore batches first: the upload task blocks until the
+         * batch is imported, so it must not wait behind a whole sync session. */
+        history_upload_batch_t *batch = NULL;
+        while (xQueueReceive(g_history_upload_queue, &batch, 0) == pdTRUE) {
+            if (batch != NULL) {
+                history_upload_import_batch(batch);
+            }
+        }
+
+        /* A CSV restore is streaming: keep draining its batches and skip the
+         * (long) sync session so a batch never waits behind one. The restore
+         * finishes in seconds to a few minutes; the periodic sync resumes after. */
+        if (g_history_upload_active) {
+            liveness_note_alive();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
         bool forced;
         bool caught_up;
         portENTER_CRITICAL(&g_history_backfill_lock);
@@ -5867,7 +5956,9 @@ static void history_backfill_worker(void *arg)
             (void)history_backfill_run_session(HISTORY_BACKFILL_MAX_PAGES, NULL, NULL);
         }
         liveness_note_alive();
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        /* Short poll so a CSV batch handed over mid-idle is imported promptly
+         * (the upload task blocks on it); the 5 s sync cadence is unchanged. */
+        vTaskDelay(pdMS_TO_TICKS(250));
     }
 }
 
@@ -7893,6 +7984,13 @@ void app_main(void)
     /* Same command set on the USB serial monitor (UART0), so the receiver can
      * be driven locally even if the dashboard is unreachable. */
     serial_console_start();
+    /* Queue that carries CSV-restore batches from the upload task to the single
+     * history writer (the backfill worker below). */
+    g_history_upload_queue = xQueueCreate(HISTORY_UPLOAD_QUEUE_LEN,
+                                          sizeof(history_upload_batch_t *));
+    if (g_history_upload_queue == NULL) {
+        ESP_LOGE(TAG, "Could not create the CSV import queue");
+    }
     BaseType_t backfill_result = xTaskCreate(history_backfill_worker, "hist_backfill",
                                              4096, NULL, 3, NULL);
     if (backfill_result != pdPASS) {

@@ -102,17 +102,21 @@ static void test_capacity_limit(void)
 
 static void test_epoch_edge_cases(void)
 {
+    /* A 1970 (epoch-zero) stamp is a device that never had a wall clock; it is
+     * rejected so it can never sort before every real minute. The valid edge
+     * dates around a non-leap and a leap February must still parse exactly. */
     const char *csv =
+        "sequence,interval_start_ms,average_w,sample_count,reason\n"
         "1,1970-01-01T00:00:00Z,0,0,none\n"
         "2,2026-02-28T23:59:00Z,1,1,none\n"
         "3,2028-02-29T12:00:00Z,1,1,none\n";
     power_history_record_t records[4];
     size_t skipped = 0;
     size_t n = parse(csv, records, 4, &skipped);
-    CHECK(n == 3, "edge timestamps parse");
-    CHECK(records[0].interval_start_utc == 0LL, "epoch zero");
-    CHECK(records[1].interval_start_utc == 1772323140LL, "non-leap end of February");
-    CHECK(records[2].interval_start_utc == 1835438400LL, "leap day 2028");
+    CHECK(n == 2, "the 1970 row is rejected, the valid edge dates parse");
+    CHECK(skipped == 1, "the pre-2024 row counted skipped");
+    CHECK(records[0].interval_start_utc == 1772323140LL, "non-leap end of February");
+    CHECK(records[1].interval_start_utc == 1835438400LL, "leap day 2028");
 }
 
 static void test_sort(void)
