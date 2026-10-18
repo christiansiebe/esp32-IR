@@ -170,6 +170,19 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_link_fallback"
 
+# Sender parser stall recovery: a wedged SML parser (bytes arriving, no telegram
+# finalised) must be reset by a timer armed by the first byte of the capture, not
+# by a telegram - the old rule left a wedge on the first telegram of a boot
+# permanent, which is the live "sender delivers no values" bug. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/uart_recovery.c" \
+    "$here/test_uart_recovery.c" \
+    -o "$out/test_uart_recovery"
+
+"$out/test_uart_recovery"
+
 # Receiver-side backfill merge bookkeeping (window/presence/dedupe). Pure C.
 "$cc" -std=c11 -Wall -Wextra -O2 \
     -Wno-unused-variable -Wno-unused-const-variable \

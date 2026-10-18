@@ -164,6 +164,13 @@ bool uart_sleep_init_idf(void);
  * the feature is compiled out. */
 void uart_sleep_espnow_power_save_enable(void);
 
+/* Undo the ESP-NOW modem sleep (WIFI_PS_NONE + no wake window) so the radio
+ * stays awake. Called by the link fallback: turning off light sleep alone does
+ * NOT restore the proven mode if the image was built with
+ * CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE, because the radio would keep cycling.
+ * Idempotent; a no-op when the feature is compiled out. */
+void uart_sleep_espnow_power_save_disable(void);
+
 /* Result of the last uart_sleep_espnow_power_save_enable() call as an int
  * (0 == ESP_OK), for diagnostics. Kept as int so the header stays free of
  * IDF includes (it is also used by the host tests). */
