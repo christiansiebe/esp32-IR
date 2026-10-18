@@ -1,0 +1,6 @@
+[Unit]
+Description=Boot journal heartbeat (last known uptime before a reset)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/sbin/boot_journal.py heartbeat

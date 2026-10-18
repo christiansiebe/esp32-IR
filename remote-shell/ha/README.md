@@ -19,6 +19,19 @@ tree (`main/`, `components/`, `tools/`, `test/`). The CI path filter
 All three run **inside** the Home Assistant container so they can read
 `/config/.storage` (gateway credentials, admin token) and the recorder DB.
 
+## Odroid crash-survival tools (outside the HA container)
+
+- `gen_ramoops_dts.py`, `ramoops.dts`, `deploy_ramoops.sh`, `revert_ramoops.sh`,
+  `test_gen_ramoops_dts.py` + `RAMOOPS-README.md` — a ramoops/pstore region
+  (`0x50000000`, in the free window `0x40000000..0xdfd2dfff`) so a kernel panic
+  survives a warm reset. The address is checked against the known reservations
+  (secmon, kernel, CMA, framebuffer) by the host test.
+- `boot_journal.py`, `boot_journal_lib.py`, `boot-journal.service`,
+  `boot-journal-heartbeat.service`/`.timer`, `deploy_boot_journal.sh` +
+  `BOOT-JOURNAL-README.md` — classify the reset reason from pstore and keep a
+  heartbeat of the last known uptime. `classify_reset()` and the pstore dedupe
+  (`consumed_pstore_mtime`, monotonic) are pure functions with host tests.
+
 ## Gateway backfill
 
 HA only records from the day the `bosch_k40rf` integration was configured, so

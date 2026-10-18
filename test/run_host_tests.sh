@@ -302,3 +302,10 @@ ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_parser_golden"
 # corrupted, truncated, adversarial and boundary inputs must never crash or be
 # accepted as consistent records.
 "$here/stability/run_stability.sh"
+
+# Odroid ramoops/pstore + boot journal (pure Python, no board): the ramoops DT
+# generator, the boot-journal reset classifier and the pstore dedupe logic.
+python3 "$repo/remote-shell/ha/test_gen_ramoops_dts.py"
+python3 "$repo/remote-shell/ha/test_boot_journal_lib.py"
+python3 "$repo/remote-shell/ha/test_boot_journal_pstore.py"
+python3 "$repo/remote-shell/ha/test_boot_journal_flow.py"

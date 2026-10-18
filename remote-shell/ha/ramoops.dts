@@ -1,0 +1,25 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Reserves RAM for pstore/ramoops so a kernel panic survives a warm
+ * reset. 0x50000000 lies in the free DRAM window 0x40000000..0xdfd2dfff
+ * (see the generator docstring for the collision analysis).
+ */
+/ {
+    fragment@0 {
+        target-path = "/reserved-memory";
+        __overlay__ {
+            #address-cells = <0x2>;
+            #size-cells = <0x2>;
+
+            ramoops@50000000 {
+                compatible = "ramoops";
+                reg = <0x0 0x50000000 0x0 0x100000>;
+                record-size = <0x20000>;
+                console-size = <0x20000>;
+                max-reason = <0x2>;
+            };
+        };
+    };
+};
