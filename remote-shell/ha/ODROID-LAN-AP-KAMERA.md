@@ -11,7 +11,9 @@ Grundlage (Messwerte, hier **nicht** wiederholt):
 Kurz-Ist (aus dem Recon):
 `end0` = NO-CARRIER (Kabel steckt am AP), WLAN-STA `wlxdc627949ba79`
 (USB `rtw88_8822bu`) ist UP auf `192.168.178.71`, Default-Route via
-`192.168.178.1` (FRITZ!Box). `hostapd`/`dnsmasq` fehlen, sind aber installierbar.
+`192.168.178.1` (FRITZ!Box). `hostapd`/`dnsmasq` waren beim Recon noch nicht
+installiert (inzwischen am Board installiert und **maskiert**, starten nicht von
+selbst — siehe `WLAN-TREIBER-ANALYSE.md`).
 `net.ipv4.ip_forward=1` ist **schon** gesetzt. `/dev/video0` ist **keine**
 Kamera, nur der Amlogic-Decoder.
 
@@ -49,6 +51,19 @@ STA-Verbindung. Ohne vorher verifizierten `end0`-Uplink ist der Odroid danach
 > **nicht garantiert**. Dieser Plan nimmt deshalb bewusst an: **ein Funkmodul =
 > eine Rolle (AP)**. Wer AP+STA testen will, macht das erst *nach* dem
 > end0-Uplink und mit Rückfallebene (Abschnitt 6).
+>
+> **Nachtrag (2026-10-18, am Board gemessen — siehe
+> [`WLAN-TREIBER-ANALYSE.md`](WLAN-TREIBER-ANALYSE.md)):** AP+STA auf demselben
+> Stick ist mit `rtw88_8822bu` **definitiv unmöglich** (`interface combinations
+> are not supported`; ein zweites VIF lässt sich nicht hochfahren). Der
+> Test-VIF-Versuch hat die STA-Verbindung **nicht** gekappt, das Board war also
+> nie in Gefahr. Für die Zielarchitektur (**`end0`-Uplink + WLAN-AP**) reicht
+> der vorhandene Stick: das sind **zwei verschiedene Geräte**, kein VIF-Problem.
+> Ein AP **ohne** Kabel (WLAN-AP **und** WLAN-STA gleichzeitig) braucht dagegen
+> einen **zweiten Funk-Adapter auf MediaTek-Basis** (mt7612u/mt7921au, mt76
+> in-kernel vorhanden) — das ist eine Chip-, keine Treiberfrage.
+> `hostapd`/`dnsmasq` sind inzwischen **installiert und maskiert** (starten
+> nicht von selbst), bereit für die echte Konfiguration.
 
 ---
 
@@ -444,6 +459,9 @@ table ip odroid_ap {
 
 - Recon: `remote-shell/ha/ODROID-NETZ-RECON.md` (Branch
   `feat/dfs-clock-visibility`).
+- WLAN-Treiber/AP+STA: `remote-shell/ha/WLAN-TREIBER-ANALYSE.md` (Branch
+  `feat/dfs-clock-visibility`) — belegt: `rtw88_8822bu` kann kein AP+STA; für
+  AP ohne Kabel braucht es einen MediaTek-Adapter (mt7612u/mt7921au).
 - HA-Integrationen: ONVIF, Generic Camera (HA-Dokumentation).
 - hostapd: `hw_mode`, `channel`, `wpa_passphrase`, `ieee80211h` (DFS).
 - dnsmasq: `dhcp-range`, `dhcp-option`, `interface`, `bind-interfaces`.
