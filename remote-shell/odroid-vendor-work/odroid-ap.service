@@ -1,0 +1,18 @@
+[Unit]
+Description=Odroid standalone Access Point (SSID "Odroid", in-kernel rtw88)
+Documentation=file:/root/README-remote-shell.md
+After=network-online.target
+Wants=network-online.target
+# Only start when the LAN cable is present (see the guard in odroid-ap.sh).
+ConditionPathExists=/sys/class/net/end0
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/iw dev ap0 del
+ExecStart=/usr/local/sbin/odroid-ap.sh
+Restart=always
+RestartSec=5
+# hostapd runs in the foreground; killing it tears the VIF down.
+
+[Install]
+WantedBy=multi-user.target
