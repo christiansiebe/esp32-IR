@@ -458,3 +458,20 @@ Host-Suite grün, beide Rollen bauen (`tools/build.sh receiver|sender`).
 - CI läuft auf `4b9819e`.
 - `TASKS.json`: alle Punkte **done**. `fleet/agents.json` existiert in dieser Sandbox
   nicht (kein `/workspace/fleet/`) — an Parent gemeldet.
+
+### 2026-10-18 (Fleet): PR #26 gemerged — Aufgabe abgeschlossen
+
+- **PR #26 ist in `main` gemerged** (Merge-Commit `0a91f83`, 22:30 UTC):
+  `feat(history): persist the last known wall clock and seed it on boot`.
+- CI auf dem Merge-Commit **grün**: Build receiver / receiver-apoff / sender +
+  Host tests — alle `success`.
+- `main` enthält jetzt `main/wall_clock.{c,h}` und `main/wall_clock_store.{c,h}`;
+  der `TODO.md`-Punkt „Letzte bekannte Zeit persistieren" (~Zeile 311) steht auf
+  `[x]`.
+- `storage`-Partition auf `main` unverändert: `0x320000, 0xE0000`. On-Disk-Format
+  unverändert (kein `POWER_HISTORY_VERSION`-Bump).
+- `TASKS.json`: **0 offen**. `fleet/agents.json`: `status: "done"`,
+  `open_tasks: 0`, `pr_state: "merged"`.
+
+Damit ist die Wall-Clock-Persistenz vollständig gelandet; **keine offene Aufgabe
+mehr** in diesem Chat.
