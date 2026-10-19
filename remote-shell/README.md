@@ -26,11 +26,15 @@ Helfer global installiert (`/usr/local/bin/oh`). Text **ohne Anfuehrungszeichen*
 oh Fuehre hostname und pwd aus und gib das Ergebnis zurueck
 oh -n starte eine frische Unterhaltung
 oh -w /root arbeite in /root
+oh -s arbeit ...   # eigene Session -> mehrere Chats parallel
 ```
-`oh` setzt ohne `-n` die letzte Conversation fort (`/root/.oh-last-conv`) und zeigt
-die Terminal-Befehle und die Antwort des Agenten. Quelle: `remote-shell/oh.sh`.
+`oh` setzt ohne `-n` die letzte Conversation fort (`/root/.oh-last-conv`); mit `-s NAME`
+bekommt die Session ein eigenes State-File (`/root/.oh-conv-NAME`), sodass mehrere
+Unterhaltungen **gleichzeitig** laufen. Es zeigt die Terminal-Befehle und die Antwort
+des Agenten. Quelle: `remote-shell/oh.sh`.
 Von der Sandbox aus: `bash cmd_send.sh "oh hostname und pwd ausfuehren" 120`.
-Achtung: ein laufendes `oh` blockiert den (sequenziellen) Kanal bis zu ~4 min.
+Achtung: der Kanal ist **sequenziell** — ein laufendes `oh` blockiert weitere
+`cmd_send.sh`-Aufrufe bis zu ~4 min. Lange Auftraege daher mit `nohup ... &` starten.
 
 Der Odroid zeigt den Befehl und fuehrt ihn nach **lokaler Bestaetigung** aus.
 Lange Laeufe: Timeout via `SANDBOX_TERM_CMD_TIMEOUT` (Default 300 s) — oder am Odroid
