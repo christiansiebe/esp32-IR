@@ -745,4 +745,10 @@ CHAT-THREAD). Keine offene Arbeit im Odroid-Zweig.
   (Python `fullmatch`); `python3 .*` + `bash .*` -> alles ueber `bash -lc '...'`
   ausfuehrbar (root). Direkte Befehle (z.B. `ls /root`) werden abgelehnt, immer
   in `bash -lc` wrappen.
+- **cmd_send.sh (2026-10-19):** wrappt blanke Befehle jetzt SELBST in
+  `bash -lc '...'` -> man tippt `cmd_send.sh "hostname; pwd"` ohne Wrapper.
+  Ausnahmen: `bash .*`/`python3 .*`/`@read`/`@write` unveraendert; Praefix
+  `raw:` schaltet das Wrapping ab. Backup `cmd_send.sh.bak-20261019-175410`,
+  in GitHub committet (`cline/power-history-diag`, Commit `b5f8aca`).
+  `/workspace` selbst ist KEIN Git-Repo.
 
