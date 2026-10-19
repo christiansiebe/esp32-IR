@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# oh.sh - Text in normaler Sprache an den lokalen OpenHands-Agenten auf dem Odroid.
+# oh - Text in normaler Sprache an den lokalen OpenHands-Agenten auf dem Odroid.
 #
-#   oh.sh "Fuehre hostname aus und gib das Ergebnis zurueck"
-#   oh.sh -n "starte eine frische Unterhaltung"
-#   oh.sh -w /root "arbeite in /root"
+#   oh Fuehre hostname aus und gib das Ergebnis zurueck
+#   oh -n starte eine frische Unterhaltung
+#   oh -w /root arbeite in /root
 #
-# Gibt die Antwort des Agenten und die benutzten Terminal-Befehle aus.
-# Der Agent laeuft auf http://127.0.0.1:8000 (openhands-agent.service).
+# Text darf OHNE Anfuehrungszeichen getippt werden (alle Woerter werden
+# zusammengefuegt). Gibt die Antwort des Agenten und die benutzten
+# Terminal-Befehle aus. Der Agent laeuft auf http://127.0.0.1:8000.
 set -euo pipefail
 
 OH_BASE="${OH_BASE:-http://127.0.0.1:8000}"
@@ -19,11 +20,12 @@ while getopts "nw:" _o; do
   case "$_o" in
     n) OH_NEW=1 ;;
     w) OH_WD="$OPTARG" ;;
-    *) echo "Nutzung: oh.sh [-n] [-w ARBEITSVERZEICHNIS] \"Aufgabe\"" >&2; exit 2 ;;
+    *) echo "Nutzung: oh [-n] [-w ARBEITSVERZEICHNIS] Aufgabe in Worten" >&2; exit 2 ;;
   esac
 done
 shift $((OPTIND - 1))
-TEXT="${1:?Aufgabentext fehlt.  Beispiel: oh.sh \"hostname und pwd ausfuehren\"}"
+TEXT="$*"
+[ -n "$TEXT" ] || { echo "Aufgabentext fehlt.  Beispiel: oh hostname und pwd ausfuehren" >&2; exit 2; }
 
 OH_BASE="$OH_BASE" OH_AID="$OH_AID" OH_STATE="$OH_STATE" \
 OH_NEW="$OH_NEW" OH_WD="$OH_WD" OH_TEXT="$TEXT" python3 -u - <<'PY'
