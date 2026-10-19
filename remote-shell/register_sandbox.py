@@ -43,6 +43,31 @@ def _registry_payload(data):
     return data
 
 
+# TTL: Eintraege aelter als N Stunden gelten als tot (Sandbox beendet) und
+# werden beim naechsten Schreiben entfernt. Verhindert, dass sich das Register
+# mit toten Sandboxes fuellt (der Odroid verbindet sich sonst endlos zu ihnen).
+REGISTRY_TTL_HOURS = int(os.environ.get("SANDBOX_REGISTRY_TTL_HOURS", "12"))
+
+
+def _parse_ts(ts):
+    try:
+        return time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _prune_stale(data, keep_id):
+    """Tote Eintraege (aelter als TTL) entfernen; keep_id nie entfernen."""
+    now = time.time()
+    ttl = REGISTRY_TTL_HOURS * 3600
+    kept = {}
+    for k, v in data.get("sandboxes", {}).items():
+        if k == keep_id or (now - _parse_ts(v.get("updated", ""))) < ttl:
+            kept[k] = v
+    data["sandboxes"] = kept
+    return data
+
+
 def api(method, path, token, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(API + path, data=data, method=method)
@@ -84,6 +109,7 @@ def main():
             except Exception:
                 pass
         data["sandboxes"][rid] = {"url": url, "updated": data["updated"]}
+        _prune_stale(data, rid)
         _registry_payload(data)
         import base64
         body = {
