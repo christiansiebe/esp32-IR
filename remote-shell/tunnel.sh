@@ -28,10 +28,14 @@ PATTERN='https://[a-z0-9-]+\.(serveousercontent\.com|lhr\.life|trycloudflare\.co
 mkdir -p "$RUN"
 
 alive() {
-  local pid
+  local pid state
   pid="$(cat "$PIDFILE" 2>/dev/null || true)"
   [ -n "$pid" ] || return 1
-  grep -q '^ssh$' "/proc/$pid/comm" 2>/dev/null
+  # Zombies zaehlen NICHT als lebendig: in diesem Container reapt PID 1 keine
+  # Kinder, getoetete ssh-Prozesse bleiben als 'Z' stehen (kill(0) gelingt dann
+  # trotzdem). Ohne diese Pruefung startet der Watcher den Tunnel nie neu.
+  state="$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null | cut -d' ' -f1)"
+  [ -n "$state" ] && [ "$state" != "Z" ]
 }
 
 http_get_ok() {
@@ -48,8 +52,14 @@ http_get_ok() {
 
 start() {
   if alive; then
-    echo "Tunnel laeuft bereits (PID $(cat "$PIDFILE")): $(cat "$URLFILE" 2>/dev/null)"
-    return 0
+    if http_get_ok; then
+      echo "Tunnel laeuft bereits (PID $(cat "$PIDFILE")): $(cat "$URLFILE" 2>/dev/null)"
+      return 0
+    fi
+    # Prozess lebt, aber der Forward ist tot (serveo-Expiry, haengende Session).
+    echo "Forward tot - starte Tunnel neu."
+    kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    sleep 1
   fi
   rm -f "$URLFILE"
   # Nur NEUE Logzeilen auswerten: die Datei wird angehaengt, sonst wuerde die
@@ -86,7 +96,12 @@ case "${1:-status}" in
   status)
     if alive; then
       echo "Tunnel laeuft (PID $(cat "$PIDFILE")): $(cat "$URLFILE" 2>/dev/null)"
-      http_get_ok && echo "HTTP-Probe: ok" || echo "HTTP-Probe: fehlgeschlagen"
+      if http_get_ok; then
+        echo "HTTP-Probe: ok"
+      else
+        echo "HTTP-Probe: fehlgeschlagen"
+        exit 1        # sonst haelt der Watcher einen toten Forward fuer gesund
+      fi
     else
       echo "Tunnel laeuft NICHT."; exit 1
     fi ;;
