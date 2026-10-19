@@ -752,3 +752,35 @@ CHAT-THREAD). Keine offene Arbeit im Odroid-Zweig.
   in GitHub committet (`cline/power-history-diag`, Commit `b5f8aca`).
   `/workspace` selbst ist KEIN Git-Repo.
 
+## oh.sh: Text-Eingabe fuer den Odroid-Agenten (2026-10-19)
+- Der Odroid-Agent-Server (v1.56.0) hat **kein Web-UI** (`/canvas`,`/docs` = 404;
+  `/` = JSON). Text in normaler Sprache geht nur per API.
+- **Helfer `/root/oh.sh`** (im Repo `remote-shell/oh.sh`, Commit `bbfb0f47dc`):
+  - `oh.sh "Aufgabe in Worten"` -> setzt die letzte Conversation fort
+    (`/root/.oh-last-conv`), `-n` = neue Conversation, `-w DIR` = cwd (Default /root).
+  - Nutzt `POST /api/conversations` (agent_profile_id, LocalWorkspace) +
+    `POST /api/conversations/{id}/events` (`{"role":"user","content":[...],"run":true}`),
+    pollt `.../events/search?limit=100` und zeigt Terminal-Befehle + Antwort.
+- **Gotchas:**
+  - `events/search?limit` ist auf **<=100** begrenzt (200 -> HTTP 422!) -> Schleife
+    bekam nie Events. Immer `limit=100`.
+  - Antworttext des Agenten steht in `MessageEvent.llm_message.content` (source=agent),
+    NICHT als `finish`-Action.
+  - Frische Conversation ist direkt nach dem Anlegen kurz `execution_status=finished`
+    -> Loop darf NICHT sofort abbrechen; erst beenden, wenn wirklich eine
+    Agent-Antwort (`MessageEvent` source=agent) vorliegt.
+  - `python3 -u` nutzen, sonst puffert die Ausgabe ueber die PTY-Pipe bis zum Ende.
+- **Kanal-Verhalten:** der Odroid-Agent verarbeitet Befehle **sequenziell**; ein
+  laufendes `oh.sh` (pollt bis zu 240s) **blockiert** alle weiteren `cmd_send.sh`-
+  Aufrufe (Server-Timeout 300s -> "timeout", der Odroid-Prozess laeuft weiter).
+  Nach einem abgebrochenen Langlauf also warten, bis der Kanal wieder frei ist
+  (`tail /tmp/cmdchannel/audit.log`).
+- **Getestet:** `oh.sh -n 'hostname und pwd ...'` -> `odroidn2` `/root`;
+  Folgeauftrag in derselben Conversation (`whoami; uname -r`, `free -h`) -> ok.
+- **WS-Konfig (Odroid):** Unit `/etc/systemd/system/odroid-cmd-agent.service` +
+  Drop-in `.d/cline.conf` (ueberschreibt `ExecStart` -> `/opt/esp32-channel/cmd_agent.py
+  --allowlist ...`). Ziel-URLs: `/etc/odroid-cmd-agent.urls` (serveousercontent-URL)
+  PLUS **Registry** `SANDBOX_TERM_REGISTRY=https://raw.githubusercontent.com/
+  christiansiebe/esp32-IR/channel-registry/remote-shell/memory/sandboxes.json`
+  (liefert u.a. `wss://work-2-hpvmjoudkabtodeh.prod-runtime.all-hands.dev/`).
+  Token via `EnvironmentFile=/etc/odroid-cmd-agent.env`.
