@@ -4,6 +4,14 @@
     "cline": {
       "url": "wss://6cc711944b825339-34-67-51-12.serveousercontent.com/",
       "updated": "2026-10-19T14:06:15Z"
+    },
+    "hpvmjoudkabtodeh": {
+      "url": "wss://work-2-hpvmjoudkabtodeh.prod-runtime.all-hands.dev/",
+      "updated": "2026-10-19T14:06:15Z"
     }
+  },
+  "paths": {
+    "memory": "remote-shell/memory/SHARED.md",
+    "registry": "https://raw.githubusercontent.com/christiansiebe/esp32-IR/channel-registry/remote-shell/memory/sandboxes.json"
   }
 }
