@@ -38,32 +38,33 @@ install -d -m700 "$HOME/odroid-channel-test"
 printf 'odroid channel test\n' > "$HOME/odroid-channel-test/hello.txt"
 ```
 
-## 2. Token: unveraendert weiterverwenden ODER rotieren
+## 2. Token: derselbe Wert auf beiden Seiten
 
 Der Server vergleicht nur `?token=` per `hmac.compare_digest`; **jeder** String
-funktioniert, also auch der vorhandene 43-Zeichen-Token. Er liegt bereits in der
-Unit (`Environment=SANDBOX_TERM_TOKEN=…`) und wird **nicht** ausgegeben.
+funktioniert, auch der vorhandene 43-Zeichen-Token. Er liegt bereits in der Unit
+(`Environment=SANDBOX_TERM_TOKEN=…`) und wird **nicht** ausgegeben.
 
-**Vor produktivem Betrieb rotieren** (der alte Token ist offengelegt). Neue
-Datei, 0600, ohne den Wert im Chat/Log zu zeigen:
-
-```bash
-sudo sh -c 'umask 077; head -c 32 /dev/urandom | base64 | tr -d "=+/" | cut -c1-43 \
-  > /etc/odroid-cmd-agent.token'
-sudo chmod 600 /etc/odroid-cmd-agent.token
-sudo wc -c /etc/odroid-cmd-agent.token          # 43 (ohne Newline: 43)
-```
-
-Denselben Wert in die Cline-Sandbox legen (**du** kopierst ihn, der Assistent
-sieht ihn nicht):
+**Empfohlen (der alte Token ist offengelegt): neu erzeugen.** In der
+Cline-Sandbox liegt bereits ein frischer 43-Zeichen-Token unter
+`/workspace/remote-shell/token` (0600). Wert dort anzeigen und **von Hand** am
+Odroid einsetzen (der Assistent braucht ihn nicht):
 
 ```bash
-# am Odroid anzeigen, Wert in die Sandbox-Datei uebernehmen:
-sudo cat /etc/odroid-cmd-agent.token
-# in der Cline-Sandbox:
-install -m600 /dev/stdin /workspace/remote-shell/token
-#   ... Wert einfuegen, Enter, Ctrl-D
+# Cline-Sandbox (Ausgabe ist geheim, nur auf dem eigenen Bildschirm):
+cat /workspace/remote-shell/token
 ```
+
+```bash
+# Odroid: Wert einfuegen, nicht in die History schreiben
+read -rsp 'Sandbox-Token: ' T; echo
+sudo sh -c 'umask 077; printf "SANDBOX_TERM_TOKEN=%s\n" "$1" > /etc/odroid-cmd-agent.env' _ "$T"
+unset T
+sudo stat -c '%a %s %n' /etc/odroid-cmd-agent.env      # 600, ~54 Byte
+```
+
+Alternativ den vorhandenen Token unveraendert weiterverwenden: dann dessen Wert
+in der Sandbox nach `/workspace/remote-shell/token` schreiben
+(`install -m600 /dev/stdin …`) — Protokoll und Laenge sind identisch.
 
 ## 3. In der Cline-Sandbox: Server + Tunnel starten
 
@@ -87,6 +88,7 @@ sudo sh -c "printf '%s\n' '$URL' > /etc/odroid-cmd-agent.urls"
 sudo install -d -m755 /etc/systemd/system/odroid-cmd-agent.service.d
 sudo tee /etc/systemd/system/odroid-cmd-agent.service.d/cline.conf >/dev/null <<'EOF'
 [Service]
+EnvironmentFile=/etc/odroid-cmd-agent.env
 Environment=SANDBOX_TERM_URLS_FILE=/etc/odroid-cmd-agent.urls
 Environment=CMD_AGENT_FILE_ROOT=/home/odroid/odroid-channel-test
 ExecStart=
@@ -94,6 +96,7 @@ ExecStart=/usr/bin/python3 /opt/esp32-channel/cmd_agent.py --allowlist /opt/esp3
 EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now odroid-cmd-agent.service
+systemctl show odroid-cmd-agent.service -p Environment | tr ' ' '\n' | grep -c SANDBOX_TERM_TOKEN
 systemctl status odroid-cmd-agent.service --no-pager | head -15
 ```
 
