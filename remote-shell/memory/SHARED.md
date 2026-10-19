@@ -861,3 +861,40 @@ CHAT-THREAD). Keine offene Arbeit im Odroid-Zweig.
   `register_sandbox.py` per Default nach **`main`** schreibt (MEM_BRANCH nicht gesetzt).
   -> Die fuer den Odroid relevante Datei ist channel-registry; main ist das Archiv.
   Beim Aufraeumen/Prunen BEIDE im Blick behalten.
+
+## Odroid-Worker (2, lokal, 0 Cloud-Guthaben) — gebaut 2026-10-19
+- **Idee:** Sub-Agenten NICHT als Cloud-Conversations starten (jede kostet 1 Chat aus
+  der Tagesquote), sondern als **lokale Conversations auf dem Odroid-Agent-Server**
+  (`127.0.0.1:8000`, v1.56.0). Das erzeugt **keine** Cloud-Sandbox und **keinen**
+  Cloud-Chat -> 0 Guthabenverbrauch. Tokens sind ohnehin frei (Managed-Proxy,
+  `billing/credits=0`, org-budget `enabled=false`, keine Ratelimits).
+- **Dateien:** `remote-shell/worker/{worker.py,worker_submit.sh,odroid-worker@.service,deploy_workers.sh}`.
+  Auf dem Odroid: `/root/worker/` (worker.py, queue/, running/, results/, worker.log).
+- **Dienste:** `odroid-worker@1.service` + `@2.service` (Template, enabled+active),
+  `Requires=openhands-agent.service`, `Restart=always`. Jeder Worker = Session
+  `worker1`/`worker2` (`oh -s workerN`), eigene lokale Conversation.
+- **Queue:** `queue/<id>.task` (JSON {text,submitted_by,ts}); Claim per **atomarem
+  `os.rename`** nach `running/` -> zwei Worker greifen nie denselben Task (verifiziert:
+  6 Tasks, 2 Worker, jeder genau 1x). Ergebnis in `results/<id>.json`.
+- **Parent-Nutzung:** `remote-shell/worker/worker_submit.sh "AUFGABE"` (einstellen),
+  `--wait N "AUFGABE"` (einstellen+warten), `--list`, `--result <id>`.
+- **Verifiziert (echt):** Task „hostname+pwd" -> worker1, Task „uname -r+nproc" ->
+  worker2; Agent nutzte real das Terminal, Ergebnisse `odroidn2` / `/root` bzw.
+  `7.1.8-edge-meson64` / `2`. Cloud-Sandboxes blieben **100** (keine neue entstand).
+- **RAM:** Agent-Server ~407 MB RSS, ~1,6 GB frei -> 2 Worker passen (mehr nur knapp).
+- **WICHTIG (Modellname):** direkt gegen den Proxy MUSS der Modellname OHNE
+  `openhands/`-Praefix laufen (`deepseek-v4.1-flash` -> 200; `openhands/deepseek-v4.1-flash`
+  -> 403 „team not allowed"). Der Agent-Server selbst strippt das Praefix.
+- **LLM-Key holen:** `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**
+  (nicht JSON). `$OPENHANDS_API_KEY` ist NICHT der Proxy-Token (401).
+
+## ESP-IDF-Chat-Ersatz (2026-10-19)
+- Alter Chat `1e748515943a404aa166c052651ca188` ("ESP-IDF") ist **archiviert**
+  (sandbox ERROR, send-message 410) und NICHT wiederbelebbar. Trajectory aber
+  vollstaendig ladbar: `GET /api/v1/app-conversations/<id>/download` (8,9 MB, 2535 Events).
+- **Nicht** zu lang: 2537 Events, ~85k Tokens/Turn bei 1M Kontext (~8,5%/Turn).
+- **Zusammenfassung** steckt im letzten **Condensation**-Event (Feld `summary`),
+  nicht in MessageEvents -> per zipfile aus `event_*.json` lesen.
+- Ersatz-Chat: `75a2e92947b54cfdbc7a81869298e363` (Branch feat/dfs-clock-visibility),
+  geladen mit `docs/CHAT-HANDOFF-ESP-IDF-2026-10-19.md`.
