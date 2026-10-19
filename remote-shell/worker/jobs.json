@@ -1,0 +1,4 @@
+{
+  "_comment": "Job-Intake fuer die Odroid-Worker. Parents schreiben hier Jobs (worker_enqueue.py, via GITHUB_WRITE_TOKEN). Die Worker auf dem Odroid POLLEN diese Datei (raw, public, read-only) und holen neue Jobs automatisch. results/ bleibt lokal auf dem Odroid.",
+  "jobs": {}
+}
