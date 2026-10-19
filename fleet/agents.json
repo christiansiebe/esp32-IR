@@ -176,6 +176,11 @@
    "name": "Odroid-Repair (OpenHands auf N2+ reparieren)",
    "open_tasks": 1,
    "note": "Repariert die lokale OpenHands-Installation auf dem Odroid N2+ + Worker/oh-Skripte. 2026-10-19: Sandbox-Dies/Zombie-Problem analysiert (MISSING=unwiederbringlich)."
+  },
+  "c80335f5baf2471192cdfb412c8a2146": {
+   "name": "Sub: ESP-IDF Firmware (host-verifizierbare TODO-Punkte)",
+   "open_tasks": 1,
+   "note": "Kind des Odroid-Repair-Chats ec27624233304e1d972007bf2b12eb00. Arbeitet offene, host-verifizierbare TODO.md-Punkte ab (record_count-Hardwareteil ist blockiert). 2026-10-19."
   }
  }
 }
