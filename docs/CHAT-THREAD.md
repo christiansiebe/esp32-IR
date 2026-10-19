@@ -755,4 +755,12 @@ Geraete-Check Empfaenger `192.168.178.70` ueber den Odroid-Kanal:
 Persistenz wiederhergestellt. `fleet/agents.json` + `TASKS.json` auf 0 offene
 Aufgaben gesetzt. Keine offene Arbeit im Odroid-Zweig.
 
-
+**9) Odroid-Repair-Chat (2026-10-19 21:35): Sandbox-Dies/Zombie-Problem geloest.**
+Ursache bewiesen (docs.openhands.dev/enterprise/conversations-and-sandboxes): `RUNNING->PAUSED`
+= Idle-Timeout (20 min, `OH_RUNTIME_IDLE_TIMEOUT_SECONDS=1200`); `PAUSED->MISSING` = **nach
+Deletion-Timeout endgueltig geloescht** (read-only, `resume`->404) - nur Chats, die NIEMAND am
+Leben haelt, sterben. Zusaetzlich harte 12-h-Kappe/Session. **Fix:** Orphan-Guard im
+`fleet-supervisor` (`adopt_orphans()`) uebernimmt automatisch NICHT registrierte, aktive Chats
+(created<48h & updated<6h) mit open_tasks=1 -> geschuetzt; Resume bestehender Sandbox ist
+**quota-frei**. Deployed (Automation `eb73ddf3`, Tarball neu), Host-Tests gruen, Commit `71b538b9bc`.
+Kontingent: 20 Conversations/Tag, Reset 00:00 UTC.
