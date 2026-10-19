@@ -1,0 +1,34 @@
+[Unit]
+Description=Off-board watchdog monitor (external heartbeat + power-cut actor)
+Documentation=file:/usr/local/share/remote-shell/WATCHDOG-ACTOR.md
+# Der Monitor laeuft OFF-BOARD (Sandbox-Kanal, zweiter Rechner oder MCU) und
+# beobachtet den Heartbeat, den watchdog-heartbeat.timer auf dem Board schreibt.
+# Nach dem Netz starten, weil der Aktor (HTTP/MQTT) es meist braucht; ein
+# lokaler Datei-Heartbeat braucht kein Netz.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# INTERVAL muss zum Board-Timer passen (watchdog-heartbeat.timer: 60 s).
+# --reboot-cmd ruft den Wrapper, der den Aktor mit durablem Cooldown startet
+# und per Default TROCKENLAEUFT (WATCHDOG_POWERCUT_ARMED=1 schaltet scharf).
+ExecStart=/usr/bin/python3 /usr/local/sbin/watchdog_monitor.py \
+    --heartbeat /var/lib/watchdog/board-heartbeat \
+    --interval 60 --grace 30 --miss-needed 3 --cooldown 900 \
+    --reboot-cmd /usr/local/sbin/watchdog_powercut.sh
+# Der Beobachter ist selbst ein Single Point of Failure -> immer neu starten.
+Restart=always
+RestartSec=10
+StateDirectory=watchdog
+
+# Haertung: der Monitor braucht nur Datei lesen + den Wrapper rufen. Der Aktor
+# selbst braucht ggf. mehr Rechte (USB-Relais/GPIO) -> dann dort lockern.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/watchdog
+
+[Install]
+WantedBy=multi-user.target
