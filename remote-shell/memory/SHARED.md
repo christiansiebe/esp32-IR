@@ -840,3 +840,24 @@ CHAT-THREAD). Keine offene Arbeit im Odroid-Zweig.
   laeuft ueber den OpenHands-LiteLLM-Proxy (laut frueh. Notiz fuer dieses Team frei/
   gratis). Will man echtes lokales/sparsames LLM, muesste man erst eins installieren.
 - Profil liegt in `/root/.openhands/profiles/default.json` (0600, api_key maskiert).
+
+## Warum dieses Setup existiert + Sandbox-Guthaben (2026-10-19, Nutzerkontext)
+- **Grund fuer den Odroid-Agenten + Reverse-Channel:** dem Nutzer wurden hier
+  staendig **Sandboxes beendet** (`OH_RUNTIME_IDLE_TIMEOUT_SECONDS=1200`, d.h. 20 min
+  Inaktivitaet killt die Sandbox). Deshalb laeuft ein eigenstaendiger OpenHands-Agent
+  **auf dem Odroid** (openhands-agent.service) + Kanal, damit Arbeit weiterlaeuft,
+  auch wenn die Cloud-Sandbox stirbt.
+- **Guthaben-Problem (Nutzer):** Sub-Agenten haben "alle Sandboxen zugemuellt" und so
+  das Kontingent (~20 Chats/Tag) verbraucht. Konsequenz: **Agenten sparsam einsetzen**
+  (steht schon in MEMORY). Kein lokales LLM vorhanden -> jeder Call = Cloud-Guthaben.
+- **Registry-Vermuellung (behoben):** `remote-shell/memory/sandboxes.json` sammelte
+  tote Sandbox-Eintraege (7 Stueck, teils 4 Tage alt) -> Odroid verbindet sich endlos
+  zu toten Zielen. Fix: `register_sandbox.py` raeumt jetzt per **TTL** auf
+  (`SANDBOX_REGISTRY_TTL_HOURS`, Default 12 h). Einmalig gepruned (Backup
+  `/workspace/remote-shell/backups/sandboxes-main-*.json`, Commit 74adddc8a8).
+  Nur `hpvmjoudkabtodeh` bleibt. Guard-Commit a471842086.
+- **Branch-Info:** Der Odroid liest die Registry aus Branch **`channel-registry`**
+  (Drop-in cline.conf: SANDBOX_TERM_REGISTRY=.../channel-registry/...), waehrend
+  `register_sandbox.py` per Default nach **`main`** schreibt (MEM_BRANCH nicht gesetzt).
+  -> Die fuer den Odroid relevante Datei ist channel-registry; main ist das Archiv.
+  Beim Aufraeumen/Prunen BEIDE im Blick behalten.
