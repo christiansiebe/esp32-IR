@@ -11,6 +11,18 @@ set -euo pipefail
 
 CMD="${1:?Befehl fehlt}"
 TIMEOUT="${2:-1800}"
+
+# Auto-Wrap: die Odroid-Allowlist erlaubt `bash .*` (Agent-Autonomie). Deshalb
+# wird ein blanker Befehl hier automatisch in `bash -lc '...'` gepackt, damit
+# man nicht bei jedem Aufruf selbst wrappen muss. Schon gewrappte Befehle
+# (bash/python3) und die Datei-Verben @read/@write bleiben unveraendert; mit dem
+# Praefix `raw:` laesst sich das Wrapping gezielt abschalten.
+case "$CMD" in
+  bash\ *|python3\ *|@read*|@write*) : ;;
+  raw:*) CMD="${CMD#raw:}" ;;
+  *)     CMD="bash -lc $(printf '%q' "$CMD")" ;;
+esac
+
 BASE="${CMD_BASE:-/tmp/cmdchannel}"
 QDIR="$BASE/queue"
 RDIR="$BASE/results"
