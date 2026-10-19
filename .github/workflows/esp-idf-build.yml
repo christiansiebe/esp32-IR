@@ -2,11 +2,29 @@ name: ESP-IDF firmware
 
 on:
   push:
+    # Only build the firmware when something that can affect it changed. These
+    # are the non-firmware trees; anything not listed here (main/, components/,
+    # test/, CMakeLists.txt, partitions.csv, sdkconfig.defaults, ...) still
+    # triggers the build, so an unknown path is never silently skipped.
     paths-ignore:
       - 'remote-shell/**'
+      - 'docs/**'
+      - 'fleet/**'
+      - 'automations/**'
+      - '.openhands/**'
+      - '**.md'
+      - 'TODO.md'
+      - 'TASKS.json'
   pull_request:
     paths-ignore:
       - 'remote-shell/**'
+      - 'docs/**'
+      - 'fleet/**'
+      - 'automations/**'
+      - '.openhands/**'
+      - '**.md'
+      - 'TODO.md'
+      - 'TASKS.json'
   workflow_dispatch:
 
 permissions:
