@@ -52,6 +52,10 @@ start() {
     return 0
   fi
   rm -f "$URLFILE"
+  # Nur NEUE Logzeilen auswerten: die Datei wird angehaengt, sonst wuerde die
+  # URL der letzten (abgelaufenen) Sitzung sofort wieder als "aktuell" gelten.
+  local offset=0
+  [ -f "$LOGFILE" ] && offset="$(wc -l <"$LOGFILE")"
   setsid ssh -o StrictHostKeyChecking=no \
              -o UserKnownHostsFile=/dev/null \
              -o ExitOnForwardFailure=yes \
@@ -62,7 +66,8 @@ start() {
   echo $! >"$PIDFILE"
   for _ in $(seq 1 30); do
     local url
-    url="$(grep -aoE "$PATTERN" "$LOGFILE" 2>/dev/null | tail -1 || true)"
+    url="$(tail -n "+$((offset + 1))" "$LOGFILE" 2>/dev/null \
+           | grep -aoE "$PATTERN" | tail -1 || true)"
     if [ -n "$url" ]; then
       printf '%s' "$url" >"$URLFILE"
       echo "Tunnel: $url"
