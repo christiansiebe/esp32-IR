@@ -253,27 +253,40 @@ def read_targets():
     return out, authoritative
 
 
+LAST_GOOD_REGISTRY = []
+
+
 def read_registry():
     """Sandbox-URLs aus dem GitHub-Register lesen (oeffentlich, ohne Token).
-    $SANDBOX_TERM_REGISTRY = Roh-URL, z.B.
-      https://raw.githubusercontent.com/<owner>/<repo>/main/remote-shell/memory/sandboxes.json
-    Fehler werden still ignoriert (Kanal darf nie an der Registry scheitern)."""
+
+    $SANDBOX_TERM_REGISTRY ist entweder eine raw.githubusercontent-URL oder eine
+    api.github.com-URL. raw.githubusercontent cached max-age=300 (Query-Parameter
+    aendern daran nichts) -> fuer den Failover wird automatisch der API-Endpunkt
+    mit `Accept: application/vnd.github.raw` benutzt; der ist dynamisch.
+    Faellt der Abruf aus (Rate-Limit 60/h anonym), gilt die letzte gute Liste.
+    """
+    global LAST_GOOD_REGISTRY
     src = os.environ.get("SANDBOX_TERM_REGISTRY", "")
     if not src:
         return []
-    # Cache-Buster: raw.githubusercontent.com cached max-age=300; mit einem
-    # wechselnden Query-Parameter holt jeder Poll den echten Stand (Failover
-    # in ~60 s statt bis zu 5 min).
-    if "?" not in src:
-        src = f"{src}?t={int(time.time())}"
+    url, headers = src, {}
+    m = re.match(r"https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)", src)
+    if m:
+        owner, repo, branch, path = m.groups()
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+        headers["Accept"] = "application/vnd.github.raw"
     try:
         import urllib.request
-        with urllib.request.urlopen(src, timeout=15) as r:
+        req = urllib.request.Request(url, headers={"User-Agent": "esp32-ir-cmd-agent", **headers})
+        with urllib.request.urlopen(req, timeout=15) as r:
             data = json.loads(r.read())
-        return [v["url"] for v in (data.get("sandboxes") or {}).values() if v.get("url")]
+        urls = [v["url"] for v in (data.get("sandboxes") or {}).values() if v.get("url")]
+        if urls:
+            LAST_GOOD_REGISTRY = urls
+        return urls
     except Exception as exc:  # noqa: BLE001
         print(f"[registry] nicht lesbar: {exc}")
-        return []
+        return LAST_GOOD_REGISTRY
 
 
 def _take_option(name):
@@ -324,7 +337,7 @@ async def main():
         await ensure(u)
 
     # Regelmaessig das Register neu lesen -> neue Sandboxes automatisch.
-    interval = int(os.environ.get("SANDBOX_TERM_REGISTRY_INTERVAL", "60"))
+    interval = int(os.environ.get("SANDBOX_TERM_REGISTRY_INTERVAL", "90"))
     while True:
         await asyncio.sleep(interval)
         targets, authoritative = read_targets()
