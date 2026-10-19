@@ -79,8 +79,21 @@ python3 /workspace/remote-shell/supervise.py --status   # zeigt dieselbe Agent-U
 
 `tunnel.sh` haelt einen SSH-Reverse-Tunnel (`TUNNEL_HOST`, Default
 `serveo.net`) auf Port `SANDBOX_TERM_PORT` (12001) und schreibt die URL nach
-`run/public-url.txt`; `supervise.py`/`register_sandbox.py` lesen sie. Die URL
-wechselt bei jedem Neustart des Tunnels.
+`run/public-url.txt`; `supervise.py`/`register_sandbox.py` lesen sie. Freie
+Tunnel **laufen nach ~15 Minuten ab** und liefern eine neue URL.
+
+**Selbstheilend (empfohlen):**
+
+```bash
+bash /workspace/remote-shell/tunnel_watch.sh start   # Tunnel + URL-Publish
+```
+
+Der Watcher prueft alle 20 s, startet einen abgelaufenen Tunnel neu und
+schreibt die aktuelle URL per `publish_url.py` in die GitHub-Registry
+(Branch `channel-registry`). Der Odroid liest diese Registry alle 60 s
+(`SANDBOX_TERM_REGISTRY`) und verbindet sich selbst neu — ohne Handarbeit.
+`raw.githubusercontent.com` cached max. 300 s, d. h. ein URL-Wechsel ist
+spaetestens nach ~5 Minuten automatisch nachgezogen.
 
 **Protokoll unveraendert:** gleicher WS-Server, gleicher Pfad `/agent`, gleiche
 Authentifizierung `?token=<SANDBOX_TERM_TOKEN>` (Vergleich per
