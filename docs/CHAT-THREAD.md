@@ -26,6 +26,27 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-19 12:11 UTC · Cline-Cloud-Chat (Branch cline/0f7jc38h)
+**Kanal steht am echten Odroid — nachgewiesen.** Ursachen der Kette:
+1. `/next`-Agent (esp32-channel) gehoert nicht zum Protokoll (kein HTTP, nur WS `/` + `/agent`).
+2. Cline-Sandbox hat keinen oeffentlichen Port -> ausgehender SSH-Tunnel (`tunnel.sh`).
+3. `SANDBOX_TERM_URLS_FILE` braucht **`wss://`**, nicht `https://` (sonst
+   "scheme isn't ws or wss").
+4. `registry.conf` mit 6 toten All-Hands-URLs erzeugte 404-Spam -> entfernt.
+5. Freie serveo-Tunnel **laufen ab** (~15 min) und liefern eine neue URL; der Agent
+   muss die `/etc/odroid-cmd-agent.urls` dann erneut bekommen. `tunnel.sh` wertet
+   dafuer nur noch **neue** Logzeilen aus (Bugfix).
+
+Nachweis (Agent als root, `CMD_AGENT_FILE_ROOT=~/odroid-channel-test`,
+`--allowlist odroid_allowlist.txt`): `hostname` -> `odroidn2`, `id` -> root,
+`cat /etc/shadow` -> `ABGELEHNT (Policy)`, `@write`/`@read proof.txt` -> 16 Byte.
+Token wurde nach dem Leak im Journal rotiert (neuer Wert nur in
+`remote-shell/token`, 43 Zeichen, Agent reconnectet ohne Serverneustart).
+
+**Offen:** a) Dauerhaft stabile URL (Cloudflare Named Tunnel/VPS statt serveo),
+b) Arbeitsbereich fuer echte Repo-Arbeit (File-Root + `git`-Allowlist),
+c) Agent laeuft als root -> besser eigener Benutzer.
+
 ## 2026-10-19 11:45 UTC · Cline-Cloud-Chat (Branch cline/0f7jc38h)
 **Auftrag:** Odroid-Zugriff aus einer Cline-Cloud-Sandbox ueber den bestehenden
 WS-Kanal; alter Agent pollt `/next` und bekommt HTTP 404.
