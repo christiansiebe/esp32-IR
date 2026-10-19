@@ -1,11 +1,25 @@
 # Allowlist fuer: python3 cmd_agent.py --allowlist odroid_allowlist.txt
 # Eine verankerte Regex pro Zeile (fullmatch), '#' = Kommentar.
-# Bewusst klein: nur ungefaehrliche Lese-Befehle plus die Datei-Verben
-# @read/@write (die der Agent selbst auf ~/odroid-channel-test einsperrt).
+# Bewusst klein: ungefaehrliche Lese-Befehle plus die Datei-Verben @read/@write
+# (die der Agent selbst auf $CMD_AGENT_FILE_ROOT einsperrt).
 hostname
 id
 uptime
 uname -a
+
+# Testverzeichnis
 ls -la /home/[A-Za-z0-9._-]+/odroid-channel-test/?
 sha256sum /home/[A-Za-z0-9._-]+/odroid-channel-test/[A-Za-z0-9._-]+
 cat /home/[A-Za-z0-9._-]+/odroid-channel-test/[A-Za-z0-9._-]+
+
+# Diagnose (nur lesend, keine Secrets: kein `systemctl show`/`cat` der Unit)
+ls -la /home/[A-Za-z0-9._-]+/?
+ls -la /opt/esp32-channel/?
+head -n 80 /opt/esp32-channel/odroid_agent.sh
+systemctl status [A-Za-z0-9@._-]+(\.service)? --no-pager
+journalctl -u [A-Za-z0-9@._-]+(\.service)? -n [0-9]+ --no-pager
+df -h /
+free -m
+
+# Git im Projekt (nur lesend)
+git -C /home/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+ (status|diff|log -n [0-9]+|show --stat)
