@@ -821,3 +821,22 @@ CHAT-THREAD). Keine offene Arbeit im Odroid-Zweig.
 - `oh` liegt als `/usr/local/bin/oh` (global, alle Shells). Der Fehler
   "oh: command not found" kam von einem **anderen Host** (Prompt `Odroid@debian`),
   NICHT vom odroidn2 (dort Prompt `root@odroidn2`).
+
+## WLAN-Entscheidung final (2026-10-19, Nutzerauftrag)
+- **STA-Modus bleibt DAUERHAFT** (AP "Odroid" aus, Fritzbox "Wohnzimmer 5 Ghz" verbunden,
+  192.168.178.71). **AP-Profil/-Dateien bleiben ERHALTEN** (nur deaktiviert):
+  Units `/etc/systemd/system/odroid-ap*.service` + Skripte
+  `/usr/local/sbin/odroid-ap*.sh` + `/etc/hostapd-odroid.conf` + `/etc/dnsmasq.d/odroid-ap.conf`
+  alle noch da; `99-odroid-ap-unmanaged.conf` nur umbenannt (Backup).
+- Reaktivieren jederzeit: `systemctl enable --now odroid-apsta odroid-apsta-nat odroid-apsta-dnsmasq`
+  + unmanaged-conf zurueck + Profil autoconnect no (siehe RESTORE.txt in netbackup).
+
+## LLM-Modell des Odroid-Agenten (2026-10-19) — WICHTIG fuer Guthaben-Frage
+- **KEIN lokales KI-Modell auf dem Odroid.** Kein ollama/llama.cpp/vLLM; nur der
+  Agent-Server (127.0.0.1:8000) laeuft. Jeder Modellaufruf geht in die **Cloud**:
+  `model = openhands/deepseek-v4.1-flash`, `base_url = https://llm-proxy.app.all-hands.dev`,
+  `auth_type = api_key`, `is_subscription = false`.
+- Also: **kein** Guthaben-Ersparnis durch "lokales Modell" — es gibt keins. Der Pfad
+  laeuft ueber den OpenHands-LiteLLM-Proxy (laut frueh. Notiz fuer dieses Team frei/
+  gratis). Will man echtes lokales/sparsames LLM, muesste man erst eins installieren.
+- Profil liegt in `/root/.openhands/profiles/default.json` (0600, api_key maskiert).
