@@ -1,33 +1,9 @@
 {
-  "updated": "2026-10-15T18:50:53Z",
+  "updated": "2026-10-19T12:16:18Z",
   "sandboxes": {
-    "fkhhrtgachhziqps": {
-      "url": "wss://work-2-fkhhrtgachhziqps.prod-runtime.all-hands.dev/",
-      "updated": "2026-10-15T18:50:53Z"
-    },
-    "zvqpzxrtfjcxbcgw": {
-      "url": "wss://work-2-zvqpzxrtfjcxbcgw.prod-runtime.all-hands.dev/",
-      "updated": "2026-10-15T18:50:53Z"
-    },
-    "jcmxwpbymbjnkhcr": {
-      "url": "wss://work-2-jcmxwpbymbjnkhcr.prod-runtime.all-hands.dev/",
-      "updated": "2026-10-15T18:50:53Z"
-    },
-    "jtwohhimbpfwbzbj": {
-      "url": "wss://work-2-jtwohhimbpfwbzbj.prod-runtime.all-hands.dev/",
-      "updated": "2026-10-15T18:50:53Z"
-    },
-    "htfgjakvneoycccu": {
-      "url": "wss://work-2-htfgjakvneoycccu.prod-runtime.all-hands.dev/",
-      "updated": "2026-10-15T18:50:53Z"
-    },
-    "hvhnzslwiseavjsh": {
-      "url": "wss://work-2-hvhnzslwiseavjsh.prod-runtime.all-hands.dev/",
-      "updated": "2026-10-15T18:50:53Z"
+    "cline": {
+      "url": "https://2ba84be3ada0dca2-34-67-51-12.serveousercontent.com/",
+      "updated": "2026-10-19T12:16:18Z"
     }
-  },
-  "paths": {
-    "memory": "remote-shell/memory/SHARED.md",
-    "registry": "https://raw.githubusercontent.com/christiansiebe/esp32-IR/main/remote-shell/memory/sandboxes.json"
   }
 }
