@@ -111,10 +111,61 @@ def claim(d):
         dst = os.path.join(d, "running", f"{tid}.task")
         try:
             os.rename(t, dst)
+            # PID/Startzeit stempeln, damit ein Neustart erkennen kann, ob der
+            # Task wirklich verwaist ist (sonst laeuft er noch in einem anderen
+            # Worker, der sich dieselbe Queue teilt).
+            try:
+                with open(os.path.join(d, "running", f"{tid}.pid"), "w") as fh:
+                    json.dump({"pid": os.getpid(), "ts": time.time()}, fh)
+            except OSError:
+                pass
             return tid, dst
         except OSError:
             continue
     return None, None
+
+
+def _pid_is_worker(pid):
+    """Laeuft unter dieser PID noch ein Worker-Prozess?"""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return "worker.py" in fh.read().decode(errors="replace")
+    except OSError:
+        return False
+
+
+def requeue_orphans(d, logf):
+    """Verwaiste running-Tasks (Worker-Neustart/-absturz) zurueck in die Queue.
+
+    Ein Task in running/ kann nur von einem Neustart/Absturz stammen: der
+    ausfuehrende Worker-Prozess ist dann tot. Lebt die gestempelte PID noch in
+    einem Worker, bleibt der Task unangetastet (die Queue wird von mehreren
+    Workern geteilt -> kein Doppelgriff). Fehlt der Stempel (Alt-Task), wird er
+    ebenfalls zurueckgestellt."""
+    rdir = os.path.join(d, "running")
+    requeued = 0
+    for t in sorted(glob.glob(os.path.join(rdir, "*.task"))):
+        tid = os.path.basename(t)[:-5]
+        meta = os.path.join(rdir, f"{tid}.pid")
+        pid = None
+        try:
+            pid = json.load(open(meta)).get("pid")
+        except (ValueError, OSError):
+            pass
+        if pid and pid != os.getpid() and _pid_is_worker(pid):
+            continue  # laeuft noch -> nicht anfassen
+        dst = os.path.join(d, "queue", f"{tid}.task")
+        try:
+            os.rename(t, dst)
+        except OSError:
+            continue
+        try:
+            os.remove(meta)
+        except OSError:
+            pass
+        requeued += 1
+        log(f"[requeue] verwaister Task {tid} zurueck in die Queue", logf)
+    return requeued
 
 
 def run_oh(name, text, fresh, timeout):
@@ -134,13 +185,57 @@ def run_oh(name, text, fresh, timeout):
         return None, f"STARTFEHLER: {e}"
 
 
-def run_task(name, text, fresh, timeout):
+# Exit-Codes, die `oh` fuer wiederholbare Fehler liefert (siehe oh.sh):
+#   3 = transienter LLM-Fehler, 5 = keine Antwort im Zeitfenster
+RETRYABLE_EXIT_CODES = {3, 5}
+# Textmuster, die auf einen wiederholbaren LLM-Fehler hindeuten (falls `oh`
+# eine aeltere Version ist oder der Fehler anders formuliert ankommt).
+RETRYABLE_HINTS = (
+    "missing credentials", "litellm_proxyexception", "internalservererror",
+    "llmserviceunavailableerror", "rate limit", "temporarily unavailable",
+    "service unavailable", "502", "503", "504", "keine antwort",
+)
+WORKER_RETRIES = int(os.environ.get("WORKER_RETRIES", "3"))
+WORKER_RETRY_BASE = float(os.environ.get("WORKER_RETRY_BASE", "10"))
+
+
+def is_retryable(rc, out):
+    """Transienter/retrybarer LLM-Fehler statt echtem Task-Fehler?"""
+    if rc in RETRYABLE_EXIT_CODES:
+        return True
+    low = (out or "").lower()
+    return any(h in low for h in RETRYABLE_HINTS)
+
+
+def run_task(name, text, fresh, timeout, logf=None):
+    """Task ausfuehren; bei transientem LLM-Fehler mit Backoff wiederholen.
+
+    Ein transienter Fehler ("Missing credentials" am LiteLLM-Proxy) darf den
+    Task NICHT als fehlgeschlagen verbuchen: er wird mit frischer Conversation
+    und wachsender Wartezeit erneut versucht.
+    """
     rc, out = run_oh(name, text, fresh, timeout)
-    if rc != 0 and not fresh:
-        # Conversation evtl. verklemmt -> einmal mit frischer Conversation.
+    # Sofortiger Einzel-Retry, wenn die Conversation verklemmt ist (bisheriges
+    # Verhalten, jetzt nur noch wenn noch keine Wiederholung noetig war).
+    if rc != 0 and not fresh and not is_retryable(rc, out):
         rc2, out2 = run_oh(name, text, True, timeout)
         if rc2 == 0:
             return rc2, out2 + "\n[Retry mit frischer Conversation erfolgreich]"
+        rc, out = rc2, out2
+    attempt = 0
+    while is_retryable(rc, out) and attempt < WORKER_RETRIES:
+        attempt += 1
+        wait = WORKER_RETRY_BASE * (2 ** (attempt - 1))
+        if logf:
+            log(f"[{name}] transienter LLM-Fehler (rc={rc}); "
+                f"Versuch {attempt}/{WORKER_RETRIES} in {wait:.0f}s", logf)
+        time.sleep(wait)
+        # Eine an einen veralteten Schluessel gebundene Conversation heilt nie
+        # -> frische Conversation erzwingen.
+        rc, out = run_oh(name, text, True, timeout)
+        if rc == 0:
+            out += f"\n[Erfolg nach {attempt} Wiederholung(en)]"
+            break
     return rc, out
 
 
@@ -161,6 +256,8 @@ def main():
     logf = os.path.join(a.dir, "worker.log")
     log(f"[{a.name}] gestartet (dir={a.dir} fresh={a.fresh} timeout={a.timeout}s "
         f"jobs-poll={a.jobs_poll}s)", logf)
+    # Verwaiste Tasks aus running/ (Neustart/Absturz) wieder aufnehmen.
+    requeue_orphans(a.dir, logf)
 
     last_jobs = 0.0
     while True:
@@ -182,7 +279,7 @@ def main():
         text = (meta.get("text") or "").strip()
         log(f"[{a.name}] Task {tid} uebernommen: {text[:100]!r}", logf)
         started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        rc, out = run_task(a.name, text, a.fresh, a.timeout)
+        rc, out = run_task(a.name, text, a.fresh, a.timeout, logf)
         result = {
             "id": tid, "worker": a.name,
             "status": "ok" if rc == 0 else "error", "returncode": rc,
@@ -197,6 +294,10 @@ def main():
             os.remove(path)
         except OSError:
             pass  # anderer Worker hat die Datei schon entfernt -> kein Absturz
+        try:
+            os.remove(os.path.join(a.dir, "running", f"{tid}.pid"))
+        except OSError:
+            pass
         log(f"[{a.name}] Task {tid} fertig: {result['status']}", logf)
 
 
