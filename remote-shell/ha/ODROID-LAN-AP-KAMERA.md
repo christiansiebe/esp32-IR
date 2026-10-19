@@ -38,7 +38,7 @@ Kamera, nur der Amlogic-Decoder.
   erreichbar — die Grundvoraussetzung für den Umbau.
 - **`wlxdc627949ba79` = AP** für die Geräte, die vorher am alten AP hingen:
   `hostapd` (Funk) + `dnsmasq` (DHCP/DNS) + NAT/Forwarding auf `end0`.
-- **Kamera über LAN** — siehe Abschnitt 5.
+- **Kamera über LAN** — siehe Abschnitt 6.
 
 ⚠️ **Warum die Reihenfolge zwingend ist:** Der Odroid hat genau **ein**
 Funkmodul. Sobald es in den AP-Modus geht, fällt die WLAN-STA-Verbindung ins
@@ -50,7 +50,7 @@ STA-Verbindung. Ohne vorher verifizierten `end0`-Uplink ist der Odroid danach
 > combinations` meldet. Ein gleichzeitiges AP+STA auf demselben Modul ist damit
 > **nicht garantiert**. Dieser Plan nimmt deshalb bewusst an: **ein Funkmodul =
 > eine Rolle (AP)**. Wer AP+STA testen will, macht das erst *nach* dem
-> end0-Uplink und mit Rückfallebene (Abschnitt 6).
+> end0-Uplink und mit Rückfallebene (Abschnitt 7).
 >
 > **Nachtrag (2026-10-18, am Board gemessen — siehe
 > [`WLAN-TREIBER-ANALYSE.md`](WLAN-TREIBER-ANALYSE.md)):** AP+STA auf demselben
@@ -76,11 +76,11 @@ nächste beginnt. Nichts wird „auf Vorrat“ umgestellt.
 |-------|--------|-------------------------------------------|
 | **P0** | Rettungsnetz herstellen (Abschnitt 3) | physischer/serieller Zugang getestet **oder** Auto-Revert geplant |
 | **P1** | `end0` als Uplink in Betrieb nehmen (Abschnitt 4) | Odroid über `end0`-IP erreichbar (ping/SSH/HA), Default-Route läuft über `end0` |
-| **P2** | WLAN auf AP umstellen: `hostapd` + `dnsmasq` (Abschnitt 5.1) | AP-Client bekommt DHCP-Lease und erreicht `192.168.178.1` |
-| **P3** | Kamera einbinden (Abschnitt 5) | HA zeigt ein Kamerabild |
+| **P2** | WLAN auf AP umstellen: `hostapd` + `dnsmasq` (Abschnitt 5.1); Ausrollen mit `deploy_ap.sh` (5.5), Dead-Man armiert (7.2) | AP-Client bekommt DHCP-Lease und erreicht `192.168.178.1` |
+| **P3** | Kamera einbinden (Abschnitt 6) | HA zeigt ein Kamerabild |
 
 **P0 und P1 dürfen nie übersprungen werden.** P2 ohne bestandenes P1-Gate =
-Lockout (siehe Abschnitt 6).
+Lockout (siehe Abschnitt 7).
 
 ---
 
@@ -92,7 +92,7 @@ Der Umbau kann die Fernverbindung kappen. Vorher **einen** Rückweg sicherstelle
    Konsolengerät** am UART-Header, einmal testweise eingeloggt.
 2. **Auto-Revert (Dead-Man-Switch):** jede Änderung wird mit einem
    zeitverzögerten Rückbau geplant. Bleibt die Bestätigung aus, fällt die
-   Konfiguration automatisch zurück (Abschnitt 6.2).
+   Konfiguration automatisch zurück (Abschnitt 7.2).
 
 Ein Board ohne P0-Rückweg umzubauen ist der einzige echte Einbahnweg in dieser
 Aufgabe — er wird nicht gegangen.
@@ -271,6 +271,52 @@ iw dev wlxdc627949ba79 info        # zeigt jetzt type AP + channel
 **Gate-P2:** Ein AP-Client verbindet sich, bekommt eine `192.168.50.x`-Lease
 (`dnsmasq`-Log) und erreicht `ping 192.168.178.1` sowie `ping 8.8.8.8`.
 
+### 5.5 Ausrollen mit `deploy_ap.sh` (empfohlener Weg)
+
+Statt die Schritte aus 5.2–5.4 von Hand zu tippen, rendert der Generator die
+Dateien und **`deploy_ap.sh`** installiert sie in einem Durchgang:
+
+```sh
+# 1) Dateien erzeugen (dry-run -> --out schreibt):
+python3 remote-shell/ha/odroid_ap_config.py \
+  --ssid "<SSID>" --passphrase "<PASSWORT>" --band 2g --channel 6 \
+  --out /tmp/odroid-ap
+
+# 2) Trockenlauf (Standard; aendert NICHTS, kein root noetig):
+sh remote-shell/ha/deploy_ap.sh --conf-dir /tmp/odroid-ap
+
+# 3) Ausrollen (root). Dead-Man-Switch standardmaessig 10 min:
+sudo sh remote-shell/ha/deploy_ap.sh --conf-dir /tmp/odroid-ap --apply
+
+# 4) Nach erfolgreicher Pruefung (Gate-P2) bestaetigen, sonst faellt es zurueck:
+sudo sh remote-shell/ha/deploy_ap.sh --confirm
+```
+
+`deploy_ap.sh` macht genau: Dateien installieren (hostapd.conf, dnsmasq-Drop-in,
+NAT-Skript), `/etc/default/hostapd` auf die Konfiguration zeigen lassen (mit
+Backup), `systemctl unmask/enable --now hostapd dnsmasq`, `nmcli device set
+<AP> managed no`, `ip addr replace <AP-Adresse>` + `ip link set up`, die
+NAT-Regeln (idempotent, `-C`/`-A`), Zustand merken und den Dead-Man armeren.
+**Kein ungefragtes Scharfschalten:** ohne `--apply` ist alles Dry-Run;
+`hostapd`/`dnsmasq` bleiben bis zu einem echten Ausroll **masked**.
+
+Optionen: `--ap-iface`, `--up-iface`, `--ap-addr CIDR`, `--deadman MIN`,
+`--no-deadman`, `--root PREFIX` (Pfad-Praefix für Tests). Die Tests laufen
+gegen einen `AP_ROOT`-Baum ohne Board und ohne root
+(`python3 remote-shell/ha/test_ap_deploy.py`, 48 Checks).
+
+### 5.6 Zurücknehmen mit `revert_ap.sh`
+
+```sh
+sh remote-shell/ha/revert_ap.sh            # Dry-Run
+sudo sh remote-shell/ha/revert_ap.sh --apply
+```
+
+Idempotent: stoppt/deaktiviert/**maskiert** `hostapd`+`dnsmasq` wieder, entfernt
+die NAT-Regeln, gibt das Funkmodul an NetworkManager zurück (`managed yes`),
+nimmt die AP-Adresse weg, entfernt das dnsmasq-Drop-in, stellt
+`/etc/default/hostapd` aus dem Backup her und entschärft den Dead-Man.
+
 ---
 
 ## 6. Kamera über LAN
@@ -365,23 +411,35 @@ Anspruch/Aufwand klein sind.
 5. AP-IP entfernen: `sudo ip addr del 192.168.50.1/24 dev wlxdc627949ba79`.
 6. `hostapd`/`dnsmasq` deaktivieren: `sudo systemctl disable hostapd dnsmasq`.
 
-### 7.2 Dead-Man-Switch (Auto-Revert) — Vorlage
+### 7.2 Dead-Man-Switch (Auto-Revert)
 
-Vor einer riskanten Änderung einen zeitverzögerten Rückbau planen; erst nach
-erfolgreicher Prüfung abbrechen:
+**Implementiert** in `deploy_ap.sh` (Marker + `systemd`-Timer) und
+`odroid_ap_deadman.sh` (Wrapper). `--apply` armiert den Timer standardmäßig auf
+10 Minuten (`--deadman MIN`, `--no-deadman` schaltet ihn ab):
 
 ```sh
-# 1) Rückbau-Skript bereitlegen (idempotent, siehe 7.1).
-# 2) Auto-Revert in 10 Minuten planen:
-sudo systemd-run --on-active=10min --unit=odroid-ap-revert \
-  /usr/local/sbin/odroid-ap-revert.sh
-# 3) Umbau durchführen und verifizieren.
-# 4) Bei Erfolg den Timer abbrechen, damit nichts zurückfällt:
-sudo systemctl stop odroid-ap-revert.timer odroid-ap-revert.service 2>/dev/null || true
+# Ausrollen MIT Dead-Man (Default 10 min):
+sudo sh remote-shell/ha/deploy_ap.sh --conf-dir /tmp/odroid-ap --apply
+#   -> deploy_ap.sh laesst /etc/odroid-ap.deadman liegen und startet
+#      odroid-ap-deadman.timer (OnActiveSec=10min).
+
+# Nach erfolgreicher Pruefung (Gate-P2) bestaetigen -> Timer aus, AP bleibt:
+sudo sh remote-shell/ha/deploy_ap.sh --confirm
 ```
 
-Bleibt Schritt 4 aus (Kanal tot), stellt das System nach 10 Minuten selbst den
-vorherigen Zustand wieder her.
+Bleibt die Bestätigung aus (z. B. weil der Kanal nach dem Umbau tot ist),
+feuert der Timer und ruft `odroid_ap_deadman.sh`:
+
+- Marker vorhanden → `revert_ap.sh --apply` (hostapd/dnsmasq gehen wieder
+  **masked**, NAT weg, NM bekommt das Modul zurück).
+- Marker weg (bestätigt) → nichts.
+
+Damit ist die Absicherung aus Abschnitt 7.1 automatisiert: ein nicht
+bestätigter AP baut sich **selbst** zurück. Host-getestet in
+`test_ap_deploy.py` (Auto-Revert ohne Confirm, Confirm verhindert Revert).
+
+> Die manuelle `systemd-run`-Vorlage ist damit nicht mehr nötig; wer sie
+> dennoch nutzen will, kann sie zusätzlich verwenden.
 
 ### 7.3 Datei-Backups vor dem Umbau
 
@@ -439,6 +497,10 @@ AP-Subnetz **nicht** mit dem Heimnetz `192.168.178.0/24` überlappt, und
 verweigert Platzhalterwerte. Tests:
 `python3 remote-shell/ha/test_odroid_ap_config.py`.
 
+Ausrollen/Rücknehmen: `remote-shell/ha/deploy_ap.sh` (Abschnitt 5.5),
+`remote-shell/ha/revert_ap.sh` (5.6), Dead-Man `remote-shell/ha/odroid_ap_deadman.sh`
+(7.2). Tests: `python3 remote-shell/ha/test_ap_deploy.py`.
+
 ### 9.2 nft-Äquivalent zu Abschnitt 5.3
 
 ```nft
@@ -462,6 +524,9 @@ table ip odroid_ap {
 - WLAN-Treiber/AP+STA: `remote-shell/ha/WLAN-TREIBER-ANALYSE.md` (Branch
   `feat/dfs-clock-visibility`) — belegt: `rtw88_8822bu` kann kein AP+STA; für
   AP ohne Kabel braucht es einen MediaTek-Adapter (mt7612u/mt7921au).
+- Werkzeuge: `odroid_ap_config.py` (Generator), `deploy_ap.sh` (Ausrollen),
+  `revert_ap.sh` (Rücknahme), `odroid_ap_deadman.sh` (Auto-Revert);
+  Tests `test_odroid_ap_config.py`, `test_ap_deploy.py`.
 - HA-Integrationen: ONVIF, Generic Camera (HA-Dokumentation).
 - hostapd: `hw_mode`, `channel`, `wpa_passphrase`, `ieee80211h` (DFS).
 - dnsmasq: `dhcp-range`, `dhcp-option`, `interface`, `bind-interfaces`.
