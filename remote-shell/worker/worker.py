@@ -173,8 +173,14 @@ def run_oh(name, text, fresh, timeout):
     if fresh:
         cmd.append("-n")
     cmd.append(text)
+    # `oh` soll VOR dem harten subprocess-Timeout zurueckkehren, damit es seine
+    # Warteschleife sauber beendet (und den Agenten nicht mitten im Lauf
+    # abschneidet). Ein laengerer Lauf wird von `oh` selbst per Fortschritt
+    # erkannt, nicht mehr durch ein festes 240-s-Fenster.
+    env = dict(os.environ)
+    env.setdefault("OH_WAIT", str(max(300, timeout - 120)))
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired as e:
         out = e.stdout or ""

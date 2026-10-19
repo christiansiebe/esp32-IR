@@ -22,6 +22,12 @@
 #   OH_RETRIES=3        zusaetzliche Versuche nach einem transienten Fehler
 #   OH_RETRY_BASE=8     Basis-Wartezeit in Sekunden (verdoppelt sich je Versuch)
 #   OH_FRESH_ON_ERROR=1 bei transientem Fehler auf frische Conversation wechseln
+#   OH_WAIT=1800        max. Gesamtwartezeit (s) auf eine Antwort. Ein laenger
+#                       laufender Auftrag wird NICHT mehr abgebrochen (der
+#                       Agent arbeitet serverseitig weiter).
+#   OH_STALL=300        aufgeben erst, wenn so viele Sekunden KEIN neues Event
+#                       mehr kam (echter Haenger, nicht nur langsame Arbeit).
+#   OH_POLL=3           Poll-Intervall (s).
 set -euo pipefail
 
 OH_BASE="${OH_BASE:-http://127.0.0.1:8000}"
@@ -52,7 +58,9 @@ fi
 OH_BASE="$OH_BASE" OH_AID="$OH_AID" OH_STATE="$OH_STATE" \
 OH_NEW="$OH_NEW" OH_WD="$OH_WD" OH_TEXT="$TEXT" \
 OH_RETRIES="${OH_RETRIES:-3}" OH_RETRY_BASE="${OH_RETRY_BASE:-8}" \
-OH_FRESH_ON_ERROR="${OH_FRESH_ON_ERROR:-1}" python3 -u - <<'PY'
+OH_FRESH_ON_ERROR="${OH_FRESH_ON_ERROR:-1}" \
+OH_WAIT="${OH_WAIT:-1800}" OH_STALL="${OH_STALL:-300}" OH_POLL="${OH_POLL:-3}" \
+python3 -u - <<'PY'
 import json, os, time, urllib.request, urllib.error
 
 B = os.environ["OH_BASE"]; AID = os.environ["OH_AID"]; ST = os.environ["OH_STATE"]
@@ -60,6 +68,9 @@ NEW = os.environ["OH_NEW"] == "1"; WD = os.environ["OH_WD"]; TXT = os.environ["O
 RETRIES = int(os.environ.get("OH_RETRIES", "3") or "3")
 RETRY_BASE = float(os.environ.get("OH_RETRY_BASE", "8") or "8")
 FRESH_ON_ERROR = os.environ.get("OH_FRESH_ON_ERROR", "1") == "1"
+WAIT_MAX = float(os.environ.get("OH_WAIT", "1800") or "1800")
+STALL = float(os.environ.get("OH_STALL", "300") or "300")
+POLL = float(os.environ.get("OH_POLL", "3") or "3")
 
 # Fehlercodes/Detail-Muster, die einen erneuten Versuch rechtfertigen.
 RETRYABLE_CODES = {
@@ -167,8 +178,11 @@ def send_and_wait(cid):
     got_answer = False
     idle_rounds = 0
     retry_info = None
-    for _ in range(80):
-        time.sleep(3)
+    started = time.monotonic()
+    last_progress = time.monotonic()
+    last_seen = len(seen_ids)
+    while True:
+        time.sleep(POLL)
         items = recent_events(cid)
         fresh = [e for e in items if e.get("id") not in seen_ids]
         for e in fresh:
@@ -203,18 +217,37 @@ def send_and_wait(cid):
         # Status warten (der Lauf wird nie mehr erfolgreich).
         if retry_info is not None:
             return "error", retry_info
+        # Fortschritt = neue Events seit dem letzten Poll. Ein langer Auftrag
+        # (viele Tool-Aufrufe) erzeugt laufend Events; nur ein echter Stillstand
+        # darf zum Abbruch fuehren.
+        if len(seen_ids) > last_seen:
+            last_progress = time.monotonic()
+            last_seen = len(seen_ids)
         st2, cj = req("GET", f"/api/conversations/{cid}")
         status = json.loads(cj).get("execution_status") if st2 == 200 else "?"
         # "idle" tritt direkt nach dem Senden kurz auf, bevor der Agent startet:
         # erst beenden, wenn der Agent wirklich geantwortet hat (oder Fehler/Stop).
         if status in ("finished", "error", "stopped") and got_answer:
             break
+        if status in ("finished", "error", "stopped") and not got_answer:
+            # Turn vorbei, aber keine Antwort -> kurz nachfassen, dann Ende.
+            if time.monotonic() - last_progress > 2 * POLL:
+                break
         if status == "idle":
             idle_rounds += 1
             if got_answer and idle_rounds >= 2:
                 break
         else:
             idle_rounds = 0
+        # Abbruch nur bei echtem Stillstand oder Erreichen der Gesamt-Obergrenze.
+        if time.monotonic() - last_progress > STALL:
+            print(f"\n[oh] kein Fortschritt seit {STALL:.0f}s "
+                  f"({len(seen_ids)} Events) -> Abbruch der Warteschleife")
+            break
+        if time.monotonic() - started > WAIT_MAX:
+            print(f"\n[oh] Gesamt-Wartezeit {WAIT_MAX:.0f}s erreicht "
+                  f"({len(seen_ids)} Events) -> Abbruch der Warteschleife")
+            break
     return ("answer" if got_answer else "timeout"), None
 
 
