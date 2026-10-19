@@ -148,6 +148,11 @@ class Conn:
         self.cid = None
 
 
+def redact(text):
+    """Token in Log-/Fehlertexten unkenntlich machen (URLs landen im Journal)."""
+    return re.sub(r"(token=)[^&\s]+", r"\1***", str(text))
+
+
 async def session(conn, token):
     q = urllib.parse.urlparse(conn.url)
     path = q.path.rstrip("/") + "/agent"
@@ -189,7 +194,7 @@ async def run_target(conn, token):
         try:
             await session(conn, token)
         except Exception as exc:  # noqa: BLE001
-            print(f"[{conn.url}] {exc} - neuer Versuch in 5s ...")
+            print(f"[{redact(conn.url)}] {redact(exc)} - neuer Versuch in 5s ...")
         finally:
             conn.ws = None
         await asyncio.sleep(5)
