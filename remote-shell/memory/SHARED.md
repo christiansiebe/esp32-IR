@@ -792,3 +792,32 @@ CHAT-THREAD). Keine offene Arbeit im Odroid-Zweig.
 - Aufruf: `oh [-n] [-w DIR] Aufgabe in Worten`. `-n` = neue Conversation,
   Default setzt `/root/.oh-last-conv` fort. Von der Sandbox:
   `bash cmd_send.sh "oh hostname und pwd ausfuehren" 120`.
+
+## WLAN-Umschaltung AP -> STA/Fritzbox (2026-10-19)
+- **Ziel erreicht:** AP ("Odroid", wlxde627949ba79) AUS, Odroid als **STA** mit
+  der Fritzbox verbunden (Profil "Wohnzimmer 5 Ghz", wlxdc627949ba79 = 192.168.178.71,
+  867 MBit/s, -18 dBm). Ethernet end0 bleibt primaere Route (192.168.178.4).
+- **Kernursache:** Das NM-Profil hatte ein **veraltetes `match.path`**
+  (`...usb-0:1.1:1.0`), der Adapter steckt aber an `...usb-0:1.2:1.0` ->
+  "profile is not compatible with device". Fix: `nmcli con mod <uuid> match.path <GENERAL.PATH>`.
+- **Vendor-Treiber (88x2bu) kann NICHT AP+STA gleichzeitig** (Kanal-Busy) -> es geht
+  nur entweder/oder. Deshalb AP-Dienste gestoppt.
+- **Reboot-fest gemacht:** `systemctl disable --now odroid-apsta{,-nat,-dnsmasq}`;
+  `99-odroid-ap-unmanaged.conf` umbenannt (KEINE MAC geloescht); Profil autoconnect=yes.
+- **Backups/Rueckweg:** `/root/netbackup/sta-switch-<TS>/` (Profile+conf),
+  `/root/netbackup/sta-persist-20261019-212419/` (+ `RESTORE.txt` = AP wieder an).
+- **Nicht anfassen:** MAC-Adressen, Ethernet, Docker, HA (Randbedingung).
+
+## oh: parallele Sessions (2026-10-19)
+- **`oh -s NAME <text>`** = eigene Conversation pro Session (State `/root/.oh-conv-NAME`),
+  so koennen mehrere Chats gleichzeitig laufen. Ohne `-s`: gemeinsamer Default
+  `/root/.oh-last-conv` -> **Kollisionsgefahr** (zwei `oh` teilen eine Conversation;
+  genau das passierte, als ein `oh -n`-Auftrag und ein interaktives `oh hi`
+  dieselbe Conversation trafen).
+- Mehrere Conversations laufen serverseitig parallel (getestet: `-s alpha`, `-s beta`).
+- **Der Kanal (cmd_agent) ist sequenziell**: nur ein `cmd_send.sh`/`oh` gleichzeitig.
+  Fuer "chatten waehrend er arbeitet" den langen Auftrag mit `nohup ... &` starten
+  (blockiert die SSH-Shell nicht) ODER direkt in der SSH-Shell des Odroid tippen.
+- `oh` liegt als `/usr/local/bin/oh` (global, alle Shells). Der Fehler
+  "oh: command not found" kam von einem **anderen Host** (Prompt `Odroid@debian`),
+  NICHT vom odroidn2 (dort Prompt `root@odroidn2`).
