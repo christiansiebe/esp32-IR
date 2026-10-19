@@ -171,6 +171,11 @@
    "name": "Sub: LLM-Credential-Resilienz (Odroid-Repair)",
    "open_tasks": 1,
    "note": "Kind des Odroid-Repair-Chats ec27624233304e1d972007bf2b12eb00; teilt dessen Sandbox. Aufgabe: 'oh'-CLI + Worker gegen transiente LLMServiceUnavailableError/Missing-credentials absichern (Retry mit Backoff). 2026-10-19 gestartet."
+  },
+  "ec27624233304e1d972007bf2b12eb00": {
+   "name": "Odroid-Repair (OpenHands auf N2+ reparieren)",
+   "open_tasks": 1,
+   "note": "Repariert die lokale OpenHands-Installation auf dem Odroid N2+ + Worker/oh-Skripte. 2026-10-19: Sandbox-Dies/Zombie-Problem analysiert (MISSING=unwiederbringlich)."
   }
  }
 }
