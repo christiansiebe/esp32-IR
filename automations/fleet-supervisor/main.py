@@ -69,6 +69,29 @@ NEVER_PAUSE = {
     "7a894c13678043e58935dd1509217a75",
 }
 
+# --- orphan guard -----------------------------------------------------------
+# A conversation that is not in the registry is invisible to this supervisor, so
+# nothing keeps it alive. It goes idle -> the platform pauses the sandbox ->
+# after the deletion timeout the sandbox is deleted. A deleted sandbox is
+# MISSING: read-only, resume returns 404, send-message returns
+# "Sandbox not found for conversation". It cannot be brought back. This is how
+# the ESP-IDF chat (75a2e929) died on 2026-10-19: it was never registered, so
+# no wake ever reached it.
+#
+# The guard finds recent conversations that nobody registered and adopts them
+# for this cycle (open_tasks=1), so the normal wake logic protects them. A new
+# chat is then safe even if its owner forgets fleet/agents.json.
+#
+# Scope is deliberately narrow to avoid waking finished chats: an orphan is
+# adopted only while it is *recent* (created within ORPHAN_MAX_AGE_HOURS) and
+# *active* (updated within ORPHAN_IDLE_HOURS). Once it stops being updated it
+# drops out and is allowed to sleep. Resuming an existing sandbox does not
+# consume the daily conversation quota, so protecting orphans is quota-free.
+ORPHAN_GUARD = os.environ.get("FLEET_ORPHAN_GUARD", "1") not in ("0", "false", "")
+ORPHAN_MAX_AGE_HOURS = float(os.environ.get("FLEET_ORPHAN_MAX_AGE_HOURS", "48"))
+ORPHAN_IDLE_HOURS = float(os.environ.get("FLEET_ORPHAN_IDLE_HOURS", "6"))
+ORPHAN_LIMIT = int(os.environ.get("FLEET_ORPHAN_LIMIT", "50"))
+
 WAKE_MESSAGE = (
     "System: Deine Sandbox war pausiert bzw. dein Lauf festgefahren und wurde vom "
     "Fleet-Supervisor geweckt. Arbeite an deinen offenen Aufgaben weiter. Regel: "
@@ -350,9 +373,53 @@ def decide(conv, entry, rec_state, sandbox_shared_live):
     return "wake"
 
 
+def adopt_orphans(token, registry, log=print):
+    """Adopt recent, active conversations that nobody registered.
+
+    Returns {cid: {"name": ..., "open_tasks": 1, "orphan": True}} to merge into
+    the registry. Only conversations created within ORPHAN_MAX_AGE_HOURS *and*
+    updated within ORPHAN_IDLE_HOURS qualify, so finished chats are left alone.
+    Never raises: a failed search just means no adoption this cycle.
+    """
+    if not ORPHAN_GUARD:
+        return {}
+    adopted = {}
+    try:
+        rec = cloud(token, "GET", f"/api/v1/app-conversations/search?limit={ORPHAN_LIMIT}")
+        items = rec.get("items") if isinstance(rec, dict) else rec
+    except Exception as exc:  # noqa: BLE001
+        log(f"orphan-guard: Suche fehlgeschlagen: {exc}")
+        return {}
+    for conv in items or []:
+        cid = conv.get("id")
+        if not cid or cid in registry or cid in adopted:
+            continue
+        if conv.get("sandbox_status") != "RUNNING":
+            continue
+        age = hours_since(conv.get("created_at"))
+        idle = hours_since(conv.get("updated_at"))
+        if age is None or idle is None:
+            continue
+        if age > ORPHAN_MAX_AGE_HOURS or idle > ORPHAN_IDLE_HOURS:
+            continue
+        adopted[cid] = {
+            "name": f"orphan:{cid[:8]}",
+            "open_tasks": 1,
+            "orphan": True,
+            "note": "auto-adopted by orphan guard (not in registry) - protects from pause->delete",
+        }
+    if adopted:
+        log(f"orphan-guard: {len(adopted)} nicht registrierte, aktive Chats uebernommen: "
+            f"{[c[:8] for c in adopted]}")
+    return adopted
+
+
 def main():
     token = get_secret("OPENHANDS_API_KEY")
     registry = load_registry()
+    orphans = adopt_orphans(token, registry)
+    if orphans:
+        registry = {**registry, **orphans}
     state = load_state()
     conv_state = state.setdefault("conv", {})
     woken, paused, stuck = [], [], []
