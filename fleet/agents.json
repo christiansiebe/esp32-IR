@@ -169,8 +169,9 @@
   },
   "d4168c3cc19c4056ae93f8dbb8c7bfe5": {
    "name": "Sub: LLM-Credential-Resilienz (Odroid-Repair)",
-   "open_tasks": 1,
-   "note": "Kind des Odroid-Repair-Chats ec27624233304e1d972007bf2b12eb00; teilt dessen Sandbox. Aufgabe: 'oh'-CLI + Worker gegen transiente LLMServiceUnavailableError/Missing-credentials absichern (Retry mit Backoff). 2026-10-19 gestartet."
+   "open_tasks": 0,
+   "note": "FERTIG (2026-10-19): Commit f6f7bea auf cline/power-history-diag. oh.sh: ConversationErrorEvent sofort melden (kein 240s-Leerwait), Retry mit Backoff, Fresh-Conversation-Selbstheilung bei 'Missing credentials' (Key ist Snapshot pro Conversation), ID-basiertes Event-Tracking (events/search liefert max 100 + aelteste -> Offset-Bug), finish-Action als Antwort, ehrliche Exit-Codes 0/2/3/4/5. worker.py: Exit 3/5 + Textmuster retrybar -> Wiederholung mit frischer Conversation; requeue_orphans stellt verwaiste running/*.task nach Neustart zurueck (PID-gestempelt). docs/LLM-RESILIENCE.md. Auf Odroid deployt + verifiziert (Selbstheilung HEAL-OK2, E2E-Queue ok, Neustart-Requeue ok, Unit-Tests). Offen (Empfehlung): Refresh-Hook OH_LLM_API_KEY_REFRESH_URL am Agent-Server aktivieren.",
+   "branch": "cline/power-history-diag"
   },
   "ec27624233304e1d972007bf2b12eb00": {
    "name": "Odroid-Repair (OpenHands auf N2+ reparieren)",
