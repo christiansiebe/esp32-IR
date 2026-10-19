@@ -112,8 +112,10 @@ for _ in range(80):
             if m:
                 print("\nAgent:", m)
                 got_answer = True
-        elif k == "ErrorEvent":
-            print("  ERROR", json.dumps(e)[:250])
+        elif k in ("ErrorEvent", "ConversationErrorEvent"):
+            code = e.get("code"); detail = e.get("detail")
+            print("  ERROR", code, str(detail)[:250])
+            got_answer = True  # Fehler beendet den Lauf, nicht 240s leer warten
     seen = len(items)
     st2, cj = req("GET", f"/api/conversations/{cid}")
     status = json.loads(cj).get("execution_status") if st2 == 200 else "?"
