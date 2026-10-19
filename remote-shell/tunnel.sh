@@ -36,7 +36,14 @@ alive() {
 
 http_get_ok() {
   [ -s "$URLFILE" ] || return 1
-  curl -fsS -m 8 -o /dev/null "$(cat "$URLFILE")/" 2>/dev/null
+  # Der WS-Server antwortet auf ein plain GET mit 426 (Upgrade Required) —
+  # das beweist, dass der Tunnel bis zum Server durchkommt.
+  local code
+  code="$(curl -sS -m 8 -o /dev/null -w '%{http_code}' "$(cat "$URLFILE")/" 2>/dev/null || true)"
+  case "$code" in
+    2*|3*|426) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 start() {
