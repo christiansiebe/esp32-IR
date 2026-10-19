@@ -166,6 +166,11 @@
    "open_tasks": 0,
    "note": "ERSETZT den geloeschten Odroid Entwicklung (b29e060b). Odroid-Koordinator; Board-Arbeit nur hier (geteilter remote-shell-Kanal). FERTIG 2026-10-18: T4 cpu-real-clock (reboot-fest); T5 OC-Overlay 2496->2472 (PR #39); T1 -> PR #42; T2 -> PR #41; T3 -> PR #40/#43/#44/#45; T6 DRUCKER ERLEDIGT (Brother HL-3040CN ueber qemu-i386-CUPS-Container, auf dem Board ausgerollt, vom Nutzer am Drucker bestaetigt). Alle Aufgaben done -> darf schlafen. Offene NUTZER-Entscheide (nur vorbereitet, nicht umgesetzt): AP, Kamera, Watchdog-Aktor.",
    "sandbox_id": "14OgyIfbGZEKFmFiE4cHVv"
+  },
+  "d4168c3cc19c4056ae93f8dbb8c7bfe5": {
+   "name": "Sub: LLM-Credential-Resilienz (Odroid-Repair)",
+   "open_tasks": 1,
+   "note": "Kind des Odroid-Repair-Chats ec27624233304e1d972007bf2b12eb00; teilt dessen Sandbox. Aufgabe: 'oh'-CLI + Worker gegen transiente LLMServiceUnavailableError/Missing-credentials absichern (Retry mit Backoff). 2026-10-19 gestartet."
   }
  }
 }
