@@ -36,6 +36,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 import urllib.parse
 
 import websockets
@@ -213,25 +214,34 @@ def ws_url(url):
 
 
 def read_targets():
-    """Ziel-URLs sammeln: $SANDBOX_TERM_URLS, dann $SANDBOX_TERM_URLS_FILE,
-    dann die zentrale GitHub-Registry ($SANDBOX_TERM_REGISTRY), sonst Fallback
-    Argument/$SANDBOX_TERM_URL. Duplikate werden entfernt."""
-    urls = []
+    """-> (urls, authoritative)
+
+    authoritative=True, wenn die Registry geantwortet hat: dann gilt NUR ihre
+    Liste (plus explizit gesetzte $SANDBOX_TERM_URLS), damit abgelaufene
+    Tunnel-URLs nicht ewig weiterversucht werden. Ohne Registry-Antwort gilt
+    die lokale Datei/Argument (Fallback).
+    """
+    explicit = []
     for part in re.split(r"[,\s]+", os.environ.get("SANDBOX_TERM_URLS", "")):
         if part.strip():
-            urls.append(part.strip())
-    path = os.environ.get("SANDBOX_TERM_URLS_FILE", "")
-    if path and os.path.exists(path):
-        for line in open(path):
-            line = line.strip()
-            if line and not line.startswith("#"):
-                urls.append(line)
-    # Zentrale Registry: der Odroid holt sich die Sandbox-Liste selbst.
-    urls.extend(read_registry())
-    if not urls:
-        single = (sys.argv[1] if len(sys.argv) > 1 else "") or os.environ.get("SANDBOX_TERM_URL", "")
+            explicit.append(part.strip())
+
+    registry = read_registry()
+    if registry:
+        urls, authoritative = explicit + registry, True
+    else:
+        urls, authoritative = list(explicit), False
+        path = os.environ.get("SANDBOX_TERM_URLS_FILE", "")
+        if path and os.path.exists(path):
+            for line in open(path):
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    urls.append(line)
+        single = (sys.argv[1] if len(sys.argv) > 1 else "") or \
+            os.environ.get("SANDBOX_TERM_URL", "")
         if single:
             urls.append(single)
+
     seen, out = set(), []
     for u in urls:
         u = ws_url(u)
@@ -240,7 +250,7 @@ def read_targets():
         if u not in seen:
             seen.add(u)
             out.append(u)
-    return out
+    return out, authoritative
 
 
 def read_registry():
@@ -251,6 +261,11 @@ def read_registry():
     src = os.environ.get("SANDBOX_TERM_REGISTRY", "")
     if not src:
         return []
+    # Cache-Buster: raw.githubusercontent.com cached max-age=300; mit einem
+    # wechselnden Query-Parameter holt jeder Poll den echten Stand (Failover
+    # in ~60 s statt bis zu 5 min).
+    if "?" not in src:
+        src = f"{src}?t={int(time.time())}"
     try:
         import urllib.request
         with urllib.request.urlopen(src, timeout=15) as r:
@@ -286,7 +301,7 @@ async def main():
     signal.signal(signal.SIGINT, on_sigint)
 
     # Erststart: falls gar keine Ziele bekannt sind, ist das ein Fehler.
-    initial = read_targets()
+    initial, _ = read_targets()
     if not initial:
         raise SystemExit(
             "Kein Ziel. Aufruf: cmd_agent.py 'wss://work-<n>-<id>.prod-runtime.all-hands.dev/'"
@@ -312,8 +327,16 @@ async def main():
     interval = int(os.environ.get("SANDBOX_TERM_REGISTRY_INTERVAL", "60"))
     while True:
         await asyncio.sleep(interval)
-        for u in read_targets():
+        targets, authoritative = read_targets()
+        for u in targets:
             await ensure(u)
+        if authoritative:
+            # Abgelaufene Tunnel-URLs nicht ewig weiterprobieren.
+            for u, task in list(tasks.items()):
+                if u not in targets:
+                    task.cancel()
+                    tasks.pop(u, None)
+                    conns.pop(u, None)
 
 
 if __name__ == "__main__":
