@@ -22,8 +22,57 @@ import json
 import os
 import subprocess
 import time
+import urllib.request
 
 OH = os.environ.get("WORKER_OH_BIN", "/usr/local/bin/oh")
+
+# Auto-Beauftragung: die Worker holen neue Jobs selbst aus der GitHub-Job-Queue
+# (raw, oeffentlich -> read-only, kein Token auf dem Odroid). Parents schreiben
+# Jobs mit worker_enqueue.py. Lokale queue/*.task funktioniert weiterhin.
+JOBS_RAW = os.environ.get(
+    "WORKER_JOBS_RAW",
+    "https://raw.githubusercontent.com/christiansiebe/esp32-IR/"
+    "cline/power-history-diag/remote-shell/worker/jobs.json")
+
+
+def fetch_jobs():
+    """GitHub-Job-Queue lesen. Fehler still ignorieren (Kanal darf nie scheitern)."""
+    try:
+        with urllib.request.urlopen(JOBS_RAW, timeout=15) as r:
+            return json.loads(r.read()).get("jobs", {})
+    except Exception:
+        return {}
+
+
+def pull_jobs(d, logf):
+    """Neue Jobs aus GitHub in die lokale Queue legen (idempotent).
+
+    Bereits bekannte Jobs (open/running/done) werden uebersprungen; ein
+    Steuer-Job (text leer) wechselt nur den Zustand."""
+    seen_path = os.path.join(d, "seen.json")
+    try:
+        seen = json.load(open(seen_path))
+    except (ValueError, OSError):
+        seen = {}
+    changed = False
+    for jid, j in fetch_jobs().items():
+        if jid in seen:
+            continue
+        text = (j.get("text") or "").strip()
+        if text:
+            with open(os.path.join(d, "queue", f"gh-{jid}.task"), "w") as fh:
+                json.dump({"text": text, "submitted_by": j.get("by", "github"),
+                           "gh_job": jid}, fh)
+            log(f"[github] Job {jid} in die Queue gelegt", logf)
+        seen[jid] = j.get("state", "open")
+        changed = True
+    if changed:
+        try:
+            with open(seen_path, "w") as fh:
+                json.dump(seen, fh)
+        except OSError:
+            pass
+
 
 
 def log(msg, path):
@@ -87,14 +136,22 @@ def main():
                     help="pro Task eine neue Conversation (Default: wiederverwenden)")
     ap.add_argument("--timeout", type=int, default=3600)
     ap.add_argument("--poll", type=int, default=5)
+    ap.add_argument("--jobs-poll", type=int, default=30,
+                    help="Intervall fuer die GitHub-Job-Queue (0=aus)")
     a = ap.parse_args()
 
     for sub in ("queue", "running", "results"):
         os.makedirs(os.path.join(a.dir, sub), exist_ok=True)
     logf = os.path.join(a.dir, "worker.log")
-    log(f"[{a.name}] gestartet (dir={a.dir} fresh={a.fresh} timeout={a.timeout}s)", logf)
+    log(f"[{a.name}] gestartet (dir={a.dir} fresh={a.fresh} timeout={a.timeout}s "
+        f"jobs-poll={a.jobs_poll}s)", logf)
 
+    last_jobs = 0.0
     while True:
+        # Neue Jobs aus GitHub automatisch aufnehmen.
+        if a.jobs_poll and time.time() - last_jobs >= a.jobs_poll:
+            pull_jobs(a.dir, logf)
+            last_jobs = time.time()
         tid, path = claim(a.dir)
         if not tid:
             time.sleep(a.poll)
