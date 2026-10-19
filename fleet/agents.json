@@ -174,8 +174,8 @@
   },
   "ec27624233304e1d972007bf2b12eb00": {
    "name": "Odroid-Repair (OpenHands auf N2+ reparieren)",
-   "open_tasks": 1,
-   "note": "Repariert die lokale OpenHands-Installation auf dem Odroid N2+ + Worker/oh-Skripte. 2026-10-19: Sandbox-Dies/Zombie-Problem analysiert (MISSING=unwiederbringlich)."
+   "open_tasks": 0,
+   "note": "Odroid-OpenHands-Reparatur ABGESCHLOSSEN+verifiziert (Profil 'default' vorhanden, api_key_set:true, health 200). Zwei Kind-Sub-Agenten laufen autonom weiter und halten die geteilte Sandbox am Leben (deren open_tasks=1 genuegt - Supervisor pausiert geteilte Sandbox nur, wenn KEIN Nutzer offene Arbeit hat). Parent auf 0 gesetzt, um unnoetige 10-min-Weckrufe zu vermeiden. 2026-10-19 21:45."
   },
   "c80335f5baf2471192cdfb412c8a2146": {
    "name": "Sub: ESP-IDF Firmware (host-verifizierbare TODO-Punkte)",
