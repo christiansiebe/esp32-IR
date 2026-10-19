@@ -18,6 +18,19 @@ bash    /workspace/remote-shell/install_autostart.sh   # optional: Hook in ~/.ba
 bash /workspace/remote-shell/cmd_send.sh "uname -a"
 bash /workspace/remote-shell/cmd_send.sh "systemctl status novnc.service --no-pager" 60
 ```
+
+## Text in normaler Sprache an den Agenten (oh.sh)
+Der Odroid-Agent-Server hat kein Web-UI — Text geht per API. Helfer auf dem Odroid:
+```bash
+/root/oh.sh "Fuehre hostname und pwd aus und gib das Ergebnis zurueck"
+/root/oh.sh -n "starte eine frische Unterhaltung"
+/root/oh.sh -w /root "arbeite in /root"
+```
+`oh.sh` (auch hier im Repo) setzt ohne `-n` die letzte Conversation fort
+(`/root/.oh-last-conv`) und zeigt die Terminal-Befehle und die Antwort des Agenten.
+Von der Sandbox aus: `bash cmd_send.sh "/root/oh.sh 'hostname und pwd ausfuehren'" 120`.
+Achtung: ein laufendes `oh.sh` blockiert den (sequenziellen) Kanal bis zu ~4 min.
+
 Der Odroid zeigt den Befehl und fuehrt ihn nach **lokaler Bestaetigung** aus.
 Lange Laeufe: Timeout via `SANDBOX_TERM_CMD_TIMEOUT` (Default 300 s) — oder am Odroid
 detached starten (`systemd-run`/`systemctl start`).
