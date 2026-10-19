@@ -55,6 +55,27 @@ static power_history_record_t g_history_ram_records[POWER_HISTORY_PAGE_SIZE];
 static size_t g_history_ram_count;
 static portMUX_TYPE g_stats_lock = portMUX_INITIALIZER_UNLOCKED;
 
+/* Optional observer for newly stored records (see power_history.h). Set once at
+ * boot, read from the writer while it holds g_history_mutex. */
+static power_history_store_observer_t g_store_observer;
+static void *g_store_observer_ctx;
+
+void power_history_set_store_observer(power_history_store_observer_t observer,
+                                      void *ctx)
+{
+    g_store_observer = observer;
+    g_store_observer_ctx = ctx;
+}
+
+/* Notify the observer that one minute was actually persisted. The writer holds
+ * the store lock; the observer must not block. */
+static void notify_store_observer(const power_history_record_t *record)
+{
+    if (g_store_observer != NULL) {
+        g_store_observer(g_store_observer_ctx, record);
+    }
+}
+
 static uint32_t header_checksum(const power_history_header_t *header)
 {
     const uint8_t *bytes = (const uint8_t *)header;
@@ -392,6 +413,7 @@ static bool write_records(power_history_record_t *records, size_t record_count)
                 return false;
             }
         }
+        notify_store_observer(&records[i]);
         ++updated.next_sequence;
         if (updated.next_sequence == 0) {
             updated.next_sequence = 1;
@@ -482,6 +504,7 @@ static void power_history_worker(void *arg)
                             (POWER_HISTORY_PAGE_SIZE - 1) * sizeof(records[0]));
                     g_history_ram_records[POWER_HISTORY_PAGE_SIZE - 1] = records[i];
                 }
+                notify_store_observer(&records[i]);
             }
         }
         xSemaphoreGive(g_history_mutex);
@@ -978,6 +1001,7 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
                 g_history_header.next_sequence = 1;
             }
             g_history_ram_records[g_history_ram_count++] = record;
+            notify_store_observer(&record);
             ++imported;
         }
         xSemaphoreGive(g_history_mutex);
@@ -1061,6 +1085,7 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
                 return ESP_FAIL;
             }
         }
+        notify_store_observer(&record);
         ++updated.next_sequence;
         if (updated.next_sequence == 0) {
             updated.next_sequence = 1;

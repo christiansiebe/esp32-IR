@@ -117,6 +117,17 @@ bool power_history_header_is_valid(const power_history_header_t *header);
 esp_err_t power_history_init(void);
 bool power_history_enqueue(const power_history_record_t *record);
 
+/* Observer for records that were just persisted (newly placed, not a duplicate).
+ * Called from the history writer while it holds the store lock, once per record
+ * a committed batch actually stored. The running energy totals use it to fold
+ * each stored minute exactly once, including backfilled (older) minutes, without
+ * re-reading the ring. Kept out of power_history.c's own logic: NULL is a no-op.
+ * The callback must not block (it runs inside the writer). */
+typedef void (*power_history_store_observer_t)(void *ctx,
+                                               const power_history_record_t *record);
+void power_history_set_store_observer(power_history_store_observer_t observer,
+                                      void *ctx);
+
 /* Merge minute records pulled from the sender (backfill). Each record is
  * validated/migrated first; corrupt or unsupported entries are skipped. A valid
  * record is enqueued only when it is new for the receiver: either its sequence

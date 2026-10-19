@@ -33,7 +33,8 @@ set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "link_fallback.c" "liveness_guard.c" "ota_policy.c"
               "task_wdt_policy.c" "task_wdt_guard.c"
               "json_escape.c" "version.c"
-              "wall_clock.c" "wall_clock_store.c")
+              "wall_clock.c" "wall_clock_store.c"
+              "energy_totals.c" "energy_totals_store.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
     list(APPEND main_srcs "mqtt_bridge.c" "mqtt_publish.c" "web_guard.c"
                           "health_policy.c" "health_task.c")

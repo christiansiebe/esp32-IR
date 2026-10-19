@@ -306,8 +306,23 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       gekipptes Byte → `SML_CHECKSUM_ERROR`). Im Host-Runner aktiv, ASan+UBSan.
 - [ ] **AP abschalten, wenn STA verbunden** (größter einzelner Spareffekt): Empfänger fährt
       dauerhaft `WIFI_MODE_APSTA` (`main.c`); nach `GOT_IP` auf `WIFI_MODE_STA` wechseln.
-- [ ] **Tages-/Monats-Summen im Flash** (`hImport[24]`/`dImport[31]` wie AMS): aus
+- [x] **Tages-/Monats-Summen im Flash** (`hImport[24]`/`dImport[31]` wie AMS): aus
       Minutenwerten ableiten, platzsparend + schnellere Langzeitgrafik.
+      **Erledigt** (Branch `feat/energy-day-month-totals`): reines Modul
+      `main/energy_totals.{c,h}` — je ein Ring über UTC-Tage (40 Slots) und
+      Kalendermonate (18 Slots), Summen in mW·min (int64, exakt) mit CRC32-Blob;
+      `main/energy_totals_store.{c,h}` persistiert den Blob in NVS
+      (`energy`/`totals`). Jede *tatsächlich gespeicherte* Minute (live **und**
+      Backfill/Import) wird über den neuen Observer
+      `power_history_set_store_observer()` genau einmal gefaltet — Boot-Marker
+      (`reason != NONE`/`sample_count == 0`) zählen nicht. Beim Boot idempotentes
+      Nachfalten ab `folded_through_utc` (deckt frisches NVS **und** Minuten seit
+      dem letzten Save ab), dann alle 300 s persistiert. Anzeige: `/api/power-history`
+      (`energy_day_wh`/`energy_month_wh`, beide Header-Pfade), Dashboard
+      (`history-day-info`), Konsole `history`. Host-Test
+      `test/test_energy_totals.c` (99 Checks: Kalender-/Monatswechsel, Wh-Identität
+      60 min × 1 W = 1 Wh, Marker-Ausschluss, Ring-Eviction, Blob-Roundtrip, echtes
+      NVS inkl. „Reboot" per fork, korruptes NVS). `storage`-Partition unangetastet.
 - [x] **Letzte bekannte Zeit persistieren** (`lastMeterReadTime`): nach Reboot ohne SNTP ist
       `bucket_start==0` → keine Aufzeichnung; letzte UTC im Header/NVS ablegen.
       **Erledigt** (PR #26): reine Module `main/wall_clock.{c,h}` (Record-Format +
