@@ -8,6 +8,14 @@
     "zvqpzxrtfjcxbcgw": {
       "url": "wss://work-2-zvqpzxrtfjcxbcgw.prod-runtime.all-hands.dev/",
       "updated": "2026-10-15T18:50:53Z"
+    },
+    "hpvmjoudkabtodeh": {
+      "url": "wss://work-2-hpvmjoudkabtodeh.prod-runtime.all-hands.dev/",
+      "updated": "2026-10-15T18:50:53Z"
     }
+  },
+  "paths": {
+    "memory": "remote-shell/memory/SHARED.md",
+    "registry": "https://raw.githubusercontent.com/christiansiebe/esp32-IR/cline/power-history-diag/remote-shell/memory/sandboxes.json"
   }
 }
