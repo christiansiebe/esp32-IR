@@ -1,0 +1,19 @@
+[Unit]
+Description=Odroid OpenHands worker %i (local agent server, no cloud quota)
+Documentation=file:/root/worker/README.md
+After=network-online.target openhands-agent.service
+Wants=network-online.target
+Requires=openhands-agent.service
+
+[Service]
+Type=simple
+# %i = 1 oder 2  ->  Session worker%i, eigene lokale Conversation.
+ExecStart=/usr/bin/python3 /root/worker/worker.py --name worker%i --dir /root/worker --timeout 3600
+Restart=always
+RestartSec=10
+# Kein Cloud-Chat: der Worker nutzt den lokalen Agent-Server (127.0.0.1:8000).
+Environment=WORKER_OH_BIN=/usr/local/bin/oh
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
