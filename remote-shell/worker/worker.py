@@ -17,6 +17,7 @@ unbeanspruchten Task (os.rename ist atomar -> kein Doppelgriff).
 Aufruf: worker.py --name worker1 [--dir /root/worker] [--fresh] [--timeout 3600]
 """
 import argparse
+import fcntl
 import glob
 import json
 import os
@@ -47,31 +48,36 @@ def fetch_jobs():
 def pull_jobs(d, logf):
     """Neue Jobs aus GitHub in die lokale Queue legen (idempotent).
 
-    Bereits bekannte Jobs (open/running/done) werden uebersprungen; ein
-    Steuer-Job (text leer) wechselt nur den Zustand."""
-    seen_path = os.path.join(d, "seen.json")
-    try:
-        seen = json.load(open(seen_path))
-    except (ValueError, OSError):
-        seen = {}
-    changed = False
-    for jid, j in fetch_jobs().items():
-        if jid in seen:
-            continue
-        text = (j.get("text") or "").strip()
-        if text:
-            with open(os.path.join(d, "queue", f"gh-{jid}.task"), "w") as fh:
-                json.dump({"text": text, "submitted_by": j.get("by", "github"),
-                           "gh_job": jid}, fh)
-            log(f"[github] Job {jid} in die Queue gelegt", logf)
-        seen[jid] = j.get("state", "open")
-        changed = True
-    if changed:
+    WICHTIG: Der ganze Vorgang laeuft unter einem flock — sonst lesen zwei
+    Worker gleichzeitig ein noch unbekanntes Job und legen ihn DOPPELT in die
+    Queue (beide fuehren ihn dann aus). seen.json verhindert zusaetzlich, dass
+    ein bereits bekannter Job (auch nach Neustart) erneut eingestellt wird."""
+    lock_path = os.path.join(d, ".jobs.lock")
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            with open(seen_path, "w") as fh:
-                json.dump(seen, fh)
-        except OSError:
-            pass
+            seen_path = os.path.join(d, "seen.json")
+            try:
+                seen = json.load(open(seen_path))
+            except (ValueError, OSError):
+                seen = {}
+            changed = False
+            for jid, j in fetch_jobs().items():
+                if jid in seen:
+                    continue
+                text = (j.get("text") or "").strip()
+                if text:
+                    with open(os.path.join(d, "queue", f"gh-{jid}.task"), "w") as fh:
+                        json.dump({"text": text, "submitted_by": j.get("by", "github"),
+                                   "gh_job": jid}, fh)
+                    log(f"[github] Job {jid} in die Queue gelegt", logf)
+                seen[jid] = j.get("state", "open")
+                changed = True
+            if changed:
+                with open(seen_path, "w") as fh:
+                    json.dump(seen, fh)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 
@@ -89,9 +95,19 @@ def claim(d):
     """Aeltesten unbeanspruchten Task atomar beanspruchen.
 
     os.rename ist atomar: greifen zwei Worker denselben Task, gewinnt genau
-    einer; der andere bekommt OSError und nimmt den naechsten."""
+    einer; der andere bekommt OSError und nimmt den naechsten. Zusaetzlich
+    werden Tasks uebersprungen, die schon laufen oder fertig sind (Schutz vor
+    doppelter Ausfuehrung, falls doch mal eine Kopie in der Queue landet)."""
     for t in sorted(glob.glob(os.path.join(d, "queue", "*.task"))):
         tid = os.path.basename(t)[:-5]
+        if os.path.exists(os.path.join(d, "running", f"{tid}.task")):
+            continue
+        if os.path.exists(os.path.join(d, "results", f"{tid}.json")):
+            try:
+                os.remove(t)
+            except OSError:
+                pass
+            continue
         dst = os.path.join(d, "running", f"{tid}.task")
         try:
             os.rename(t, dst)
@@ -177,7 +193,10 @@ def main():
         }
         with open(os.path.join(a.dir, "results", f"{tid}.json"), "w") as fh:
             json.dump(result, fh, indent=2)
-        os.remove(path)
+        try:
+            os.remove(path)
+        except OSError:
+            pass  # anderer Worker hat die Datei schon entfernt -> kein Absturz
         log(f"[{a.name}] Task {tid} fertig: {result['status']}", logf)
 
 
