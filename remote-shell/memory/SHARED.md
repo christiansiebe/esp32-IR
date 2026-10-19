@@ -784,3 +784,11 @@ CHAT-THREAD). Keine offene Arbeit im Odroid-Zweig.
   christiansiebe/esp32-IR/channel-registry/remote-shell/memory/sandboxes.json`
   (liefert u.a. `wss://work-2-hpvmjoudkabtodeh.prod-runtime.all-hands.dev/`).
   Token via `EnvironmentFile=/etc/odroid-cmd-agent.env`.
+
+## oh: Text-Eingabe global (Update 2026-10-19)
+- Helfer jetzt global als **`/usr/local/bin/oh`** installiert (Text OHNE
+  Anfuehrungszeichen: `oh Fuehre hostname aus` -> `TEXT="$*"`). `/root/oh.sh` ist
+  ein Symlink darauf. Repo-Quelle: `remote-shell/oh.sh`.
+- Aufruf: `oh [-n] [-w DIR] Aufgabe in Worten`. `-n` = neue Conversation,
+  Default setzt `/root/.oh-last-conv` fort. Von der Sandbox:
+  `bash cmd_send.sh "oh hostname und pwd ausfuehren" 120`.
