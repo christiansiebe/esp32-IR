@@ -200,6 +200,18 @@ async def run_target(conn, token):
         await asyncio.sleep(5)
 
 
+def ws_url(url):
+    """http(s):// -> ws(s):// (Registry/URL-Dateien sind oft als https notiert)."""
+    url = (url or "").strip()
+    if url.startswith("https://"):
+        url = "wss://" + url[len("https://"):]
+    elif url.startswith("http://"):
+        url = "ws://" + url[len("http://"):]
+    if url and not url.endswith("/"):
+        url += "/"
+    return url
+
+
 def read_targets():
     """Ziel-URLs sammeln: $SANDBOX_TERM_URLS, dann $SANDBOX_TERM_URLS_FILE,
     dann die zentrale GitHub-Registry ($SANDBOX_TERM_REGISTRY), sonst Fallback
@@ -222,6 +234,9 @@ def read_targets():
             urls.append(single)
     seen, out = set(), []
     for u in urls:
+        u = ws_url(u)
+        if not u or not u.startswith(("ws://", "wss://")):
+            continue
         if u not in seen:
             seen.add(u)
             out.append(u)

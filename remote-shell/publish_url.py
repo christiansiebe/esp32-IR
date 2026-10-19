@@ -43,6 +43,11 @@ def main():
         print("Aufruf: publish_url.py <url>")
         return 2
     url = sys.argv[1].rstrip("/") + "/"
+    # Der Agent spricht WebSocket: Registry-Eintraege muessen wss:// sein.
+    if url.startswith("https://"):
+        url = "wss://" + url[len("https://"):]
+    elif url.startswith("http://"):
+        url = "ws://" + url[len("http://"):]
     if not ensure_branch():
         print("publish: Branch konnte nicht angelegt werden")
         return 1
