@@ -1,4 +1,11 @@
 {
   "_comment": "Job-Intake fuer die Odroid-Worker. Parents schreiben hier Jobs (worker_enqueue.py, via GITHUB_WRITE_TOKEN). Die Worker auf dem Odroid POLLEN diese Datei (raw, public, read-only) und holen neue Jobs automatisch. results/ bleibt lokal auf dem Odroid.",
-  "jobs": {}
+  "jobs": {
+    "auto-e2e-1": {
+      "text": "Fuehre 'date -u' und 'uptime' aus und gib beide Ergebnisse kompakt zurueck.",
+      "by": "parent",
+      "state": "open",
+      "created": "2026-10-19T20:24:09Z"
+    }
+  }
 }
