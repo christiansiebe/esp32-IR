@@ -182,6 +182,15 @@
    "name": "Sub: ESP-IDF Firmware (host-verifizierbare TODO-Punkte)",
    "open_tasks": 1,
    "note": "Kind des Odroid-Repair-Chats ec27624233304e1d972007bf2b12eb00. Arbeitet offene, host-verifizierbare TODO.md-Punkte ab (record_count-Hardwareteil ist blockiert). 2026-10-19."
+  },
+  "24b80e1f597f4d8fb8a62f39a871dc0e": {
+   "name": "gitignore-Hygiene + CI-Aufraeumen (Chat 24b80e1f)",
+   "open_tasks": 0,
+   "branch": "fix/gitignore-hygiene-main",
+   "pr": [
+    50
+   ],
+   "note": "FERTIG 2026-10-19: (1) 167 nicht-firmware-bezogene Actions-Runs geloescht (640->478, je geprueft, 0 firmware-beruehrende in der Loeschliste). (2) Drei .gitignore-Bugs gefixt (Inline-Kommentare tot; sdkconfig.defaults ignoriert; Firmware/-Bundle ignoriert) + CI-Trigger eingegrenzt + neuer Guard-Workflow repo-hygiene.yml (faellt bei getrackten-ignorierten Dateien/Inline-Kommentaren). PR #50 gegen main (CLEAN, CI gruen); PR #49 als superseded geschlossen. Keine offene Arbeit -> darf schlafen."
   }
  }
 }
