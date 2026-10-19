@@ -20,6 +20,12 @@ Verhalten:
   - Bei jedem Befehl: Anzeige + Rueckfrage  ->  [y]=ja  [N]=nein  [a]=immer ja
   - Ctrl-C schaltet die Bestaetigungspflicht AUS/EIN (Pause-Modus).
   - Antwort (Exit-Code + Ausgabe) geht zurueck an die jeweilige Sandbox.
+  - Optional eingeschraenkt: `--allowlist <datei>` (oder
+    $CMD_AGENT_ALLOWLIST_FILE) laesst nur passende Befehle zu (fail closed).
+  - Datei-Verben im selben cmd-Frame, auf $CMD_AGENT_FILE_ROOT eingesperrt
+    (Default ~/odroid-channel-test):
+        @read  test.txt
+        @write test.txt <base64>
 
 Voraussetzung:  apt install -y python3-websockets
 """
@@ -34,7 +40,24 @@ import urllib.parse
 
 import websockets
 
+import cmd_policy
+
 AUTO = {"always": os.environ.get("CMD_AGENT_AUTO") == "1", "paused": False}
+# Eingeschraenkter Modus: None = voller Shell-Zugriff (altes Verhalten),
+# Liste = nur Befehle, die der Allowlist entsprechen (fail closed).
+ALLOWLIST = None
+FILE_ROOT = os.environ.get(
+    "CMD_AGENT_FILE_ROOT", os.path.expanduser("~/odroid-channel-test"))
+
+
+def ask_or_reject(cmd):
+    """Bestaetigung wie bisher; bei Allowlist zusaetzlich die Policy."""
+    if ALLOWLIST is not None:
+        ok, why = cmd_policy.check_command(cmd, ALLOWLIST)
+        if not ok:
+            print(f"-> ABGELEHNT ({why}): {cmd}")
+            return False
+    return True
 
 
 def tty_prompt(text):
@@ -144,11 +167,17 @@ async def session(conn, token):
                 continue
             cid, cmd = msg.get("id"), msg.get("cmd", "")
             conn.cid = cid
-            if await ask(cmd):
+            is_file_op = cmd_policy.parse_file_op(cmd)[0] is not None
+            if is_file_op:
+                # @read/@write laufen NIE als Shell; der Agent sperrt sie auf
+                # FILE_ROOT ein (siehe cmd_policy.resolve_scoped).
+                res = cmd_policy.file_op(cmd, FILE_ROOT) if await ask(cmd) else \
+                    {"code": -1, "out": "ABGELEHNT (keine Bestaetigung)"}
+            elif await ask(cmd) and ask_or_reject(cmd):
                 res = await run_cmd(cmd, conn)
             else:
                 print("-> ABGELEHNT")
-                res = {"code": -1, "out": "ABGELEHNT (keine Bestaetigung)"}
+                res = {"code": -1, "out": "ABGELEHNT (keine Bestaetigung/Policy)"}
             res.update({"type": "result", "id": cid})
             await ws.send(json.dumps(res))
             conn.cid = None
@@ -212,7 +241,25 @@ def read_registry():
         return []
 
 
+def _take_option(name):
+    """Option + Wert aus sys.argv entfernen (der Rest bleibt Ziel-URL/Argument)."""
+    if name in sys.argv:
+        i = sys.argv.index(name)
+        if i + 1 < len(sys.argv):
+            value = sys.argv[i + 1]
+            del sys.argv[i:i + 2]
+            return value
+        del sys.argv[i]
+    return ""
+
+
 async def main():
+    global ALLOWLIST
+    allow = _take_option("--allowlist") or os.environ.get("CMD_AGENT_ALLOWLIST_FILE", "")
+    if allow:
+        with open(allow) as fh:
+            ALLOWLIST = cmd_policy.load_allowlist(fh.read())
+        print(f"Allowlist aktiv ({len(ALLOWLIST)} Muster), Datei-Root: {FILE_ROOT}")
     token = os.environ.get("SANDBOX_TERM_TOKEN", "")
     if not token:
         raise SystemExit("SANDBOX_TERM_TOKEN nicht gesetzt.")

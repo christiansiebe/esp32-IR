@@ -26,6 +26,43 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-19 11:45 UTC · Cline-Cloud-Chat (Branch cline/0f7jc38h)
+**Auftrag:** Odroid-Zugriff aus einer Cline-Cloud-Sandbox ueber den bestehenden
+WS-Kanal; alter Agent pollt `/next` und bekommt HTTP 404.
+
+**Ursache 404:** Der `esp32-channel.service` (`/opt/esp32-channel/odroid_agent.sh`)
+ist **kein Client des heutigen Protokolls**. Der Server bietet nur zwei
+WebSocket-Pfade (`/` PTY, `/agent` Kommando) und **keine** HTTP-Routen; `/next`
+existiert in `remote-shell/` nirgends. Zusaetzlich ist die alte All-Hands-URL tot
+(`work-2-fkhhrtgachhziqps...` -> HTTP 404 vom Proxy). Beides zusammen = 404.
+
+**Cline-Cloud-Kompatibilitaet:** Eine Cline-Sandbox hat **keinen** oeffentlichen
+Eingang (kein `RUNTIME_ID`, kein `work-N-<id>`-Host; lokal lauscht nur der
+Cline-Hub :8080/:8081 `/hub`). Der Odroid kann sie also **nicht** direkt
+anwaehlen. Das Protokoll selbst ist kompatibel und bleibt unveraendert
+(`/agent`, Token per `?token=`, `hmac.compare_digest`, Server liest den Token pro
+Verbindung). Nachgewiesen durch einen oeffentlichen Reverse-Tunnel
+(`remote-shell/tunnel.sh`, SSH zu serveo.net): authentifizierter Connect ok,
+`hostname` -> Antwort, falscher Token -> `1008 unauthorized`, 43-Zeichen-Token
++ Rotation ohne Serverneustart ok. `cloudflared` quick tunnel war hier nicht
+nutzbar (Hostname NXDOMAIN).
+
+**Geaendert:** `remote-shell/tunnel.sh` (neu), `remote-shell/cmd_policy.py` (neu,
+Allowlist + auf `~/odroid-channel-test` eingesperrte `@read`/`@write`),
+`cmd_agent.py` (`--allowlist`, fail closed), `supervise.py` (Tunnel-URL +
+pip-Fallback), `odroid_allowlist.txt`, `test/test_cmd_policy.py` (19 Checks, in
+`run_host_tests.sh`), README-Abschnitt, `.gitignore` (Token/`run/`).
+
+**Sicherheit:** Der alte Token ist offengelegt -> **vor produktivem Betrieb
+rotieren** (Datei auf beiden Seiten ersetzen, kein Neustart noetig); niemals in
+Repo/Logs. `esp32-channel.service` bleibt unangetastet, bis der neue Kanal am
+Odroid nachgewiesen ist. Der Relay terminiert TLS -> Allowlist + Datei-Root
+bleiben Pflicht.
+
+**Offen:** Der Nachweis am echten Odroid (`hostname`, `id`, Testdatei lesen/
+schreiben) steht aus — dieser Chat hat keinen Zugriff auf das Geraet. Befehle
+siehe `remote-shell/README.md` ("Cline Cloud").
+
 ## 2026-10-18 21:20 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 57e010b)
 **Nachtrag 2 zu PR #32:** `main` ist erneut weitergelaufen (`#48` Sender-Link-Fix, `#27`
 Recovery-Button, u.a.), der Branch ist wieder **rebasd** auf `b2eaa51`. Konflikt nur in

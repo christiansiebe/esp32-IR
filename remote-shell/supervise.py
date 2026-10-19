@@ -85,6 +85,12 @@ def url():
     explicit = os.environ.get("SANDBOX_TERM_URL", "")
     if explicit:
         return explicit
+    # Cline-Cloud-Sandbox: kein oeffentlicher Port -> Tunnel-URL (tunnel.sh).
+    tunnel = os.path.join(RUN, "public-url.txt")
+    if os.path.exists(tunnel):
+        found = open(tunnel).read().strip()
+        if found:
+            return found if found.endswith("/") else found + "/"
     rid = os.environ.get("RUNTIME_ID", "")
     return f"wss://work-2-{rid}.prod-runtime.all-hands.dev/" if rid else "<unknown>"
 
@@ -102,9 +108,12 @@ def ensure_deps():
         return
     except ImportError:
         log("websockets fehlt - installiere nach")
-    for args in (["--user"], []):
+    for args in (["--user", "--break-system-packages"], ["--user"], []):
         r = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--quiet", *args, "websockets"],
+            [sys.executable, "-m", "pip", "install", "--quiet",
+             "--trusted-host", "pypi.org",
+             "--trusted-host", "files.pythonhosted.org",
+             *args, "websockets"],
             capture_output=True, text=True,
         )
         if r.returncode == 0:

@@ -62,6 +62,55 @@ sed -i -E 's|wss://work-[0-9]+-[a-z0-9]+\.prod-runtime|wss://work-2-NEUERID.prod
 systemctl daemon-reload && systemctl restart odroid-cmd-agent.service
 ```
 
+## Cline Cloud: kein oeffentlicher Port -> Reverse-Tunnel (2026-10-19)
+
+Eine Cline-Cloud-Sandbox hat **keinen** oeffentlichen HTTP-Eingang: es gibt kein
+`RUNTIME_ID`, kein `work-N-<id>.prod-runtime.all-hands.dev` (alte URLs liefern
+HTTP 404), und im Container lauscht nur der Cline-Hub (Port 8080/8081, Pfad
+`/hub`) — nicht erreichbar von aussen. Der Odroid kann die Sandbox daher **nicht**
+direkt anwaehlen; erreichbar wird sie nur ueber einen Tunnel, den die Sandbox
+selbst **ausgehend** aufbaut.
+
+```bash
+bash /workspace/remote-shell/tunnel.sh start   # -> https://<name>.serveousercontent.com
+bash /workspace/remote-shell/tunnel.sh status
+python3 /workspace/remote-shell/supervise.py --status   # zeigt dieselbe Agent-URL
+```
+
+`tunnel.sh` haelt einen SSH-Reverse-Tunnel (`TUNNEL_HOST`, Default
+`serveo.net`) auf Port `SANDBOX_TERM_PORT` (12001) und schreibt die URL nach
+`run/public-url.txt`; `supervise.py`/`register_sandbox.py` lesen sie. Die URL
+wechselt bei jedem Neustart des Tunnels.
+
+**Protokoll unveraendert:** gleicher WS-Server, gleicher Pfad `/agent`, gleiche
+Authentifizierung `?token=<SANDBOX_TERM_TOKEN>` (Vergleich per
+`hmac.compare_digest`). Der vorhandene 43-Zeichen-Token kann unveraendert
+weiterverwendet werden; der Server liest ihn **pro Verbindung** aus
+`remote-shell/token` (0600), Rotation = Datei ersetzen, **kein Neustart**.
+Token niemals committen (`.gitignore`) oder ausgeben.
+
+Getestet (2026-10-19, durch den oeffentlichen Tunnel): authentifizierter
+`/agent`-Connect + `hostname` -> Antwort `ins-...`; falscher Token ->
+`closed 1008 unauthorized`; 43-Zeichen-Token + Rotation ohne Serverneustart ok.
+`cloudflared tunnel --url ...` war hier **nicht** nutzbar (Tunnel registriert,
+aber der Quick-Tunnel-Hostname lieferte NXDOMAIN).
+
+**Sicherheit:** Der Relay terminiert TLS (Befehle sind dort im Klartext
+sichtbar). Deshalb zusaetzlich im Agenten:
+
+```bash
+# nur erlaubte Befehle + Datei-Verben, eingesperrt auf ~/odroid-channel-test
+python3 cmd_agent.py --allowlist odroid_allowlist.txt 'wss://<tunnel-host>/'
+```
+
+`@read test.txt` / `@write test.txt <base64>` laufen ueber denselben
+`cmd`-Frame und werden von `cmd_policy.py` auf `$CMD_AGENT_FILE_ROOT`
+(Default `~/odroid-channel-test`) eingesperrt — absolute Pfade, `..` und
+Symlink-Ausbrueche werden abgelehnt.
+
+Schritt-fuer-Schritt-Reparatur mit allen Odroid-Befehlen:
+**`remote-shell/CLINE-ODROID-REPAIR.md`**.
+
 ## Betrieb auf dem Odroid (diese Session eingerichtet)
 - **Taegliches inkrementelles Backup**: `backup-daily.timer` → `/root/backup-daily.sh`
   (rsync `--link-dest`, nur geaenderte Daten, 14 Tage, `/mnt/ssd/backups/rsync/`).

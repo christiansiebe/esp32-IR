@@ -490,3 +490,7 @@ ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_selftest"
     -o "$out/test_virtual_day"
 
 "$out/test_virtual_day"
+
+# remote-shell: Policy des Odroid-Agenten (Allowlist, Pfad-Einsperrung,
+# @read/@write-Roundtrip). Reines Python, kein ESP-IDF.
+python3 "$here/test_cmd_policy.py"

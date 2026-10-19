@@ -1,0 +1,11 @@
+# Allowlist fuer: python3 cmd_agent.py --allowlist odroid_allowlist.txt
+# Eine verankerte Regex pro Zeile (fullmatch), '#' = Kommentar.
+# Bewusst klein: nur ungefaehrliche Lese-Befehle plus die Datei-Verben
+# @read/@write (die der Agent selbst auf ~/odroid-channel-test einsperrt).
+hostname
+id
+uptime
+uname -a
+ls -la /home/[A-Za-z0-9._-]+/odroid-channel-test/?
+sha256sum /home/[A-Za-z0-9._-]+/odroid-channel-test/[A-Za-z0-9._-]+
+cat /home/[A-Za-z0-9._-]+/odroid-channel-test/[A-Za-z0-9._-]+
