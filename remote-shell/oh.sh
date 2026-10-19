@@ -4,6 +4,7 @@
 #   oh Fuehre hostname aus und gib das Ergebnis zurueck
 #   oh -n starte eine frische Unterhaltung
 #   oh -w /root arbeite in /root
+#   oh -s arbeit ...   eigene Session "arbeit" (parallel zu anderen moeglich)
 #
 # Text darf OHNE Anfuehrungszeichen getippt werden (alle Woerter werden
 # zusammengefuegt). Gibt die Antwort des Agenten und die benutzten
@@ -12,20 +13,28 @@ set -euo pipefail
 
 OH_BASE="${OH_BASE:-http://127.0.0.1:8000}"
 OH_AID="${OH_AID:-ef81fbef-81ea-4940-9a20-ab210add363c}"
-OH_STATE="${OH_STATE:-/root/.oh-last-conv}"
+OH_SESS=""
 OH_NEW=0
 OH_WD=/root
 
-while getopts "nw:" _o; do
+while getopts "nw:s:" _o; do
   case "$_o" in
     n) OH_NEW=1 ;;
     w) OH_WD="$OPTARG" ;;
-    *) echo "Nutzung: oh [-n] [-w ARBEITSVERZEICHNIS] Aufgabe in Worten" >&2; exit 2 ;;
+    s) OH_SESS="$OPTARG" ;;
+    *) echo "Nutzung: oh [-n] [-w ARBEITSVERZEICHNIS] [-s SESSION] Aufgabe in Worten" >&2; exit 2 ;;
   esac
 done
 shift $((OPTIND - 1))
 TEXT="$*"
 [ -n "$TEXT" ] || { echo "Aufgabentext fehlt.  Beispiel: oh hostname und pwd ausfuehren" >&2; exit 2; }
+
+# Jede Session hat ihre eigene Conversation -> parallele Chats moeglich.
+if [ -n "$OH_SESS" ]; then
+  OH_STATE="${OH_STATE:-/root/.oh-conv-$OH_SESS}"
+else
+  OH_STATE="${OH_STATE:-/root/.oh-last-conv}"
+fi
 
 OH_BASE="$OH_BASE" OH_AID="$OH_AID" OH_STATE="$OH_STATE" \
 OH_NEW="$OH_NEW" OH_WD="$OH_WD" OH_TEXT="$TEXT" python3 -u - <<'PY'
