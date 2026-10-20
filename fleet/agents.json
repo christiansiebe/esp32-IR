@@ -1,223 +1,232 @@
 {
- "_comment": "Worker-Registry des esp32-IR-Fleet. Der Parent pflegt sie; der Fleet Supervisor (automations/fleet-supervisor, cron */10 + KV-Run-Lock, ~13 min/Lauf) liest die Kopie auf GitHub raw (Branch feat/dfs-clock-visibility) - lokal aendern reicht nicht, pushen. open_tasks=0 -> Agent darf schlafen. Der alte fleet-watchdog ist deaktiviert; der Supervisor ersetzt ihn.",
- "agents": {
-  "8c2548251ad045599fbfb6f95f3e7944": {
-   "name": "parent (ALT, ersetzt)",
-   "open_tasks": 0,
-   "note": "ERSETZT durch 30cfd896 (Handoff docs/CHAT-HANDOFF-2026-10-18.md, 2026-10-18). Rolle Parent/Koordinator uebergeben; dieser Chat darf schlafen.",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "a3484f59487c4e6a9f1c5a40664506ba": {
-   "name": "UTC-persist",
-   "open_tasks": 0,
-   "pr": [],
-   "note": "PR #16 (UTC persist) gemerged 2026-10-18 -> fertig, darf schlafen.",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "335a48a5e35442e69b8f1cb1c9321480": {
-   "name": "TWDT",
-   "open_tasks": 0,
-   "pr": [
-    10
-   ],
-   "note": "FERTIG: PR #10 (TWDT-Modul) gemerged. Restaufgabe (TWDT-Worker anmelden) an Kind 'AMS Health-Monitor' uebergeben.",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "1b043863d80d41a08f7b161036f65649": {
-   "name": "MQTT-reboot",
-   "open_tasks": 0,
-   "pr": [
-    9
-   ],
-   "note": "FERTIG: PR #9 (Reboot-Grund ueber MQTT) rebased + gemerged in feat/link-fallback (e48c1cc5), CI 6/6 gruen. Breite MQTT/HA-Discovery = separates Kind.",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "7a894c13678043e58935dd1509217a75": {
-   "name": "parent (XFCE-Desktop/Odroid-Chat, jetzt 'HA WP entwicklung')",
-   "open_tasks": 0,
-   "note": "Sandbox MISSING (endgueltig geloescht, kein Resume) - Chat-Transcript gerettet und als /workspace/HA-WP-HANDOVER.md zusammengefasst. Offene Punkte: AP+STA/Konkurrenz-Modus, USB2-Bandbreiten-Deckel, Reboot-Festigkeit AP, Kamera-ueber-LAN. Uebergabe an neuen Chat.",
-   "checked_at": "2026-10-20T02:50:55Z"
-  },
-  "f85f7c473e7748259d2751fc1085b2b2": {
-   "name": "parent (Odroid N2: VNC-Desktop & CPU-PLL-OC)",
-   "open_tasks": 0,
-   "note": "FERTIG (2026-10-20): (1) /ro read-only Kanal gebaut+live getestet (bbcabb0). (2) Kernel-Oops 0x86000006 analysiert (6d74228): EC=0x21 Instruction Abort EL1, IFSC=6 Translation fault L2 -> Kernel holte Befehl aus nicht gemapptem Bereich ('Code: ????'). (3) Fehleraufzeichnung verbessert (76f2619): crash_capture.py + deploy/revert + 56 Host-Checks + CRASH-CAPTURE-README.md. Kern: Oops wird ohne panic_on_oops=1 kein Panic -> ramoops und panic=10 greifen nie; journald syncht mit 5min Default. Fix: panic_on_oops=1, panic=10, hung_task_panic=1@120s, softlockup_panic=1, SyncIntervalSec=1s, Storage=persistent, extraargs-Merge, optional netconsole. Offen am Board (Parent, sequenziell): deploy_ramoops (#45) -> deploy_crash_capture.sh -> audit. Volle Host-Suite gruen.",
-   "checked_at": "2026-10-20T10:41:00Z"
-  },
-  "521252f5a71b42c28165ad7e74ed13ec": {
-   "name": "ODROID LAN/AP + Kamera",
-   "open_tasks": 0,
-   "branch": "feat/odroid-ap-deploy",
-   "pr": [
-    42
-   ],
-   "note": "FERTIG + GEMERGED: PR #36 (Plan ODROID-LAN-AP-KAMERA.md + Generator odroid_ap_config.py, 52 Host-Checks). FERTIG (T1, 2026-10-18): PR #42 (offen, base cline/power-history-diag) -> host-seitiges Ausroll-/Ruecknahme-Werkzeug deploy_ap.sh (Dry-Run Default, AP_ROOT-Praefix, hostapd/dnsmasq unmask+enable, NM unmanaged, AP-Adresse, NAT idempotent), revert_ap.sh (idempotent, Dienste wieder MASKED), odroid_ap_deadman.sh + Timer (Auto-Revert ohne --confirm), test_ap_deploy.py (48 Checks). Host-Suite gruen. KEIN Board/Kanal. P2 wartet auf Nutzer-Entscheid.",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "fb4acc4e11f94fcd94bbfc000a927301": {
-   "name": "HA WP entwicklung (neu) - Odroid AP/HA",
-   "open_tasks": 0,
-   "branch": "feat/dfs-clock-visibility",
-   "note": "FERTIG (2026-10-20). T1-T4 done (Kanal-Fix, AP-Ursache, USB2-Deckel, Reboot-Doku, Kamera-Runbook). T5 done: wp-native + waermepumpe-dashboard an Buderus-Vorlage angeglichen (Sub-Agent bf7188fe, PR #56 vom Parent gemergt; Host-Tests gruen). Hand-off an Repair-Chat: Board-Deploy des Dashboards (HA-WebSocket-API) - Kanal-Allowlist erlaubt kein docker/HA. Keine offene Agent-Arbeit.",
-   "checked_at": "2026-10-20T10:55:00Z"
-  },
-  "732f5e0624b948499d0183f5633d86b5": {
-   "name": "ODROID Watchdog-Aktor",
-   "open_tasks": 0,
-   "branch": "feat/watchdog-actor-wiring",
-   "pr": [
-    37,
-    41
-   ],
-   "note": "FERTIG: PR #37 gemerged (WATCHDOG-ACTOR.md + watchdog_actor.py + Tests). FERTIG (T2): PR #41 verdrahtet Beobachter+Aktor -> watchdog_powercut.sh (Wrapper, Trockenlauf-Default, durablem Cooldown) + watchdog-monitor.service (Restart=always, passend zu watchdog-heartbeat.timer) + deploy_watchdog_actor.sh + test_watchdog_integration.py (simulierter Heartbeat-Ausfall plant genau EINEN Cut, durabler Cooldown unterdrueckt den zweiten; keine Mocks/Netz/Hardware). Host-Tests gruen. Offen (NUTZER): Aktor-Wahl, Heartbeat-Transport, Fail-safe, Cooldown-Wert. KEIN Board/Kanal.",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "4950336be956489a960a2ef506320545": {
-   "name": "ODROID PR-Review 5-8+14",
-   "open_tasks": 0,
-   "branch": "docs/odroid-pr-review-5-8",
-   "note": "FERTIG: PR #38 (Review) + T3-Umsetzung 2026-10-18: PR #40 (#7), PR #43 (#5), PR #44 (#6, OC-Pfad erhalten), PR #45 (#14). Je PR gegen cline/power-history-diag, Host-Tests gruen, nichts gemergt.",
-   "pr": [
-    38,
-    40,
-    43,
-    44,
-    45
-   ],
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "9fe65410b01148a5a30fa18994436a83": {
-   "name": "Firmware record_count+web_guard",
-   "open_tasks": 0,
-   "branch": "fix/record-count-web-guard",
-   "pr": [
-    46,
-    47
-   ],
-   "note": "FERTIG: PR #46 gemerged nach feat/dfs-clock-visibility (8252d5f) - web_guard-Clamp + header-version-range + test_header_migration.c. web_guard-Hunk war Duplikat von main-PR #15; header-Teil echt neu -> Cherry-pick als PR #47 gegen cline gemerged (9822ae4). Host-Tests rot ohne Fix (41/2 Fehler), gruen mit.",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "fa4de3cbc9f34a3f958f95aac45725e9": {
-   "name": "ODROID noVNC-extern",
-   "open_tasks": 0,
-   "branch": "feat/novnc-external-tunnel",
-   "pr": [
-    19
-   ],
-   "note": "FERTIG: README + start_novnc_bridge.sh + novnc_bridge.py + Test (62 Checks) -> PR #19 gemerged (a248c0b).",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "6c9d48a675af44c799ec283e6471a595": {
-   "name": "ODROID OC-Overlay",
-   "open_tasks": 0,
-   "branch": "feat/oc-opp-overlay",
-   "pr": [
-    20
-   ],
-   "note": "FERTIG: PR #20 (gen_oc_dts.py + umkehrbares OC-Test-Overlay + Tests) gemerged (af08832).",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "b56660b93576404d94dccf406be168c6": {
-   "name": "ODROID Watchdog-Luecke",
-   "open_tasks": 0,
-   "branch": "docs/watchdog-gap-hardening",
-   "pr": [
-    18
-   ],
-   "note": "FERTIG: PR #18 (Befund + Haertung) gemerged (faad569). Parent hat am Board verifiziert: H2+H1 widerlegt, bootstatus unbrauchbar -> H3 beste Erklaerung (PR #35).",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "4e889e18ce73432d9c65d3d8568c55e8": {
-   "name": "LICENSE+README",
-   "open_tasks": 0,
-   "branch": "fleet/license-readme",
-   "note": "FERTIG: PR #25 (docs/license-third-party) gemerged - Drittlizenz-Angabe (LGPL-2.1 sml_parser, Apache-2.0/MIT Managed Components) im README. LICENSE+README lagen schon auf main (PR #12).",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "b6b11eb9dd704eaca389ecbaa5cb7de8": {
-   "name": "Backfill-Dubletten",
-   "open_tasks": 0,
-   "branch": "fleet/backfill-dedup",
-   "note": "FERTIG: PR #28 (Backfill-Seitenverlust nur einmal zaehlen) rebased + gemerged (2026-10-18).",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "843d8fde02eb4530a5a185d90db68650": {
-   "name": "AMS Health-Monitor",
-   "open_tasks": 0,
-   "branch": "fleet/ams-health",
-   "note": "FERTIG: PR #29 (selbstheilender Health-Watchdog, receiver-only Reboot bei Stale-Daten/wenig Heap) gemerged (squash 453291d). TWDT-Worker-Anmeldung (TODO ~310) war schon in #10, um Health-Worker erweitert. CI gruen.",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "2001aa2feb0a4efc90f339404a7e2b0e": {
-   "name": "AMS MQTT-Bridge",
-   "open_tasks": 0,
-   "branch": "fix/print-server-blank-pages",
-   "pr": [
-    32,
-    55
-   ],
-   "note": "FERTIG 2026-10-20: (1) PR #32 (HA-Energie-Entitaeten import/export + Bare-Number-Live-Power, Live-Minuten-Push, reines mqtt_publish.{c,h} + test_mqtt_bridge.c) auf main gemerged (9ac3f2b). (2) Nutzer-Frage 'Drucker spinnt / leere Seiten': PR #55 (base main) - read-only Diagnose fuer den Odroid: remote-shell/ha/brother-hl3040cn/{print_health.py,diagnose_print.sh,BLANK-PAGES.md} + test_print_health.py (24 Checks) in run_host_tests.sh. Befund: Odroid-Kanal nur via Schwester-Sandbox, fail-closed Allowlist sperrt docker/lpstat -> Container-Innensicht remote nicht moeglich; Ursachenkette GDI-Drucker -> i386-Filter unter qemu-i386 dokumentiert. CI gruen (receiver/receiver-apoff/sender/Host/Hygiene), PR mergeable. Keine offene Aufgabe -> darf schlafen."
-  },
-  "e6c5a6cb7a794da6a88ee7449a5555c9": {
-   "name": "AMS Boot-Rollback",
-   "open_tasks": 0,
-   "branch": "feat/recovery-button",
-   "note": "FERTIG: PR #27 (recovery_button/recovery_start) gemerged 9a75c40; boot_confirm/boot_policy bereits auf main. Host-Tests gruen.",
-   "checked_at": "2026-10-20T02:50:55Z"
-  },
-  "65b95dbdf8ce4d7f962e4a42fe36755a": {
-   "name": "SML-Parser Haertung",
-   "open_tasks": 0,
-   "branch": "feat/sml-crc-variants-golden-fixtures",
-   "pr": [
-    33
-   ],
-   "note": "FERTIG: PR #33 (offen, erneut auf aktuelles main rebased, CI 8/8 gruen, MERGEABLE). Befund: gegen den kompletten devZer0/libsml-testing-Korpus (232 Telegramme inkl. Holley DTZ541) sind ALLE CRC-16/X-25, keiner Kermit -> Parser-Einzelpruefung korrekt, kein blinder 2. Variant (waere Regression). Gebaut: sml_crc16.{c,h} (X-25 genutzt + Kermit als getesteter Baustein), echte .bin-Fixtures + korrupte Kopie, test_sml_crc16.c (17 Checks) + test_sml_golden_bin.cpp (30 Checks). Kein Datenverlust: Parser bleibt X-25. Keine offene Arbeit.",
-   "checked_at": "2026-10-20T02:45:27Z"
-  },
-  "52c2b110e5fd457e8ab4b938a4407351": {
-   "name": "UX & Persistenz",
-   "open_tasks": 0,
-   "branch": "fix/upload-offload-storage-ready",
-   "note": "FERTIG: CSV-Upload-Blockade gefixt - Async-Task + Batch-Queue an Backfill-Worker, storage_ready praezisiert, Sender-Zeitbasis. PR #31 gemerged (be1507d).",
-   "pr": [
-    31
-   ],
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "30cfd896aac440a4a09ba70ec6199f08": {
-   "name": "Odroid Entwicklung (neu)",
-   "open_tasks": 0,
-   "note": "ERSETZT den geloeschten Odroid Entwicklung (b29e060b). Odroid-Koordinator; Board-Arbeit nur hier (geteilter remote-shell-Kanal). FERTIG 2026-10-18: T4 cpu-real-clock (reboot-fest, ueberlebte den 19:32-Reboot); T5 OC-Overlay 2496->2472 (PR #39); T1 -> PR #42 (AP deploy/revert/dead-man); T2 -> PR #41 (Watchdog-Verdrahtung); T3 -> PR #40/#43/#44/#45 (Review-Empfehlungen #5/#6/#7/#14). Re-use bestehender Sub-Agenten (Tages-Limit 20). Offene NUTZER-Entscheide: AP (ersetzen/ergaenzen, SSID/Kanal/Passwort), Kamera (IP-Modell), Watchdog-Aktor.",
-   "sandbox_id": "14OgyIfbGZEKFmFiE4cHVv",
-   "checked_at": "2026-10-20T02:20:37Z"
-  },
-  "a752b852ba7a49bcb91d65b1e603e1ce": {
-   "name": "Sub: ODROID-PRs pruefen + Konflikt-Rebase (Parent ec276242)",
-   "open_tasks": 0,
-   "branch": "fleet/pr-merge-rebase",
-   "note": "FERTIG: PR #54 (PR-MERGE-EMPFEHLUNG.md, mergeable) gegen cline/power-history-diag. Teil A: je PR Empfehlung (MERGE #45/#44/#43/#42/#41/#40/#39; CLOSE #7/#5). Teil B: #14 CLOSE (von #45 abgedeckt), #6 Rebase gelungen (von #44 abgedeckt) -> kein eigener PR.",
-   "pr": [
-    54
-   ]
-  },
-  "ec27624233304e1d972007bf2b12eb00": {
-   "name": "Odroid-Repair (OpenHands auf N2+ reparieren) - jetzt HA/Buderus-Dashboard",
-   "open_tasks": 0,
-   "note": "FERTIG (2026-10-20). (1) oh fuer alle User: Zustandsdatei pro $HOME (Backup oh.bak-20261020-050723); als chris verifiziert -> odroidn2. (2) Natives HA-Dashboard wp-native (8 Sections, nur native Karten) inkl. MQTT-Stromzaehler; per WS-API ohne HA-Neustart; PR #53; Backup /root/ha-backup-20261020-051013. (3) OpenHands-Repair verifiziert: LLM-Profil default aktiv + echter oh-Lauf (hostname/pwd -> odroidn2//root). (4) PR-Merge-Review delegiert -> Sub-Agent a752b852, PR #54. Keine offene Arbeit.",
-   "pr": [
-    53
-   ]
-  },
-  "bf7188fec2ec40feaac056c5fff9b280": {
-   "name": "HA-Dashboard Buderus-Angleichung (Sub von fb4acc4e)",
-   "open_tasks": 0,
-   "branch": "feat/ha-dashboard-buderus",
-   "pr": [
-    56
-   ],
-   "note": "FERTIG (2026-10-20). PR #56 (wp-native + waermepumpe an Buderus-Vorlage) geoeffnet, vom Parent gemergt. Host-Tests gruen (141+52 Checks). Board-Deploy = Hand-off.",
-   "checked_at": "2026-10-20T10:55:00Z"
+  "_comment": "Worker-Registry des esp32-IR-Fleet. Der Parent pflegt sie; der Fleet Supervisor (automations/fleet-supervisor, cron */10 + KV-Run-Lock, ~13 min/Lauf) liest die Kopie auf GitHub raw (Branch feat/dfs-clock-visibility) - lokal aendern reicht nicht, pushen. open_tasks=0 -> Agent darf schlafen. Der alte fleet-watchdog ist deaktiviert; der Supervisor ersetzt ihn.",
+  "agents": {
+    "8c2548251ad045599fbfb6f95f3e7944": {
+      "name": "parent (ALT, ersetzt)",
+      "open_tasks": 0,
+      "note": "ERSETZT durch 30cfd896 (Handoff docs/CHAT-HANDOFF-2026-10-18.md, 2026-10-18). Rolle Parent/Koordinator uebergeben; dieser Chat darf schlafen.",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "a3484f59487c4e6a9f1c5a40664506ba": {
+      "name": "UTC-persist",
+      "open_tasks": 0,
+      "pr": [],
+      "note": "PR #16 (UTC persist) gemerged 2026-10-18 -> fertig, darf schlafen.",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "335a48a5e35442e69b8f1cb1c9321480": {
+      "name": "TWDT",
+      "open_tasks": 0,
+      "pr": [
+        10
+      ],
+      "note": "FERTIG: PR #10 (TWDT-Modul) gemerged. Restaufgabe (TWDT-Worker anmelden) an Kind 'AMS Health-Monitor' uebergeben.",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "1b043863d80d41a08f7b161036f65649": {
+      "name": "MQTT-reboot",
+      "open_tasks": 0,
+      "pr": [
+        9
+      ],
+      "note": "FERTIG: PR #9 (Reboot-Grund ueber MQTT) rebased + gemerged in feat/link-fallback (e48c1cc5), CI 6/6 gruen. Breite MQTT/HA-Discovery = separates Kind.",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "7a894c13678043e58935dd1509217a75": {
+      "name": "parent (XFCE-Desktop/Odroid-Chat, jetzt 'HA WP entwicklung')",
+      "open_tasks": 0,
+      "note": "Sandbox MISSING (endgueltig geloescht, kein Resume) - Chat-Transcript gerettet und als /workspace/HA-WP-HANDOVER.md zusammengefasst. Offene Punkte: AP+STA/Konkurrenz-Modus, USB2-Bandbreiten-Deckel, Reboot-Festigkeit AP, Kamera-ueber-LAN. Uebergabe an neuen Chat.",
+      "checked_at": "2026-10-20T02:50:55Z"
+    },
+    "f85f7c473e7748259d2751fc1085b2b2": {
+      "name": "parent (Odroid N2: VNC-Desktop & CPU-PLL-OC)",
+      "open_tasks": 0,
+      "note": "FERTIG (2026-10-20): (1) /ro read-only Kanal gebaut+live getestet (bbcabb0). (2) Kernel-Oops 0x86000006 analysiert (6d74228): EC=0x21 Instruction Abort EL1, IFSC=6 Translation fault L2 -> Kernel holte Befehl aus nicht gemapptem Bereich ('Code: ????'). (3) Fehleraufzeichnung verbessert (76f2619): crash_capture.py + deploy/revert + 56 Host-Checks + CRASH-CAPTURE-README.md. Kern: Oops wird ohne panic_on_oops=1 kein Panic -> ramoops und panic=10 greifen nie; journald syncht mit 5min Default. Fix: panic_on_oops=1, panic=10, hung_task_panic=1@120s, softlockup_panic=1, SyncIntervalSec=1s, Storage=persistent, extraargs-Merge, optional netconsole. Offen am Board (Parent, sequenziell): deploy_ramoops (#45) -> deploy_crash_capture.sh -> audit. Volle Host-Suite gruen.",
+      "checked_at": "2026-10-20T10:41:00Z"
+    },
+    "521252f5a71b42c28165ad7e74ed13ec": {
+      "name": "ODROID LAN/AP + Kamera",
+      "open_tasks": 0,
+      "branch": "feat/odroid-ap-deploy",
+      "pr": [
+        42
+      ],
+      "note": "FERTIG + GEMERGED: PR #36 (Plan ODROID-LAN-AP-KAMERA.md + Generator odroid_ap_config.py, 52 Host-Checks). FERTIG (T1, 2026-10-18): PR #42 (offen, base cline/power-history-diag) -> host-seitiges Ausroll-/Ruecknahme-Werkzeug deploy_ap.sh (Dry-Run Default, AP_ROOT-Praefix, hostapd/dnsmasq unmask+enable, NM unmanaged, AP-Adresse, NAT idempotent), revert_ap.sh (idempotent, Dienste wieder MASKED), odroid_ap_deadman.sh + Timer (Auto-Revert ohne --confirm), test_ap_deploy.py (48 Checks). Host-Suite gruen. KEIN Board/Kanal. P2 wartet auf Nutzer-Entscheid.",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "fb4acc4e11f94fcd94bbfc000a927301": {
+      "name": "HA WP entwicklung (neu) - Odroid AP/HA",
+      "open_tasks": 0,
+      "branch": "feat/dfs-clock-visibility",
+      "note": "FERTIG (2026-10-20). T1-T4 done (Kanal-Fix, AP-Ursache, USB2-Deckel, Reboot-Doku, Kamera-Runbook). T5 done: wp-native + waermepumpe-dashboard an Buderus-Vorlage angeglichen (Sub-Agent bf7188fe, PR #56 vom Parent gemergt; Host-Tests gruen). Hand-off an Repair-Chat: Board-Deploy des Dashboards (HA-WebSocket-API) - Kanal-Allowlist erlaubt kein docker/HA. Keine offene Agent-Arbeit.",
+      "checked_at": "2026-10-20T10:55:00Z"
+    },
+    "732f5e0624b948499d0183f5633d86b5": {
+      "name": "ODROID Watchdog-Aktor",
+      "open_tasks": 0,
+      "branch": "feat/watchdog-actor-wiring",
+      "pr": [
+        37,
+        41
+      ],
+      "note": "FERTIG: PR #37 gemerged (WATCHDOG-ACTOR.md + watchdog_actor.py + Tests). FERTIG (T2): PR #41 verdrahtet Beobachter+Aktor -> watchdog_powercut.sh (Wrapper, Trockenlauf-Default, durablem Cooldown) + watchdog-monitor.service (Restart=always, passend zu watchdog-heartbeat.timer) + deploy_watchdog_actor.sh + test_watchdog_integration.py (simulierter Heartbeat-Ausfall plant genau EINEN Cut, durabler Cooldown unterdrueckt den zweiten; keine Mocks/Netz/Hardware). Host-Tests gruen. Offen (NUTZER): Aktor-Wahl, Heartbeat-Transport, Fail-safe, Cooldown-Wert. KEIN Board/Kanal.",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "4950336be956489a960a2ef506320545": {
+      "name": "ODROID PR-Review 5-8+14",
+      "open_tasks": 0,
+      "branch": "docs/odroid-pr-review-5-8",
+      "note": "FERTIG: PR #38 (Review) + T3-Umsetzung 2026-10-18: PR #40 (#7), PR #43 (#5), PR #44 (#6, OC-Pfad erhalten), PR #45 (#14). Je PR gegen cline/power-history-diag, Host-Tests gruen, nichts gemergt.",
+      "pr": [
+        38,
+        40,
+        43,
+        44,
+        45
+      ],
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "9fe65410b01148a5a30fa18994436a83": {
+      "name": "Firmware record_count+web_guard",
+      "open_tasks": 0,
+      "branch": "fix/record-count-web-guard",
+      "pr": [
+        46,
+        47
+      ],
+      "note": "FERTIG: PR #46 gemerged nach feat/dfs-clock-visibility (8252d5f) - web_guard-Clamp + header-version-range + test_header_migration.c. web_guard-Hunk war Duplikat von main-PR #15; header-Teil echt neu -> Cherry-pick als PR #47 gegen cline gemerged (9822ae4). Host-Tests rot ohne Fix (41/2 Fehler), gruen mit.",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "fa4de3cbc9f34a3f958f95aac45725e9": {
+      "name": "ODROID noVNC-extern",
+      "open_tasks": 0,
+      "branch": "feat/novnc-external-tunnel",
+      "pr": [
+        19
+      ],
+      "note": "FERTIG: README + start_novnc_bridge.sh + novnc_bridge.py + Test (62 Checks) -> PR #19 gemerged (a248c0b).",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "6c9d48a675af44c799ec283e6471a595": {
+      "name": "ODROID OC-Overlay",
+      "open_tasks": 0,
+      "branch": "feat/oc-opp-overlay",
+      "pr": [
+        20
+      ],
+      "note": "FERTIG: PR #20 (gen_oc_dts.py + umkehrbares OC-Test-Overlay + Tests) gemerged (af08832).",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "b56660b93576404d94dccf406be168c6": {
+      "name": "ODROID Watchdog-Luecke",
+      "open_tasks": 0,
+      "branch": "docs/watchdog-gap-hardening",
+      "pr": [
+        18
+      ],
+      "note": "FERTIG: PR #18 (Befund + Haertung) gemerged (faad569). Parent hat am Board verifiziert: H2+H1 widerlegt, bootstatus unbrauchbar -> H3 beste Erklaerung (PR #35).",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "4e889e18ce73432d9c65d3d8568c55e8": {
+      "name": "LICENSE+README",
+      "open_tasks": 0,
+      "branch": "fleet/license-readme",
+      "note": "FERTIG: PR #25 (docs/license-third-party) gemerged - Drittlizenz-Angabe (LGPL-2.1 sml_parser, Apache-2.0/MIT Managed Components) im README. LICENSE+README lagen schon auf main (PR #12).",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "b6b11eb9dd704eaca389ecbaa5cb7de8": {
+      "name": "Backfill-Dubletten",
+      "open_tasks": 0,
+      "branch": "fleet/backfill-dedup",
+      "note": "FERTIG: PR #28 (Backfill-Seitenverlust nur einmal zaehlen) rebased + gemerged (2026-10-18).",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "843d8fde02eb4530a5a185d90db68650": {
+      "name": "AMS Health-Monitor",
+      "open_tasks": 0,
+      "branch": "fleet/ams-health",
+      "note": "FERTIG: PR #29 (selbstheilender Health-Watchdog, receiver-only Reboot bei Stale-Daten/wenig Heap) gemerged (squash 453291d). TWDT-Worker-Anmeldung (TODO ~310) war schon in #10, um Health-Worker erweitert. CI gruen.",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "2001aa2feb0a4efc90f339404a7e2b0e": {
+      "name": "AMS MQTT-Bridge",
+      "open_tasks": 0,
+      "branch": "fix/print-server-blank-pages",
+      "pr": [
+        32,
+        55
+      ],
+      "note": "FERTIG 2026-10-20: (1) PR #32 (HA-Energie-Entitaeten import/export + Bare-Number-Live-Power, Live-Minuten-Push, reines mqtt_publish.{c,h} + test_mqtt_bridge.c) auf main gemerged (9ac3f2b). (2) Nutzer-Frage 'Drucker spinnt / leere Seiten': PR #55 (base main) - read-only Diagnose fuer den Odroid: remote-shell/ha/brother-hl3040cn/{print_health.py,diagnose_print.sh,BLANK-PAGES.md} + test_print_health.py (24 Checks) in run_host_tests.sh. Befund: Odroid-Kanal nur via Schwester-Sandbox, fail-closed Allowlist sperrt docker/lpstat -> Container-Innensicht remote nicht moeglich; Ursachenkette GDI-Drucker -> i386-Filter unter qemu-i386 dokumentiert. CI gruen (receiver/receiver-apoff/sender/Host/Hygiene), PR mergeable. Keine offene Aufgabe -> darf schlafen."
+    },
+    "e6c5a6cb7a794da6a88ee7449a5555c9": {
+      "name": "AMS Boot-Rollback",
+      "open_tasks": 0,
+      "branch": "feat/recovery-button",
+      "note": "FERTIG: PR #27 (recovery_button/recovery_start) gemerged 9a75c40; boot_confirm/boot_policy bereits auf main. Host-Tests gruen.",
+      "checked_at": "2026-10-20T02:50:55Z"
+    },
+    "65b95dbdf8ce4d7f962e4a42fe36755a": {
+      "name": "SML-Parser Haertung",
+      "open_tasks": 0,
+      "branch": "feat/sml-crc-variants-golden-fixtures",
+      "pr": [
+        33
+      ],
+      "note": "FERTIG: PR #33 (offen, erneut auf aktuelles main rebased, CI 8/8 gruen, MERGEABLE). Befund: gegen den kompletten devZer0/libsml-testing-Korpus (232 Telegramme inkl. Holley DTZ541) sind ALLE CRC-16/X-25, keiner Kermit -> Parser-Einzelpruefung korrekt, kein blinder 2. Variant (waere Regression). Gebaut: sml_crc16.{c,h} (X-25 genutzt + Kermit als getesteter Baustein), echte .bin-Fixtures + korrupte Kopie, test_sml_crc16.c (17 Checks) + test_sml_golden_bin.cpp (30 Checks). Kein Datenverlust: Parser bleibt X-25. Keine offene Arbeit.",
+      "checked_at": "2026-10-20T02:45:27Z"
+    },
+    "52c2b110e5fd457e8ab4b938a4407351": {
+      "name": "UX & Persistenz",
+      "open_tasks": 0,
+      "branch": "fix/upload-offload-storage-ready",
+      "note": "FERTIG: CSV-Upload-Blockade gefixt - Async-Task + Batch-Queue an Backfill-Worker, storage_ready praezisiert, Sender-Zeitbasis. PR #31 gemerged (be1507d).",
+      "pr": [
+        31
+      ],
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "30cfd896aac440a4a09ba70ec6199f08": {
+      "name": "Odroid Entwicklung (neu)",
+      "open_tasks": 0,
+      "note": "ERSETZT den geloeschten Odroid Entwicklung (b29e060b). Odroid-Koordinator; Board-Arbeit nur hier (geteilter remote-shell-Kanal). FERTIG 2026-10-18: T4 cpu-real-clock (reboot-fest, ueberlebte den 19:32-Reboot); T5 OC-Overlay 2496->2472 (PR #39); T1 -> PR #42 (AP deploy/revert/dead-man); T2 -> PR #41 (Watchdog-Verdrahtung); T3 -> PR #40/#43/#44/#45 (Review-Empfehlungen #5/#6/#7/#14). Re-use bestehender Sub-Agenten (Tages-Limit 20). Offene NUTZER-Entscheide: AP (ersetzen/ergaenzen, SSID/Kanal/Passwort), Kamera (IP-Modell), Watchdog-Aktor.",
+      "sandbox_id": "14OgyIfbGZEKFmFiE4cHVv",
+      "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "a752b852ba7a49bcb91d65b1e603e1ce": {
+      "name": "Sub: ODROID-PRs pruefen + Konflikt-Rebase (Parent ec276242)",
+      "open_tasks": 0,
+      "branch": "fleet/pr-merge-rebase",
+      "note": "FERTIG: PR #54 (PR-MERGE-EMPFEHLUNG.md, mergeable) gegen cline/power-history-diag. Teil A: je PR Empfehlung (MERGE #45/#44/#43/#42/#41/#40/#39; CLOSE #7/#5). Teil B: #14 CLOSE (von #45 abgedeckt), #6 Rebase gelungen (von #44 abgedeckt) -> kein eigener PR.",
+      "pr": [
+        54
+      ]
+    },
+    "ec27624233304e1d972007bf2b12eb00": {
+      "name": "Odroid-Repair (OpenHands auf N2+ reparieren) - jetzt HA/Buderus-Dashboard",
+      "open_tasks": 0,
+      "note": "FERTIG (2026-10-20). (1) oh fuer alle User: Zustandsdatei pro $HOME (Backup oh.bak-20261020-050723); als chris verifiziert -> odroidn2. (2) Natives HA-Dashboard wp-native (8 Sections, nur native Karten) inkl. MQTT-Stromzaehler; per WS-API ohne HA-Neustart; PR #53; Backup /root/ha-backup-20261020-051013. (3) OpenHands-Repair verifiziert: LLM-Profil default aktiv + echter oh-Lauf (hostname/pwd -> odroidn2//root). (4) PR-Merge-Review delegiert -> Sub-Agent a752b852, PR #54. Keine offene Arbeit.",
+      "pr": [
+        53
+      ]
+    },
+    "bf7188fec2ec40feaac056c5fff9b280": {
+      "name": "HA-Dashboard Buderus-Angleichung (Sub von fb4acc4e)",
+      "open_tasks": 0,
+      "branch": "feat/ha-dashboard-buderus",
+      "pr": [
+        56
+      ],
+      "note": "FERTIG (2026-10-20). PR #56 (wp-native + waermepumpe an Buderus-Vorlage) geoeffnet, vom Parent gemergt. Host-Tests gruen (141+52 Checks). Board-Deploy = Hand-off.",
+      "checked_at": "2026-10-20T10:55:00Z"
+    },
+    "24b80e1f597f4d8fb8a62f39a871dc0e": {
+      "name": "Fleet-Hygiene + Sender-Hang-Diagnose (parent 24b80e1f)",
+      "open_tasks": 0,
+      "pr": [
+        50
+      ],
+      "note": "FERTIG: T1 Fleet-Supervisor-Analyse (Nutzer pausiert), T2 ESP-IDF-Status, T3 167 Junk-Runs geloescht, T4 gitignore+CI-Hygiene (PR #50 gemergt), T5 Sender-Hang-Diagnose+Handoff (Fix blockiert: kein Geraete-Zugang). Alle TASKS.json-Eintraege done. Darf schlafen.",
+      "checked_at": "2026-10-20T11:35:45Z"
+    }
   }
- }
 }
