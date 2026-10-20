@@ -835,3 +835,37 @@ Kein `ip`/`iw`/`nmcli` -> Netz-/AP-Aktionen sind ueber den Kanal **nicht** moegl
   Nutzer-Punkt dokumentiert, kein Agent-Blocker.
 - `TASKS.json` und `fleet/agents.json` (fb4acc4e) auf **open_tasks=0**. Keine
   offene Agent-Arbeit im Odroid/HA-Zweig.
+
+## 2026-10-20 10:15 UTC · Parent Odroid (f85f7c473e7748259d2751fc1085b2b2)
+
+**Punkt 1: Read-only-Kanal `/ro` (Auftrag "Testen wir read only") — FERTIG.**
+
+Ein einfacher Chat/Browser **ohne Werkzeuge** (z.B. ChatGPT) kann den Odroid jetzt
+beobachten: `GET /ro?token=<TOKEN>&c=<befehl>` -> reiner Klartext. Neu:
+`remote-shell/ro_policy.py` (strikte Allowlist, Pipeline pro Segment geprueft,
+keine Shell-Metazeichen, keine Schreibverben, keine Credential-Pfade),
+`test_ro_policy.py`, `/ro`-Handler + `process_request`-Hook in
+`sandbox_term_server.py`, `ro`-Flag in `cmd_agent.py`, Doku
+`READONLY-CHANNEL.md`. **Doppeltes Gate**: Server prueft vor dem Senden, der
+Board-Agent prueft vor dem Ausfuehren ohne Rueckfrage.
+Verifiziert live ueber die oeffentliche URL: help=200, `uptime`/`uname -a` vom
+Board, `rm -rf /` / `reboot` / `cat /etc/shadow` = 403, ohne Agent = 503.
+Commit `bbcabb0` auf `feat/dfs-clock-visibility`.
+
+**Nebenbefund:** Board-Token war rotiert (`VERWORFEN (Token)`), Kanal wieder
+hergestellt. Der Board-Agent laeuft inzwischen mit einer eigenen fail-closed
+Allowlist (`cmd_policy.py`+`odroid_allowlist.txt` aus `cline/0f7jc38h`) - daher
+sind `dmesg`/`journalctl -k`/`cat` auf dem Board gesperrt.
+
+**Punkt 2: Kernel-Oops `0x86000006` (Nutzer: "Untersuchen") - analysiert.**
+
+`remote-shell/ha/ODROID-OOPS-0x86000006.md`, Commit `6d74228`.
+ESR dekodiert: **EC=0x21 = Instruction Abort aus dem Kernel (EL1)**,
+**IFSC=6 = Translation fault, level 2** -> der Kernel hat einen Befehl von einer
+nicht gemappten Adresse geholt; `Code: ???? ... (????)` passt (PC selbst
+unlesbar). Kein Data Abort, kein Userspace-Fehler. **Kein Trace vorhanden**
+(dmesg/journalctl -k/kern.log/pstore alle leer, nur `hard-reset-unknown`),
+weil ramoops fehlt. Wahrscheinlichste Ursache: board-spezifische
+Clock-/Spannungs-Instabilitaet (PLL-OC/UV/lowfreq/cpu-hotplug-Historie);
+Software-Bad-Pointer ohne Backtrace nicht ausschliessbar.
+**Empfehlung:** ramoops deployen (PR #45) + `panic_on_oops=1 panic=10`.
