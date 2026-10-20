@@ -311,6 +311,12 @@ python3 "$repo/remote-shell/ha/test_cpu_real_clock.py"
 # edit cannot silently drop a filter helper or the PPD.
 python3 "$repo/remote-shell/ha/test_brother_cups.py"
 
+# Crash-capture configuration (Odroid): an Oops must become a panic (else
+# ramoops and panic=10 never fire) and journald must flush early. Pins the
+# rendered sysctl/journald/cmdline artifacts and the audit that reports what a
+# running board still lacks.
+python3 "$repo/remote-shell/ha/test_crash_capture.py"
+
 # Fleet supervisor decision table (pure, no Cloud API): the cases that let an
 # agent fall asleep and never wake (shared parent sandbox, a failed turn, a
 # finished worker sharing a live sandbox).
