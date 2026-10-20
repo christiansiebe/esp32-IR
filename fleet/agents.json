@@ -34,9 +34,9 @@
     },
     "7a894c13678043e58935dd1509217a75": {
       "name": "parent (XFCE-Desktop/Odroid-Chat, jetzt 'HA WP entwicklung')",
-      "open_tasks": 2,
-      "note": "Odroid-Familie am 2026-10-18 an f85f7c47 uebergeben (Nutzer); arbeitet jetzt an HA-WP/Dashboard-Themen (offene Aufgaben dort).",
-      "checked_at": "2026-10-20T02:20:37Z"
+      "open_tasks": 0,
+      "note": "Sandbox MISSING (endgueltig geloescht, kein Resume) - Chat-Transcript gerettet und als /workspace/HA-WP-HANDOVER.md zusammengefasst. Offene Punkte: AP+STA/Konkurrenz-Modus, USB2-Bandbreiten-Deckel, Reboot-Festigkeit AP, Kamera-ueber-LAN. Uebergabe an neuen Chat.",
+      "checked_at": "2026-10-20T02:50:55Z"
     },
     "f85f7c473e7748259d2751fc1085b2b2": {
       "name": "parent (Odroid N2: VNC-Desktop & CPU-PLL-OC)",
@@ -150,10 +150,10 @@
     },
     "e6c5a6cb7a794da6a88ee7449a5555c9": {
       "name": "AMS Boot-Rollback",
-      "open_tasks": 1,
-      "branch": "fleet/ams-boot-recovery",
-      "note": "TODO: boot_confirm/boot_policy + recovery_button/recovery_start salvage",
-      "checked_at": "2026-10-20T02:20:37Z"
+      "open_tasks": 0,
+      "branch": "feat/recovery-button",
+      "note": "FERTIG: PR #27 (recovery_button/recovery_start) gemerged 9a75c40; boot_confirm/boot_policy bereits auf main. Host-Tests gruen.",
+      "checked_at": "2026-10-20T02:50:55Z"
     },
     "65b95dbdf8ce4d7f962e4a42fe36755a": {
       "name": "SML-Parser Haertung",
