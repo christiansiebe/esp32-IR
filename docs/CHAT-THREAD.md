@@ -591,3 +591,15 @@ PR #27 war zweimal DIRTY (main merged #25/#29, dann #28/#31). Konflikte nur in
 Thread-Nachrichten blieben erhalten (chronologisch). Branch ist **0 hinter main**,
 CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender), PR `CLEAN`/`MERGEABLE`.
 
+
+## 2026-10-19 21:40 UTC · Firmware-Sub-Agent (Branch feat/energy-day-month-totals)
+
+**Punkt:** TODO „Tages-/Monats-Summen im Flash" (`hImport[24]`/`dImport[31]` wie AMS) — host-verifizierbar, nicht hardware-blockiert, vorher `git fetch` + `gh pr list --state all` + `git log --all` geprueft (kein vorhandener Branch/PR).
+
+**Umsetzung (minimal):**
+1. Reines Modul `main/energy_totals.{c,h}`: Ringe ueber UTC-Tage (40 Slots) und Kalendermonate (18 Slots), Summe in mW·min (int64, exakt), Umrechnung erst beim Rendern (60000 mW·min = 1 Wh). CRC32-Blob (0xEDB88320, wie Records/Uhr). Boot-Marker (reason != NONE oder sample_count == 0) und pre-2024-Minuten zaehlen nicht.
+2. `main/energy_totals_store.{c,h}`: NVS `energy`/`totals`, laedt nur einen gueltigen Blob (sonst found=false, nie vergiftet).
+3. Observer `power_history_set_store_observer()` in `power_history.{h,c}`: jede tatsaechlich gespeicherte Minute (Live und Backfill/Import) wird genau einmal gefaltet. Laeuft im Writer unter dem Store-Lock -> nimmt nur einen kurzen Spinlock, blockiert nie.
+4. `main.c`: Boot-Laedt, idempotentes Nachfalten ab folded_through_utc (deckt frisches NVS und Minuten seit dem letzten Save ab), Persist-Worker alle 300 s. Anzeige in /api/power-history (energy_day_wh/energy_month_wh, beide Header-Pfade), Dashboard (history-day-info) und Konsole history.
+
+**Tests:** neu `test/test_energy_totals.c` (99 Checks, ASan+UBSan gruen): Kalender-/Monatswechsel, Wh-Identitaet (60 min x 1 W = 1 Wh), Marker-Ausschluss, Ring-Eviction, Blob-Roundtrip/Checksum, echtes NVS inkl. Reboot per fork und korruptem NVS. `run_host_tests.sh` gruen (alle bestehenden Suites unveraendert), `check_dashboard_js.py` gruen. Kein idf.py lokal; Build-Nachweis ueber CI. `storage`-Partition unangetastet, kein erase-flash, kein Datenverlust.

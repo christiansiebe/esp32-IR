@@ -43,6 +43,7 @@
 #include "json_escape.h"
 #include "link_fallback.h"
 #include "power_history.h"
+#include "energy_totals.h"
 #include "runtime_config.h"
 #include "sml_selftest.h"
 #include "version.h"
@@ -742,6 +743,124 @@ static void wall_clock_worker(void *arg)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(60000));
         wall_clock_persist_if_due();
+    }
+}
+
+/* --- Day / month running energy totals (see energy_totals.h) -------------- */
+
+static energy_totals_t g_energy_totals;
+static portMUX_TYPE g_energy_totals_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool g_energy_totals_dirty;
+/* The observer runs inside the history writer while it holds the store lock, so
+ * it only takes this short spinlock and never blocks on I/O. */
+static void energy_totals_observe_store(void *ctx, const power_history_record_t *record)
+{
+    (void)ctx;
+    portENTER_CRITICAL(&g_energy_totals_lock);
+    if (energy_totals_add(&g_energy_totals, record)) {
+        g_energy_totals_dirty = true;
+    }
+    portEXIT_CRITICAL(&g_energy_totals_lock);
+}
+
+/* Fold the minutes still present in the ring that the running totals have not
+ * seen yet, so "today"/"this month" are right from the first request. The ring
+ * is time-ordered and the totals remember the newest minute they folded, so
+ * seeding from that cursor is idempotent: it picks up (a) a fresh store on the
+ * first boot after this feature shipped, and (b) the few minutes written after
+ * the last NVS save but before a reboot. Minutes older than the ring are gone. */
+static void energy_totals_seed_from_ring(void)
+{
+    /* Heap, not stack: 128 records are ~3.5 kB and this runs on the main task,
+     * whose stack is only a few kB. */
+    power_history_record_t *page =
+        heap_caps_malloc(POWER_HISTORY_PAGE_SIZE * sizeof(*page), MALLOC_CAP_8BIT);
+    if (page == NULL) {
+        ESP_LOGW(TAG, "Energy totals seed skipped: no memory for the read buffer");
+        return;
+    }
+    int64_t cursor = g_energy_totals.folded_through_utc;
+    for (;;) {
+        size_t count = 0;
+        power_history_status_t status;
+        bool more = false;
+        if (power_history_read_after(cursor, POWER_HISTORY_PAGE_SIZE, page,
+                                     POWER_HISTORY_PAGE_SIZE, &count, &status,
+                                     &more) != ESP_OK) {
+            break;
+        }
+        if (count == 0) {
+            break;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            portENTER_CRITICAL(&g_energy_totals_lock);
+            energy_totals_add(&g_energy_totals, &page[i]);
+            portEXIT_CRITICAL(&g_energy_totals_lock);
+            cursor = page[i].interval_start_utc;
+        }
+        if (!more) {
+            break;
+        }
+    }
+    heap_caps_free(page);
+}
+
+#define ENERGY_TOTALS_PERSIST_INTERVAL_SECONDS 300
+
+/* Persist the running totals periodically. The totals are folded in RAM on every
+ * stored minute; a reboot loses at most the last interval, and the seed-on-boot
+ * folds those minutes again from the ring. */
+static void energy_totals_worker(void *arg)
+{
+    (void)arg;
+    /* Heap, not stack: the snapshot is ~1.5 kB and the task stack stays small. */
+    energy_totals_t *snapshot = heap_caps_malloc(sizeof(*snapshot), MALLOC_CAP_8BIT);
+    if (snapshot == NULL) {
+        ESP_LOGW(TAG, "Energy totals disabled: no memory for the snapshot");
+        vTaskDelete(NULL);
+        return;
+    }
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(ENERGY_TOTALS_PERSIST_INTERVAL_SECONDS * 1000u));
+        bool dirty;
+        portENTER_CRITICAL(&g_energy_totals_lock);
+        dirty = g_energy_totals_dirty;
+        if (dirty) {
+            *snapshot = g_energy_totals;
+            g_energy_totals_dirty = false;
+        }
+        portEXIT_CRITICAL(&g_energy_totals_lock);
+        if (!dirty) {
+            continue;
+        }
+        esp_err_t err = energy_totals_store_save(snapshot);
+        if (err != ESP_OK) {
+            /* Retry on the next tick: a failed save must not lose the totals. */
+            portENTER_CRITICAL(&g_energy_totals_lock);
+            g_energy_totals_dirty = true;
+            portEXIT_CRITICAL(&g_energy_totals_lock);
+            ESP_LOGW(TAG, "Could not persist energy totals: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+static void energy_totals_start(void)
+{
+    bool found = false;
+    esp_err_t err = energy_totals_store_load(&g_energy_totals, &found);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not load energy totals: %s", esp_err_to_name(err));
+    }
+    ESP_LOGI(TAG, "Energy totals: %s", found ? "restored from NVS" : "fresh (seeded from the ring)");
+    /* Seed before the observer is attached: no minute can complete in the few
+     * milliseconds this takes (the recorder needs a whole minute), so nothing is
+     * folded twice. */
+    int64_t before = g_energy_totals.folded_through_utc;
+    energy_totals_seed_from_ring();
+    g_energy_totals_dirty = (!found || g_energy_totals.folded_through_utc != before);
+    power_history_set_store_observer(energy_totals_observe_store, NULL);
+    if (xTaskCreate(energy_totals_worker, "energy_totals", 3072, NULL, 2, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the energy-totals worker");
     }
 }
 
@@ -3470,6 +3589,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "' · aktuelle Messwerte im Intervall: '+d.current_sample_count+"
         "' · Speicher: '+(d.storage_ready?'bereit':'nicht bereit')+"
         "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
+        "if(typeof d.energy_day_wh==='number'){byId('history-day-info').textContent+=(' · heute '+fmt(d.energy_day_wh/1000,2)+' kWh · Monat '+fmt(d.energy_month_wh/1000,2)+' kWh');}"
         "}catch(e){byId('history-status').textContent='Verlauf nicht verfügbar: '+e;}"
         "try{const sr=await fetch('/api/history-pull',{cache:'no-store'});"
         "if(sr.ok){const s=await sr.json();"
@@ -4043,8 +4163,17 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
             status.ready = false;
             ESP_LOGW(TAG, "Power history busy; serving empty aggregation");
         }
-        char agg_header[384];
+        char agg_header[512];
         int agg_header_len = -1;
+        double energy_day_wh = 0.0;
+        double energy_month_wh = 0.0;
+        if (system_time_is_valid()) {
+            int64_t now_utc = current_utc_seconds();
+            portENTER_CRITICAL(&g_energy_totals_lock);
+            energy_day_wh = energy_totals_day_wh(&g_energy_totals, now_utc);
+            energy_month_wh = energy_totals_month_wh(&g_energy_totals, now_utc);
+            portEXIT_CRITICAL(&g_energy_totals_lock);
+        }
         if (agg_err == ESP_OK || agg_busy) {
             agg_header_len = snprintf(
                 agg_header, sizeof(agg_header),
@@ -4053,7 +4182,8 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 "\"latest_sequence\":%lu,\"record_count\":%lu,"
                 "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
                 "\"aggregated\":true,\"window_hours\":%.2f,\"bucket_seconds\":%lld,"
-                "\"day_start_utc\":%lld,\"capacity\":%u,\"records\":[",
+                "\"day_start_utc\":%lld,\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
+                "\"capacity\":%u,\"records\":[",
                 system_time_is_valid() ? "true" : "false",
                 status.persistent ? "true" : "false",
                 (unsigned int)current_sample_count_agg,
@@ -4066,6 +4196,8 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 window_hours_out,
                 (long long)bucket_seconds,
                 (long long)window_start_utc,
+                energy_day_wh,
+                energy_month_wh,
                 (unsigned int)POWER_HISTORY_CAPACITY);
         }
         if ((!agg_busy && agg_err != ESP_OK) ||
@@ -4124,13 +4256,23 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     current_sample_count = g_sml_power_sample_count;
     portEXIT_CRITICAL(&g_sml_history_lock);
 
-    char header[320];
+    char header[448];
+    double energy_day_wh = 0.0;
+    double energy_month_wh = 0.0;
+    if (system_time_is_valid()) {
+        int64_t now_utc = current_utc_seconds();
+        portENTER_CRITICAL(&g_energy_totals_lock);
+        energy_day_wh = energy_totals_day_wh(&g_energy_totals, now_utc);
+        energy_month_wh = energy_totals_month_wh(&g_energy_totals, now_utc);
+        portEXIT_CRITICAL(&g_energy_totals_lock);
+    }
     int header_len = snprintf(
         header, sizeof(header),
         "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
         "\"oldest_sequence\":%lu,"
         "\"latest_sequence\":%lu,\"record_count\":%lu,"
         "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
+        "\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
         "\"capacity\":%u,\"records\":[",
         system_time_is_valid() ? "true" : "false",
         status.persistent ? "true" : "false",
@@ -4141,6 +4283,8 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         (unsigned long)status.queue_drops,
         (unsigned long)status.write_errors,
         overflow ? "true" : "false",
+        energy_day_wh,
+        energy_month_wh,
         (unsigned int)POWER_HISTORY_CAPACITY);
     if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
         free(records);
@@ -4951,6 +5095,25 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         (unsigned int)status.queue_drops);
     if (written < 0 || (size_t)written >= out_size) {
         snprintf(out, out_size, "history: output truncated\n");
+        return;
+    }
+    /* Day/month running energy totals: the long-term view the minute ring alone
+     * cannot provide. Only a synced clock gives a meaningful "today"/"month". */
+    if (system_time_is_valid()) {
+        int64_t now = current_utc_seconds();
+        double day_wh;
+        double month_wh;
+        portENTER_CRITICAL(&g_energy_totals_lock);
+        day_wh = energy_totals_day_wh(&g_energy_totals, now);
+        month_wh = energy_totals_month_wh(&g_energy_totals, now);
+        portEXIT_CRITICAL(&g_energy_totals_lock);
+        int extra = snprintf(out + written, out_size - (size_t)written,
+                             "energy today: %.3f kWh\n"
+                             "energy month: %.3f kWh\n",
+                             day_wh / 1000.0, month_wh / 1000.0);
+        if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
+            snprintf(out, out_size, "history: output truncated\n");
+        }
     }
 }
 
@@ -8128,6 +8291,11 @@ void app_main(void)
     if (xTaskCreate(wall_clock_worker, "wall_clock", 3072, NULL, 2, NULL) != pdPASS) {
         ESP_LOGW(TAG, "Could not start the wall-clock persistence worker");
     }
+
+    /* Running day/month energy totals on both roles: the sender's own ring also
+     * has minutes, so the totals are meaningful there too (the receiver's
+     * dashboard is the main consumer). */
+    energy_totals_start();
 
     ESP_ERROR_CHECK(esp_now_register_recv_cb(receive_callback));
 

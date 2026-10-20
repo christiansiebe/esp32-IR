@@ -342,6 +342,23 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_wall_clock"
 
+# Day/month running energy totals: the pure accumulator (day/month split,
+# rollover, boot-marker exclusion, ring eviction, calendar math) plus the real
+# NVS store driven through a file-backed NVS shim. A forked "reboot" proves the
+# totals survive a reset.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DENERGY_TOTALS_TEST_DIR="\"$out/energy\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/energy_totals.c" \
+    "$repo/main/energy_totals_store.c" \
+    "$here/test_energy_totals.c" \
+    -lm -o "$out/test_energy_totals"
+
+"$out/test_energy_totals"
+
 python3 "$here/test_ha_stats.py"
 python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"
