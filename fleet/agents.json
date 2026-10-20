@@ -181,6 +181,13 @@
       "note": "ERSETZT den geloeschten Odroid Entwicklung (b29e060b). Odroid-Koordinator; Board-Arbeit nur hier (geteilter remote-shell-Kanal). FERTIG 2026-10-18: T4 cpu-real-clock (reboot-fest, ueberlebte den 19:32-Reboot); T5 OC-Overlay 2496->2472 (PR #39); T1 -> PR #42 (AP deploy/revert/dead-man); T2 -> PR #41 (Watchdog-Verdrahtung); T3 -> PR #40/#43/#44/#45 (Review-Empfehlungen #5/#6/#7/#14). Re-use bestehender Sub-Agenten (Tages-Limit 20). Offene NUTZER-Entscheide: AP (ersetzen/ergaenzen, SSID/Kanal/Passwort), Kamera (IP-Modell), Watchdog-Aktor.",
       "sandbox_id": "14OgyIfbGZEKFmFiE4cHVv",
       "checked_at": "2026-10-20T02:20:37Z"
+    },
+    "fb4acc4e11f94fcd94bbfc000a927301": {
+      "name": "HA WP entwicklung (neu) - Odroid AP/HA",
+      "open_tasks": 1,
+      "branch": "feat/dfs-clock-visibility",
+      "note": "Neuer Chat als Ersatz fuer den geloeschten 7a894c13 (HA WP entwicklung). Uebernommen: Odroid-als-AP (rtw88_8822bu, kein VIF), USB2-Bandbreiten-Deckel, Reboot-Festigkeit AP, Kamera-ueber-LAN. Uebergabe: remote-shell/ha/ODROID-SESSION.md.",
+      "checked_at": "2026-10-20T02:53:24Z"
     }
   }
 }
