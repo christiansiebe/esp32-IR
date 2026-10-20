@@ -101,7 +101,7 @@ covers them and `test_supervisor.py` locks them in:
 4. **A run takes ~13 min** (mostly sandbox provisioning), so a short cron
    schedule starts overlapping runs that each wake the same agent and burn
    `MAX_WAKES`. A KV run-lock (`_LOCK_TTL_MIN`) makes runs single-flight; the
-   schedule (`*/10`) plus the lock keeps one run at a time.
+   schedule (`*/20`) plus the lock keeps one run at a time.
 5. **The registry the supervisor reads is the one on GitHub**, not the local
    file - keep `fleet/agents.json` pushed or the open-task counts are stale.
 

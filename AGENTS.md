@@ -8,11 +8,11 @@ Two firmware roles are built from one source tree.
   at the top, the "Arbeitsweise: Chat-Heartbeat" section with the rules below.
   Every follow-up chat must pick up the open items from it.
 - The chat runs in a sandbox with a ~20 min inactivity timeout. On idle it is
-  reset and any **uncommitted** work is lost. A cron automation `chat-heartbeat`
-  (`*/15 * * * *`, ACTIVE) pings the chat to keep it alive - but it protects the
-  chat, not the work.
-- At the start of a chat, check that `chat-heartbeat` is still ACTIVE (recreate
-  it if not), then continue the open `TODO.md` items.
+  reset and any **uncommitted** work is lost. The primary way to survive this is
+  to **keep the turn alive** while `TASKS.json` has open entries (see the fleet
+  rule below) - do not end the turn to idle mid-task. A cron `chat-heartbeat`
+  (`*/15`, currently **DISABLED**) is only a legacy fallback; do not rely on it
+  and do not re-enable it without a cost check.
 - Commit and push small steps promptly; never leave important work only in
   `/tmp`.
 
@@ -56,11 +56,13 @@ This is a standing rule for **every** esp32-IR chat agent, not a suggestion.
   fallback.)
 - **Cost rule for the schedule.** A cron run *itself* costs almost nothing (no
   LLM), but every wake it sends starts an LLM turn, and every run pays a sandbox
-  start. So: run the supervisor no more often than the fleet can actually
-  change - `*/15` is enough for the safety net (a wake delayed by minutes is
-  irrelevant for a paused agent). Never tighten it below `*/10`. Before any
-  change to a cron cadence, multiply runs/day x expected LLM turns per run and
-  keep the total small; a stuck `open_tasks > 0` entry multiplied by a `*/5`
+  start. So run the supervisor only as often as the fleet can actually change.
+  The current cadence is `*/20` (72 sandbox starts/day) and that is plenty - a
+  wake delayed by a few minutes is irrelevant for a paused agent whose own turns
+  run for many minutes. Never tighten it below `*/15`; do not use `*/19` or any
+  other non-dividing value (it produces an uneven pattern with a 3-minute gap).
+  Before changing a cadence, multiply runs/day x expected LLM turns per run and
+  keep the total small; a stuck `open_tasks > 0` entry multiplied by a tight
   schedule is what burns credit.
 - **A wedged chat can also be restarted by hand**:
   `python3 /workspace/fleet/restart.py <conversation_id>` interrupts the stuck
