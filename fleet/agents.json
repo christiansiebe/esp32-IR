@@ -41,8 +41,8 @@
   "f85f7c473e7748259d2751fc1085b2b2": {
    "name": "parent (Odroid N2: VNC-Desktop & CPU-PLL-OC)",
    "open_tasks": 0,
-   "note": "FERTIG (2026-10-20): Read-only-Kanal /ro gebaut+live getestet (bbcabb0: ro_policy.py, test_ro_policy.py, /ro-Handler+process_request, ro-Flag in cmd_agent, READONLY-CHANNEL.md; doppeltes Gate Server+Board). Kernel-Oops 0x86000006 analysiert (6d74228): EC=0x21 Instruction Abort aus Kernel-EL1, IFSC=6 Translation fault L2 -> Kernel holte Befehl aus nicht gemapptem Speicher ('Code: ????'); kein Trace (ramoops fehlt, nur hard-reset-unknown). Empfehlung: ramoops (PR #45) + panic_on_oops=1 panic=10. Nebenbefund: Board-Token war rotiert -> Kanal wiederhergestellt; Board-Agent laeuft jetzt mit eigener fail-closed Allowlist (cline/0f7jc38h). Keine offene Agent-Arbeit.",
-   "checked_at": "2026-10-20T10:16:00Z"
+   "note": "FERTIG (2026-10-20): (1) /ro read-only Kanal gebaut+live getestet (bbcabb0). (2) Kernel-Oops 0x86000006 analysiert (6d74228): EC=0x21 Instruction Abort EL1, IFSC=6 Translation fault L2 -> Kernel holte Befehl aus nicht gemapptem Bereich ('Code: ????'). (3) Fehleraufzeichnung verbessert (76f2619): crash_capture.py + deploy/revert + 56 Host-Checks + CRASH-CAPTURE-README.md. Kern: Oops wird ohne panic_on_oops=1 kein Panic -> ramoops und panic=10 greifen nie; journald syncht mit 5min Default. Fix: panic_on_oops=1, panic=10, hung_task_panic=1@120s, softlockup_panic=1, SyncIntervalSec=1s, Storage=persistent, extraargs-Merge, optional netconsole. Offen am Board (Parent, sequenziell): deploy_ramoops (#45) -> deploy_crash_capture.sh -> audit. Volle Host-Suite gruen.",
+   "checked_at": "2026-10-20T10:41:00Z"
   },
   "521252f5a71b42c28165ad7e74ed13ec": {
    "name": "ODROID LAN/AP + Kamera",

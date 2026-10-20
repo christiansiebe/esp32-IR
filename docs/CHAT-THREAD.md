@@ -869,3 +869,37 @@ weil ramoops fehlt. Wahrscheinlichste Ursache: board-spezifische
 Clock-/Spannungs-Instabilitaet (PLL-OC/UV/lowfreq/cpu-hotplug-Historie);
 Software-Bad-Pointer ohne Backtrace nicht ausschliessbar.
 **Empfehlung:** ramoops deployen (PR #45) + `panic_on_oops=1 panic=10`.
+
+## 2026-10-20 10:40 UTC · Parent Odroid (f85f7c473e7748259d2751fc1085b2b2)
+
+**Punkt 3: Fehleraufzeichnung verbessert (Nutzer: "Können wir die Fehler Aufzeichnungen verbessern?") - FERTIG.**
+
+Theorie bestaetigt: ESR `0x86000006` = EC `0x21` (Instruction Abort aus EL1) +
+IFSC `6` (Translation fault L2) = der Kernel holte einen Befehl aus einem nicht
+gemappten Bereich; `Code: ????` = der PC selbst war unlesbar. **Warum** er dort
+landete, ist ohne Backtrace nicht entscheidbar (Instabilitaet vs. Software-Bug).
+
+**Zwei echte Aufzeichnungs-Luecken gefunden und geschlossen:**
+1. **Ein Oops ist kein Panic** -> `panic=10` UND ramoops haengen am Panic-Pfad.
+   Ohne `panic_on_oops=1` wird weder ein ramoops-Record geschrieben noch
+   rebootet. Deshalb war die Spur weg.
+2. **journald syncht mit Default 5 min** -> bis zu 5 min Kernel-Log nur im RAM,
+   bei hartem Reset weg.
+
+**Neu (Commit `76f2619`, Branch feat/dfs-clock-visibility):**
+`remote-shell/ha/crash_capture.py` (reine Logik, host-testbar) rendert
+sysctl-Drop-in (`panic_on_oops=1 panic=10 hung_task_panic=1@120s
+softlockup_panic=1 panic_on_warn=0 vm.panic_on_oom=0`), journald-Drop-in
+(`SyncIntervalSec=1s Storage=persistent SystemMaxUse=64M`), den idempotenten
+`extraargs`-Merge, optional **netconsole** (einziger Weg, einen harten
+PLL-/Spannungs-Hang zu sehen) + `audit`. Dazu `deploy_crash_capture.sh`,
+`revert_crash_capture.sh`, `test_crash_capture.py` (**56 Checks**),
+`CRASH-CAPTURE-README.md`. Volle Host-Suite gruen (EXIT=0).
+
+**Wichtig:** Der Test hat zwei echte Bugs gefunden, bevor sie aufs Board kamen:
+`5min` wurde nicht als Dauer geparst (Fix: `_seconds()`), und **Inline-Kommentare
+in sysctl.d/journald.conf sind ungueltig** (der Wert waere `1   # ...` geworden) ->
+Kommentare jetzt in eigenen Zeilen, mit Regressionstest.
+
+**Naechster Schritt am Board (Parent, sequenziell):** Schritt 0 `deploy_ramoops.sh`
+(#45), dann `deploy_crash_capture.sh`, dann `python3 crash_capture.py audit`.
