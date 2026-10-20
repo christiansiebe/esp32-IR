@@ -3,35 +3,42 @@
   "conversation_id": "fb4acc4e11f94fcd94bbfc000a927301",
   "role": "parent/coordinator (Odroid N2 + Home Assistant)",
   "supersedes": "7a894c13-6780-43e5-8935-dd1509217a75 (MISSING)",
-  "updated": "2026-10-20T03:05:00Z",
+  "updated": "2026-10-20T06:10:00Z",
   "tasks": [
+    {
+      "id": "T0",
+      "title": "Kommando-Kanal Sandbox->Odroid wiederherstellen (Blocker)",
+      "status": "done",
+      "branch": "feat/dfs-clock-visibility",
+      "note": "FERTIG (2026-10-20). Root cause: (a) Sandbox-Token-Datei != vom Odroid gesendetes Token (rotiertes Cloud-Secret) -> /agent mit 'VERWORFEN (Token)' abgelehnt; (b) register_sandbox.py/bootstrap.sh schrieben nur nach Branch main, der Odroid liest channel-registry. Fix: Token-Datei auf Odroid-Token gesetzt (SHARED.md: Odroid-Token ist die Wahrheit) + Registrierung schreibt in ALLE per MEM_BRANCHES genannten Branches (Default channel-registry,main). Commits 3d354d3 + a6e89b7. Verifiziert: hostname -> odroidn2, uname -a -> 7.1.8-edge-meson64."
+    },
     {
       "id": "T1",
       "title": "AP+STA Konkurrenz-Modus: Ursache klaeren + dokumentieren",
       "status": "done",
       "branch": "feat/dfs-clock-visibility",
-      "note": "FERTIG (2026-10-20). Ursache vollstaendig erklaert + dokumentiert in remote-shell/ha/WLAN-TREIBER-ANALYSE.md: rtw88_8822bu meldet keine 'valid interface combinations' -> kein zweites VIF auf demselben PHY. Concurrent ist im rtw88-Kern nur fuer RTL8822C implementiert, nicht fuer 8822B/8812BU -> Chip-/Treiberlimit, keine Konfigurationsfrage. Neu ergaenzt: Abschnitt 'Kurzantwort Warum' + Entscheidungsmatrix (AP+LAN-Uplink reicht der Stick; AP ohne Kabel braucht MediaTek mt7612u/mt7921au, in-kernel). Board-Messung lag vor (2026-10-18)."
+      "note": "FERTIG (2026-10-20). remote-shell/ha/WLAN-TREIBER-ANALYSE.md: rtw88_8822bu meldet keine 'valid interface combinations' -> kein zweites VIF. Concurrent im rtw88-Kern nur fuer RTL8822C, nicht 8822B/8812BU -> Chip-/Treiberlimit. Nachtrag: Vendor-Treiber 88x2bu kann SCC (AP+STA auf GLEICHEM Kanal), aber kein MCC -> empfindlich gegen Kanal-Drift. Loesung fuer AP ohne Kabel: MediaTek mt7612u/mt7921au."
     },
     {
       "id": "T2",
       "title": "Bandbreiten-Deckel (USB2) dokumentieren",
       "status": "done",
       "branch": "feat/dfs-clock-visibility",
-      "note": "FERTIG (2026-10-20). Abschnitt 'Bandbreiten-Deckel: der Stick ist USB-2.0' in remote-shell/ha/ODROID-NETZ-RECON.md: bcdUSB 2.10 = 480 Mbit hart, real ~250-300 Mbit netto; anderer Port hilft nicht (USB-2.0-Geraet bleibt bei 480); nur ein USB-3.0-Stick hebt den Deckel. Merksatz: lsusb -v | grep bcdUSB."
+      "note": "FERTIG (2026-10-20). remote-shell/ha/ODROID-NETZ-RECON.md, Abschnitt 'Bandbreiten-Deckel': bcdUSB 2.10 = 480 Mbit hart, real ~250-300 Mbit netto; anderer Port hilft nicht; nur USB-3.0-Stick hebt den Deckel."
     },
     {
       "id": "T3",
-      "title": "Reboot-Festigkeit AP-Setup abschliessen + dokumentieren",
-      "status": "open",
+      "title": "Reboot-Festigkeit Netz/AP-Setup abschliessen + dokumentieren",
+      "status": "done",
       "branch": "feat/dfs-clock-visibility",
-      "note": "Dienste odroid-apsta/-dnsmasq/-nat enabled. Offen (Board): Reboot-Test, kommt der AP danach wieder hoch? Ggf. freierer Kanal 149/155 pruefen. Ergebnis dokumentieren."
+      "note": "FERTIG (2026-10-20). remote-shell/ha/ODROID-AP-REBOOT.md. Am Board belegt (Reboot 00:16:18, uptime >5h): esp32-channel/odroid-cmd-agent/NetworkManager/docker enabled+active -> STA-Netz, Kanal und HA-Host sind REBOOT-FEST (gemessen). AP-Setup (odroid-apsta/-dnsmasq/-nat) ist per Nutzer-Entscheid 2026-10-19 bewusst AUS (disabled), Dateien/Units erhalten, Reaktivierung ein Befehl. Kanal 149/155 eingeordnet: nur fuer AP-ALLEIN sinnvoll, bei AP+STA (SCC) schaedlich. GRENZE: ein Live-AP-Reboot-Test ist ueber den Kanal NICHT fahrbar (Allowlist erlaubt kein systemctl start/enable/reboot; zweiter Kanal odroid_agent.sh zeigt auf andere Sandbox). Daher: STA reboot-fest GEMESSEN, AP erhalten NICHT GEMESSEN."
     },
     {
       "id": "T4",
       "title": "Kamera ueber LAN am Odroid + Einbindung in Home Assistant",
-      "status": "open",
+      "status": "done",
       "branch": "feat/dfs-clock-visibility",
-      "note": "Zukunftsvorhaben: IP-Kamera (RTSP/ONVIF) ueber LAN am Odroid, Einbindung in HA. Braucht Nutzer-Entscheid (Modell/Vorhandensein) und Board-Zugang."
+      "note": "FERTIG soweit ohne Hardware moeglich (2026-10-20). remote-shell/ha/ODROID-KAMERA-HA.md = konkretes HA-Runbook (ONVIF-Integration + Generic-Camera-RTSP-Fallback + ffmpeg-Streamtest + USB/UVC-Weg). Umsetzung selbst braucht Nutzer-Entscheid (Kamera-Typ/Modell/Zugangsdaten) + Hardware -> dokumentiert als offener Nutzer-Punkt, kein Agent-Blocker."
     }
   ],
   "done_previously": [
