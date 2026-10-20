@@ -141,3 +141,37 @@ liste). **Kein HTTPS** auf 6080 — Port 443 ist `nginx` (HA), das liefert 404.
 `vnc-lan-guard` (Kette `VNC_LAN`) erlaubt 6080 nur aus `127.0.0.0/8` +
 `192.168.178.0/24` → aus dem Heimnetz ok, von aussen gesperrt.
 
+## Bandbreiten-Deckel: der Stick ist USB-2.0 (T2, 2026-10-20)
+
+**Frage des Nutzers:** „Der Stick verbindet mit 700 Mbit zur FritzBox, kann aber
+nur 480 (USB2). Gibt es mehr USB-3-Ports?" — **Nein, ein anderer Port hilft
+nicht.** Der Deckel sitzt im Stick, nicht im Port.
+
+**Beleg (am Board gelesen):** Der WLAN-Stick `2357:0138` (TP-Link 802.11ac,
+RTL8812BU/8822BU) meldet am USB-Bus **`bcdUSB 2.10`** — also **USB 2.0** mit
+**480 Mbit/s Bruttorate**. Ein USB-2.0-Geraet bleibt an einem USB-3.0-Port bei
+480 Mbit/s; der Port handelt nicht hoch. Ein anderer Steckplatz aendert daran
+nichts.
+
+**Was das praktisch bedeutet:**
+
+| Groesse | Wert | Anmerkung |
+|---------|------|-----------|
+| USB-2.0 Bruttorate | 480 Mbit/s | harte Obergrenze fuer den ganzen Stick |
+| Real erreichbar (netto, alle Overheads) | **~250–300 Mbit/s** | typisch ~50–60 % der Bruttorate |
+| Beobachtet am Board | ~175 Mbit/s brutto / ~50 Mbit/s netto | reale Messung, WLAN+USB zusammen |
+
+Die **Funkrate** (802.11ac, VHT-MCS9, 80 MHz → im Link bis ~866 Mbit/s
+angezeigt) ist damit **nicht** der Engpass. Der USB-2.0-Bus und der Funk-Overhead
+begrenzen zusammen auf rund ein Drittel der beworbenen Funkrate. Das ist die
+„Mogelpackung": beworben wird die Funkrate, nutzbar ist die USB-2.0-Rate.
+
+**Einziger echter Hebel:** ein **USB-3.0-WLAN-Stick** (z. B. RTL8814AU mit
+`bcdUSB 3.0`, oder ein MediaTek-Modell). Alles andere (anderer Port, Treiber
+tauschen, Kanal wechseln) hebt den 480-Mbit-Deckel **nicht** auf.
+
+**Merksatz:** Bei einem USB-WLAN-Adapter immer zuerst `lsusb -v | grep bcdUSB`
+pruefen. `2.10` = 480-Mbit-Deckel, `3.00` = erst dann lohnt der Blick auf die
+Funkrate. Ein Adapter, der mit „1200 Mbit" beworben wird, aber an USB 2.0 haengt,
+liefert real nie mehr als ~300 Mbit/s.
+

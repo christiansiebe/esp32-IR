@@ -56,10 +56,10 @@
   },
   "fb4acc4e11f94fcd94bbfc000a927301": {
    "name": "HA WP entwicklung (neu) - Odroid AP/HA",
-   "open_tasks": 1,
+   "open_tasks": 2,
    "branch": "feat/dfs-clock-visibility",
-   "note": "Neuer Chat als Ersatz fuer den geloeschten 7a894c13 (HA WP entwicklung). Uebernommen: Odroid-als-AP (rtw88_8822bu, kein VIF), USB2-Bandbreiten-Deckel, Reboot-Festigkeit AP, Kamera-ueber-LAN. Uebergabe: remote-shell/ha/ODROID-SESSION.md.",
-   "checked_at": "2026-10-20T02:53:24Z"
+   "note": "Parent fuer den geloeschten HA-WP-Chat (7a894c13). T1 (AP+STA/Warum, WLAN-TREIBER-ANALYSE.md) + T2 (USB2-Bandbreiten-Deckel, ODROID-NETZ-RECON.md) FERTIG dokumentiert. Offen: T3 Reboot-Festigkeit AP (Board-Test), T4 Kamera ueber LAN + HA (Nutzer-Entscheid + Board). Board-Kanal steht (Server up, registriert), Odroid-Agent verbindet sich aktuell NICHT -> Board offline/umgesteckt.",
+   "checked_at": "2026-10-20T03:25:00Z"
   },
   "732f5e0624b948499d0183f5633d86b5": {
    "name": "ODROID Watchdog-Aktor",

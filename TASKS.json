@@ -8,16 +8,16 @@
     {
       "id": "T1",
       "title": "AP+STA Konkurrenz-Modus: Ursache klaeren + dokumentieren",
-      "status": "open",
+      "status": "done",
       "branch": "feat/dfs-clock-visibility",
-      "note": "Befund bisher: rtw88_8822bu kann kein VIF ('interface combinations are not supported') -> AP+STA parallel unmoeglich; nur ein MediaTek-Stick (mt7612u/mt7921au, in-kernel) loest das. Offen: Befund am Board final belegen und in remote-shell/ha/WLAN-TREIBER-ANALYSE.md scharf dokumentieren (inkl. Alternativen)."
+      "note": "FERTIG (2026-10-20). Ursache vollstaendig erklaert + dokumentiert in remote-shell/ha/WLAN-TREIBER-ANALYSE.md: rtw88_8822bu meldet keine 'valid interface combinations' -> kein zweites VIF auf demselben PHY. Concurrent ist im rtw88-Kern nur fuer RTL8822C implementiert, nicht fuer 8822B/8812BU -> Chip-/Treiberlimit, keine Konfigurationsfrage. Neu ergaenzt: Abschnitt 'Kurzantwort Warum' + Entscheidungsmatrix (AP+LAN-Uplink reicht der Stick; AP ohne Kabel braucht MediaTek mt7612u/mt7921au, in-kernel). Board-Messung lag vor (2026-10-18)."
     },
     {
       "id": "T2",
       "title": "Bandbreiten-Deckel (USB2) dokumentieren",
-      "status": "open",
+      "status": "done",
       "branch": "feat/dfs-clock-visibility",
-      "note": "Geklaert: Stick ist USB-2.0 (480 Mbit) -> real ~250-300 Mbit netto max; anderer Port hilft nicht, nur USB-3.0-Stick. Offen: als Abschnitt in ODROID-NETZ-RECON.md / WLAN-TREIBER-ANALYSE.md festschreiben (Messwerte + Begruendung)."
+      "note": "FERTIG (2026-10-20). Abschnitt 'Bandbreiten-Deckel: der Stick ist USB-2.0' in remote-shell/ha/ODROID-NETZ-RECON.md: bcdUSB 2.10 = 480 Mbit hart, real ~250-300 Mbit netto; anderer Port hilft nicht (USB-2.0-Geraet bleibt bei 480); nur ein USB-3.0-Stick hebt den Deckel. Merksatz: lsusb -v | grep bcdUSB."
     },
     {
       "id": "T3",

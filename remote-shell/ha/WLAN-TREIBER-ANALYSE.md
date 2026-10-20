@@ -5,6 +5,27 @@ Kontext: Der Odroid soll den Access Point übernehmen. Der Stick ist ein
 **TP-Link 802.11ac (USB-ID `2357:0138`) = Realtek RTL8812BU/8822BU**, am Board
 vom **In-Kernel-Treiber `rtw88_8822bu`** bedient.
 
+## Kurzantwort auf „Warum geht der Konkurrenz-Modus nicht?" (T1, 2026-10-20)
+
+Ein Funkmodul kann nur dann gleichzeitig AP **und** STA fahren, wenn es mehrere
+**virtuelle Interfaces (VIF)** auf einem PHY erlaubt. Ein VIF ist eine
+Software-Sicht auf denselben Funk-Chip: `wlan0` (STA) und `ap0` (AP) teilen sich
+Antenne, Kanal und Zeitfenster. Der Treiber muss das koennen **und** es der
+Funk-Regulierung melden — ueber die Liste `valid interface combinations`.
+
+Der `rtw88_8822bu`-Treiber meldet diese Kombinationen **nicht**:
+`iw` sagt schlicht **`interface combinations are not supported`**. Ohne diese
+Meldung darf der Kernel kein zweites Interface auf demselben PHY aktivieren —
+er kennt keine erlaubte Kombination. Ein zweites VIF laesst sich zwar anlegen,
+aber nicht hochfahren (siehe Messung unten). Das ist **kein Konfigurations-,
+sondern ein Treiber-/Chip-Limit**: die Concurrent-Unterstuetzung im `rtw88`-
+Kern ist fuer **RTL8822C** implementiert, **nicht** fuer den 8822B/8812BU.
+
+**Konsequenz fuer dieses Board:** Ein gleichzeitiger AP+STA-Betrieb ist mit dem
+vorhandenen Stick **unmoeglich** — unabhaengig von Treiberwahl, Kanal oder
+Konfiguration. Es braucht einen **anderen Funk-Chip** (MediaTek, siehe unten),
+keinen anderen Treiber.
+
 ## Messung am Board (Beleg)
 
 ```
@@ -19,6 +40,14 @@ type __ap` → rc=0), aber `ip link set ap0 up` scheitert:
 `Could not set interface ap0 flags (UP)` ab. Die STA-Verbindung blieb dabei
 **stabil** (Gateway 2 ms) — d. h. das Board war nie in Gefahr, aber **AP+STA
 parallel ist mit diesem Treiber unmöglich**.
+
+## Entscheidungsmatrix: braucht der Odroid ueberhaupt AP+STA?
+
+| Ziel | Reicht der vorhandene Stick? | Warum |
+|------|------------------------------|-------|
+| AP mit **LAN-Kabel-Uplink** (`end0`) | **Ja** | AP (WLAN) und Uplink (LAN) sind zwei **verschiedene** Geraete — kein VIF noetig. |
+| AP **ohne** Kabel (AP + STA gleichzeitig) | **Nein** | genau **ein** Funkmodul, und das kann kein VIF -> Lockout-Gefahr. Braucht einen **zweiten** MediaTek-Adapter. |
+| Nur STA (kein AP) | **Ja** | Standardfall, laeuft heute. |
 
 ## Treiberlage (recherchiert)
 
