@@ -1,49 +1,40 @@
 {
-  "_comment": "Odroid Entwicklung (neu), conversation 30cfd896aac440a4a09ba70ec6199f08. Ein Eintrag pro Aufgabe, status open|done. Offene Eintraege = wachbleiben. Der Parent spiegelt die Zahl der offenen Eintraege nach fleet/agents.json (open_tasks).",
-  "conversation_id": "30cfd896aac440a4a09ba70ec6199f08",
-  "role": "parent/coordinator",
-  "updated": "2026-10-18T21:10:00Z",
+  "_comment": "Odroid + Home Assistant (Uebernahme des geloeschten Chats 7a894c13 'HA WP entwicklung'), conversation fb4acc4e11f94fcd94bbfc000a927301. Ein Eintrag pro Aufgabe, status open|done. Offene Eintraege = wachbleiben. Der Parent spiegelt die Zahl der offenen Eintraege nach fleet/agents.json (open_tasks).",
+  "conversation_id": "fb4acc4e11f94fcd94bbfc000a927301",
+  "role": "parent/coordinator (Odroid N2 + Home Assistant)",
+  "supersedes": "7a894c13-6780-43e5-8935-dd1509217a75 (MISSING)",
+  "updated": "2026-10-20T03:05:00Z",
   "tasks": [
     {
       "id": "T1",
-      "title": "Odroid-Netz: AP-Uebernahme + Kamera ueber LAN",
-      "status": "done",
-      "branch": "feat/odroid-lan-ap-camera",
-      "note": "P1 (end0-Uplink) am Board bestaetigt (end0 UP/carrier=1, 192.168.178.4/24, Default-Route via end0). Host-seitiges Ausroll-/Ruecknahme-Werkzeug GELIEFERT: PR #42 (feat/odroid-ap-deploy: deploy_ap.sh, revert_ap.sh, odroid_ap_deadman.sh, test_ap_deploy.py, ODROID-LAN-AP-KAMERA.md) gegen cline/power-history-diag. P2 (WLAN->AP) bleibt bis Nutzer-Entscheid (AP ersetzen/ergaenzen, SSID/Kanal/Passwort) und bis zum bewussten Ausroll gesperrt."
+      "title": "AP+STA Konkurrenz-Modus: Ursache klaeren + dokumentieren",
+      "status": "open",
+      "branch": "feat/dfs-clock-visibility",
+      "note": "Befund bisher: rtw88_8822bu kann kein VIF ('interface combinations are not supported') -> AP+STA parallel unmoeglich; nur ein MediaTek-Stick (mt7612u/mt7921au, in-kernel) loest das. Offen: Befund am Board final belegen und in remote-shell/ha/WLAN-TREIBER-ANALYSE.md scharf dokumentieren (inkl. Alternativen)."
     },
     {
       "id": "T2",
-      "title": "Watchdog: externer Aktor (Design)",
-      "status": "done",
-      "branch": "feat/odroid-watchdog-actor",
-      "note": "Design GELIEFERT (WATCHDOG-ACTOR.md, PR #37) + VERDRAHTUNG GELIEFERT: PR #41 (feat/watchdog-actor-wiring: watchdog_powercut.sh-Wrapper, watchdog-monitor.service, deploy_watchdog_actor.sh, test_watchdog_integration.py) gegen cline/power-history-diag. Host-Tests gruen (28+50+17 Checks). Trockenlauf Default. OFFEN nur Nutzer-Entscheide: Aktor-Wahl, Heartbeat-Transport, Fail-safe-Verdrahtung, Cooldown-Wert; Scharfschalten erst danach."
+      "title": "Bandbreiten-Deckel (USB2) dokumentieren",
+      "status": "open",
+      "branch": "feat/dfs-clock-visibility",
+      "note": "Geklaert: Stick ist USB-2.0 (480 Mbit) -> real ~250-300 Mbit netto max; anderer Port hilft nicht, nur USB-3.0-Stick. Offen: als Abschnitt in ODROID-NETZ-RECON.md / WLAN-TREIBER-ANALYSE.md festschreiben (Messwerte + Begruendung)."
     },
     {
       "id": "T3",
-      "title": "PR-Stack #5/#6/#7/#8/#14 aufraeumen",
-      "status": "done",
-      "note": "ALLE Review-Empfehlungen umgesetzt, je PR gegen cline/power-history-diag (nichts gemergt, Originale unangetastet): #7 -> PR #40 (PWM-Notes-Korrektur), #5 -> PR #43 (safe lowfreq overlay: additives user_overlays, MIN_SPEED=1000000, Dry-Run ohne Board-DTB warnt), #6 -> PR #44 (voltage curve rebased; render() erhalten -> OC-Pfad intakt, vom Parent verifiziert: test_gen_oc_dts 24/0 + gen_oc_dts laeuft), #14 -> PR #45 (ramoops/boot-journal herausgetrennt, 16 Dateien). Zusatz: PR #46 (9fe65410, firmware record_count+web_guard). Host-Tests auf allen Branches gruen."
+      "title": "Reboot-Festigkeit AP-Setup abschliessen + dokumentieren",
+      "status": "open",
+      "branch": "feat/dfs-clock-visibility",
+      "note": "Dienste odroid-apsta/-dnsmasq/-nat enabled. Offen (Board): Reboot-Test, kommt der AP danach wieder hoch? Ggf. freierer Kanal 149/155 pruefen. Ergebnis dokumentieren."
     },
     {
       "id": "T4",
-      "title": "CPU-Takt-Anzeige: echten PLL-Takt (2472/2016) statt gecachtem scaling_cur_freq",
-      "status": "done",
+      "title": "Kamera ueber LAN am Odroid + Einbindung in Home Assistant",
+      "status": "open",
       "branch": "feat/dfs-clock-visibility",
-      "note": "cpu-real-clock.service (remote-shell/ha/cpu_real_clock.py) ueberlagert policy{0,2}/scaling_cur_freq per bind-Mount mit dem echten PLL-Takt. Auf dem Board installiert, aktiviert, reboot-fest. Verifiziert: htop zeigt 2472 statt 2400, cpu-volt-line zeigt big 2472MHz. Host-Test test_cpu_real_clock.py gruen."
-    },
-    {
-      "id": "T5",
-      "title": "OC-Overlay: Punkt 2496 (N=208) -> 2472 (N=206) ersetzen",
-      "status": "done",
-      "branch": "feat/oc-overlay-2472",
-      "note": "PR #39 gegen cline/power-history-diag. gen_oc_dts.py Standardpunkt 2472/N=206; deploy_oc_safe.sh DTB-Check, oc-freq-guard.sh und OC-README.md angepasst. Host-Tests gruen (test_gen_oc_dts 24 Checks, test_oc_safe, Gesamtsuite). Overlay auf dem Board noch NICHT installiert (Deployment = separater Schritt mit Testboot)."
-    },
-    {
-      "id": "T6",
-      "title": "Drucker HL-3040CN ueber Odroid (qemu-i386 CUPS-Container)",
-      "status": "done",
-      "branch": "feat/dfs-clock-visibility",
-      "note": "ERLEDIGT + vom Nutzer am Drucker bestaetigt (\"ja er hat gedruckt\"): HL-3040CN ist host-based (GDI), kann weder PCL6 noch PostScript (Brother-Spec: Emulation N/A, BR-Script3 N/A; PCL_P1/POSTSCRIPT_P1 sind Attrappen) -> leere Seiten. Brother-Treiber ist i386-Binary ohne Quelle -> unter qemu-i386 in einem i386-CUPS-Container. remote-shell/ha/brother-hl3040cn/ (Dockerfile, cupsd.conf, entrypoint.sh, deploy_brother_cups.sh, README) + test_brother_cups.py (24 Checks, in run_host_tests.sh). Auf odroidn2 ausgerollt: Container brother-cups (--network=host, --restart unless-stopped), Queue socket://192.168.178.50:9100, CUPS 631 erreichbar. Reboot-fest (docker enabled + unless-stopped). Verifiziert: 121 B PS -> 112587 B Brother-Strom; Testdruck kam korrekt heraus. Board-Fallen: build+run brauchen --network=host (Bridge-DNS/LAN kaputt)."
+      "note": "Zukunftsvorhaben: IP-Kamera (RTSP/ONVIF) ueber LAN am Odroid, Einbindung in HA. Braucht Nutzer-Entscheid (Modell/Vorhandensein) und Board-Zugang."
     }
+  ],
+  "done_previously": [
+    "T4 cpu-real-clock (reboot-fest), T5 OC-Overlay 2496->2472 (PR #39), T1 PR #42 (AP deploy/revert/dead-man), T2 PR #41 (Watchdog-Verdrahtung), T3 PR #40/#43/#44/#45 (Review), T6 Brother HL-3040CN Drucker (bestaetigt)."
   ]
 }

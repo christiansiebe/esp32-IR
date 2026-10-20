@@ -54,6 +54,13 @@
       "note": "FERTIG + GEMERGED: PR #36 (Plan ODROID-LAN-AP-KAMERA.md + Generator odroid_ap_config.py, 52 Host-Checks). FERTIG (T1, 2026-10-18): PR #42 (offen, base cline/power-history-diag) -> host-seitiges Ausroll-/Ruecknahme-Werkzeug deploy_ap.sh (Dry-Run Default, AP_ROOT-Praefix, hostapd/dnsmasq unmask+enable, NM unmanaged, AP-Adresse, NAT idempotent), revert_ap.sh (idempotent, Dienste wieder MASKED), odroid_ap_deadman.sh + Timer (Auto-Revert ohne --confirm), test_ap_deploy.py (48 Checks). Host-Suite gruen. KEIN Board/Kanal. P2 wartet auf Nutzer-Entscheid.",
       "checked_at": "2026-10-20T02:20:37Z"
     },
+    "fb4acc4e11f94fcd94bbfc000a927301": {
+      "name": "Odroid+HA (Uebernahme 7a894c13)",
+      "open_tasks": 4,
+      "branch": "feat/dfs-clock-visibility",
+      "note": "Neuer Parent fuer den geloeschten HA-WP-Chat (7a894c13). Offen: T1 AP+STA-Konkurrenzmodus (rtw88 kein VIF), T2 USB2-Bandbreiten-Deckel dokumentieren, T3 Reboot-Festigkeit AP, T4 Kamera ueber LAN + HA. Board-Kanal steht (Server up, registriert), Odroid-Agent verbindet sich aktuell nicht.",
+      "checked_at": "2026-10-20T03:05:00Z"
+    },
     "732f5e0624b948499d0183f5633d86b5": {
       "name": "ODROID Watchdog-Aktor",
       "open_tasks": 0,
