@@ -60,6 +60,10 @@ jobs:
           python3 test/test_ws_client.py
           python3 test/check_dashboard_js.py
 
+      - name: Run remote-shell read-only policy tests
+        shell: bash
+        run: python3 remote-shell/test_ro_policy.py
+
   build:
     name: Build ${{ matrix.role }}
     runs-on: ubuntu-24.04

@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """Sandbox-Server: interaktives Terminal UND Kommando-Kanal.
 
-Zwei Rollen auf EINEM Port (der Runtime-Proxy leitet alles an den Port weiter):
+Drei Rollen auf EINEM Port (der Runtime-Proxy leitet alles an den Port weiter):
   - Pfad "/"            -> interaktives PTY-Terminal (WS -> Shell in der Sandbox)
   - Pfad "/agent"       -> Kommando-Kanal: die Sandbox schickt Befehle, ein Agent
                            auf dem Odroid zeigt sie an und fuehrt sie nach
                            lokaler Bestaetigung aus (Antwort kommt zurueck).
+  - Pfad "/ro"          -> READ-ONLY HTTP-GET: ein Aufrufer OHNE Werkzeuge
+                           (z.B. ein einfacher Chat/Browser) holt sich die Ausgabe
+                           eines erlaubten Lese-Befehls als Klartext:
+                             GET /ro?token=<TOKEN>&c=uptime
+                           Nur Befehle aus remote-shell/ro_policy.py werden
+                           durchgelassen; alles andere wird abgelehnt.
 
 Sicherheit:
-  - Beide Pfade nur mit gueltigem Token (hmac.compare_digest).
+  - Alle Pfade nur mit gueltigem Token (hmac.compare_digest).
   - Token aus $SANDBOX_TERM_TOKEN (Datei $SANDBOX_TERM_TOKEN_FILE als Fallback).
   - Ohne Token startet der Server nicht.
+  - /ro ist zusaetzlich auf reine Lese-Befehle beschraenkt (ro_policy.check).
 
 Kommando-Kanal, Dateien unter $CMD_BASE (Default /tmp/cmdchannel):
   - queue/<id>.cmd     -> hier legt die Sandbox Befehle ab (siehe cmd_send.sh)
@@ -38,6 +45,10 @@ import time
 import urllib.parse
 
 import websockets
+from websockets.datastructures import Headers
+from websockets.http11 import Response
+
+import ro_policy
 
 PORT = int(os.environ.get("SANDBOX_TERM_PORT", "12001"))
 SHELL = os.environ.get("SANDBOX_TERM_SHELL", "/bin/bash")
@@ -146,8 +157,11 @@ async def handle_agent(ws, path):
         PENDING.clear()
 
 
-async def run_remote_command(cmd, timeout=None):
-    """Befehl an einen Agenten senden und auf das Ergebnis warten."""
+async def run_remote_command(cmd, timeout=None, ro=False):
+    """Befehl an einen Agenten senden und auf das Ergebnis warten.
+
+    ``ro=True`` markiert den Befehl als read-only: der Agent auf dem Odroid
+    fuehrt ihn dann OHNE Rueckfrage aus (er prueft die Policy erneut)."""
     if timeout is None:
         timeout = float(os.environ.get("SANDBOX_TERM_CMD_TIMEOUT", "300"))
     if not AGENTS:
@@ -155,7 +169,7 @@ async def run_remote_command(cmd, timeout=None):
     cid = next_id()
     fut = asyncio.get_running_loop().create_future()
     PENDING[cid] = fut
-    payload = json.dumps({"type": "cmd", "id": cid, "cmd": cmd})
+    payload = json.dumps({"type": "cmd", "id": cid, "cmd": cmd, "ro": bool(ro)})
     for ws in list(AGENTS):
         try:
             await ws.send(payload)
@@ -244,6 +258,73 @@ async def router(ws, path=None):
         await handle_root(ws)
 
 
+def _http(status, reason, body, ctype="text/plain; charset=utf-8"):
+    headers = Headers()
+    headers["Content-Type"] = ctype
+    headers["Cache-Control"] = "no-store"
+    return Response(status, reason, headers, body if isinstance(body, bytes) else body.encode())
+
+
+async def _ro_handler(path):
+    """READ-ONLY HTTP-Endpunkt /ro - fuer Aufrufer OHNE Werkzeuge.
+
+    Kein WebSocket, nur ein GET, das Klartext zurueckgibt. Nur Befehle, die
+    ro_policy.check() durchlaesst, werden ueberhaupt an das Board geschickt;
+    der Agent auf dem Odroid prueft die Policy ein zweites Mal.
+
+    Rueckgabe: ein websockets ``Response``-Objekt, damit die WS-Verhandlung
+    sofort beendet und ein reiner HTTP-Text geliefert wird.
+    """
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+    token = load_token()
+    given = (q.get("token") or [""])[0]
+    if not token or not hmac.compare_digest(given, token):
+        audit("RO VERWORFEN (Token)")
+        return _http(403, "Forbidden", "403 verboten: Token fehlt oder falsch\n")
+
+    cmd = (q.get("c") or [""])[0]
+    if not cmd:
+        return _http(200, "OK", ro_policy.help_text())
+
+    ok, why = ro_policy.check(cmd)
+    if not ok:
+        audit(f"RO ABGELEHNT {cmd!r}: {why}")
+        return _http(403, "Forbidden", f"403 abgelehnt: {why}\nBefehl: {cmd}\n")
+
+    if not AGENTS:
+        audit(f"RO kein Agent fuer {cmd!r}")
+        return _http(503, "Service Unavailable",
+                     "503 kein Agent verbunden (Odroid-Kanal nicht aktiv)\n")
+
+    # Blockiert den (kurzen) HTTP-Request, bis das Board antwortet. Timeout
+    # bewusst klein: der Aufrufer ist ein Chat/Browser, kein Batch-Job.
+    timeout = float(os.environ.get("SANDBOX_TERM_RO_TIMEOUT", "30"))
+    try:
+        res = await run_remote_command(cmd, timeout=timeout, ro=True)
+    except Exception as exc:  # noqa: BLE001 - nie den HTTP-Hook crashen lassen
+        audit(f"RO FEHLER {cmd!r}: {exc}")
+        return _http(500, "Internal Server Error", f"500 interner Fehler: {exc}\n")
+
+    if res.get("error"):
+        return _http(504, "Gateway Timeout", f"504 {res['error']}\n")
+    out = res.get("out", "")
+    code = res.get("code")
+    audit(f"RO {cmd!r} code={code} bytes={len(out)}")
+    return _http(200, "OK", out if out.endswith("\n") or not out else out + "\n")
+
+
+async def process_request(connection, request):
+    """HTTP-Hook VOR dem WS-Handshake: bedient /ro als reines HTTP-GET.
+
+    Alles andere (WS-Handshake fuer / und /agent) laeuft normal weiter, indem
+    None zurueckgegeben wird."""
+    path = request.path or ""
+    ppath = urllib.parse.urlparse(path).path.rstrip("/") or "/"
+    if ppath == "/ro":
+        return await _ro_handler(path)
+    return None
+
+
 async def queue_worker():
     """Befehle aus queue/*.cmd ausfuehren (Datei-Kanal, siehe cmd_send.sh)."""
     while True:
@@ -274,9 +355,10 @@ async def main():
     token = load_token()
     if not token:
         raise SystemExit("SANDBOX_TERM_TOKEN nicht gesetzt - Start abgebrochen.")
-    async with websockets.serve(router, "0.0.0.0", PORT, max_size=None):
+    async with websockets.serve(router, "0.0.0.0", PORT, max_size=None,
+                                process_request=process_request):
         print(f"remote-shell lauscht auf 0.0.0.0:{PORT} (Token gesetzt: {len(token)} Zeichen)")
-        print(f"Pfade: / (Terminal)  /agent (Kommando-Kanal)  CMD_BASE={CMD_BASE}")
+        print(f"Pfade: / (Terminal)  /agent (Kommando-Kanal)  /ro (read-only GET)  CMD_BASE={CMD_BASE}")
         asyncio.create_task(queue_worker())
         await asyncio.Future()
 

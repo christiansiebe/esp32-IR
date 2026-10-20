@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Odroid-Agent: empfaengt Befehle aus einer oder MEHREREN Sandboxes und fuehrt
-sie NUR nach lokaler Bestaetigung aus.
+sie NUR nach lokaler Bestaetigung aus - AUSSER der Befehl ist als read-only
+markiert ("ro": true) UND besteht die Policy in ro_policy.py; dann laeuft er
+ohne Rueckfrage (der /ro-Kanal ist so fuer Aufrufer ohne Werkzeuge nutzbar).
 
 Start (als root auf dem Odroid, in einem eigenen Terminal):
     export SANDBOX_TERM_TOKEN='<token>'
@@ -33,6 +35,8 @@ import sys
 import urllib.parse
 
 import websockets
+
+import ro_policy
 
 AUTO = {"always": os.environ.get("CMD_AGENT_AUTO") == "1", "paused": False}
 
@@ -143,8 +147,20 @@ async def session(conn, token):
             if msg.get("type") != "cmd":
                 continue
             cid, cmd = msg.get("id"), msg.get("cmd", "")
+            ro = bool(msg.get("ro"))
             conn.cid = cid
-            if await ask(cmd):
+            if ro:
+                # Read-only-Kanal: Policy ein ZWEITES Mal pruefen (Defence in
+                # depth - der Server prueft schon, aber der Board-Agent darf
+                # sich nie allein auf die Gegenseite verlassen).
+                ok, why = ro_policy.check(cmd)
+                if ok:
+                    print(f"\n[RO] {cmd}  -> automatisch (read-only)")
+                    res = await run_cmd(cmd, conn)
+                else:
+                    print(f"\n[RO ABGELEHNT] {cmd}  -> {why}")
+                    res = {"code": -1, "out": f"RO ABGELEHNT: {why}"}
+            elif await ask(cmd):
                 res = await run_cmd(cmd, conn)
             else:
                 print("-> ABGELEHNT")
