@@ -337,7 +337,18 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
 - [x] **MQTT-Availability (LWT)**: `main/mqtt_bridge.c` setzt ein LWT auf
       `<prefix>/status` (retained, offline) und veroeffentlicht beim Connect `online`;
       der Discovery-Hub verweist per `availability_topic` darauf.
-- [ ] **MQTT-Service-Events (Reboot-Grund)** — ergänzt Crash-Journal (noch offen).
+- [x] **MQTT-Service-Events (Reboot-Grund)** — ergänzt Crash-Journal.
+      **Erledigt auf `main`** (Branch `feat/mqtt-reboot-event-main`, portiert aus
+      PR #9 / `feat/link-fallback`, der nie nach `main` kam): bei jedem MQTT-
+      Connect wird ein **retained** Event auf `<base>/event/reboot` publiziert mit
+      `esp_reset_reason()` (Kurzname aus `crash_journal_reset_reason_name()`, damit
+      Boot-Log und MQTT nie auseinanderlaufen), Firmware-Version (`fw_version()`,
+      JSON-escaped) und `deliberate`; ist ein Crash-Journal vorhanden, wird eine
+      Kurzfassung der Vorsession angehängt (`reset_reason`, `boot_count`,
+      `clean_shutdown`, `uptime_ms`). Reiner, host-getesteter Payload-Builder
+      `main/mqtt_events.{c,h}` (receiver-only), Host-Test `test/test_mqtt_events.c`
+      (33 Checks: Reason-Mapping, Minimal-Payload, `deliberate`, Journal-Kurzfassung,
+      Versions-Escaping, Overflow) + Topic-Test erweitert. Sender-Build unverändert.
 - [ ] Optional: konfigurierbares Reboot-Intervall (nächtlich), Deckelung wie AMS.
 
 ### SPIFFS-Historie auch im Sender (gleiche Speicherung wie Empfänger)

@@ -603,3 +603,11 @@ CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender), PR `CLEAN`/`MERGE
 4. `main.c`: Boot-Laedt, idempotentes Nachfalten ab folded_through_utc (deckt frisches NVS und Minuten seit dem letzten Save ab), Persist-Worker alle 300 s. Anzeige in /api/power-history (energy_day_wh/energy_month_wh, beide Header-Pfade), Dashboard (history-day-info) und Konsole history.
 
 **Tests:** neu `test/test_energy_totals.c` (99 Checks, ASan+UBSan gruen): Kalender-/Monatswechsel, Wh-Identitaet (60 min x 1 W = 1 Wh), Marker-Ausschluss, Ring-Eviction, Blob-Roundtrip/Checksum, echtes NVS inkl. Reboot per fork und korruptem NVS. `run_host_tests.sh` gruen (alle bestehenden Suites unveraendert), `check_dashboard_js.py` gruen. Kein idf.py lokal; Build-Nachweis ueber CI. `storage`-Partition unangetastet, kein erase-flash, kein Datenverlust.
+
+## 2026-10-19 23:55 UTC · Firmware-Sub-Agent (Branch feat/mqtt-reboot-event-main)
+
+**Punkt:** TODO „MQTT-Service-Events (Reboot-Grund)" (L340) — host-verifizierbar. Befund nach `git fetch` + `gh pr list --state all` + `git branch -a`: PR #9 (`feat/mqtt-reboot-event`) wurde 2026-10-18 nur nach **`feat/link-fallback`** gemerged (e48c1cc), und `feat/link-fallback` wurde **nie nach `main`** gemerged. Damit fehlten `mqtt_events.{c,h}`, `event/reboot`-Topic und der Host-Test auf `main` vollstaendig.
+
+**Umsetzung:** Cherry-pick des PR-#9-Commits (`51c1094`) auf frisches `main`; Konflikte nur in `main/CMakeLists.txt` (mqtt_publish+health_* erhalten) und `test/run_host_tests.sh` (beide Testbloecke behalten) — beide Seiten zusammengefuehrt, `mqtt_bridge.c`-Include zusammengefuehrt. Kein Datenverlust.
+
+**Tests:** `test/test_mqtt_events.c` (33 Checks, 0 Failures) + `test_mqtt_topics.c` um `event/reboot` erweitert; `run_host_tests.sh` gruen (alle bestehenden Suites inkl. energy_totals unveraendert). Kein `idf.py` lokal; Build-Nachweis ueber CI. Receiver-only, Sender-Build unveraendert, `storage` unangetastet.
