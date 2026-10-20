@@ -16,8 +16,10 @@ TOKEN_FILE="$DEST/token"
 
 export MEM_OWNER="${MEM_OWNER:-christiansiebe}"
 export MEM_REPO="${MEM_REPO:-esp32-IR}"
-export MEM_BRANCH="${MEM_BRANCH:-main}"
-export SANDBOX_TERM_REGISTRY="${SANDBOX_TERM_REGISTRY:-https://raw.githubusercontent.com/$MEM_OWNER/$MEM_REPO/$MEM_BRANCH/remote-shell/memory/sandboxes.json}"
+# Der Odroid liest `channel-registry`, `main` ist das Archiv. In BEIDE schreiben,
+# sonst findet der Odroid neue Sandboxes nicht (Kanal-Ausfall 2026-10-20).
+export MEM_BRANCHES="${MEM_BRANCHES:-channel-registry,main}"
+export SANDBOX_TERM_REGISTRY="${SANDBOX_TERM_REGISTRY:-https://raw.githubusercontent.com/$MEM_OWNER/$MEM_REPO/${MEM_BRANCHES%%,*}/remote-shell/memory/sandboxes.json}"
 
 echo "bootstrap: $SRC -> $DEST"
 mkdir -p "$DEST"
