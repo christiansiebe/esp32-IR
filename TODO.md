@@ -1,5 +1,23 @@
 # To-do – esp32-IR
 
+## OFFEN (2026-10-20): WLAN-Link-Watchdog – Push + CI + Flash ausstehend
+**Nutzer:** „die ESPs gehen still offline, Zeitraum nicht festnagelbar" + Wunsch
+nach Watchdog. **Ursache (belegt):** Kein Wächter beobachtete die
+**WLAN-Verbindung** des Empfängers — `web_guard` probt nur den Loopback (der
+antwortet auch ohne WLAN), `health_task` sieht nur SML-Stille + Heap,
+`link_fallback` nur den ESP-NOW-Peer; der `STA_DISCONNECTED`-Handler machte genau
+**einen** `esp_wifi_connect()` und nie einen Retry. Letzter Reset: Task-Watchdog.
+- [x] Reines, host-getestetes Modul `main/net_watchdog.{c,h}` (229 Checks) +
+      Kleber in `main.c` (`g_sta_got_ip`: gesund nur wenn assoziiert **und** IP).
+      Stufen: Reconnect (120 s) → Reboot via `boot_confirm_fail()` (120 s+300 s),
+      Grace 120 s; Flapping rebootet nicht. `Kconfig`/`CMakeLists`/`status`.
+- [x] Host-Suite grün (`./test/run_host_tests.sh`, exit 0).
+- [ ] **Push** `fix/net-watchdog` (Commit `f166d7b`) — in der Sandbox fehlt ein
+      GitHub-Write-Token (`GITHUB_TOKEN`/`GITHUB_WRITE_TOKEN` leer).
+- [ ] CI-Build (`receiver`/`receiver-apoff`/`sender`) abwarten.
+- [ ] OTA-Flash beider ESPs vom Odroid aus; danach beobachten, ob ein
+      Reconnect/Reboot-Log auftritt, wenn der Router kurz weg ist.
+
 ## NEU (2026-10-17): Laufzeit-Knöpfe überleben Reboot + OTA (NVS)
 **Bisher waren `set cpu|freq|cpu-min|sleep|retries` RAM-only** — ein Reboot warf
 sie auf die Compile-Time-Defaults zurück, also musste man zum dauerhaften Ändern

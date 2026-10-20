@@ -621,3 +621,22 @@ CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender), PR `CLEAN`/`MERGE
 **Umsetzung (minimal, PR #55, base main):** read-only Diagnose fuer den Odroid: `print_health.py` (reiner Signal->Ursache-Klassifizierer), `diagnose_print.sh` (VERDICT/CAUSE/FIX), `BLANK-PAGES.md`, Host-Test `test_print_health.py` (24 Checks) in `run_host_tests.sh` eingehaengt.
 
 **Tests:** `./test/run_host_tests.sh` gruen; CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender + Hygiene). Nur `remote-shell/**` + `test/run_host_tests.sh` beruehrt; kein Firmware-Verhalten, kein Flash-Layout, kein Datenverlust.
+
+## 2026-10-20 23:10 UTC · Firmware-Sub-Agent (Branch fix/net-watchdog)
+
+**Punkt:** Nutzer-Meldung "die ESPs gehen still offline, ich kann den Zeitraum nicht festnageln" + Wunsch nach einem Watchdog. Vorhandene Diagnose/Test-Funktionen nicht duplizieren.
+
+**Ursache (belegt):** Kein Waechter beobachtet die **WLAN-Verbindung** des Empfaengers.
+- `web_guard` probt nur `127.0.0.1/healthz` (Loopback antwortet auch ohne WLAN).
+- `health_task` sieht nur SML-Stille + Heap.
+- `link_fallback` deckt nur den ESP-NOW-Peer (Sender-Seite) ab.
+- Der `WIFI_EVENT_STA_DISCONNECTED`-Handler machte **genau einen** `esp_wifi_connect()` und nie einen Retry; kein IP-/Connectivity-Monitor. Der letzte Reset des Empfaengers war ein Task-Watchdog.
+
+**Umsetzung (minimal):** Neues, reines und host-getestetes Modul `main/net_watchdog.{c,h}` + Kleber in `main.c`:
+- Link gesund nur wenn **assoziiert UND IP vorhanden** (neues Flag `g_sta_got_ip`, gesetzt bei `IP_EVENT_STA_GOT_IP`, geloescht bei `IP_EVENT_STA_LOST_IP` und Disconnect).
+- Stufen: `RECONNECT` (`esp_wifi_connect()`) nach `DOWN_MS` (Default 120 s), `REBOOT` ueber `boot_confirm_fail()` (Rollback bei unbest. Image, sonst Reboot) nach `DOWN_MS+REBOOT_MS` (Default +300 s), Grace `GRACE_MS` (120 s). Eine gesunde Meldung setzt alle Stufen zurueck (Flapping rebootet nicht).
+- Empfaenger-only, und nur wenn ein Heim-WLAN konfiguriert ist (AP-only bleibt unberuehrt). `Kconfig.projbuild` + `CMakeLists.txt` ergaenzt, `status`-Konsole um eine Zeile "network watchdog" erweitert.
+
+**Tests:** `test/test_net_watchdog.c` (229 Checks, 0 Failures) in `run_host_tests.sh` eingehaengt; gesamte Host-Suite gruen. Kein `idf.py` lokal -> Build-Nachweis ueber CI. Sender-Build unveraendert, `storage` unangetastet, kein Datenverlust.
+
+**OFFEN:** Commit liegt lokal auf `fix/net-watchdog` (f166d7b), **nicht gepusht** - in dieser Sandbox ist kein GitHub-Write-Token vorhanden (`GITHUB_TOKEN`/`GITHUB_WRITE_TOKEN` leer, kein Credential-Helper). Push + CI-Build + OTA-Flash stehen noch aus.
