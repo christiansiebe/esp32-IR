@@ -22,20 +22,30 @@ This is a standing rule for **every** esp32-IR chat agent, not a suggestion.
 - **Work through sub-agents.** Break work into sub-conversations (each with
   `parent_conversation_id` set). The parent coordinates and reviews; the
   sub-agents do the long work.
-- **A conversation must not sleep while it has open work.** An idle sandbox is
-  paused by the platform, and a paused agent cannot wake itself - nothing is
-  running in it. So the agents watch each other.
+- **Keep your turn alive while you have open work - this is the primary
+  anti-sleep mechanism.** The platform pauses a sandbox after ~20 min with no
+  running turn (`OH_RUNTIME_IDLE_TIMEOUT_SECONDS`, default 1200). A paused
+  sandbox runs nothing, so a paused agent cannot resume itself. So while your
+  `TASKS.json` has any `open` entry, do NOT end the turn to idle: chain the next
+  step in the same turn, one task after another. End the turn only when every
+  entry is `done`. Everything below is only the safety net for an agent that is
+  genuinely wedged or already paused.
 - **Every agent keeps a `TASKS.json`** in its workspace with one entry per task
   and `"status": "open" | "done"`. Open entries are the signal that the agent
   must stay awake. A conversation may only be considered finished when it has no
   open entries.
 - **The parent keeps `/workspace/fleet/agents.json`** current: for each worker
-  it stores `open_tasks` (0 = may sleep) and a short note. This is the registry
-  the supervisor trusts.
-- **The fleet supervisor** (`automations/fleet-supervisor`, a cron automation
-  every 5 min, **no LLM, no token cost**) is the guarantee. It runs on the
-  platform scheduler, *outside* every conversation sandbox, so it survives a
-  sandbox pause. It reads `fleet/agents.json`, and each cycle:
+  it stores `open_tasks` (0 = may sleep), a short note, and `checked_at` (UTC,
+  the time the entry was last confirmed). A stale `open_tasks > 0` is the most
+  expensive bug in the fleet: the supervisor keeps resuming and waking a worker
+  that is long done, burning an LLM turn every cycle. So the supervisor treats an
+  entry whose `checked_at` is older than `FLEET_MAX_AGE_HOURS` (72) as
+  `open_tasks: 0`, and the parent must refresh the entry whenever a worker
+  finishes.
+- **The fleet supervisor** (`automations/fleet-supervisor`, a cron automation,
+  **no LLM, no token cost per se**) is the safety net. It runs on the platform
+  scheduler, *outside* every conversation sandbox, so it survives a sandbox
+  pause. It reads `fleet/agents.json`, and each cycle:
   - `open_tasks > 0` and sandbox `PAUSED` -> resume + wake message;
   - `open_tasks > 0`, running but no activity for more than
     `FLEET_STUCK_MINUTES` (20) -> interrupt the wedged turn + wake message;
@@ -44,6 +54,14 @@ This is a standing rule for **every** esp32-IR chat agent, not a suggestion.
   in-sandbox loop such as `fleet/fleet.py` cannot be the guarantee: if its own
   sandbox pauses, nothing wakes anyone. It is kept only as a fast local
   fallback.)
+- **Cost rule for the schedule.** A cron run *itself* costs almost nothing (no
+  LLM), but every wake it sends starts an LLM turn, and every run pays a sandbox
+  start. So: run the supervisor no more often than the fleet can actually
+  change - `*/15` is enough for the safety net (a wake delayed by minutes is
+  irrelevant for a paused agent). Never tighten it below `*/10`. Before any
+  change to a cron cadence, multiply runs/day x expected LLM turns per run and
+  keep the total small; a stuck `open_tasks > 0` entry multiplied by a `*/5`
+  schedule is what burns credit.
 - **A wedged chat can also be restarted by hand**:
   `python3 /workspace/fleet/restart.py <conversation_id>` interrupts the stuck
   turn on the conversation's own runtime host, then resumes and wakes it. (The

@@ -325,6 +325,23 @@ def wake_worker(token, cid, conv):
     send_wake(token, cid)
 
 
+def effective_open_tasks(entry):
+    """open_tasks, but 0 once the entry is stale.
+
+    A stale `open_tasks > 0` is the most expensive bug in the fleet: the
+    supervisor would resume and wake a worker that finished long ago, burning an
+    LLM turn every cycle. The parent stamps `checked_at` when it confirms the
+    entry, so an entry older than FLEET_MAX_AGE_HOURS is treated as done.
+    An entry without `checked_at` is trusted (older registry format)."""
+    n = (entry or {}).get("open_tasks", 0)
+    if n <= 0:
+        return 0
+    age = hours_since((entry or {}).get("checked_at"))
+    if age is not None and age > MAX_AGE_HOURS:
+        return 0
+    return n
+
+
 def decide(conv, entry, rec_state, sandbox_shared_live):
     """Pure decision for one conversation. Returns one of:
       "pause"  - no open work, sandbox running, not shared with live work
@@ -336,7 +353,7 @@ def decide(conv, entry, rec_state, sandbox_shared_live):
 
     No I/O, so the table can be host-tested without the Cloud API.
     """
-    open_n = (entry or {}).get("open_tasks", 0)
+    open_n = effective_open_tasks(entry)
     status = conv.get("sandbox_status")
     exec_status = conv.get("execution_status")
     cid = conv.get("id")
@@ -454,19 +471,21 @@ def main():
 
     def sandbox_busy(sandbox_id):
         """True if any conversation in this sandbox still has open work or must
-        not be paused. Pausing a shared sandbox would freeze those too."""
+        not be paused. Pausing a shared sandbox would freeze those too. A stale
+        entry counts as no open work, else one forgotten worker would keep its
+        whole sandbox (and its parent) awake forever."""
         for other in sandbox_users.get(sandbox_id, []):
             if other in NEVER_PAUSE:
                 return True
             _, oentry, _ = convs.get(other, (None, {}, {}))
-            if (oentry or {}).get("open_tasks", 0) > 0:
+            if effective_open_tasks(oentry) > 0:
                 return True
         return False
 
     # Pass 2: act on the pure decision.
     for cid, (name, entry, conv) in convs.items():
         try:
-            open_n = (entry or {}).get("open_tasks", 0)
+            open_n = effective_open_tasks(entry)
             status = conv.get("sandbox_status")
             exec_status = conv.get("execution_status")
             sandbox_id = conv.get("sandbox_id")

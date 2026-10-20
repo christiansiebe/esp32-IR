@@ -97,6 +97,22 @@ check("too many wakes, cooldown elapsed -> wake",
 check("too many wakes, no last_wake recorded -> wake",
       sup.decide(conv(PARENT, "RUNNING", "error"), E1, {"wakes": sup.MAX_WAKES}, False), "wake")
 
+# 6. stale open entry -> treated as done (no wake, sandbox may be paused).
+# A forgotten open_tasks>0 entry otherwise burns an LLM turn every cycle.
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+_old = (_dt.now(_tz.utc) - _td(hours=sup.MAX_AGE_HOURS + 1)).isoformat()
+_fresh = (_dt.now(_tz.utc) - _td(hours=1)).isoformat()
+E_STALE = {"open_tasks": 1, "checked_at": _old}
+E_FRESH = {"open_tasks": 1, "checked_at": _fresh}
+check("stale open entry -> not woken (sandbox pausable)",
+      sup.decide(conv(WORKER, "RUNNING", "finished"), E_STALE, {}, False), "pause")
+check("stale open entry, paused sandbox -> skip",
+      sup.decide(conv(PARENT, "PAUSED", None), E_STALE, {}, False), "skip")
+check("fresh open entry -> still woken",
+      sup.decide(conv(PARENT, "PAUSED", None), E_FRESH, {}, False), "wake")
+check("entry without checked_at stays trusted",
+      sup.decide(conv(PARENT, "PAUSED", None), E1, {}, False), "wake")
+
 print()
 if fails:
     print(f"FAILED: {len(fails)} check(s): {fails}")
