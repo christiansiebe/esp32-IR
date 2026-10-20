@@ -211,11 +211,13 @@
   },
   "bf7188fec2ec40feaac056c5fff9b280": {
    "name": "HA-Dashboard Buderus-Angleichung (Sub von fb4acc4e)",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "branch": "feat/ha-dashboard-buderus",
-   "pr": [],
-   "note": "Sub-Agent (parent fb4acc4e): wp-native (PR #53) + waermepumpe-dashboard an Bosch-Buderus simple-dashboard.yaml angleichen. Liefert Repo-Artefakte + PR gegen cline/power-history-diag; Board-Deploy macht der Parent. Gestartet 2026-10-20 06:42 UTC.",
-   "checked_at": "2026-10-20T06:42:00Z"
+   "pr": [
+    56
+   ],
+   "note": "FERTIG (2026-10-20): wp-native auf Buderus-Vorlagen-Struktur umgebaut + waermepumpe-dashboard additiv angeglichen (Mode-Badge + Energiebilanz-Stacks) + WP-NATIVE-DASHBOARD.md/WP-DASHBOARD-ANGLEICHUNG.md + struktureller JSON-Host-Test (141/0). PR #56 gegen cline/power-history-diag (MERGEABLE/CLEAN). Basis ab feat/ha-native-dashboard (dfs hat die wp-native-Dateien nicht) - im PR/CHAT-THREAD dokumentiert. Kein Board/Kanal; Deploy macht Parent fb4acc4e.",
+   "checked_at": "2026-10-20T10:55:00Z"
   }
  }
 }
