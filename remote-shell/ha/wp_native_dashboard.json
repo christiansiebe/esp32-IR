@@ -1,116 +1,406 @@
 {
  "views": [
   {
-   "title": "Wärmepumpe",
+   "title": "Überblick",
    "path": "wp-native",
    "icon": "mdi:heat-pump",
    "type": "sections",
-   "max_columns": 3,
+   "max_columns": 4,
+   "cards": [],
+   "badges": [
+    {
+     "type": "entity",
+     "show_name": true,
+     "show_state": true,
+     "show_icon": true,
+     "entity": "binary_sensor.wp_laeuft",
+     "color": "",
+     "icon": "mdi:heat-pump-outline",
+     "show_entity_picture": false,
+     "name": "Modus"
+    }
+   ],
    "sections": [
     {
      "type": "grid",
+     "column_span": 4,
      "cards": [
       {
        "type": "heading",
-       "heading": "Temperaturen",
+       "heading": "Aktuelle Werte",
        "heading_style": "title",
+       "icon": "mdi:heat-pump"
+      },
+      {
+       "graph": "line",
+       "type": "sensor",
+       "entity": "sensor.mx_400_outdoor_temperature",
+       "detail": 1,
+       "name": "Außentemperatur",
+       "icon": "mdi:home-thermometer-outline"
+      },
+      {
+       "graph": "line",
+       "type": "sensor",
+       "entity": "sensor.mx_400_supply_temperature",
+       "detail": 1,
+       "name": "Vorlauftemperatur",
+       "icon": "mdi:thermometer-lines"
+      },
+      {
+       "graph": "line",
+       "type": "sensor",
+       "entity": "sensor.warmwasser_actual_temperature",
+       "detail": 1,
+       "name": "Warmwassertemperatur",
+       "icon": "mdi:water-thermometer"
+      },
+      {
+       "graph": "line",
+       "type": "sensor",
+       "entity": "sensor.mx_400_return_temperature",
+       "detail": 1,
+       "name": "Rücklauftemperatur",
        "icon": "mdi:thermometer"
       },
       {
-       "type": "gauge",
-       "entity": "sensor.mx_400_outdoor_temperature",
-       "name": "Außen",
-       "min": -20,
-       "max": 40,
-       "needle": true
-      },
-      {
-       "type": "gauge",
-       "entity": "sensor.mx_400_supply_temperature",
-       "name": "Vorlauf",
-       "min": 0,
-       "max": 80,
-       "needle": true
-      },
-      {
-       "type": "gauge",
-       "entity": "sensor.mx_400_return_temperature",
-       "name": "Rücklauf",
-       "min": 0,
-       "max": 80,
-       "needle": true
-      },
-      {
-       "type": "gauge",
-       "entity": "sensor.warmwasser_actual_temperature",
-       "name": "Warmwasser",
-       "min": 0,
-       "max": 80,
-       "needle": true
-      },
-      {
-       "type": "gauge",
-       "entity": "sensor.mx_400_system_internal_room_temperature",
-       "name": "Raum",
-       "min": 5,
-       "max": 30,
-       "needle": true
-      },
-      {
-       "type": "gauge",
+       "graph": "line",
+       "type": "sensor",
        "entity": "sensor.mx_400_hybman_temperature_flow_heat_pump",
+       "detail": 1,
        "name": "WP-Vorlauf",
-       "min": 0,
-       "max": 80,
-       "needle": true
-      }
-     ]
-    },
-    {
-     "type": "grid",
-     "cards": [
+       "icon": "mdi:heat-pump-outline"
+      },
       {
-       "type": "heading",
-       "heading": "Leistung & Effizienz",
-       "heading_style": "title",
-       "icon": "mdi:flash"
+       "graph": "line",
+       "type": "sensor",
+       "entity": "sensor.mx_400_system_internal_room_temperature",
+       "detail": 1,
+       "name": "Raumtemperatur",
+       "icon": "mdi:home-thermometer"
+      },
+      {
+       "graph": "line",
+       "type": "sensor",
+       "entity": "sensor.wp_modulation",
+       "detail": 1,
+       "name": "Modulation",
+       "icon": "mdi:fan"
       },
       {
        "type": "gauge",
        "entity": "sensor.mx_400_compressor_electrical_power",
-       "name": "Elektr. Leistung",
+       "name": "Elektrische Leistungsaufnahme",
        "min": 0,
        "max": 3000,
-       "needle": true
+       "needle": true,
+       "unit": "W",
+       "grid_options": {
+        "columns": 6,
+        "rows": "auto"
+       }
       },
       {
        "type": "gauge",
        "entity": "sensor.wp_waermeleistung_1h",
-       "name": "Therm. Leistung (1 h)",
+       "name": "Thermische Leistungsabgabe",
        "min": 0,
        "max": 10,
-       "needle": true
+       "needle": true,
+       "unit": "kW",
+       "grid_options": {
+        "columns": 6,
+        "rows": "auto"
+       }
       },
       {
        "type": "gauge",
        "entity": "sensor.wp_cop_1h",
-       "name": "COP (1 h)",
+       "name": "Arbeitszahl (1 h)",
        "min": 1,
        "max": 6,
-       "needle": true
-      },
-      {
-       "type": "gauge",
-       "entity": "sensor.wp_modulation",
-       "name": "Modulation",
-       "min": 0,
-       "max": 100,
-       "needle": true
+       "needle": true,
+       "grid_options": {
+        "columns": 6,
+        "rows": "auto"
+       }
       }
      ]
     },
     {
      "type": "grid",
+     "column_span": 4,
+     "cards": [
+      {
+       "type": "heading",
+       "heading": "Heute",
+       "heading_style": "title",
+       "icon": "mdi:arrow-collapse-left"
+      },
+      {
+       "type": "history-graph",
+       "hours_to_show": 24,
+       "entities": [
+        {
+         "entity": "binary_sensor.wp_laeuft",
+         "name": " "
+        }
+       ],
+       "grid_options": {
+        "columns": "full",
+        "rows": "auto"
+       }
+      },
+      {
+       "type": "vertical-stack",
+       "cards": [
+        {
+         "type": "heading",
+         "heading": "Energiebilanz - Heizung - Heute",
+         "heading_style": "title",
+         "icon": "mdi:heat-wave"
+        },
+        {
+         "type": "horizontal-stack",
+         "cards": [
+          {
+           "type": "statistic",
+           "entity": "sensor.mx_400_system_heating_energy_electricity",
+           "name": "Energieverbrauch (Heizen)",
+           "period": {
+            "calendar": {
+             "period": "day"
+            }
+           },
+           "stat_type": "change",
+           "icon": "mdi:lightning-bolt"
+          }
+         ],
+         "grid_options": {
+          "columns": 18,
+          "rows": "auto"
+         }
+        }
+       ],
+       "grid_options": {
+        "columns": 18,
+        "rows": "auto"
+       }
+      },
+      {
+       "type": "vertical-stack",
+       "cards": [
+        {
+         "type": "heading",
+         "heading": "Energiebilanz - Warmwasser - Heute",
+         "heading_style": "title",
+         "icon": "mdi:water"
+        },
+        {
+         "type": "horizontal-stack",
+         "cards": [
+          {
+           "type": "statistic",
+           "entity": "sensor.mx_400_system_hot_water_energy_electricity",
+           "name": "Energieverbrauch (Warmwasser)",
+           "period": {
+            "calendar": {
+             "period": "day"
+            }
+           },
+           "stat_type": "change",
+           "icon": "mdi:water-boiler"
+          }
+         ],
+         "grid_options": {
+          "columns": 18,
+          "rows": "auto"
+         }
+        }
+       ],
+       "grid_options": {
+        "columns": 18,
+        "rows": "auto"
+       }
+      },
+      {
+       "type": "statistics-graph",
+       "chart_type": "bar",
+       "period": "hour",
+       "entities": [
+        {
+         "entity": "sensor.warmeerzeuger_2_total_energy_produced",
+         "name": "Wärme erzeugt"
+        },
+        {
+         "entity": "sensor.warmeerzeuger_2_total_energy_compressor",
+         "name": "Eingesetzte elektrische Energie"
+        }
+       ],
+       "days_to_show": 1,
+       "stat_types": [
+        "change"
+       ],
+       "grid_options": {
+        "columns": "full",
+        "rows": 8
+       }
+      }
+     ]
+    },
+    {
+     "type": "grid",
+     "column_span": 4,
+     "cards": [
+      {
+       "type": "heading",
+       "heading": "Gesamte Laufzeit",
+       "heading_style": "title",
+       "icon": "mdi:counter"
+      },
+      {
+       "type": "vertical-stack",
+       "cards": [
+        {
+         "type": "heading",
+         "heading": "Energiebilanz - Heizung",
+         "heading_style": "title",
+         "icon": "mdi:heat-wave"
+        },
+        {
+         "type": "horizontal-stack",
+         "cards": [
+          {
+           "type": "entity",
+           "entity": "sensor.mx_400_system_heating_energy_electricity",
+           "name": "Energieverbrauch (Heizen)",
+           "icon": "mdi:lightning-bolt"
+          }
+         ],
+         "grid_options": {
+          "columns": 18,
+          "rows": "auto"
+         }
+        }
+       ],
+       "grid_options": {
+        "columns": 18,
+        "rows": "auto"
+       }
+      },
+      {
+       "type": "vertical-stack",
+       "cards": [
+        {
+         "type": "heading",
+         "heading": "Energiebilanz - Warmwasser",
+         "heading_style": "title",
+         "icon": "mdi:water"
+        },
+        {
+         "type": "horizontal-stack",
+         "cards": [
+          {
+           "type": "entity",
+           "entity": "sensor.mx_400_system_hot_water_energy_electricity",
+           "name": "Energieverbrauch (Warmwasser)",
+           "icon": "mdi:water-boiler"
+          }
+         ],
+         "grid_options": {
+          "columns": 18,
+          "rows": "auto"
+         }
+        }
+       ],
+       "grid_options": {
+        "columns": 18,
+        "rows": "auto"
+       }
+      },
+      {
+       "type": "vertical-stack",
+       "cards": [
+        {
+         "type": "heading",
+         "heading": "Energiebilanz - Total",
+         "heading_style": "title",
+         "icon": "mdi:heat-pump-outline"
+        },
+        {
+         "type": "horizontal-stack",
+         "cards": [
+          {
+           "type": "entity",
+           "entity": "sensor.warmeerzeuger_2_total_energy_compressor",
+           "name": "Energieverbrauch",
+           "icon": "mdi:lightning-bolt"
+          },
+          {
+           "type": "entity",
+           "entity": "sensor.warmeerzeuger_2_total_energy_produced",
+           "name": "Energieabgabe",
+           "icon": "mdi:heat-pump-outline"
+          },
+          {
+           "type": "entity",
+           "entity": "sensor.wp_cop_gesamt",
+           "name": "Jahresarbeitszahl",
+           "icon": "mdi:chart-line"
+          }
+         ],
+         "grid_options": {
+          "columns": 18,
+          "rows": "auto"
+         }
+        }
+       ],
+       "grid_options": {
+        "columns": 18,
+        "rows": "auto"
+       }
+      },
+      {
+       "type": "vertical-stack",
+       "cards": [
+        {
+         "type": "heading",
+         "heading": "Laufzeit",
+         "heading_style": "title",
+         "icon": "mdi:timer-outline"
+        },
+        {
+         "type": "horizontal-stack",
+         "cards": [
+          {
+           "type": "entity",
+           "entity": "sensor.warmeerzeuger_2_working_time_total",
+           "name": "Laufzeit gesamt",
+           "icon": "mdi:timer-outline"
+          },
+          {
+           "type": "entity",
+           "entity": "sensor.warmeerzeuger_2_compressor_starts_total",
+           "name": "Kompressorstarts",
+           "icon": "mdi:counter"
+          }
+         ],
+         "grid_options": {
+          "columns": 18,
+          "rows": "auto"
+         }
+        }
+       ],
+       "grid_options": {
+        "columns": 18,
+        "rows": "auto"
+       }
+      }
+     ]
+    },
+    {
+     "type": "grid",
+     "column_span": 4,
      "cards": [
       {
        "type": "heading",
@@ -136,181 +426,7 @@
     },
     {
      "type": "grid",
-     "cards": [
-      {
-       "type": "heading",
-       "heading": "Energie heute",
-       "heading_style": "title",
-       "icon": "mdi:calendar-today"
-      },
-      {
-       "type": "statistic",
-       "entity": "sensor.warmeerzeuger_2_total_energy_compressor",
-       "name": "Strom Kompressor",
-       "stat_type": "change",
-       "period": {
-        "calendar": {
-         "period": "day"
-        }
-       },
-       "icon": "mdi:lightning-bolt"
-      },
-      {
-       "type": "statistic",
-       "entity": "sensor.warmeerzeuger_2_total_energy_produced",
-       "name": "Wärme erzeugt",
-       "stat_type": "change",
-       "period": {
-        "calendar": {
-         "period": "day"
-        }
-       },
-       "icon": "mdi:fire"
-      },
-      {
-       "type": "statistic",
-       "entity": "sensor.mx_400_system_heating_energy_electricity",
-       "name": "Heizen Strom",
-       "stat_type": "change",
-       "period": {
-        "calendar": {
-         "period": "day"
-        }
-       },
-       "icon": "mdi:radiator"
-      },
-      {
-       "type": "statistic",
-       "entity": "sensor.mx_400_system_hot_water_energy_electricity",
-       "name": "Warmwasser Strom",
-       "stat_type": "change",
-       "period": {
-        "calendar": {
-         "period": "day"
-        }
-       },
-       "icon": "mdi:water-boiler"
-      }
-     ]
-    },
-    {
-     "type": "grid",
-     "cards": [
-      {
-       "type": "heading",
-       "heading": "Energie kumuliert",
-       "heading_style": "title",
-       "icon": "mdi:counter"
-      },
-      {
-       "type": "entities",
-       "entities": [
-        {
-         "entity": "sensor.warmeerzeuger_2_total_energy_compressor",
-         "name": "Strom Kompressor gesamt"
-        },
-        {
-         "entity": "sensor.warmeerzeuger_2_total_energy_produced",
-         "name": "Wärme gesamt"
-        },
-        {
-         "entity": "sensor.wp_cop_gesamt",
-         "name": "COP gesamt"
-        },
-        {
-         "entity": "sensor.warmeerzeuger_2_compressor_starts_total",
-         "name": "Starts gesamt"
-        },
-        {
-         "entity": "sensor.warmeerzeuger_2_working_time_total",
-         "name": "Laufzeit gesamt (s)"
-        }
-       ]
-      }
-     ]
-    },
-    {
-     "type": "grid",
-     "cards": [
-      {
-       "type": "heading",
-       "heading": "Verläufe (24 h)",
-       "heading_style": "title",
-       "icon": "mdi:chart-line"
-      },
-      {
-       "type": "history-graph",
-       "hours_to_show": 24,
-       "entities": [
-        {
-         "entity": "sensor.mx_400_outdoor_temperature",
-         "name": "Außen"
-        },
-        {
-         "entity": "sensor.mx_400_supply_temperature",
-         "name": "Vorlauf"
-        },
-        {
-         "entity": "sensor.mx_400_return_temperature",
-         "name": "Rücklauf"
-        },
-        {
-         "entity": "sensor.warmwasser_actual_temperature",
-         "name": "Warmwasser"
-        },
-        {
-         "entity": "sensor.mx_400_system_internal_room_temperature",
-         "name": "Raum"
-        }
-       ]
-      },
-      {
-       "type": "history-graph",
-       "hours_to_show": 24,
-       "entities": [
-        {
-         "entity": "sensor.mx_400_compressor_electrical_power",
-         "name": "Elektr. Leistung (W)"
-        },
-        {
-         "entity": "sensor.wp_waermeleistung_1h",
-         "name": "Therm. Leistung (kW)"
-        }
-       ]
-      }
-     ]
-    },
-    {
-     "type": "grid",
-     "cards": [
-      {
-       "type": "heading",
-       "heading": "Energieverlauf",
-       "heading_style": "title",
-       "icon": "mdi:chart-bar"
-      },
-      {
-       "type": "statistics-graph",
-       "days_to_show": 9,
-       "chart_type": "bar",
-       "stat_types": [
-        "change"
-       ],
-       "entities": [
-        {
-         "entity": "sensor.warmeerzeuger_2_total_energy_compressor",
-         "name": "Strom (kWh)"
-        },
-        {
-         "entity": "sensor.warmeerzeuger_2_total_energy_produced",
-         "name": "Wärme (kWh)"
-        }
-       ]
-      }
-     ]
-    },
-    {
-     "type": "grid",
+     "column_span": 4,
      "cards": [
       {
        "type": "heading",
@@ -324,7 +440,12 @@
        "name": "Netzleistung",
        "min": 0,
        "max": 6000,
-       "needle": true
+       "needle": true,
+       "unit": "W",
+       "grid_options": {
+        "columns": 6,
+        "rows": "auto"
+       }
       },
       {
        "type": "entities",
@@ -344,32 +465,27 @@
        ]
       },
       {
-       "type": "history-graph",
-       "hours_to_show": 24,
-       "entities": [
-        {
-         "entity": "sensor.esp32_ir_stromzaehler_leistung",
-         "name": "Netzleistung (W)"
-        }
-       ]
-      },
-      {
        "type": "statistics-graph",
-       "days_to_show": 9,
        "chart_type": "bar",
-       "stat_types": [
-        "change"
-       ],
+       "period": "hour",
        "entities": [
         {
          "entity": "sensor.esp32_ir_stromzaehler_bezug",
-         "name": "Bezug (kWh)"
+         "name": "Bezug"
         },
         {
          "entity": "sensor.esp32_ir_stromzaehler_einspeisung",
-         "name": "Einspeisung (kWh)"
+         "name": "Einspeisung"
         }
-       ]
+       ],
+       "days_to_show": 9,
+       "stat_types": [
+        "change"
+       ],
+       "grid_options": {
+        "columns": "full",
+        "rows": 8
+       }
       }
      ]
     }
