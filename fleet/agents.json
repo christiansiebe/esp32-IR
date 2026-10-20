@@ -157,10 +157,13 @@
     },
     "65b95dbdf8ce4d7f962e4a42fe36755a": {
       "name": "SML-Parser Haertung",
-      "open_tasks": 1,
-      "branch": "fleet/sml-hardening",
-      "note": "TODO: CRC-Varianten + SML-Golden-Fixtures + Host-Test",
-      "checked_at": "2026-10-20T02:20:37Z"
+      "open_tasks": 0,
+      "branch": "feat/sml-crc-variants-golden-fixtures",
+      "pr": [
+        33
+      ],
+      "note": "FERTIG: PR #33 (offen, erneut auf aktuelles main rebased, CI 8/8 gruen, MERGEABLE). Befund: gegen den kompletten devZer0/libsml-testing-Korpus (232 Telegramme inkl. Holley DTZ541) sind ALLE CRC-16/X-25, keiner Kermit -> Parser-Einzelpruefung korrekt, kein blinder 2. Variant (waere Regression). Gebaut: sml_crc16.{c,h} (X-25 genutzt + Kermit als getesteter Baustein), echte .bin-Fixtures + korrupte Kopie, test_sml_crc16.c (17 Checks) + test_sml_golden_bin.cpp (30 Checks). Kein Datenverlust: Parser bleibt X-25. Keine offene Arbeit.",
+      "checked_at": "2026-10-20T02:45:27Z"
     },
     "52c2b110e5fd457e8ab4b938a4407351": {
       "name": "UX & Persistenz",
