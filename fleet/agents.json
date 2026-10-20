@@ -150,10 +150,13 @@
   },
   "2001aa2feb0a4efc90f339404a7e2b0e": {
    "name": "AMS MQTT-Bridge",
-   "open_tasks": 1,
-   "branch": "fleet/ams-mqtt",
-   "note": "TODO: mqtt_publish/mqtt_bridge salvage + HA-Discovery + Live-Push (TODO ~910)",
-   "checked_at": "2026-10-20T02:20:37Z"
+   "open_tasks": 0,
+   "branch": "fix/print-server-blank-pages",
+   "pr": [
+    32,
+    55
+   ],
+   "note": "FERTIG 2026-10-20: (1) PR #32 (HA-Energie-Entitaeten import/export + Bare-Number-Live-Power, Live-Minuten-Push, reines mqtt_publish.{c,h} + test_mqtt_bridge.c) auf main gemerged (9ac3f2b). (2) Nutzer-Frage 'Drucker spinnt / leere Seiten': PR #55 (base main) - read-only Diagnose fuer den Odroid: remote-shell/ha/brother-hl3040cn/{print_health.py,diagnose_print.sh,BLANK-PAGES.md} + test_print_health.py (24 Checks) in run_host_tests.sh. Befund: Odroid-Kanal nur via Schwester-Sandbox, fail-closed Allowlist sperrt docker/lpstat -> Container-Innensicht remote nicht moeglich; Ursachenkette GDI-Drucker -> i386-Filter unter qemu-i386 dokumentiert. CI gruen (receiver/receiver-apoff/sender/Host/Hygiene), PR mergeable. Keine offene Aufgabe -> darf schlafen."
   },
   "e6c5a6cb7a794da6a88ee7449a5555c9": {
    "name": "AMS Boot-Rollback",
