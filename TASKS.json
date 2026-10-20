@@ -1,12 +1,12 @@
 {
   "tasks": [
-    {"id": "setup", "title": "Setup: TASKS.json, write-token remote, branch", "status": "in_progress"},
-    {"id": "fetch-prs", "title": "Fetch PR details + diffs for #45,44,43,42,41,40,39,7,5,14,6", "status": "todo"},
-    {"id": "review-prs", "title": "Review each PR: mergeable, CI, content, safety, superseded", "status": "todo"},
-    {"id": "write-reco", "title": "Write remote-shell/ha/PR-MERGE-EMPFEHLUNG.md", "status": "todo"},
-    {"id": "rebase-14", "title": "Check #14 vs #45; rebase or recommend CLOSE", "status": "todo"},
-    {"id": "rebase-6", "title": "Rebase #6 onto cline/power-history-diag, resolve conflicts", "status": "todo"},
-    {"id": "host-tests", "title": "Keep ./test/run_host_tests.sh green", "status": "todo"},
-    {"id": "push-pr", "title": "Push branch + open PR(s) against cline/power-history-diag", "status": "todo"}
+    {"id": "setup", "title": "Setup: TASKS.json, write-token remote, branch", "status": "done"},
+    {"id": "fetch-prs", "title": "Fetch PR details + diffs for #45,44,43,42,41,40,39,7,5,14,6", "status": "done"},
+    {"id": "review-prs", "title": "Review each PR: mergeable, CI, content, safety, superseded", "status": "done"},
+    {"id": "write-reco", "title": "Write remote-shell/ha/PR-MERGE-EMPFEHLUNG.md", "status": "done"},
+    {"id": "rebase-14", "title": "Check #14 vs #45; rebase attempted (conflict in SHARED.md) -> CLOSE", "status": "done"},
+    {"id": "rebase-6", "title": "Rebase #6 onto cline/power-history-diag (conflict resolved, tests green)", "status": "done"},
+    {"id": "host-tests", "title": "Keep ./test/run_host_tests.sh green (base + rebase-6)", "status": "done"},
+    {"id": "push-pr", "title": "Push branch + open PR against cline/power-history-diag", "status": "in_progress"}
   ]
 }
