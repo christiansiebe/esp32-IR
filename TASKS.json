@@ -3,7 +3,7 @@
   "conversation_id": "fb4acc4e11f94fcd94bbfc000a927301",
   "role": "parent/coordinator (Odroid N2 + Home Assistant)",
   "supersedes": "7a894c13-6780-43e5-8935-dd1509217a75 (MISSING)",
-  "updated": "2026-10-20T06:10:00Z",
+  "updated": "2026-10-20T06:40:00Z",
   "tasks": [
     {
       "id": "T0",
@@ -39,6 +39,13 @@
       "status": "done",
       "branch": "feat/dfs-clock-visibility",
       "note": "FERTIG soweit ohne Hardware moeglich (2026-10-20). remote-shell/ha/ODROID-KAMERA-HA.md = konkretes HA-Runbook (ONVIF-Integration + Generic-Camera-RTSP-Fallback + ffmpeg-Streamtest + USB/UVC-Weg). Umsetzung selbst braucht Nutzer-Entscheid (Kamera-Typ/Modell/Zugangsdaten) + Hardware -> dokumentiert als offener Nutzer-Punkt, kein Agent-Blocker."
+    },
+    {
+      "id": "T5",
+      "title": "HA-Dashboards (wp-native + waermepumpe-dashboard) an Buderus-Vorlage angleichen",
+      "status": "open",
+      "branch": "feat/ha-dashboard-buderus (Sub-Agent)",
+      "note": "Auftrag (2026-10-20, Nutzer/Repair-Chat): wp-native (PR #53) + waermepumpe-dashboard sollen der Bosch-Buderus-Vorlage simple-dashboard.yaml folgen. Delegiert an Sub-Agent (parent fb4acc4e). Ist-Stand analysiert: Vorlage = 1 View 'Ueberblick', type sections, max_columns 4, column_span, sensor-line-Karten (graph line/detail 1), gauge needle+grid_options, Energiebilanz-Stacks (statistic calendar/day change), statistics-graph bar, badges (Modus+Silent). Grenze: bosch_k40rf read-only -> kein thermostat/select (Silent-Badge entfaellt). Sub-Agent liefert Repo-Artefakte + PR gegen cline/power-history-diag; Deploy aufs Board macht der Parent."
     }
   ],
   "done_previously": [

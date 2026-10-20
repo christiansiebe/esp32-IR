@@ -56,10 +56,10 @@
   },
   "fb4acc4e11f94fcd94bbfc000a927301": {
    "name": "HA WP entwicklung (neu) - Odroid AP/HA",
-   "open_tasks": 0,
+   "open_tasks": 1,
    "branch": "feat/dfs-clock-visibility",
-   "note": "FERTIG (2026-10-20). Blocker geloest: Kommando-Kanal war tot (rotiertes Cloud-Secret + register_sandbox/bootstrap schrieben nur nach main, Odroid liest channel-registry) -> Fix Token-Datei + Mehrfach-Branch-Registrierung (3d354d3, a6e89b7); Kanal verifiziert. T1 AP+STA-Ursache (WLAN-TREIBER-ANALYSE.md), T2 USB2-Deckel (ODROID-NETZ-RECON.md), T3 Reboot-Festigkeit (ODROID-AP-REBOOT.md: STA-Netz/Kanal/HA gemessen reboot-fest; AP per Nutzer-Entscheid aus+erhalten; Live-AP-Reboot-Test nicht kanal-fahrbar - Allowlist), T4 Kamera-Runbook (ODROID-KAMERA-HA.md, braucht Nutzer-Hardware-Entscheid) - alle done. Keine offene Agent-Arbeit.",
-   "checked_at": "2026-10-20T06:12:00Z"
+   "note": "T1-T4 FERTIG (Kanal-Fix, AP-Ursache, USB2, Reboot-Doku, Kamera-Runbook). NEU offen: T5 Dashboards (wp-native + waermepumpe-dashboard) an Buderus-Vorlage angleichen - an Sub-Agent bf7188fec2ec40feaac056c5fff9b280 delegiert (Branch feat/ha-dashboard-buderus, PR gegen cline/power-history-diag). Parent supervidiert bis T5 done.",
+   "checked_at": "2026-10-20T06:42:00Z"
   },
   "732f5e0624b948499d0183f5633d86b5": {
    "name": "ODROID Watchdog-Aktor",
@@ -208,6 +208,14 @@
    "pr": [
     53
    ]
+  },
+  "bf7188fec2ec40feaac056c5fff9b280": {
+   "name": "HA-Dashboard Buderus-Angleichung (Sub von fb4acc4e)",
+   "open_tasks": 1,
+   "branch": "feat/ha-dashboard-buderus",
+   "pr": [],
+   "note": "Sub-Agent (parent fb4acc4e): wp-native (PR #53) + waermepumpe-dashboard an Bosch-Buderus simple-dashboard.yaml angleichen. Liefert Repo-Artefakte + PR gegen cline/power-history-diag; Board-Deploy macht der Parent. Gestartet 2026-10-20 06:42 UTC.",
+   "checked_at": "2026-10-20T06:42:00Z"
   }
  }
 }

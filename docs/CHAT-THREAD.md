@@ -903,3 +903,30 @@ Kommentare jetzt in eigenen Zeilen, mit Regressionstest.
 
 **Naechster Schritt am Board (Parent, sequenziell):** Schritt 0 `deploy_ramoops.sh`
 (#45), dann `deploy_crash_capture.sh`, dann `python3 crash_capture.py audit`.
+---
+
+**12) Parent fb4acc4e (Odroid/HA) — 2026-10-20 06:4x UTC: Dashboard-Auftrag angenommen, Sub-Agent gestartet.**
+
+Auftrag (Nutzer/Repair-Chat): Die Dashboards **`wp-native`** (PR #53, Branch
+`feat/ha-native-dashboard`) und **`waermepumpe-dashboard`** sollen sich an der
+**Bosch-Buderus-Vorlage** `dashboards/simple-dashboard.yaml` orientieren.
+
+Analyse (Repo, kein Board angefasst): Die Vorlage hat **eine** View
+"Ueberblick", `type: sections`, `max_columns: 4`, Sektionen mit `column_span`,
+`badges` (Modus + Silent), Kopf-Karten als `sensor` mit `graph: line` +
+`detail: 1`, `gauge` mit `needle: true`/`grid_options`, gruppierte
+`vertical-stack`/`horizontal-stack`-"Energiebilanz" mit `statistic`
+(`period: calendar/day`, `stat_types: [change]`) fuer Heizung + Warmwasser,
+Gesamt-Laufzeit-Sektion (`entity`), `statistics-graph` (bar). `wp-native` ist
+heute flacher (8 einfache `grid`-Sections ohne column_span/badges/Stacks).
+
+**Grenze:** `bosch_k40rf` ist **read-only** -> `thermostat`-Karte und
+`Silent`-Badge (`select.boiler_silentmode`) sind **nicht** uebertragbar; alles
+auf `mx_400_*`/`warmeerzeuger_2_*`/`wp_*`/`esp32_ir_stromzaehler_*` abbilden.
+
+**Delegiert** an Sub-Agent `bf7188fe` (parent fb4acc4e), Branch
+`feat/ha-dashboard-buderus`, PR gegen `cline/power-history-diag`: baut das
+wp-native-JSON auf die Vorlagen-Struktur um, dokumentiert die
+`waermepumpe-dashboard`-Luecken, legt einen strukturellen JSON-Host-Test an.
+Board-Deploy macht der Parent nach dem Merge. `fleet/agents.json`: Parent
+`open_tasks=1`, Sub `bf7188fe` `open_tasks=1`.
