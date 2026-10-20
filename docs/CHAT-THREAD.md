@@ -764,3 +764,21 @@ Leben haelt, sterben. Zusaetzlich harte 12-h-Kappe/Session. **Fix:** Orphan-Guar
 (created<48h & updated<6h) mit open_tasks=1 -> geschuetzt; Resume bestehender Sandbox ist
 **quota-frei**. Deployed (Automation `eb73ddf3`, Tarball neu), Host-Tests gruen, Commit `71b538b9bc`.
 Kontingent: 20 Conversations/Tag, Reset 00:00 UTC.
+
+---
+
+**10) Odroid-Repair-Chat ec276242 (2026-10-20, HA + `oh`).** Drei Dinge am Board
+erledigt (nur Board-Arbeit, keine Repo-PRs von hier):
+- **`oh` fuer alle User:** Ursache war die fest verdrahtete Zustandsdatei
+  `/root/.oh-last-conv` (PermissionError fuer Nicht-root). `OH_STATE` wird jetzt
+  aus `$HOME`/`$XDG_STATE_HOME`/`/tmp` abgeleitet; verifiziert mit `chris` ->
+  `odroidn2`. Backup `/usr/local/bin/oh.bak-20261020-050723`.
+- **WP-Grafik:** Karte `custom:wp-panels` rendert headless fehlerfrei und liegt
+  jetzt auf dem Dashboard `wp-grafana`.
+- **NEU: natives Dashboard `wp-native`** (8 Sections, nur native Karten: gauge,
+  statistic, entities, history-graph, statistics-graph) inkl. MQTT-Stromzaehler-
+  Abschnitt. Anlage per WebSocket-API, kein HA-Neustart. Generator + Doku im Repo
+  (`remote-shell/ha/`), **PR #53**. Backup `/root/ha-backup-20261020-051013`
+  (+ Kopie `/mnt/ssd/`); bestehende Dashboards per md5 als unveraendert bestaetigt.
+- **Delegiert:** Sub-Agent `a752b852` (TEIL A Merge-Empfehlung #45/#44/#43/#42/#41/
+  #40/#39/#7/#5, TEIL B Rebase #14/#6), rein repo-seitig.
