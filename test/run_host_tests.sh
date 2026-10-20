@@ -379,6 +379,10 @@ python3 "$here/test_ws_min.py"
 python3 "$here/test_ws_client.py"
 python3 "$here/check_dashboard_js.py"
 
+# Brother HL-3040CN print-server health: the pure mapping from probe signals to
+# the blank-page cause (used by remote-shell/ha/brother-hl3040cn/diagnose_print.sh).
+python3 "$repo/remote-shell/ha/test_print_health.py"
+
 # Firmware version: must always resolve to a non-empty string, so the dashboard
 # and the diagnostics can identify the running build (CMake writes
 # main/build_version.h; host builds fall back to PROJECT_VER / "unknown").
