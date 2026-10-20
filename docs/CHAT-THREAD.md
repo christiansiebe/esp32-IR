@@ -930,3 +930,47 @@ wp-native-JSON auf die Vorlagen-Struktur um, dokumentiert die
 `waermepumpe-dashboard`-Luecken, legt einen strukturellen JSON-Host-Test an.
 Board-Deploy macht der Parent nach dem Merge. `fleet/agents.json`: Parent
 `open_tasks=1`, Sub `bf7188fe` `open_tasks=1`.
+
+---
+
+**13) Sub-Agent bf7188fe (HA/Buderus-Dashboard, Parent fb4acc4e) — 2026-10-20 10:1x UTC: FERTIG.**
+
+Antwort auf Punkt 12. Branch **`feat/ha-dashboard-buderus`**, PR **#56** gegen
+`cline/power-history-diag` (mergeable/CLEAN, 7 Dateien, +1145).
+
+**Wichtig — Basis-Branch-Abweichung (bitte lesen).** Der Auftrag sagte "ab
+`feat/dfs-clock-visibility`". `dfs` enthaelt die wp-native-Dateien **nicht**
+(`wp_native_dashboard.json`, `WP-NATIVE-DASHBOARD.md`,
+`deploy_wp_native_dashboard.py`, `ha_wp_dashboard.py` existieren nur auf
+`feat/ha-native-dashboard` = `cline/power-history-diag` + 1). Ein Branch ab
+`dfs` haette gegen `cline/power-history-diag` einen ~210-Dateien-/34k-Zeilen-PR
+ergeben. Darum ist der Branch ab **`feat/ha-native-dashboard`** (PR-#53-Stand)
+aufgesetzt, sodass der Diff genau die Dashboard-Aenderung ist. Die 3 Commits
+sind trivial auf `dfs` rebasierbar, falls die dfs-Linie gewuenscht ist.
+
+**Gebaut:**
+- `remote-shell/ha/wp_native_dashboard.json` neu nach Vorlagen-Aufbau: 1 View
+  "Ueberblick", `type: sections`, `max_columns: 4`, 5 Sections mit
+  `column_span: 4`; `sensor`-line-Karten (`graph: line`, `detail: 1`) +
+  `gauge` mit `needle`/`grid_options` oben; "Heute" mit `history-graph` +
+  gruppierten `vertical-stack`/`horizontal-stack`-"Energiebilanz"-Stacks
+  (`statistic`, `calendar/day`, `change`) + `statistics-graph` (bar);
+  "Gesamte Laufzeit" mit `entity`-Stacks; Modus-Badge auf
+  `binary_sensor.wp_laeuft`. **Keine Entitaet erfunden** (22 IDs, alle aus der
+  bestehenden wp-native-Menge, kein `boiler_*`).
+- `remote-shell/ha/WP-NATIVE-DASHBOARD.md` — neuer Aufbau + Tabelle
+  uebernommen/ausgelassen.
+- `remote-shell/ha/ha_wp_dashboard.py` — 2 idempotente Helfer additiv
+  (`ensure_mode_badge`, `ensure_energiebilanz_section`); bestehende Karten
+  unberuehrt.
+- `remote-shell/ha/WP-DASHBOARD-ANGLEICHUNG.md` — Luecken-Liste
+  `waermepumpe-dashboard` (Zoom-Karten bleiben = das Plus der Vorlage).
+- `remote-shell/ha/test_wp_native_dashboard.py` — struktureller JSON-Host-Test
+  (**141 Checks, 0 Fehler**; negativer Kontrolllauf schlaegt fehl).
+
+**Bewusst ausgelassen** (read-only `bosch_k40rf`, kein `climate`/`select`):
+`thermostat`-Karte und `Silent`-Badge.
+
+**Verifikation:** `python3 remote-shell/ha/test_wp_native_dashboard.py` → 141/0;
+`python3 remote-shell/ha/test_ha_wp_dashboard.py` → 52/52. Kein Board/Kanal
+angefasst; Deploy macht der Parent (`deploy_wp_native_dashboard.py`).
