@@ -56,10 +56,10 @@
   },
   "fb4acc4e11f94fcd94bbfc000a927301": {
    "name": "HA WP entwicklung (neu) - Odroid AP/HA",
-   "open_tasks": 1,
+   "open_tasks": 0,
    "branch": "feat/dfs-clock-visibility",
-   "note": "T1-T4 FERTIG (Kanal-Fix, AP-Ursache, USB2, Reboot-Doku, Kamera-Runbook). NEU offen: T5 Dashboards (wp-native + waermepumpe-dashboard) an Buderus-Vorlage angleichen - an Sub-Agent bf7188fec2ec40feaac056c5fff9b280 delegiert (Branch feat/ha-dashboard-buderus, PR gegen cline/power-history-diag). Parent supervidiert bis T5 done.",
-   "checked_at": "2026-10-20T06:42:00Z"
+   "note": "FERTIG (2026-10-20). T1-T4 done (Kanal-Fix, AP-Ursache, USB2-Deckel, Reboot-Doku, Kamera-Runbook). T5 done: wp-native + waermepumpe-dashboard an Buderus-Vorlage angeglichen (Sub-Agent bf7188fe, PR #56 vom Parent gemergt; Host-Tests gruen). Hand-off an Repair-Chat: Board-Deploy des Dashboards (HA-WebSocket-API) - Kanal-Allowlist erlaubt kein docker/HA. Keine offene Agent-Arbeit.",
+   "checked_at": "2026-10-20T10:55:00Z"
   },
   "732f5e0624b948499d0183f5633d86b5": {
    "name": "ODROID Watchdog-Aktor",
@@ -216,7 +216,7 @@
    "pr": [
     56
    ],
-   "note": "FERTIG (2026-10-20): wp-native auf Buderus-Vorlagen-Struktur umgebaut + waermepumpe-dashboard additiv angeglichen (Mode-Badge + Energiebilanz-Stacks) + WP-NATIVE-DASHBOARD.md/WP-DASHBOARD-ANGLEICHUNG.md + struktureller JSON-Host-Test (141/0). PR #56 gegen cline/power-history-diag (MERGEABLE/CLEAN). Basis ab feat/ha-native-dashboard (dfs hat die wp-native-Dateien nicht) - im PR/CHAT-THREAD dokumentiert. Kein Board/Kanal; Deploy macht Parent fb4acc4e.",
+   "note": "FERTIG (2026-10-20). PR #56 (wp-native + waermepumpe an Buderus-Vorlage) geoeffnet, vom Parent gemergt. Host-Tests gruen (141+52 Checks). Board-Deploy = Hand-off.",
    "checked_at": "2026-10-20T10:55:00Z"
   }
  }

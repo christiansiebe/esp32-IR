@@ -3,7 +3,7 @@
   "conversation_id": "fb4acc4e11f94fcd94bbfc000a927301",
   "role": "parent/coordinator (Odroid N2 + Home Assistant)",
   "supersedes": "7a894c13-6780-43e5-8935-dd1509217a75 (MISSING)",
-  "updated": "2026-10-20T06:40:00Z",
+  "updated": "2026-10-20T10:55:00Z",
   "tasks": [
     {
       "id": "T0",
@@ -43,9 +43,9 @@
     {
       "id": "T5",
       "title": "HA-Dashboards (wp-native + waermepumpe-dashboard) an Buderus-Vorlage angleichen",
-      "status": "open",
-      "branch": "feat/ha-dashboard-buderus (Sub-Agent)",
-      "note": "Auftrag (2026-10-20, Nutzer/Repair-Chat): wp-native (PR #53) + waermepumpe-dashboard sollen der Bosch-Buderus-Vorlage simple-dashboard.yaml folgen. Delegiert an Sub-Agent (parent fb4acc4e). Ist-Stand analysiert: Vorlage = 1 View 'Ueberblick', type sections, max_columns 4, column_span, sensor-line-Karten (graph line/detail 1), gauge needle+grid_options, Energiebilanz-Stacks (statistic calendar/day change), statistics-graph bar, badges (Modus+Silent). Grenze: bosch_k40rf read-only -> kein thermostat/select (Silent-Badge entfaellt). Sub-Agent liefert Repo-Artefakte + PR gegen cline/power-history-diag; Deploy aufs Board macht der Parent."
+      "status": "done",
+      "branch": "feat/ha-dashboard-buderus (gemergt)",
+      "note": "FERTIG (2026-10-20). Sub-Agent bf7188fe hat beide Dashboards an die Buderus-Vorlage simple-dashboard.yaml ausgerichtet und PR #56 geoeffnet; Parent hat PR #56 nach eigener Verifikation gemergt (mergeable=CLEAN, 7 Dateien, +1145, nur remote-shell/ha/, kein Firmware-Baum). wp-native: 1 View 'Ueberblick', type sections, max_columns 4, column_span je Section, Badge 'Modus', sensor-line-Karten (graph line/detail 1), gauges needle+grid_options, Energiebilanz-Stacks (statistic calendar/day change) Heizung+Warmwasser+Total, statistics-graph bar. waermepumpe-dashboard: additiv um Modus-Badge + Energiebilanz-Sektion ergaenzt (Zoom-Karten bleiben = das Plus), Doku WP-DASHBOARD-ANGLEICHUNG.md. Bewusst ausgelassen (bosch_k40rf read-only): thermostat-Karte + Silent-Badge. Host-Tests gruen: test_wp_native_dashboard.py 141 Checks, test_ha_wp_dashboard.py 52 Checks. OFFEN als Hand-off (kein Agent-Blocker): der Board-DEPLOY (HA-WebSocket-API im Container) ist ueber den Kanal nicht fahrbar - die Board-Allowlist lehnt docker/HA-Pfade ab (ABGELEHNT). Deploy braucht den Repair-Chat/erweiterte Allowlist."
     }
   ],
   "done_previously": [

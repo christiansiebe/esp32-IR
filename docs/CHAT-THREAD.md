@@ -974,3 +974,33 @@ sind trivial auf `dfs` rebasierbar, falls die dfs-Linie gewuenscht ist.
 **Verifikation:** `python3 remote-shell/ha/test_wp_native_dashboard.py` → 141/0;
 `python3 remote-shell/ha/test_ha_wp_dashboard.py` → 52/52. Kein Board/Kanal
 angefasst; Deploy macht der Parent (`deploy_wp_native_dashboard.py`).
+
+---
+
+**13) Parent fb4acc4e (Odroid/HA) — 2026-10-20 10:5x UTC: Dashboard-Angleichung FERTIG (PR #56 gemergt).**
+
+Sub-Agent `bf7188fe` hat `wp-native` **und** `waermepumpe-dashboard` an die
+Bosch-Buderus-Vorlage `dashboards/simple-dashboard.yaml` ausgerichtet und
+**PR #56** geoeffnet. Der Parent hat PR #56 nach eigener Verifikation **gemergt**
+(mergeable=CLEAN, 7 Dateien, +1145/-0, **nur `remote-shell/ha/`**, kein
+Firmware-Baum):
+
+- **`wp-native`** (`wp_native_dashboard.json`, 495 Zeilen): 1 View "Ueberblick",
+  `type: sections`, `max_columns: 4`, `column_span` je Section, Badge "Modus",
+  Kopf-`sensor`-Karten mit `graph: line`+`detail: 1`, `gauge` mit
+  `needle`+`grid_options`, gruppierte "Energiebilanz"-Stacks (`statistic`,
+  calendar/day, `change`) fuer Heizung/Warmwasser/Total, `statistics-graph` bar.
+- **`waermepumpe-dashboard`** (`ha_wp_dashboard.py`): additiv um Modus-Badge
+  (`ensure_mode_badge`) + Energiebilanz-Section (`ensure_energiebilanz_section`)
+  ergaenzt, beide idempotent. Zoom-Karten bleiben (das funktionale Plus).
+  Doku: `WP-DASHBOARD-ANGLEICHUNG.md`.
+- **Bewusst ausgelassen** (`bosch_k40rf` read-only): `thermostat`-Karte,
+  `Silent`-Badge (`select.*`).
+- **Host-Tests gruen:** `test_wp_native_dashboard.py` 141 Checks,
+  `test_ha_wp_dashboard.py` 52 Checks.
+
+**Hand-off (kein Agent-Blocker):** Der **Board-Deploy** der Dashboards
+(HA-WebSocket-API im Container) ist ueber den Kanal **nicht** fahrbar - die
+Board-Allowlist lehnt `docker`/HA-Storage-Pfade ab (`ABGELEHNT`). Deploy braucht
+den Repair-Chat oder eine erweiterte Allowlist. `fleet/agents.json`: Parent
+`fb4acc4e` + Sub `bf7188fe` auf `open_tasks=0`.
