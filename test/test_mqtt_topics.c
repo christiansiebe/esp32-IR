@@ -25,6 +25,8 @@ static void test_build(void)
     CHECK(strcmp(t.history, "esp32ir/receiver/history") == 0, "history topic");
     CHECK(strcmp(t.status, "esp32ir/receiver/status") == 0, "status topic");
     CHECK(strcmp(t.state, "esp32ir/receiver/state") == 0, "state topic");
+    CHECK(strcmp(t.event_reboot, "esp32ir/receiver/event/reboot") == 0,
+          "reboot event topic");
 
     /* Surrounding slashes are trimmed, so both spellings agree. */
     mqtt_topics_t t2;
