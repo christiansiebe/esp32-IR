@@ -257,3 +257,48 @@ config ESPNOW_HEALTH_GRACE_S
         Uptime that must pass before any health rule may fire, so a slow boot
         (Wi-Fi association, first backfill) is not mistaken for a fault.
 
+config ESPNOW_NET_WATCHDOG
+    bool "Receiver: Wi-Fi link watchdog (reconnect then reboot when the link drops)"
+    depends on ESPNOW_ROLE_RECEIVER
+    default y
+    help
+        Watch the station link and act when it is lost. The existing guards each
+        cover another path (web_guard the HTTP server on the loopback,
+        health_task the meter data, link_fallback the ESP-NOW peer), but none of
+        them notices a dropped Wi-Fi association or DHCP lease: every task keeps
+        running, the dashboard answers locally, and the device is nonetheless
+        unreachable from the home LAN. That is the silent "goes offline" case.
+        This watchdog reconnects after CONFIG_ESPNOW_NET_WATCHDOG_DOWN_MS and
+        reboots if that does not help. It runs only when a home WLAN is
+        configured (an AP-only receiver has no station link to lose). The
+        decision is pure and host-tested (test_net_watchdog.c).
+
+config ESPNOW_NET_WATCHDOG_DOWN_MS
+    int "Receiver: link down time before reconnecting (ms)"
+    depends on ESPNOW_NET_WATCHDOG
+    range 10000 3600000
+    default 120000
+    help
+        How long the station may be unassociated or without an IP before the
+        watchdog re-issues esp_wifi_connect(). Comfortably above a normal router
+        reboot or channel switch, so a brief blip does not trigger it.
+
+config ESPNOW_NET_WATCHDOG_REBOOT_MS
+    int "Receiver: extra time after the reconnect before rebooting (ms)"
+    depends on ESPNOW_NET_WATCHDOG
+    range 10000 3600000
+    default 300000
+    help
+        Time the reconnect is given to restore the link. If it is still down
+        after this (measured from the same down edge), the watchdog reboots to a
+        known-good state - the case a reconnect cannot fix (a wedged driver).
+
+config ESPNOW_NET_WATCHDOG_GRACE_MS
+    int "Receiver: network watchdog grace after boot (ms)"
+    depends on ESPNOW_NET_WATCHDOG
+    range 0 3600000
+    default 120000
+    help
+        Uptime that must pass before the link is judged, so association and DHCP
+        at boot are not mistaken for an outage.
+

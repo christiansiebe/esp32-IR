@@ -42,6 +42,7 @@
 #include "history_upload.h"
 #include "json_escape.h"
 #include "link_fallback.h"
+#include "net_watchdog.h"
 #include "power_history.h"
 #include "energy_totals.h"
 #include "runtime_config.h"
@@ -234,6 +235,10 @@ static char g_wifi_ssid[WIFI_SSID_MAX_LEN + 1];
 static char g_wifi_password[WIFI_PASSWORD_MAX_LEN + 1];
 static bool g_wifi_configured;
 static bool g_wifi_connected;
+/* True once the station holds an IP. Association alone is not enough: without a
+ * DHCP lease the dashboard is unreachable even though the radio is "connected",
+ * which is exactly the silent-offline case the network watchdog has to catch. */
+static bool g_sta_got_ip;
 static bool g_sntp_started;
 static esp_netif_t *g_ap_netif;
 static esp_netif_t *g_sta_netif;
@@ -350,6 +355,18 @@ static volatile bool g_link_fallback_active;
  * silence adds a stage instead of only logging. Kept outside the role guard
  * because it also logs counts in the shared diagnostics. */
 static volatile uint8_t g_link_fallback_stage;
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Wi-Fi link watchdog: web_guard only probes the loopback and health_task only
+ * looks at the meter data, so a dropped association/DHCP lease leaves the
+ * receiver "online" internally but unreachable from the home LAN. This watches
+ * the actual link and escalates reconnect -> reboot. Receiver only: the sender
+ * has no home WLAN and its link is covered by link_fallback. */
+#if CONFIG_ESPNOW_NET_WATCHDOG
+static net_wd_t g_net_watchdog;
+static volatile bool g_net_watchdog_active;
+#endif
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -888,6 +905,7 @@ static void wifi_event_handler(void *arg,
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *event = event_data;
         g_wifi_connected = false;
+        g_sta_got_ip = false;
         ESP_LOGW(TAG, "Wi-Fi station disconnected (reason %u)", event->reason);
 #if CONFIG_ESPNOW_ROLE_SENDER
 #if CONFIG_ESPNOW_SENDER_ASSOCIATE
@@ -913,8 +931,15 @@ static void wifi_event_handler(void *arg,
         ESP_LOGI(TAG, "Setup AP started: http://192.168.4.1/  ->  http://%s.local/",
                  MDNS_HOSTNAME);
         start_mdns();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_LOST_IP) {
+        /* The lease/address is gone even though the radio may still be
+         * associated: the dashboard is unreachable from the home LAN. Clearing
+         * the flag lets the network watchdog treat it as a down link. */
+        g_sta_got_ip = false;
+        ESP_LOGW(TAG, "Home network address lost");
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *event = event_data;
+        g_sta_got_ip = true;
         ESP_LOGI(TAG, "Home network address: " IPSTR "  ->  http://%s.local/",
                  IP2STR(&event->ip_info.ip), MDNS_HOSTNAME);
         start_mdns();
@@ -1060,6 +1085,8 @@ static void initialize_wifi_and_espnow(void)
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                               wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP,
                                                wifi_event_handler, NULL));
     ESP_ERROR_CHECK(load_wifi_credentials());
 #if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
@@ -5042,6 +5069,19 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
     }
     written += wdt;
 #if !CONFIG_ESPNOW_ROLE_SENDER
+#if CONFIG_ESPNOW_NET_WATCHDOG
+    int net = snprintf(out + written, out_size - (size_t)written,
+                       "network watchdog: %s, link %s\n",
+                       g_net_watchdog_active ? "waiting" : "idle",
+                       (g_wifi_connected && g_sta_got_ip) ? "up" : "down");
+    if (net < 0 || (size_t)net >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+        return;
+    }
+    written += net;
+#endif
+#endif
+#if !CONFIG_ESPNOW_ROLE_SENDER
     int extra = snprintf(
         out + written, out_size - (size_t)written,
         "web health: %s, last activity %u ms ago, restarts %u\n",
@@ -7993,6 +8033,71 @@ static void link_fallback_worker(void *arg)
 }
 #endif /* CONFIG_ESPNOW_LINK_FALLBACK */
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+#if CONFIG_ESPNOW_NET_WATCHDOG
+/* Receiver Wi-Fi link watchdog. Runs only when a home WLAN is configured: with
+ * no credentials the dashboard lives on the fallback SoftAP and there is no
+ * station link to lose. The link counts as healthy only when the station is
+ * associated *and* holds an IP. */
+static void net_watchdog_worker(void *arg)
+{
+    (void)arg;
+    const uint64_t started_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    net_wd_policy_t policy;
+    net_wd_default_policy(&policy);
+    policy.down_timeout_ms = CONFIG_ESPNOW_NET_WATCHDOG_DOWN_MS;
+    policy.reboot_timeout_ms = CONFIG_ESPNOW_NET_WATCHDOG_REBOOT_MS;
+    policy.min_uptime_ms = CONFIG_ESPNOW_NET_WATCHDOG_GRACE_MS;
+    net_wd_init(&g_net_watchdog, &policy, started_ms);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        if (!g_wifi_configured) {
+            continue; /* AP-only fallback: nothing to watch */
+        }
+        bool up = g_wifi_connected && g_sta_got_ip;
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        net_wd_action_t action = net_wd_tick(&g_net_watchdog, now_ms, up);
+        /* "waiting" while a reconnect is outstanding, not just on the tick that
+         * issues it, so the status line reflects the escalation window. */
+        g_net_watchdog_active = g_net_watchdog.reconnect_tried;
+        switch (action) {
+        case NET_WD_RECONNECT:
+            ESP_LOGW(TAG, "Network watchdog: Wi-Fi down for %u ms, reconnecting",
+                     (unsigned)CONFIG_ESPNOW_NET_WATCHDOG_DOWN_MS);
+            if (esp_wifi_connect() != ESP_OK) {
+                ESP_LOGE(TAG, "Network watchdog: reconnect attempt failed");
+            }
+            break;
+        case NET_WD_REBOOT:
+            /* A reconnect did not restore the link (wedged driver or a router
+             * that never re-admits us): reboot to a known-good state. Routed
+             * through boot_confirm_fail() so a still-unconfirmed image rolls
+             * back instead of boot-looping, exactly like health_task. */
+            ESP_LOGE(TAG, "Network watchdog: Wi-Fi still down, rebooting");
+            boot_confirm_fail("network watchdog: Wi-Fi link lost");
+            esp_restart();
+            break;
+        case NET_WD_OK:
+        default:
+            break;
+        }
+    }
+}
+
+static void net_watchdog_start(void)
+{
+    if (xTaskCreate(net_watchdog_worker, "net_watchdog", 3072, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the network watchdog");
+    }
+}
+#else
+static void net_watchdog_start(void)
+{
+}
+#endif /* CONFIG_ESPNOW_NET_WATCHDOG */
+#endif
+
 /* --- Global liveness watchdog --------------------------------------------
  * The per-subsystem guards (web_guard on the dashboard, link_fallback on the
  * ESP-NOW peer) each watch one path. This is the backstop for a *global* stall:
@@ -8359,6 +8464,10 @@ void app_main(void)
         ESP_LOGW(TAG, "Receiver health watchdog is disabled");
     }
 #endif
+    /* Wi-Fi link watchdog: the guards above never look at the station link, so a
+     * dropped association/DHCP lease would leave the dashboard unreachable with
+     * no reboot. This closes that gap (reconnect, then reboot). */
+    net_watchdog_start();
     /* Same command set on the USB serial monitor (UART0), so the receiver can
      * be driven locally even if the dashboard is unreachable. */
     serial_console_start();
