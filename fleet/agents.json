@@ -180,8 +180,13 @@
   },
   "c80335f5baf2471192cdfb412c8a2146": {
    "name": "Sub: ESP-IDF Firmware (host-verifizierbare TODO-Punkte)",
-   "open_tasks": 1,
-   "note": "Kind des Odroid-Repair-Chats ec27624233304e1d972007bf2b12eb00. Arbeitet offene, host-verifizierbare TODO.md-Punkte ab (record_count-Hardwareteil ist blockiert). 2026-10-19."
+   "open_tasks": 0,
+   "branch": "feat/mqtt-reboot-event-main",
+   "pr": [
+    51,
+    52
+   ],
+   "note": "Kind des Odroid-Repair-Chats ec27624233304e1d972007bf2b12eb00. FERTIG 2026-10-19: PR #51 (Tages-/Monats-Summen im Flash, energy_totals, Host-Test 99 Checks) gemerged nach main (a6216c8). PR #52 (MQTT-Service-Event Reboot-Grund, Port von PR #9, der nur nach feat/link-fallback kam) offen gegen main, CI gruen, MERGEABLE, Host-Test test_mqtt_events.c 33 Checks. Restliche offene TODO-Punkte: AP-runtime-off ist per Design verworfen (AGENTS.md), record_count-Geraetepruefung hardware-blockiert, Rest gehoert anderen Chats. Keine offene host-verifizierbare Arbeit -> darf schlafen."
   },
   "24b80e1f597f4d8fb8a62f39a871dc0e": {
    "name": "gitignore-Hygiene + CI-Aufraeumen (Chat 24b80e1f)",
