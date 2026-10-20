@@ -611,3 +611,13 @@ CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender), PR `CLEAN`/`MERGE
 **Umsetzung:** Cherry-pick des PR-#9-Commits (`51c1094`) auf frisches `main`; Konflikte nur in `main/CMakeLists.txt` (mqtt_publish+health_* erhalten) und `test/run_host_tests.sh` (beide Testbloecke behalten) — beide Seiten zusammengefuehrt, `mqtt_bridge.c`-Include zusammengefuehrt. Kein Datenverlust.
 
 **Tests:** `test/test_mqtt_events.c` (33 Checks, 0 Failures) + `test_mqtt_topics.c` um `event/reboot` erweitert; `run_host_tests.sh` gruen (alle bestehenden Suites inkl. energy_totals unveraendert). Kein `idf.py` lokal; Build-Nachweis ueber CI. Receiver-only, Sender-Build unveraendert, `storage` unangetastet.
+
+## 2026-10-20 05:30 UTC · Firmware-Sub-Agent (Branch fix/print-server-blank-pages, PR #55)
+
+**Punkt:** Nutzer-Frage "warum spinnt der Drucker-Server und jagt leere Seiten durch den Drucker" (Odroid, Brother HL-3040CN).
+
+**Befund:** Der Sandbox->Odroid-Kanal ist nur ueber die Schwester-Sandbox `sglfzjvyoyxniivf` erreichbar; der Odroid-Agent laeuft mit **fail-closed Allowlist** (`cline/0f7jc38h`: `cmd_policy.py`+`odroid_allowlist.txt`) - `docker`, `lpstat`, `curl`, `cat /etc/...` sind **gesperrt**, die CUPS-Container-Innensicht ist aus dem Chat **nicht** moeglich. journald zeigt nur das Queue-Re-Create pro Boot. Ursachenkette (GDI-Drucker -> i386-Filter unter qemu-i386 im `brother-cups`-Container) in `remote-shell/ha/brother-hl3040cn/BLANK-PAGES.md` dokumentiert.
+
+**Umsetzung (minimal, PR #55, base main):** read-only Diagnose fuer den Odroid: `print_health.py` (reiner Signal->Ursache-Klassifizierer), `diagnose_print.sh` (VERDICT/CAUSE/FIX), `BLANK-PAGES.md`, Host-Test `test_print_health.py` (24 Checks) in `run_host_tests.sh` eingehaengt.
+
+**Tests:** `./test/run_host_tests.sh` gruen; CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender + Hygiene). Nur `remote-shell/**` + `test/run_host_tests.sh` beruehrt; kein Firmware-Verhalten, kein Flash-Layout, kein Datenverlust.
