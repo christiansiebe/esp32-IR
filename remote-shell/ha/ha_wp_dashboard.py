@@ -5,6 +5,13 @@ Copies ``ha_wp_zoom_chart.js`` into HA's ``config/www/``, registers it as a
 Lovelace module resource (idempotent) and adds the three zoom cards
 (temperature, energy, power/COP) to the ``waermepumpe-dashboard`` if missing.
 
+It also brings the dashboard closer to the Bosch-Buderus reference template
+(``bosch-buderus-wp/home-assistant`` -> ``dashboards/simple-dashboard.yaml``):
+a Modus entity badge in the header and a grouped "Energiebilanz" section
+(vertical/horizontal stacks). The reference's thermostat card and Silent badge
+are not portable (``bosch_k40rf`` is read-only: no climate, no select entity).
+See ``WP-DASHBOARD-ANGLEICHUNG.md`` for the full gap list.
+
 Runs **inside** the Home Assistant container so it can read ``.storage`` and
 mint an admin JWT:
 
@@ -245,6 +252,75 @@ def replace_raw_modulation_tile(view):
     return changed
 
 
+# --- Buderus-Vorlage: Kopf-Badge + gruppierte Energiebilanz ------------------
+# The reference dashboard (bosch-buderus-wp simple-dashboard.yaml) puts an
+# entity badge for the operating mode in the header and groups the energy
+# figures into vertical/horizontal stacks. The read-only ``bosch_k40rf``
+# integration has no select entity, so only the Modus badge is portable.
+BADGE_MODE_ENTITY = "binary_sensor.wp_laeuft"
+
+
+def ensure_mode_badge(view):
+    """Add the reference's Modus entity-badge to the view if it is missing.
+
+    Idempotent: an existing badge for ``BADGE_MODE_ENTITY`` is left as-is.
+    Returns True when a badge was added.
+    """
+    badges = view.setdefault("badges", [])
+    for b in badges:
+        if isinstance(b, dict) and b.get("entity") == BADGE_MODE_ENTITY:
+            return False
+    badges.append({
+        "type": "entity", "show_name": True, "show_state": True,
+        "show_icon": True, "entity": BADGE_MODE_ENTITY, "color": "",
+        "icon": "mdi:heat-pump-outline", "show_entity_picture": False,
+        "name": "Modus"})
+    return True
+
+
+def energiebilanz_stack(heading, icon, cards):
+    """A vertical-stack with a heading + horizontal row of cards (reference)."""
+    return {"type": "vertical-stack", "cards": [
+        {"type": "heading", "heading": heading, "heading_style": "title",
+         "icon": icon},
+        {"type": "horizontal-stack", "cards": cards,
+         "grid_options": {"columns": 18, "rows": "auto"}},
+    ], "grid_options": {"columns": 18, "rows": "auto"}}
+
+
+def ensure_energiebilanz_section(view):
+    """Append the reference's grouped Energiebilanz section if it is missing.
+
+    Idempotent: the section is identified by its heading and is never added
+    twice. Returns True when the section was added.
+    """
+    for s in view.get("sections", []):
+        for c in s.get("cards", []):
+            if isinstance(c, dict) and c.get("heading") == "Energiebilanz":
+                return False
+    stack_h = energiebilanz_stack("Energiebilanz - Heizung", "mdi:heat-wave", [
+        {"type": "entity",
+         "entity": "sensor.mx_400_system_heating_energy_electricity",
+         "name": "Energieverbrauch (Heizen)", "icon": "mdi:lightning-bolt"}])
+    stack_w = energiebilanz_stack("Energiebilanz - Warmwasser", "mdi:water", [
+        {"type": "entity",
+         "entity": "sensor.mx_400_system_hot_water_energy_electricity",
+         "name": "Energieverbrauch (Warmwasser)", "icon": "mdi:water-boiler"}])
+    stack_t = energiebilanz_stack("Energiebilanz - Total", "mdi:heat-pump-outline", [
+        {"type": "entity", "entity": "sensor.warmeerzeuger_2_total_energy_compressor",
+         "name": "Energieverbrauch", "icon": "mdi:lightning-bolt"},
+        {"type": "entity", "entity": "sensor.warmeerzeuger_2_total_energy_produced",
+         "name": "Energieabgabe", "icon": "mdi:heat-pump-outline"},
+        {"type": "entity", "entity": "sensor.wp_cop_gesamt",
+         "name": "Jahresarbeitszahl", "icon": "mdi:chart-line"}])
+    view.setdefault("sections", []).append({
+        "type": "grid", "column_span": 3,
+        "cards": [{"type": "heading", "heading": "Energiebilanz",
+                   "heading_style": "title", "icon": "mdi:counter"},
+                  stack_h, stack_w, stack_t]})
+    return True
+
+
 async def main():
     # 1) JS kopieren
     src = "/config/wp-zoom-chart.js"
@@ -309,6 +385,10 @@ async def main():
             print("Immer-0-Kachel auf berechnete Modulation umgestellt")
         if ensure_reference_gauges(view):
             print("Referenz-Gauges (Modulation/thermisch) ergaenzt")
+        if ensure_mode_badge(view):
+            print("Modus-Badge (Buderus-Vorlage) ergaenzt")
+        if ensure_energiebilanz_section(view):
+            print("Energiebilanz-Sektion (Buderus-Vorlage) ergaenzt")
 
         # Karten: Zoom-Karten ersetzen/ergaenzen
         charts = {

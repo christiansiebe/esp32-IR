@@ -147,6 +147,39 @@ def test_upsert_marker_block_is_idempotent():
     check(t3.count(s) == 1 and t3.count(e) == 1, "still one marker pair")
 
 
+def test_ensure_mode_badge_idempotent():
+    print("test_ensure_mode_badge_idempotent")
+    view = {}
+    check(hwd.ensure_mode_badge(view), "first run adds the badge")
+    check(view["badges"][0]["entity"] == hwd.BADGE_MODE_ENTITY, "badge entity")
+    check(view["badges"][0]["name"] == "Modus", "badge name")
+    before = list(view["badges"])
+    check(not hwd.ensure_mode_badge(view), "second run is a no-op")
+    check(view["badges"] == before, "no duplicate badge")
+    # An existing (user-styled) badge for the same entity is respected.
+    view2 = {"badges": [{"type": "entity", "entity": hwd.BADGE_MODE_ENTITY,
+                         "name": "Mein Modus"}]}
+    check(not hwd.ensure_mode_badge(view2), "existing badge respected")
+    check(view2["badges"][0]["name"] == "Mein Modus", "styling untouched")
+
+
+def test_ensure_energiebilanz_section_idempotent():
+    print("test_ensure_energiebilanz_section_idempotent")
+    view = {"sections": [{"type": "grid", "cards": [
+        {"type": "heading", "heading": "Temperaturen"}]}]}
+    check(hwd.ensure_energiebilanz_section(view), "first run adds the section")
+    added = view["sections"][-1]
+    check(added["type"] == "grid" and added["column_span"] == 3, "grid + span")
+    check(added["cards"][0].get("heading") == "Energiebilanz", "section heading")
+    types = [c["type"] for c in added["cards"][1:]]
+    check(types == ["vertical-stack"] * 3, f"three stacks: {types}")
+    for stack in added["cards"][1:]:
+        check(stack["cards"][1]["type"] == "horizontal-stack", "stack has h-row")
+    n = len(view["sections"])
+    check(not hwd.ensure_energiebilanz_section(view), "second run is a no-op")
+    check(len(view["sections"]) == n, "no duplicate section")
+
+
 def test_wrap_all_apex_only_touches_apex():
     print("test_wrap_all_apex_only_touches_apex")
     cfg = {"views": [{"sections": [{"cards": [
@@ -173,5 +206,7 @@ if __name__ == "__main__":
     test_reference_gauges_idempotent()
     test_replace_raw_modulation_tile()
     test_upsert_marker_block_is_idempotent()
+    test_ensure_mode_badge_idempotent()
+    test_ensure_energiebilanz_section_idempotent()
     print(f"\n{CHECKS - FAILURES}/{CHECKS} checks passed")
     sys.exit(1 if FAILURES else 0)
