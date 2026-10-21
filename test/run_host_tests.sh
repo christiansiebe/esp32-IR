@@ -223,6 +223,19 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_trial_mode"
 
+# Boot-log ring + suppress list: per-telegram SML chatter must be kept out of
+# the RAM ring so the startup messages survive for /bootlog. Drives the real
+# boot_log.c through its capture entry point.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/boot_log.c" \
+    "$here/test_boot_log.c" \
+    -o "$out/test_boot_log"
+
+"$out/test_boot_log"
+
 # Sender parser stall recovery: a wedged SML parser (bytes arriving, no telegram
 # finalised) must be reset by a timer armed by the first byte of the capture, not
 # by a telegram - the old rule left a wedge on the first telegram of a boot

@@ -19,6 +19,18 @@
  * app_main. Safe to call once; a second call is a no-op. */
 void boot_log_init(void);
 
+/* Register a substring; any captured line containing it is kept out of the RAM
+ * ring (the console still receives it). Use for high-rate, low-value chatter
+ * that would otherwise overwrite the startup messages within seconds. The
+ * marker must have static lifetime. At most BOOT_LOG_MAX_SUPPRESS markers are
+ * honoured; further calls are ignored. */
+void boot_log_suppress(const char *marker);
+
+/* Store one rendered log line in the ring, honouring the suppress list. This is
+ * the hook's entry point; it is exposed so host tests can drive the real
+ * filtering/ring path without the ESP-IDF log hook. */
+void boot_log_capture_line(const char *line, size_t len);
+
 /* Copy up to max bytes of the captured log into out (NUL terminated).
  * Returns the number of bytes written. */
 size_t boot_log_read(char *out, size_t max);

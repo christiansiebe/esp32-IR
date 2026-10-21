@@ -640,3 +640,34 @@ CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender), PR `CLEAN`/`MERGE
 **Tests:** `test/test_net_watchdog.c` (229 Checks, 0 Failures) in `run_host_tests.sh` eingehaengt; gesamte Host-Suite gruen. Kein `idf.py` lokal -> Build-Nachweis ueber CI. Sender-Build unveraendert, `storage` unangetastet, kein Datenverlust.
 
 **OFFEN:** Commit liegt lokal auf `fix/net-watchdog` (f166d7b), **nicht gepusht** - in dieser Sandbox ist kein GitHub-Write-Token vorhanden (`GITHUB_TOKEN`/`GITHUB_WRITE_TOKEN` leer, kein Credential-Helper). Push + CI-Build + OTA-Flash stehen noch aus.
+
+## 2026-10-21 17:50 UTC · Kontroll-Chat (Branch fix/integration, Commit 4cd31ec)
+
+**Auftrag (Nutzer):** (1) SML-Werte aus dem Bootlog weglassen, damit die Essentials
+sichtbar bleiben; (2) GitHub-Schreib-Token auf dem Odroid fuer die Agenten zugaenglich
+machen; (3) Meldung "Receiver ist wieder weg" pruefen.
+
+**(1) Bootlog-Filter — umgesetzt.** `main/boot_log.{c,h}`: neue Suppress-Liste
+(`boot_log_suppress(marker)`, max. 4) + `boot_log_capture_line()`, das der Hook jetzt
+aufruft. Treffer werden **nur aus dem RAM-Ring** gehalten, bleiben auf der Konsole.
+`app_main` registriert `"SML value:"` — die pro-Telegramm-Zeile (`ESP_LOGI(TAG,
+"SML value: OBIS=... ")`, `main.c:2935`) fuellte den ~6 kB-Ring in Sekunden und
+verdraengte die Startmeldungen, genau woran `/bootlog` krankt. Andere SML-Zeilen
+(Fehler, "batch ring full") bleiben erhalten.
+
+**(2) Token — Mechanik gebaut, aber BLOCKER:** Der einzige gefundene Token
+(`/root/.config/github-bridge/token`, fine-grained PAT, login `christiansiebe`) ist
+**read-only**: `git-upload-pack` → HTTP 200, `git-receive-pack` → **HTTP 403**. Die
+API-`permissions` zeigen `push:true`, das sind aber nur die *Nutzer*-Rechte, nicht die
+Token-Scopes. Zugang eingerichtet via `/etc/gitconfig` (Credential-Helper
+`/root/.config/github-bridge/git-credential.sh`, liest die 0600-Datei; kein Secret in
+einer git-Config/URL) und `/root/.bashrc` (`GITHUB_TOKEN`/`GITHUB_WRITE_TOKEN` aus der
+Datei) — mehr geht nicht, solange der PAT kein `contents:write` hat. **Push bleibt offen**;
+Nutzer muss am PAT `Contents: Read and write` setzen.
+
+**(3) Receiver** war waehrend der ganzen Session erreichbar (`/healthz` 200,
+`uart_rx_bytes` steigend, zuletzt ~2,48 MB). Der Ausfall war **transient** — passt zum
+TODO-Befund (Router-Kanalwechsel, ~6 h Stillstand), kein neuer Reachability-Bug.
+
+**Tests:** Host-Suite gruen inkl. neuer `test/test_boot_log.c` (6 Checks); Builds
+`tools/build.sh receiver` (1329280 B) und `sender` (935312 B) mit IDF v6.1 ok.

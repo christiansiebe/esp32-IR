@@ -8693,6 +8693,11 @@ void app_main(void)
     /* Capture the boot log in RAM first, so the Wi-Fi dashboard can offer it
      * later even when no host is attached at boot. */
     boot_log_init();
+    /* One decoded SML value is logged per telegram; at the meter's rate that
+     * fills the ~6 kB ring within seconds and pushes the startup messages out,
+     * which is exactly what the boot log is for. Keep them on the console and
+     * off the /bootlog ring. */
+    boot_log_suppress("SML value:");
     initialize_wifi_and_espnow();
     apply_power_management();
     /* Drop a candidate left pending by a reset during a trial. The trial worker

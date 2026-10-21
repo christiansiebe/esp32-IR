@@ -806,3 +806,25 @@ dem Odroid, Key in KEY, Doku in README.md).
   `TH_UPTIME_RESET_S=120`. Empfaenger-IP via `ESP32_RECEIVER` ueberschreibbar.
 - OFFENER BEFUND (2026-10-21): `sender-uart-dead` — der Sender liest 0 Bytes vom
   SML-Zaehler; das ist der naechste zu behebende Bug (nicht der Reachability-Fix).
+
+## Bootlog (/bootlog) — SML-Chatter unterdrueckt
+- `main/boot_log.{c,h}` haelt die letzten ~6 kB Log in einem RAM-Ring; der Permalink
+  ist `/api/bootlog` (Header `X-OTA-Key`).
+- Pro CRC-gueltigem Telegramm loggt die Firmware `SML value: OBIS=... ` (main.c:2935).
+  Diese hohe Rate fuellte den Ring in Sekunden und verdraengte die Startmeldungen.
+- Loesung: `boot_log_suppress(marker)` (max. 4 Marker, Substring). `app_main` registriert
+  `"SML value:"`; betroffene Zeilen bleiben auf der **Konsole**, fehlen aber im Ring.
+- Nur genau dieser Praefix ist unterdrueckt — andere SML-Zeilen (Fehler, "batch ring
+  full") bleiben im Bootlog. Host-Test: `test/test_boot_log.c`.
+
+## GitHub-Token des Odroid (Agenten)
+- Secret-Datei: `/root/.config/github-bridge/token` (0600). Herkunft/Sinn unklar,
+  Inhalt ist ein fine-grained PAT, login `christiansiebe`.
+- Zugang fuer Agenten: `/etc/gitconfig` registriert den Credential-Helper
+  `/root/.config/github-bridge/git-credential.sh` (liest nur die Datei; kein Secret in
+  einer git-Config/URL). `/root/.bashrc` exportiert `GITHUB_TOKEN`/`GITHUB_WRITE_TOKEN`
+  aus derselben Datei (Agenten-Shells lesen `.bashrc`, HOME ist leer).
+- **BLOCKER (2026-10-21):** Der PAT ist **read-only** — `git ls-remote` (upload-pack)
+  ok, `git push` (receive-pack) → **HTTP 403**. Die Repo-`permissions` der API
+  (`push:true`) sind die *Nutzer*-Rechte, nicht die Token-Scopes. Erst wenn der PAT
+  unter *Contents: Read and write* steht, funktioniert der Push ohne weiteres Zutun.
