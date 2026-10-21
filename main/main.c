@@ -47,6 +47,7 @@
 #include "energy_totals.h"
 #include "runtime_config.h"
 #include "sml_selftest.h"
+#include "trial_mode.h"
 #include "version.h"
 #include "wall_clock.h"
 #include "web_console.h"
@@ -467,6 +468,11 @@ static uint32_t g_rssi_latest_sequence;
 static bool g_rssi_capture_active;
 static portMUX_TYPE g_rssi_history_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t g_diag_response_queue;
+/* Serializes every ESP-NOW request/response exchange. The response queue is a
+ * single shared channel, so two concurrent exchanges (the HTTP proxy handlers,
+ * the history-sync worker) would steal each other's replies. One holder at a
+ * time keeps the request_id match meaningful. */
+static SemaphoreHandle_t g_sender_exchange_mutex;
 static uint8_t g_sender_mac[ESP_NOW_ETH_ALEN];
 static bool g_sender_mac_valid;
 static portMUX_TYPE g_sender_mac_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -5483,6 +5489,37 @@ static bool g_runtime_config_ready;
 #define RUNTIME_CONFIG_NVS_KEY "cfg"
 #define RUNTIME_CONFIG_NVS_VERSION 1u
 
+/* One wire layout for the persisted knobs, shared by the committed blob
+ * (rtcfg/cfg) and the trial candidate (trial/cand). */
+static void runtime_config_encode(const runtime_config_t *cfg, uint8_t blob[12])
+{
+    blob[0] = (uint8_t)RUNTIME_CONFIG_NVS_VERSION;
+    blob[1] = cfg->light_sleep ? 1u : 0u;
+    blob[2] = (uint8_t)cfg->cpu_mhz;
+    blob[3] = (uint8_t)cfg->cpu_min_mhz;
+    uint32_t retries = cfg->espnow_retries;
+    memcpy(&blob[4], &retries, sizeof(retries));
+}
+
+/* Returns true when blob is a well-formed, current-version config. */
+static bool runtime_config_decode(const uint8_t blob[12], size_t len,
+                                  runtime_config_t *cfg)
+{
+    if (len != 12 || blob[0] != RUNTIME_CONFIG_NVS_VERSION) {
+        return false;
+    }
+    runtime_config_t loaded = runtime_config_defaults();
+    loaded.light_sleep = blob[1] != 0;
+    loaded.cpu_mhz = blob[2];
+    loaded.cpu_min_mhz = blob[3];
+    uint32_t retries = 0;
+    memcpy(&retries, &blob[4], sizeof(retries));
+    loaded.espnow_retries = retries;
+    runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
+    *cfg = loaded;
+    return true;
+}
+
 static void runtime_config_store(const runtime_config_t *cfg)
 {
     nvs_handle_t handle;
@@ -5490,12 +5527,7 @@ static void runtime_config_store(const runtime_config_t *cfg)
         return;
     }
     uint8_t blob[12];
-    blob[0] = (uint8_t)RUNTIME_CONFIG_NVS_VERSION;
-    blob[1] = cfg->light_sleep ? 1u : 0u;
-    blob[2] = (uint8_t)cfg->cpu_mhz;
-    blob[3] = (uint8_t)cfg->cpu_min_mhz;
-    uint32_t retries = cfg->espnow_retries;
-    memcpy(&blob[4], &retries, sizeof(retries));
+    runtime_config_encode(cfg, blob);
     if (nvs_set_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, sizeof(blob)) == ESP_OK) {
         (void)nvs_commit(handle);
     }
@@ -5525,18 +5557,13 @@ static void runtime_config_load(runtime_config_t *cfg)
     size_t len = sizeof(blob);
     esp_err_t err = nvs_get_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, &len);
     nvs_close(handle);
-    if (err != ESP_OK || len != sizeof(blob) || blob[0] != RUNTIME_CONFIG_NVS_VERSION) {
+    if (err != ESP_OK) {
         return;
     }
-    runtime_config_t loaded = runtime_config_defaults();
-    loaded.light_sleep = blob[1] != 0;
-    loaded.cpu_mhz = blob[2];
-    loaded.cpu_min_mhz = blob[3];
-    uint32_t retries = 0;
-    memcpy(&retries, &blob[4], sizeof(retries));
-    loaded.espnow_retries = retries;
-    runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
-    *cfg = loaded;
+    runtime_config_t loaded;
+    if (runtime_config_decode(blob, len, &loaded)) {
+        *cfg = loaded;
+    }
 }
 
 static runtime_config_t *active_runtime_config(void)
@@ -5547,6 +5574,160 @@ static runtime_config_t *active_runtime_config(void)
         g_runtime_config_ready = true;
     }
     return &g_runtime_config;
+}
+
+/* --- Trial mode -----------------------------------------------------------
+ * A risky knob is applied as a trial: the candidate lives under its own NVS
+ * key, a pending marker survives a reset, and the boot that finds the marker
+ * drops the candidate and keeps the committed config. So a value that bricks
+ * the radio (bad DFS ceiling, a wedged sleep state) reverts on its own - the
+ * reset that the failed trial triggers is exactly what rolls it back. The
+ * decision logic is pure (trial_mode.c, host-tested); this is the glue. */
+#define TRIAL_NVS_NAMESPACE "trial"
+#define TRIAL_NVS_CAND_KEY "cand"
+
+static trial_t g_trial;
+
+static bool trial_marker_load(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(TRIAL_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return false;
+    }
+    uint8_t blob[12];
+    size_t len = sizeof(blob);
+    esp_err_t err = nvs_get_blob(handle, TRIAL_NVS_CAND_KEY, blob, &len);
+    nvs_close(handle);
+    return err == ESP_OK && len == sizeof(blob);
+}
+
+static void trial_marker_erase(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(TRIAL_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    (void)nvs_erase_key(handle, TRIAL_NVS_CAND_KEY);
+    (void)nvs_commit(handle);
+    nvs_close(handle);
+}
+
+static void trial_marker_store(const runtime_config_t *cfg)
+{
+    nvs_handle_t handle;
+    if (nvs_open(TRIAL_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    uint8_t blob[12];
+    runtime_config_encode(cfg, blob);
+    if (nvs_set_blob(handle, TRIAL_NVS_CAND_KEY, blob, sizeof(blob)) == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+}
+
+/* At boot, a surviving marker means the previous trial did not complete: drop
+ * the candidate (it was only ever applied live, never committed) and keep the
+ * committed config that active_runtime_config() already loaded. */
+static void trial_boot_recover(void)
+{
+    if (trial_boot_should_revert(trial_marker_load())) {
+        ESP_LOGW(TAG, "Trial did not complete (reset during the window); "
+                      "discarding the candidate and keeping the committed config");
+        trial_marker_erase();
+    }
+}
+
+/* The "device still works" signal for a trial: the heap is not starved and the
+ * radio still does its job. The runtime knobs can only break the radio or the
+ * scheduler, so that is what the signal has to prove.
+ *
+ * The two roles prove the radio differently: the receiver must hold its station
+ * link (association + a DHCP lease), because that is how its dashboard stays
+ * reachable; with no home WLAN the dashboard lives on the SoftAP, which is up by
+ * construction. The sender has no IP of its own (its IP_EVENT handler is
+ * deliberately not registered), so its proof is the association with the
+ * receiver AP. A false "unhealthy" only costs a revert to the committed config,
+ * so the signal errs toward the known-good value. */
+static bool trial_health_ok(void)
+{
+    if (esp_get_free_heap_size() <= 40960) {
+        return false;
+    }
+#if CONFIG_ESPNOW_ROLE_SENDER
+#if CONFIG_ESPNOW_SENDER_ASSOCIATE
+    return g_wifi_connected;
+#else
+    return true;
+#endif
+#else
+    if (g_wifi_configured) {
+        return g_wifi_connected && g_sta_got_ip;
+    }
+    return true;
+#endif
+}
+
+static void trial_commit(void)
+{
+    runtime_config_t *cfg = active_runtime_config();
+    runtime_config_store(cfg);   /* candidate becomes the committed config */
+    trial_marker_erase();
+    ESP_LOGI(TAG, "Trial survived; config committed");
+}
+
+static void trial_revert_now(const char *reason)
+{
+    /* The reboot is the revert: the pending marker is deliberately left in NVS
+     * so the next boot keeps the committed config even if this reboot wedges.
+     * Routed through boot_confirm_fail() so an unconfirmed image rolls back to
+     * the previous firmware instead of boot-looping. */
+    ESP_LOGE(TAG, "Trial failed (%s); rebooting to discard the candidate",
+             reason != NULL ? reason : "?");
+    boot_confirm_fail("trial health check failed");
+    esp_restart();
+}
+
+static void trial_worker(void *arg)
+{
+    (void)arg;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        bool healthy = trial_health_ok();
+        trial_action_t action = trial_tick(&g_trial, now_ms, healthy);
+        if (action == TRIAL_ACT_COMMIT) {
+            trial_commit();
+        } else if (action == TRIAL_ACT_REVERT) {
+            trial_revert_now("health signal lost inside the window");
+        }
+    }
+}
+
+/* Arm a trial for the current (just-applied) candidate config. */
+static void trial_arm(const runtime_config_t *candidate)
+{
+    trial_policy_t policy;
+    trial_policy_defaults(&policy);
+    trial_marker_store(candidate);
+    trial_begin(&g_trial, &policy, (uint64_t)(esp_timer_get_time() / 1000));
+    ESP_LOGW(TAG, "Trial armed for %u ms; a health failure reverts it",
+             (unsigned)policy.window_ms);
+}
+
+/* Start the trial worker once, on the first armed trial (keeps an idle task off
+ * the device during normal operation). */
+static void trial_worker_start_once(void)
+{
+    static bool started;
+    if (started) {
+        return;
+    }
+    started = true;
+    if (xTaskCreate(trial_worker, "trial_mode", 3072, NULL, 3, NULL) != pdPASS) {
+        started = false;
+        ESP_LOGW(TAG, "Could not start the trial worker");
+    }
 }
 
 /* Append NVS partition usage to out. Shared by the `test storage` console
@@ -5746,9 +5927,18 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
 {
     char key[24] = {0};
     char value[32] = {0};
-    if (sscanf(args, "%23s %31s", key, value) != 2) {
+    /* 'set trial <knob> <value>' applies the candidate and arms an auto-revert
+     * window instead of committing it outright. */
+    bool as_trial = false;
+    const char *rest = args;
+    char first[8] = {0};
+    if (sscanf(args, "%7s", first) == 1 && strcmp(first, "trial") == 0) {
+        as_trial = true;
+        rest = args + strlen(first);
+    }
+    if (sscanf(rest, "%23s %31s", key, value) != 2) {
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries> <value>\n");
+                 "usage: set [trial] <cpu|freq|cpu-min|sleep|retries> <value>\n");
         return;
     }
     runtime_config_t *cfg = active_runtime_config();
@@ -5759,8 +5949,15 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         return;
     }
     bool applied = runtime_config_apply(cfg);
-    /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only). */
-    runtime_config_store(cfg);
+    if (as_trial) {
+        /* Keep the committed value in NVS; the candidate lives only in RAM and
+         * under the trial marker, so a reset drops it. */
+        trial_arm(cfg);
+        trial_worker_start_once();
+    } else {
+        /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only). */
+        runtime_config_store(cfg);
+    }
 
     /* Say so when the stored value differs from what was asked for (a value
      * below the Wi-Fi minimum or off the DFS grid is snapped, not rejected). */
@@ -5794,7 +5991,8 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     }
 #endif
     int written = snprintf(out, out_size,
-                           "%s=%s%s%s\n", key, value, note,
+                           "%s=%s%s%s%s\n", key, value, note,
+                           as_trial ? " [trial: reverts unless it survives 60 s]" : "",
                            applied ? "" : " (hardware rejected the change)");
     if (written > 0 && (size_t)written < out_size) {
         runtime_config_render(cfg, out + written, out_size - (size_t)written);
@@ -5834,7 +6032,7 @@ static void web_console_register_commands(void)
     web_console_register("help", "list available commands", console_cmd_help);
     web_console_register("test", "run a self-test: sleep|cpu|sml|espnow|storage|nvs",
                          console_cmd_test);
-    web_console_register("set", "change a runtime knob: cpu|freq|cpu-min|sleep|retries",
+    web_console_register("set", "change a runtime knob: [trial] cpu|freq|cpu-min|sleep|retries",
                          console_cmd_set);
     web_console_register("config", "show the current test knobs",
                          console_cmd_config);
@@ -6026,22 +6224,40 @@ static esp_err_t sender_diag_exchange_once(const void *payload, size_t payload_l
  * (status/history reads); a command must not run twice. */
 #define SENDER_DIAG_ATTEMPTS 4u
 
+/* Serializes an ESP-NOW exchange against every other caller. NULL (early boot
+ * or a failed create) degrades to "no serialization" rather than crashing. */
+static void sender_exchange_lock(void)
+{
+    if (g_sender_exchange_mutex != NULL) {
+        (void)xSemaphoreTake(g_sender_exchange_mutex, portMAX_DELAY);
+    }
+}
+
+static void sender_exchange_unlock(void)
+{
+    if (g_sender_exchange_mutex != NULL) {
+        (void)xSemaphoreGive(g_sender_exchange_mutex);
+    }
+}
+
 static esp_err_t sender_diag_exchange_raw(const void *payload, size_t payload_len,
                                           uint32_t request_id,
                                           uint8_t *response, size_t *response_len)
 {
     esp_err_t err = ESP_ERR_TIMEOUT;
+    sender_exchange_lock();
     for (unsigned int attempt = 0; attempt < SENDER_DIAG_ATTEMPTS; ++attempt) {
         err = sender_diag_exchange_once(payload, payload_len, request_id,
                                         response, response_len);
         if (err == ESP_OK) {
-            return ESP_OK;
+            break;
         }
         /* A MAC/send error will not fix itself by retrying; only timeouts do. */
         if (err != ESP_ERR_TIMEOUT) {
-            return err;
+            break;
         }
     }
+    sender_exchange_unlock();
     return err;
 }
 
@@ -6090,8 +6306,10 @@ static esp_err_t sender_cmd_exchange(const char *line, char *out, size_t out_siz
     uint8_t response[ESP_NOW_MAX_DATA_LEN];
     size_t response_len = 0;
     /* No retry here: the sender would run the command again on a lost response. */
+    sender_exchange_lock();
     esp_err_t err = sender_diag_exchange_once(&request, sizeof(request), request_id,
                                               response, &response_len);
+    sender_exchange_unlock();
     if (err != ESP_OK) {
         return err;
     }
@@ -6429,7 +6647,7 @@ static esp_err_t history_backfill_api_handler(httpd_req_t *req)
     return httpd_resp_send(req, payload, len);
 }
 
-static esp_err_t sender_diag_api_handler(httpd_req_t *req)
+static esp_err_t sender_diag_render(httpd_req_t *req)
 {
     char query[96];
     char section_text[16] = "counters";
@@ -6802,7 +7020,7 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
  * from three ESP-NOW pulls (counters, crash, events). Kept as a single handler
  * so the page needs one round trip; each section is still fetched on demand, so
  * no diagnostics traffic flows during normal operation. */
-static esp_err_t sender_status_api_handler(httpd_req_t *req)
+static esp_err_t sender_status_render(httpd_req_t *req)
 {
     uint8_t response[ESP_NOW_MAX_DATA_LEN];
     size_t response_len = 0;
@@ -6988,7 +7206,7 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
 
 /* POST one command line to the sender (the tunnelled sender web console). The
  * key check matches the receiver's own console so a single key guards both. */
-static esp_err_t sender_console_api_handler(httpd_req_t *req)
+static esp_err_t sender_console_render(httpd_req_t *req)
 {
     if (!ota_key_is_valid(req)) {
         return send_http_error_status(req, "401 Unauthorized",
@@ -7022,6 +7240,93 @@ static esp_err_t sender_console_api_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_status(req, ok ? "200 OK" : "422 Unprocessable Entity");
     return httpd_resp_send(req, output, strlen(output));
+}
+
+/* The three proxy handlers above each perform a blocking ESP-NOW round trip
+ * (up to SENDER_DIAG_ATTEMPTS * ESPNOW_DIAG_TIMEOUT_MS = 6 s). esp_http_server
+ * runs every handler on ONE task, so while such a round trip is in flight the
+ * whole dashboard stops answering - the "receiver is often unreachable" report.
+ * Hand each request to its own short-lived task (the same trick the CSV upload
+ * uses) so the HTTP task returns immediately and keeps serving /healthz.
+ * A missing sender MAC fails fast (no round trip), so that case is answered
+ * inline and never pays for a task. */
+typedef enum {
+    SENDER_PROXY_DIAG = 0,
+    SENDER_PROXY_STATUS,
+    SENDER_PROXY_CONSOLE,
+} sender_proxy_kind_t;
+
+typedef struct {
+    httpd_req_t *req;
+    sender_proxy_kind_t kind;
+} sender_proxy_job_t;
+
+static void sender_proxy_task(void *arg)
+{
+    sender_proxy_job_t *job = (sender_proxy_job_t *)arg;
+    httpd_req_t *req = job->req;
+    liveness_note_alive();
+    switch (job->kind) {
+    case SENDER_PROXY_DIAG:
+        (void)sender_diag_render(req);
+        break;
+    case SENDER_PROXY_STATUS:
+        (void)sender_status_render(req);
+        break;
+    case SENDER_PROXY_CONSOLE:
+    default:
+        (void)sender_console_render(req);
+        break;
+    }
+    httpd_req_async_handler_complete(req);
+    free(job);
+    vTaskDelete(NULL);
+}
+
+/* Offload the current request; the worker renders and completes it. On any
+ * setup failure the request is answered inline (blocking) so the client still
+ * gets a definite result instead of a dropped connection. */
+static esp_err_t sender_proxy_dispatch(httpd_req_t *req, sender_proxy_kind_t kind,
+                                       esp_err_t (*render)(httpd_req_t *))
+{
+    httpd_req_t *copy = NULL;
+    esp_err_t err = httpd_req_async_handler_begin(req, &copy);
+    if (err != ESP_OK || copy == NULL) {
+        return render(req);
+    }
+    sender_proxy_job_t *job = calloc(1, sizeof(*job));
+    if (job == NULL) {
+        httpd_req_async_handler_complete(copy);
+        return send_http_error_status(req, "500 Internal Server Error",
+                                      "Out of memory for the sender request");
+    }
+    job->req = copy;
+    job->kind = kind;
+    /* 6144: the status render builds a 2048-byte payload plus a 768-byte crash
+     * snippet on the stack; the httpd task uses 8192 for the same work. */
+    if (xTaskCreate(sender_proxy_task, "sender_proxy", 6144, job, 3, NULL) != pdPASS) {
+        free(job);
+        httpd_req_async_handler_complete(copy);
+        return send_http_error_status(req, "500 Internal Server Error",
+                                      "Could not start the sender request task");
+    }
+    /* The worker owns the copy and sends the response. */
+    return ESP_OK;
+}
+
+static esp_err_t sender_diag_api_handler(httpd_req_t *req)
+{
+    return sender_proxy_dispatch(req, SENDER_PROXY_DIAG, sender_diag_render);
+}
+
+static esp_err_t sender_status_api_handler(httpd_req_t *req)
+{
+    return sender_proxy_dispatch(req, SENDER_PROXY_STATUS, sender_status_render);
+}
+
+static esp_err_t sender_console_api_handler(httpd_req_t *req)
+{
+    return sender_proxy_dispatch(req, SENDER_PROXY_CONSOLE, sender_console_render);
 }
 
 static esp_err_t sender_page_handler(httpd_req_t *req)
@@ -8390,6 +8695,9 @@ void app_main(void)
     boot_log_init();
     initialize_wifi_and_espnow();
     apply_power_management();
+    /* Drop a candidate left pending by a reset during a trial. The trial worker
+     * itself starts lazily when 'set trial' arms one. Runs on both roles. */
+    trial_boot_recover();
     /* Arm the task watchdog (generous timeout + panic) before any worker starts,
      * so the long-running workers can subscribe themselves and a wedged one
      * reboots the device instead of hanging. */
@@ -8421,6 +8729,11 @@ void app_main(void)
                                          sizeof(espnow_ota_rx_item_t));
     if (g_diag_response_queue == NULL) {
         ESP_LOGE(TAG, "Could not create receiver diagnostic response queue");
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+    g_sender_exchange_mutex = xSemaphoreCreateMutex();
+    if (g_sender_exchange_mutex == NULL) {
+        ESP_LOGE(TAG, "Could not create the sender exchange mutex");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
 #endif

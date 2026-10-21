@@ -211,6 +211,18 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_net_watchdog"
 
+# Trial mode: a risky runtime knob must commit only after a healthy window and
+# revert immediately on a health failure; a pending marker at boot always drops
+# the candidate. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/trial_mode.c" \
+    "$here/test_trial_mode.c" \
+    -o "$out/test_trial_mode"
+
+"$out/test_trial_mode"
+
 # Sender parser stall recovery: a wedged SML parser (bytes arriving, no telegram
 # finalised) must be reset by a timer armed by the first byte of the capture, not
 # by a telegram - the old rule left a wedge on the first telegram of a boot
