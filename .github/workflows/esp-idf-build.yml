@@ -71,15 +71,23 @@ jobs:
         run: |
           # The BOOT-button startup check turns a held button into a config
           # restore (3 s) or a forced firmware rollback (10 s); its GPIO/OTA
-          # calls are IDF-only. Compile the receiver branch (button enabled)
-          # against the stubbed headers so the real branch cannot rot silently.
-          # -DCONFIG_... mirrors the receiver default (GPIO0, 3000/10000 ms)
-          # since no sdkconfig exists on the host.
+          # calls are IDF-only. Both roles compile the real branch now, so check
+          # each one against the stubbed headers to catch silent rot.
+          # -DCONFIG_... mirrors the default (GPIO0, 3000/10000 ms) since no
+          # sdkconfig exists on the host.
+          for role in 0 1; do
+            gcc -std=c11 -fsyntax-only \
+              -DCONFIG_ESPNOW_ROLE_SENDER=$role \
+              -DCONFIG_RECOVERY_BUTTON_GPIO=0 \
+              -DCONFIG_RECOVERY_BUTTON_RESTORE_MS=3000 \
+              -DCONFIG_RECOVERY_BUTTON_ROLLBACK_MS=10000 \
+              -I test/host/include \
+              main/recovery_start.c
+          done
+          # And the disabled variant must still compile to no-op stubs.
           gcc -std=c11 -fsyntax-only \
-            -DCONFIG_ESPNOW_ROLE_SENDER=0 \
-            -DCONFIG_RECOVERY_BUTTON_GPIO=0 \
-            -DCONFIG_RECOVERY_BUTTON_RESTORE_MS=3000 \
-            -DCONFIG_RECOVERY_BUTTON_ROLLBACK_MS=10000 \
+            -DCONFIG_ESPNOW_ROLE_SENDER=1 \
+            -DCONFIG_RECOVERY_BUTTON_GPIO=-1 \
             -I test/host/include \
             main/recovery_start.c
 

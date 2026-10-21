@@ -12,8 +12,7 @@ endchoice
 
 config RECOVERY_BUTTON_GPIO
     int "Recovery button GPIO (BOOT button; -1 disables)"
-    default 0 if ESPNOW_ROLE_RECEIVER
-    default -1
+    default 0
     range -1 39
     help
         Holding this pin low for RECOVERY_BUTTON_RESTORE_MS at startup puts the
@@ -24,8 +23,12 @@ config RECOVERY_BUTTON_GPIO
         but broken" image. The default 0 is the on-board BOOT button on most
         ESP32 devkits. Set to -1 to disable.
 
-        Only the receiver honours this: the sender has no USB and is reachable
-        only over ESP-NOW, so its recovery is the relayed OTA path instead.
+        Both roles honour this. On the sender (no USB, reachable only over
+        ESP-NOW) the button is the local recovery path for an image that no
+        longer comes up far enough to accept the relayed OTA. GPIO0 is a
+        strapping pin, but it is only watched after the ROM has made its
+        download-mode decision, so an unpopulated button (pin pulled high) is
+        harmless.
 
 config RECOVERY_BUTTON_RESTORE_MS
     int "Recovery button hold to restore the config (ms)"

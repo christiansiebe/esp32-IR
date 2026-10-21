@@ -9,10 +9,13 @@
 
 #include "recovery_button.h"
 
-/* Only the receiver carries the recovery button. The sender has no USB and is
- * reachable only over ESP-NOW, so a bad image there is recovered by the relayed
- * OTA path, not by a local button. */
-#if !CONFIG_ESPNOW_ROLE_SENDER && CONFIG_RECOVERY_BUTTON_GPIO >= 0
+/* The recovery button is honoured on both roles. The receiver has a soldered
+ * button on the BOOT pin; the sender (which has no USB and is otherwise only
+ * reachable over ESP-NOW) can carry the same button so a bad image or a wedged
+ * config can be recovered locally instead of only via the relayed OTA path.
+ * CONFIG_RECOVERY_BUTTON_GPIO = -1 still compiles the whole thing to no-op
+ * stubs, e.g. for a board without a button or where GPIO0 is needed elsewhere. */
+#if CONFIG_RECOVERY_BUTTON_GPIO >= 0
 
 static const char *TAG = "recovery";
 
@@ -97,7 +100,7 @@ esp_err_t recovery_button_check(void)
     }
 }
 
-#else /* sender, or CONFIG_RECOVERY_BUTTON_GPIO < 0 */
+#else /* CONFIG_RECOVERY_BUTTON_GPIO < 0 */
 
 void recovery_set_restore_fn(recovery_restore_fn fn) { (void)fn; }
 esp_err_t recovery_button_check(void) { return ESP_OK; }
