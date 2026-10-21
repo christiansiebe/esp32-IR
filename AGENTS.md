@@ -817,6 +817,36 @@ dem Odroid, Key in KEY, Doku in README.md).
 - Nur genau dieser Praefix ist unterdrueckt — andere SML-Zeilen (Fehler, "batch ring
   full") bleiben im Bootlog. Host-Test: `test/test_boot_log.c`.
 
+## BOOT-Taste: Config-Restore (3 s) / Firmware-Rollback (10 s) – Empfänger
+- Eine gelötete Taste am **BOOT-Pin** (`CONFIG_RECOVERY_BUTTON_GPIO`, Default 0;
+  `-1` = aus) treibt zwei Aktionen, unterschieden nach Haltedauer **nach** dem Boot
+  (der ROM sampelt den Strap-Pin beim Download-Mode, daher erst danach beobachten):
+  - **≥3 s, dann loslassen** (`RECOVERY_BUTTON_RESTORE_MS`) → **vorherige Config
+    zurückholen** und rebooten.
+  - **≥10 s gehalten** (`RECOVERY_BUTTON_ROLLBACK_MS`) → **Firmware-Rollback**
+    (`esp_ota_mark_app_invalid_rollback_and_reboot`), auch wenn das laufende Image
+    schon bestätigt war.
+- **Restore feuert beim Loslassen**, nicht während des Haltens — sonst würde ein
+  3-s-Halt rebooten, bevor die 10-s-Rollback erreichbar ist. Reine Logik in
+  `main/recovery_button.{c,h}` (host-getestet, `test/test_recovery_button.c`);
+  GPIO/OTA/Callback-Glue in `main/recovery_start.{c,h}` (nur Empfänger; Sender-Stub).
+- **Zwei NVS-Slots im Namespace `rtcfg`:** `cfg` (committed) und **`prev`** (der
+  zuletzt ersetzte committed Wert). Jedes committed `set` legt **vorher** `prev` ab
+  (`runtime_config_store_prev`); die Taste/`restore-config` holen `prev` zurück.
+  Das ist nötig, weil ein `set cpu-min 40` in NVS liegt und ein simpler Reboot es
+  nur erneut anwendet.
+- **Trial-Mode ist davon getrennt:** `trial/cand` hält den *Kandidaten* für
+  `set trial …` und verwirft ihn bei Reset selbst (`main/trial_mode.{c,h}`). `prev`
+  ist der Rückweg für ein *committed* `set` — die beiden nicht verwechseln.
+- **Reihenfolge in `app_main`:** `recovery_set_restore_fn(...)` +
+  `recovery_button_check()` laufen **nach `initialize_wifi_and_espnow()` und VOR
+  `apply_power_management()`** — ein schlechter DFS-Boden hängt genau im Apply, also
+  muss die Rettung vorher greifen. Nicht wieder hinter `boot_confirm_init()` schieben.
+- Konsolenbefehl `restore-config` ruft denselben Pfad (Test/Remote). Ohne `prev`-Slot
+  passiert **nichts** (kein Reboot, Gerät bleibt erreichbar).
+- Grenzfall-Hinweis: `sdkconfig.receiver*` ist **nicht getrackt** (gitignore); die
+  Schwellen kommen aus den Kconfig-Defaults.
+
 ## GitHub-Token des Odroid (Agenten)
 - Secret-Datei: `/root/.config/github-bridge/token` (0600). Herkunft/Sinn unklar,
   Inhalt ist ein fine-grained PAT, login `christiansiebe`.

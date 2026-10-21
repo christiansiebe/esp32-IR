@@ -1,5 +1,68 @@
 # To-do – esp32-IR
 
+## ERLEDIGT+GEFLASHT (2026-10-21): BOOT-Taste – 3 s stellt Config zurück, 10 s Firmware-Rollback
+**Auftrag:** Eine gelötete BOOT-Taste soll zwei Rettungsaktionen auslösen; zwei Werte
+in NVS (aktueller + experimenteller Wert); zuerst nur der Empfänger.
+**Status: implementiert, host-getestet, gebaut und am Empfänger OTA-geflasht und
+live verifiziert.** Branch `feat/boot-button-config-restore` (Basis `cad898c` =
+`v0.1.1-2`, also **die laufende `fix/integration`-Linie**, nicht `main`).
+Geflashte Version: **`v0.1.1-4-g40538a9`**.
+
+**Wichtig – Befund beim Bauen:** Das „zwei Werte in NVS"-Konzept war auf der
+Basis **schon halb da**: der **Trial-Mode** (`trial/cand`, `main/trial_mode.{c,h}`,
+`set trial …`) hält den *Kandidaten* neben der committed Config (`rtcfg/cfg`) und
+verwirft ihn bei Reset selbst. Was fehlte, war der **Rückweg für ein *committed*
+`set`**: ein `set cpu-min 40` landet in NVS und wird nach jedem Reboot wieder
+angewandt – ein Reboot hilft also nicht. Deshalb:
+
+- [x] **Zweiter NVS-Slot `rtcfg/prev`**: jedes committed `set` legt **vorher** den
+      ersetzten Wert unter `prev` ab (`runtime_config_store_prev`). Genau das ist
+      der „vorherige Wert", den die Taste zurückholt.
+- [x] **`recovery_button.{c,h}` auf zwei Schwellen erweitert**: `RECOVERY_RESTORE`
+      (bei Loslassen nach ≥ `restore_ms`) und `RECOVERY_ROLLBACK` (gehalten ab
+      `rollback_ms`). Der Restore feuert **beim Loslassen**, nicht während des
+      Haltens – sonst würde ein 3-s-Halt neu starten, bevor die 10-s-Rollback
+      überhaupt erreichbar ist.
+- [x] **`recovery_start.{c,h}`**: pollt beide Fenster, ruft einen registrierten
+      Restore-Callback; die Glue kennt kein NVS. Sender-Zweig bleibt Stub
+      (`CONFIG_RECOVERY_BUTTON_GPIO=-1`).
+- [x] **Reihenfolge in `app_main` korrigiert**: die Prüfung läuft jetzt **direkt
+      nach `initialize_wifi_and_espnow()` und VOR `apply_power_management()`**
+      (der alte Aufruf bei `boot_confirm_init()` kam zu spät – ein schlechter
+      DFS-Boden hängt genau im Apply). `recovery_set_restore_fn(
+      runtime_config_restore_prev_and_reboot)` wird dort registriert.
+- [x] **Konsolenbefehl `restore-config`** (gleicher Pfad wie die Taste) für
+      Tests/Remote.
+- [x] **Kconfig**: `RECOVERY_BUTTON_HOLD_MS` → `RECOVERY_BUTTON_RESTORE_MS` (3000)
+      + `RECOVERY_BUTTON_ROLLBACK_MS` (10000). `sdkconfig.receiver*` (nicht
+      getrackt) lokal angepasst; CI zieht die Defaults.
+- [x] **Host-Test** `test/test_recovery_button.c` neu (22 Checks): 2,975 s idle,
+      3 s Restore, 10 s Rollback, „halten über 3 s verschiebt Restore aufs
+      Loslassen", Loslassen startet den Timer neu, freie Fenster, Reset.
+      Volle Host-Suite grün (`./test/run_host_tests.sh`, exit 0).
+- [x] **CI-Syntaxcheck** der Glue auf die neuen Flags umgestellt.
+- [x] **Build lokal** (`tools/build.sh receiver`, Docker `espressif/idf:v6.1`):
+      1330080 B, 15 % frei, Version `v0.1.1-4-g40538a9` im Binary.
+- [x] **OTA-Flash am Empfänger (Odroid, 192.168.178.70)** und live verifiziert:
+      - `set retries 5` → committed (`config` = `retries=5`);
+      - `restore-config` (= 3-s-Taste) → Reboot, danach `config` = **`retries=3`**;
+      - **SPIFFS-Historie unversehrt**: 9390/29000 Records, `write errors: 0`,
+        Sequence lief weiter (latest 10773) – `storage` wurde nicht angefasst;
+      - **Grenzfall ohne `prev`** (nach `reset-config`): `restore-config` rebottet
+        **nicht**, Gerät bleibt sofort erreichbar (HTTP 200) – kein Hänger.
+- [ ] **Physischer Tastentest** (echtes 3-s- und 10-s-Halten am Gerät) – steht
+      noch aus; der Code-Pfad ist über `restore-config` funktional bewiesen, die
+      GPIO-/OTA-Anbindung nur syntaktisch + per Log.
+- [ ] **Push** von `feat/boot-button-config-restore` – in der Sandbox ist
+      `/root/.config/github-bridge/token` **leer (0 B)**, `git push` schlägt fehl
+      („could not read Username"). Der Branch liegt lokal vor; Push nachreichen,
+      sobald ein Write-Token gesetzt ist.
+- [ ] **Sender** bekommt dieselbe Taste erst später (der Sender hat kein USB und
+      wird über den Relais-OTA-Weg gerettet, s. Kconfig-Hilfe).
+- Hinweis: Der angestrebte Versionssprung „von `0.1.1-2` weiter" ergibt wegen der
+  **separaten** WDT-Korrektur (`f475c01`) `v0.1.1-4`, nicht `-3` – beide Commits
+  sind echte Änderungen, daher bewusst so belassen.
+
 ## OFFEN (2026-10-21): ESP-NOW-Link bleibt nach Kanalwechsel des Routers tot
 **Nutzer:** „trotz Empfänger- und Sender-Neustart kam die Verbindung nicht
 wieder." **Am Gerät belegt (Odroid, 21.10.):** Die FRITZ!Box „Wohnzimmer" hat

@@ -26,6 +26,56 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-21 23:20 UTC · Bau-Chat (Branch feat/boot-button-config-restore, Commit 40538a9)
+**Auftrag:** BOOT-Taste am Empfänger – ≥3 s halten = **vorherige Laufzeit-Config
+zurückholen**, ≥10 s halten = **vorherige Firmware zurückrollen**; „zwei Werte in
+NVS" (aktuell + experimentell); zuerst nur der Empfänger; wenn nicht in GitHub
+baubar, **auf der Odroid bauen und flashen**; Version ab `0.1.1-2` fortsetzen.
+**Ergebnis: gebaut, OTA-geflasht und live verifiziert – `v0.1.1-4-g40538a9`.**
+
+**Basis-Entscheidung:** Die laufende Firmware (`v0.1.1-2-gcad898c`) stammt von
+**`fix/integration`**, nicht von `main` (die Branches sind divergiert; `main` hat
+den Tag `v0.1.1` gar nicht und würde Net-Watchdog + Link-Re-align verlieren).
+Branch daher von **`cad898c`** abgezweigt.
+
+**Wichtigster Befund (Dubletten-Regel):** Das „zwei Werte in NVS"-Konzept war auf
+dieser Basis **schon halb vorhanden** – der **Trial-Mode** (`main/trial_mode.{c,h}`,
+`set trial …`, NVS `trial/cand`) hält den *Kandidaten* neben der committed Config
+(`rtcfg/cfg`) und verwirft ihn bei Reset selbst. Es wurde deshalb **nicht** ein
+zweites Mal gebaut. Die echte Lücke war der **Rückweg für ein *committed* `set`**:
+ein `set cpu-min 40` liegt in NVS und wird nach jedem Reboot erneut angewandt – ein
+Reboot hilft also gerade nicht. Genau dafür ist die Taste da.
+
+**Gebaut (Empfänger):**
+- Neuer NVS-Slot **`rtcfg/prev`**: jedes committed `set` legt **vorher** den
+  ersetzten Wert ab (`runtime_config_store_prev`). Der Trial-Mode bleibt unberührt
+  (er deckt den *Kandidaten*-Slot, `prev` den *committed*-Rückweg).
+- `recovery_button.{c,h}`: zwei Schwellen, `RECOVERY_RESTORE` **beim Loslassen**
+  (≥3 s, <10 s), `RECOVERY_ROLLBACK` ab 10 s. Restore-on-release ist zwingend –
+  sonst würde ein 3-s-Halt neu starten, bevor die 10-s-Rollback erreichbar ist.
+- `recovery_start.{c,h}`: pollt beide Fenster, ruft einen registrierten
+  Restore-Callback (Glue bleibt NVS-frei); Sender-Zweig weiter Stub.
+- `app_main`: Prüfung **vor `apply_power_management()`** verschoben (der alte
+  Aufruf bei `boot_confirm_init()` kam zu spät – ein schlechter DFS-Boden hängt
+  genau im Apply). Neuer Konsolenbefehl `restore-config` (gleicher Pfad wie die
+  Taste).
+- Kconfig `RECOVERY_BUTTON_HOLD_MS` → `RECOVERY_BUTTON_RESTORE_MS` (3000) +
+  `RECOVERY_BUTTON_ROLLBACK_MS` (10000); CI-Syntaxcheck angepasst.
+- Host-Test `test/test_recovery_button.c` neu (22 Checks), volle Host-Suite grün.
+
+**Verifikation am Gerät (Odroid, 192.168.178.70):**
+`set retries 5` → committed; `restore-config` (= 3-s-Taste) → Reboot → `config`
+wieder **`retries=3`**. **SPIFFS-Historie unversehrt** (9390/29000, `write
+errors: 0`, Sequence weiter bei 10773). Grenzfall **ohne `prev`** (nach
+`reset-config`): kein Reboot, Gerät bleibt sofort erreichbar. Physischer
+3-s/10-s-Tastentest steht noch aus.
+
+**Offen:** **Push** fehlt – `/root/.config/github-bridge/token` ist in der Sandbox
+**leer (0 B)** (`git push` → „could not read Username"). Branch liegt lokal vor.
+Versionssprung ergibt wegen einer **separaten** WDT-Korrektur (`f475c01`)
+`v0.1.1-4` statt `-3`; beide Commits sind echte Änderungen. Sender bekommt die
+Taste später (kein USB → Relais-OTA-Rettung).
+
 ## 2026-10-18 21:20 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 57e010b)
 **Nachtrag 2 zu PR #32:** `main` ist erneut weitergelaufen (`#48` Sender-Link-Fix, `#27`
 Recovery-Button, u.a.), der Branch ist wieder **rebasd** auf `b2eaa51`. Konflikt nur in
