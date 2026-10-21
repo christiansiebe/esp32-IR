@@ -7913,10 +7913,13 @@ static void register_webserver_handlers(httpd_handle_t server)
 }
 
 #if CONFIG_ESPNOW_LINK_FALLBACK
-/* Per-device link watchdog. It polls the pure link_fallback state every 5 s and,
- * once the peer has been silent past the timeout, falls back to the proven mode
- * exactly once (sticky until reboot, so it cannot flap). The two sides watch
- * each other independently - no handshake, so they can never deadlock. */
+/* Per-device link watchdog. It polls the pure link_fallback state every 5 s.
+ * On the sender it also re-scans the receiver's SoftAP channel on a timer while
+ * the peer stays silent (the AP follows the home AP's channel, so a boot-time
+ * scan alone goes stale after every router channel change); once the peer has
+ * been silent past the timeout it falls back to the proven mode exactly once
+ * (sticky until reboot, so it cannot flap). The two sides watch each other
+ * independently - no handshake, so they can never deadlock. */
 static void link_fallback_worker(void *arg)
 {
     (void)arg;
@@ -7924,15 +7927,57 @@ static void link_fallback_worker(void *arg)
     portENTER_CRITICAL(&g_link_fallback_lock);
     link_fallback_init(&g_link_fallback, CONFIG_ESPNOW_LINK_FALLBACK_MS,
                        CONFIG_ESPNOW_LINK_FALLBACK_GRACE_MS, started_ms);
+#if CONFIG_ESPNOW_ROLE_SENDER
+    link_fallback_set_realign_interval(&g_link_fallback,
+                                       CONFIG_ESPNOW_LINK_REALIGN_MS);
+#endif
     portEXIT_CRITICAL(&g_link_fallback_lock);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(5000));
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        uint64_t uptime_ms = now_ms - started_ms;
+
+#if CONFIG_ESPNOW_ROLE_SENDER
+        /* Periodic channel re-align. The receiver's SoftAP moves with the home
+         * AP's channel, and our broadcast sends report success even when nobody
+         * listens, so the link only heals if we keep re-scanning. This runs on
+         * every poll (rate-limited inside the pure module), not once per boot,
+         * so it also recovers after the *next* router channel change. */
+        bool realign;
+        portENTER_CRITICAL(&g_link_fallback_lock);
+        realign = link_fallback_should_realign(&g_link_fallback, now_ms, uptime_ms);
+        portEXIT_CRITICAL(&g_link_fallback_lock);
+        if (realign) {
+            uint8_t before = g_espnow_channel;
+            uint8_t channel = espnow_align_channel_from_receiver_ap();
+            if (channel != 0 && channel != before) {
+                /* Re-add the broadcast peer so the new channel takes effect on
+                 * the next send. */
+                esp_now_del_peer(broadcast_mac);
+                esp_now_peer_info_t peer = {0};
+                memcpy(peer.peer_addr, broadcast_mac, ESP_NOW_ETH_ALEN);
+                peer.channel = g_espnow_channel;
+                peer.ifidx = ESPNOW_IF;
+                peer.encrypt = false;
+                esp_now_add_peer(&peer);
+                ESP_LOGW(TAG, "Link re-align: peer silent, moved ESP-NOW to "
+                              "receiver AP channel %u (was %u)", channel, before);
+                diag_log_event(ESPNOW_DIAG_LEVEL_WARN,
+                               "link re-align: channel %u -> %u", before, channel);
+            } else if (channel == 0) {
+                ESP_LOGW(TAG, "Link re-align: peer silent, receiver AP not "
+                              "visible; channel stays %u", before);
+            } else {
+                ESP_LOGI(TAG, "Link re-align: peer silent, channel %u confirmed",
+                         channel);
+            }
+        }
+#endif
+
         if (g_link_fallback_active) {
             continue; /* already fell back */
         }
-        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
-        uint64_t uptime_ms = now_ms - started_ms;
         bool fallback;
         portENTER_CRITICAL(&g_link_fallback_lock);
         fallback = link_fallback_should_fallback(&g_link_fallback, now_ms, uptime_ms);
@@ -8181,8 +8226,11 @@ static void run_sender(void)
         ESP_ERROR_CHECK(ESP_FAIL);
     }
 #if CONFIG_ESPNOW_LINK_FALLBACK
+    /* Larger stack than the receiver's: this worker calls the channel scan
+     * (espnow_align_channel_from_receiver_ap -> a 16-entry wifi_ap_record_t
+     * array, ~1.6 kB) on the sender. */
     task_result = xTaskCreate(link_fallback_worker, "link_fallback",
-                              3072, NULL, 2, NULL);
+                              4096, NULL, 2, NULL);
     if (task_result != pdPASS) {
         ESP_LOGW(TAG, "Could not start the link-fallback worker");
     }

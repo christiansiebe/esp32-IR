@@ -208,6 +208,21 @@ config ESPNOW_LINK_FALLBACK_GRACE_MS
         Uptime that must pass before the fallback may fire, so a slow peer boot
         does not look like a dead link.
 
+config ESPNOW_LINK_REALIGN_MS
+    int "Sender: re-scan the receiver AP channel this often while silent (ms)"
+    depends on ESPNOW_LINK_FALLBACK && ESPNOW_ROLE_SENDER
+    range 5000 3600000
+    default 60000
+    help
+        The receiver's SoftAP follows the home AP's channel, which the router can
+        change at any time, and the sender's broadcast sends report success even
+        when nobody is listening - so a single boot-time scan (or a one-shot
+        fallback) leaves the sender on a stale channel forever. While no frame
+        has arrived from the receiver for CONFIG_ESPNOW_LINK_FALLBACK_MS, the
+        sender re-scans for the receiver AP at most once per this interval and
+        re-aligns. Set 0 to disable the periodic re-align (boot-time scan only).
+        The receiver has no channel to chase and ignores this.
+
 config ESPNOW_RECEIVER_HEALTH_WATCHDOG
     bool "Receiver: self-healing health watchdog (reboot on stale data / low heap)"
     depends on ESPNOW_ROLE_RECEIVER

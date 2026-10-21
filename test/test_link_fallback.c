@@ -98,6 +98,88 @@ int main(void)
     /* NULL is safe. */
     CHECK(!link_fallback_should_fallback(NULL, 1, 1), "NULL state -> false");
 
+    /* --- Periodic channel re-align (sender) ------------------------------- */
+
+    /* Off by default: a receiver that never calls the setter must not re-scan. */
+    link_fallback_t off;
+    link_fallback_init(&off, T_MS, 0, 0);
+    CHECK(!link_fallback_should_realign(&off, 10u * T_MS, 10u * T_MS),
+          "re-align disabled -> never fires");
+
+    /* While the peer keeps answering, the channel is fine and no scan runs. */
+    link_fallback_t live;
+    link_fallback_init(&live, T_MS, 0, 0);
+    link_fallback_set_realign_interval(&live, T_MS);
+    bool live_realigned = false;
+    for (uint64_t t = 0; t <= 20u * T_MS; t += 5000) {
+        link_fallback_note_rx(&live, t);
+        if (link_fallback_should_realign(&live, t, t)) {
+            live_realigned = true;
+        }
+    }
+    CHECK(!live_realigned, "traffic every 5 s -> no re-align");
+
+    /* A broadcast sender's own sends always "succeed" into the void; they must
+     * not mask the silence, or the stale channel is never re-scanned. */
+    link_fallback_t stuck_sender;
+    link_fallback_init(&stuck_sender, T_MS, 0, 0);
+    link_fallback_set_realign_interval(&stuck_sender, T_MS);
+    uint64_t st = 0;
+    bool masked = false;
+    for (int i = 0; i < 100; ++i) {
+        st += 5000;
+        link_fallback_note_send_ok(&stuck_sender, st);
+        if (link_fallback_should_realign(&stuck_sender, st, st)) {
+            masked = true;
+        }
+    }
+    CHECK(masked, "silent peer re-aligns even while sends report success");
+
+    /* Rate-limited: polling every 5 s re-scans once per interval, not once per
+     * poll. Count the fires over a window and compare to the interval. */
+    link_fallback_t paced;
+    link_fallback_init(&paced, T_MS, 0, 0);
+    link_fallback_set_realign_interval(&paced, 60000u);
+    int fires = 0;
+    uint64_t pt = 0;
+    for (int i = 0; i < 120; ++i) { /* 120 * 5 s = 10 min */
+        pt += 5000;
+        if (link_fallback_should_realign(&paced, pt, pt)) {
+            ++fires;
+        }
+    }
+    /* First fire at T_MS, then every 60 s for the remaining ~9 min -> ~10. */
+    CHECK(fires >= 8 && fires <= 11, "one scan per interval, not per poll");
+
+    /* The uptime grace gates the first scan too. */
+    link_fallback_t boot_grace;
+    link_fallback_init(&boot_grace, T_MS, 120000u, 0);
+    link_fallback_set_realign_interval(&boot_grace, T_MS);
+    CHECK(!link_fallback_should_realign(&boot_grace, T_MS, T_MS),
+          "silent but inside the grace -> no re-align");
+    CHECK(link_fallback_should_realign(&boot_grace, 120000, 120000),
+          "grace passed -> re-align");
+
+    /* A frame arriving re-arms the re-align silence window (a re-align that
+     * fixed the channel must not keep scanning every interval). */
+    link_fallback_t healed;
+    link_fallback_init(&healed, T_MS, 0, 0);
+    link_fallback_set_realign_interval(&healed, T_MS);
+    CHECK(link_fallback_should_realign(&healed, T_MS, T_MS), "fires while silent");
+    link_fallback_note_rx(&healed, T_MS + 1); /* channel fixed, peer answers */
+    CHECK(!link_fallback_should_realign(&healed, T_MS + T_MS - 1, T_MS + T_MS - 1),
+          "answered peer -> no further re-align");
+
+    /* The clock going backwards must not fire a re-align. */
+    link_fallback_t rewind;
+    link_fallback_init(&rewind, T_MS, 0, 0);
+    link_fallback_set_realign_interval(&rewind, T_MS);
+    link_fallback_note_rx(&rewind, 100000);
+    CHECK(!link_fallback_should_realign(&rewind, 50000, 100000),
+          "now before last_rx -> no re-align");
+
+    CHECK(!link_fallback_should_realign(NULL, 1, 1), "NULL re-align -> false");
+
     printf("link fallback: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -17,6 +17,15 @@
  * dropped until the next boot. Re-arming it after a single answered poll would
  * flap (sleep off -> peer answers -> sleep on -> silence -> ...).
  *
+ * The sender additionally needs a *repeatable* channel re-align, not a sticky
+ * one: the receiver's SoftAP follows the home AP's channel, which the router can
+ * change at any time, and the sender's broadcast TX path reports success even
+ * when nobody is listening. So a single boot-time scan (or a single fallback)
+ * leaves the sender transmitting on a stale channel forever. While the peer is
+ * silent the sender re-scans on a timer (see link_fallback_should_realign),
+ * which keys on the *receive* direction only - last_ok must not mask it, or a
+ * broadcast-only sender would never notice the silence.
+ *
  * Pure C, no ESP-IDF, so the transition is host-tested (test/test_link_fallback.c).
  */
 
@@ -36,6 +45,8 @@ typedef struct {
     uint32_t min_uptime_ms;      /* grace after boot before the link is judged */
     uint64_t last_rx_ms;         /* last inbound peer frame */
     uint64_t last_ok_ms;         /* last acknowledged send to the peer */
+    uint32_t realign_interval_ms;/* min gap between channel re-align attempts (0 = off) */
+    uint64_t last_realign_ms;    /* last re-align attempt, to rate-limit the scan */
     bool latched;                /* fell back; sticky until a fresh init */
 } link_fallback_t;
 
@@ -56,6 +67,20 @@ void link_fallback_note_rx(link_fallback_t *fb, uint64_t now_ms);
 /* Our own send to the peer was acknowledged; also counts as the link being up.
  * Used by the sender, whose outbound path is what adaptive light sleep breaks. */
 void link_fallback_note_send_ok(link_fallback_t *fb, uint64_t now_ms);
+
+/* Enable the repeatable channel re-align: while the *receive* direction has been
+ * silent for at least this long, link_fallback_should_realign() fires once per
+ * interval so the caller can re-scan the receiver's AP channel. 0 disables it
+ * (the receiver, which has no channel to chase, leaves it off). */
+void link_fallback_set_realign_interval(link_fallback_t *fb, uint32_t interval_ms);
+
+/* True when the peer has been silent long enough (receive direction only, so a
+ * broadcast sender whose sends always "succeed" still notices) and the re-align
+ * interval has elapsed since the last attempt. Each true advances the timer, so
+ * a caller polling faster than the interval re-scans at most once per interval.
+ * Never latches: the channel can go stale again after the router changes it. */
+bool link_fallback_should_realign(link_fallback_t *fb, uint64_t now_ms,
+                                  uint64_t uptime_ms);
 
 /* True when the peer has been silent past the timeout and the uptime grace has
  * passed. Latches on first true (sticky) so the caller cannot flap. */
