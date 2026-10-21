@@ -67,8 +67,10 @@ trap 'rm -rf "$out"' EXIT
 "$out/test_boot_policy"
 
 # Recovery-button gesture (receiver): the pure timing logic that turns a held
-# BOOT button into a forced rollback. Replays press patterns tick by tick; the
-# GPIO read and the OTA call live in recovery_start.c, which is not host-built.
+# BOOT button into a config restore (3 s, on release) or a firmware rollback
+# (10 s, still held). Replays press patterns tick by tick; the GPIO read, the OTA
+# call and the config-restore callback live in recovery_start.c, which is not
+# host-built.
 "$cc" -std=c11 -Wall -Wextra -O2 \
     -Wno-unused-variable -Wno-unused-const-variable \
     -I"$repo/main" \

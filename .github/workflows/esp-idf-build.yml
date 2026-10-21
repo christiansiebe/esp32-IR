@@ -69,15 +69,17 @@ jobs:
       - name: Compile the recovery-button glue
         shell: bash
         run: |
-          # The BOOT-button startup check turns a held button into a forced
-          # rollback; its GPIO/OTA calls are IDF-only. Compile the receiver
-          # branch (button enabled) against the stubbed headers so the real
-          # branch cannot rot silently. -DCONFIG_... mirrors the receiver
-          # default (GPIO0, 3000 ms) since no sdkconfig exists on the host.
+          # The BOOT-button startup check turns a held button into a config
+          # restore (3 s) or a forced firmware rollback (10 s); its GPIO/OTA
+          # calls are IDF-only. Compile the receiver branch (button enabled)
+          # against the stubbed headers so the real branch cannot rot silently.
+          # -DCONFIG_... mirrors the receiver default (GPIO0, 3000/10000 ms)
+          # since no sdkconfig exists on the host.
           gcc -std=c11 -fsyntax-only \
             -DCONFIG_ESPNOW_ROLE_SENDER=0 \
             -DCONFIG_RECOVERY_BUTTON_GPIO=0 \
-            -DCONFIG_RECOVERY_BUTTON_HOLD_MS=3000 \
+            -DCONFIG_RECOVERY_BUTTON_RESTORE_MS=3000 \
+            -DCONFIG_RECOVERY_BUTTON_ROLLBACK_MS=10000 \
             -I test/host/include \
             main/recovery_start.c
 

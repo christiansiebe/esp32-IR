@@ -5487,6 +5487,10 @@ static bool g_runtime_config_ready;
 
 #define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
 #define RUNTIME_CONFIG_NVS_KEY "cfg"
+/* The config a committed change replaced. Written before every committed store
+ * so the BOOT button (and 'restore-config') can go back one step, which a plain
+ * reboot cannot: the bad value lives in NVS and would just be re-applied. */
+#define RUNTIME_CONFIG_NVS_KEY_PREV "prev"
 #define RUNTIME_CONFIG_NVS_VERSION 1u
 
 /* One wire layout for the persisted knobs, shared by the committed blob
@@ -5520,7 +5524,7 @@ static bool runtime_config_decode(const uint8_t blob[12], size_t len,
     return true;
 }
 
-static void runtime_config_store(const runtime_config_t *cfg)
+static void runtime_config_store_key(const runtime_config_t *cfg, const char *key)
 {
     nvs_handle_t handle;
     if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
@@ -5528,10 +5532,22 @@ static void runtime_config_store(const runtime_config_t *cfg)
     }
     uint8_t blob[12];
     runtime_config_encode(cfg, blob);
-    if (nvs_set_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, sizeof(blob)) == ESP_OK) {
+    if (nvs_set_blob(handle, key, blob, sizeof(blob)) == ESP_OK) {
         (void)nvs_commit(handle);
     }
     nvs_close(handle);
+}
+
+/* Persist the knobs as the active config. */
+static void runtime_config_store(const runtime_config_t *cfg)
+{
+    runtime_config_store_key(cfg, RUNTIME_CONFIG_NVS_KEY);
+}
+
+/* Remember the config the next committed change replaces. */
+static void runtime_config_store_prev(const runtime_config_t *cfg)
+{
+    runtime_config_store_key(cfg, RUNTIME_CONFIG_NVS_KEY_PREV);
 }
 
 static void runtime_config_erase(void)
@@ -5545,25 +5561,46 @@ static void runtime_config_erase(void)
     nvs_close(handle);
 }
 
-/* Load the persisted knobs, clamped to what this build allows. A missing or
- * malformed blob leaves *cfg untouched (the caller keeps the defaults). */
-static void runtime_config_load(runtime_config_t *cfg)
+/* Load one persisted slot, clamped to what this build allows. Returns false and
+ * leaves *cfg untouched when the slot is missing or malformed. */
+static bool runtime_config_load_key(runtime_config_t *cfg, const char *key)
 {
     nvs_handle_t handle;
     if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
-        return;
+        return false;
     }
     uint8_t blob[12];
     size_t len = sizeof(blob);
-    esp_err_t err = nvs_get_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, &len);
+    esp_err_t err = nvs_get_blob(handle, key, blob, &len);
     nvs_close(handle);
     if (err != ESP_OK) {
-        return;
+        return false;
     }
     runtime_config_t loaded;
-    if (runtime_config_decode(blob, len, &loaded)) {
-        *cfg = loaded;
+    if (!runtime_config_decode(blob, len, &loaded)) {
+        return false;
     }
+    *cfg = loaded;
+    return true;
+}
+
+/* Load the active config. A missing or malformed blob leaves *cfg untouched
+ * (the caller keeps the defaults). */
+static void runtime_config_load(runtime_config_t *cfg)
+{
+    (void)runtime_config_load_key(cfg, RUNTIME_CONFIG_NVS_KEY);
+}
+
+/* Read back the previous committed config. Returns false when no previous slot
+ * exists, so a caller never overwrites the live config with nothing. */
+static bool runtime_config_restore_prev(runtime_config_t *out)
+{
+    runtime_config_t prev;
+    if (!runtime_config_load_key(&prev, RUNTIME_CONFIG_NVS_KEY_PREV)) {
+        return false;
+    }
+    *out = prev;
+    return true;
 }
 
 static runtime_config_t *active_runtime_config(void)
@@ -5728,6 +5765,32 @@ static void trial_worker_start_once(void)
         started = false;
         ESP_LOGW(TAG, "Could not start the trial worker");
     }
+}
+
+/* Restore the config the last committed change replaced and reboot. Registered
+ * with recovery_start.c, which calls it on a BOOT-button restore gesture, and
+ * used by the 'restore-config' console command. Runs early in app_main, before
+ * the persisted knobs are applied, so a value that hangs the device (e.g. a
+ * 'set cpu-min 40' that wedges the radio) can be undone without a reflash.
+ * A pending trial marker is dropped too: whatever was being tried is abandoned. */
+static void runtime_config_restore_prev_and_reboot(void)
+{
+    runtime_config_t prev;
+    if (!runtime_config_restore_prev(&prev)) {
+        ESP_LOGW(TAG, "No previous config to restore; keeping the current one");
+        return;
+    }
+    trial_marker_erase();
+    runtime_config_store(&prev);
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* Only the sender keeps a crash journal, so only it has to label the reboot
+     * as deliberate (otherwise it would be read as a crash on the next boot). */
+    crash_journal_mark_clean_restart();
+#endif
+    ESP_LOGW(TAG, "Restored the previous config (cpu %u/%u MHz, sleep %s); rebooting",
+             (unsigned)prev.cpu_min_mhz, (unsigned)prev.cpu_mhz,
+             prev.light_sleep ? "on" : "off");
+    esp_restart();
 }
 
 /* Append NVS partition usage to out. Shared by the `test storage` console
@@ -5942,6 +6005,9 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         return;
     }
     runtime_config_t *cfg = active_runtime_config();
+    /* Capture the live values before the set mutates them, so a committed
+     * change can store them as the one-step-back restore point. */
+    runtime_config_t before = *cfg;
     char err[64] = {0};
     if (!runtime_config_set(cfg, key, value, CONFIG_ESPNOW_CPU_MAX_MHZ, err,
                             sizeof(err))) {
@@ -5955,7 +6021,10 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         trial_arm(cfg);
         trial_worker_start_once();
     } else {
-        /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only). */
+        /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only),
+         * and keep the replaced value as the restore point the BOOT button and
+         * 'restore-config' go back to. */
+        runtime_config_store_prev(&before);
         runtime_config_store(cfg);
     }
 
@@ -6016,6 +6085,16 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
     }
 }
 
+static void console_cmd_restore_config(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    (void)out;
+    (void)out_size;
+    /* Same action as the BOOT-button restore: put the previous committed values
+     * back and reboot. Does not return when a previous slot exists. */
+    runtime_config_restore_prev_and_reboot();
+}
+
 static void console_cmd_config(const char *args, char *out, size_t out_size)
 {
     (void)args;
@@ -6038,6 +6117,9 @@ static void web_console_register_commands(void)
                          console_cmd_config);
     web_console_register("reset-config", "restore the default test knobs",
                          console_cmd_reset_config);
+    web_console_register("restore-config",
+                         "put the previous knobs back and reboot (BOOT button >= 3 s)",
+                         console_cmd_restore_config);
     web_console_register("status", "wifi, channel, clock and heap",
                          console_cmd_status);
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -8699,6 +8781,14 @@ void app_main(void)
      * off the /bootlog ring. */
     boot_log_suppress("SML value:");
     initialize_wifi_and_espnow();
+    /* Watch the BOOT button BEFORE the persisted knobs are applied: a bad
+     * 'set cpu-min 40' wedges the device in apply_power_management(), so the
+     * escape hatch has to run first. A 3 s hold puts the previous config back
+     * and reboots; holding on to 10 s rolls back the firmware. A normal boot
+     * (button untouched) returns immediately. NVS is up by now, which the
+     * restore path needs. */
+    recovery_set_restore_fn(runtime_config_restore_prev_and_reboot);
+    (void)recovery_button_check();
     apply_power_management();
     /* Drop a candidate left pending by a reset during a trial. The trial worker
      * itself starts lazily when 'set trial' arms one. Runs on both roles. */
@@ -8801,13 +8891,9 @@ void app_main(void)
         }
     }
 #else
-    /* Manual recovery: holding the BOOT button at startup forces a rollback to
-     * the previous firmware, even when this image was already confirmed. Runs
-     * before the OTA confirmation so it can always rescue a confirmed-but-broken
-     * build, which the automatic policy can no longer roll back. A normal boot
-     * (button not pressed) returns immediately. */
-    (void)recovery_button_check();
-    /* Receiver: do not accept the running image right away. It is confirmed
+    /* The BOOT-button check already ran early in app_main (before the persisted
+     * knobs were applied), so the restore/rollback gesture is handled there.
+     * Receiver: do not accept the running image right away. It is confirmed
      * only after the dashboard is up and a stability window has passed; an
      * image that never comes up is rolled back to the previous OTA slot. This
      * keeps the CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE safety net intact.
