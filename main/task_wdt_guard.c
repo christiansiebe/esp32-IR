@@ -44,13 +44,22 @@ esp_err_t task_wdt_guard_init(void)
         .idle_core_mask = idle_core_mask(),
         .trigger_panic = policy.panic,
     };
+    /* With CONFIG_ESP_TASK_WDT_INIT=y the IDF has already created the TWDT
+     * during startup, so calling esp_task_wdt_init() would only fail with
+     * ESP_ERR_INVALID_STATE and emit a spurious "TWDT already initialized"
+     * ERROR into the boot log. Adopt the existing handle with our generous
+     * timeout + panic instead of leaving the default 5 s / no-panic policy that
+     * would reset a healthy worker. Only when auto-init is disabled do we create
+     * the watchdog ourselves. The compile-time flag is authoritative: there is
+     * no query API that reports initialisation without logging an error. */
+#if CONFIG_ESP_TASK_WDT_INIT
+    esp_err_t err = esp_task_wdt_reconfigure(&config);
+#else
     esp_err_t err = esp_task_wdt_init(&config);
     if (err == ESP_ERR_INVALID_STATE) {
-        /* The IDF initialised the TWDT at startup (CONFIG_ESP_TASK_WDT_INIT);
-         * adopt it with our generous timeout + panic instead of leaving the
-         * default 5 s / no-panic policy that would reset a healthy worker. */
         err = esp_task_wdt_reconfigure(&config);
     }
+#endif
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Could not configure the task watchdog: %s",
                  esp_err_to_name(err));
