@@ -199,6 +199,18 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_link_fallback"
 
+# Receiver Wi-Fi link watchdog: a lost association/IP must escalate to a
+# reconnect and then a reboot instead of leaving the device silently offline
+# (web_guard only probes the loopback and never notices a dead link). Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/net_watchdog.c" \
+    "$here/test_net_watchdog.c" \
+    -o "$out/test_net_watchdog"
+
+"$out/test_net_watchdog"
+
 # Sender parser stall recovery: a wedged SML parser (bytes arriving, no telegram
 # finalised) must be reset by a timer armed by the first byte of the capture, not
 # by a telegram - the old rule left a wedge on the first telegram of a boot
