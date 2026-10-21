@@ -26,6 +26,39 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-22 00:35 UTC · Bau-Chat (Branch feat/boot-button-config-restore, Commit 5106ab5)
+**Nachtrag: Taste gilt jetzt auch für den Sender.**
+Die Verdrahtung in `app_main` war bereits rollen-agnostisch (beide Rollen rufen
+`recovery_set_restore_fn()` + `recovery_button_check()`); nur `recovery_start.c`
+gatete die echte Implementierung hinter `!CONFIG_ESPNOW_ROLE_SENDER` → Sender
+kompilierte zu No-op-Stubs. Gate geöffnet. `RECOVERY_BUTTON_GPIO`-Default jetzt
+**0 für beide Rollen** (Onboard-BOOT-Taste); `-1` schaltet weiter auf Stubs.
+Begründung: Der Sender hat kein USB und ist sonst nur per ESP-NOW erreichbar —
+ohne Taste gibt es für ein Image, das nicht weit genug hochkommt, um das
+Relais-OTA (`/update-sender`) anzunehmen, **keinen** lokalen Rückweg. GPIO0 ist
+Strapping-Pin, wird aber erst nach der ROM-Download-Mode-Entscheidung
+beobachtet; eine nicht bestückte Taste (Pin hochgezogen) liest sich als „nicht
+gedrückt". Der `rtcfg/prev`-Slot und der Restore-Callback sind geteilter Code,
+der Sender erbt also dasselbe Ein-Schritt-zurück.
+- Sender-Build grün (940304 B, Button-Strings im Image), Receiver unverändert
+  1330080 B, Host-Suite grün.
+- CI-Syntaxcheck prüft jetzt **beide** Rollen (GPIO 0) **und** den Stub (GPIO -1).
+- **Noch nicht geflasht**: der Sender hängt am Messpunkt ohne USB → Flash über
+  `/update-sender`. Damit die Taste im Feld wirkt, muss der Sender das Image
+  bekommen. Physischer Tastentest (3 s / 10 s) weiterhin offen.
+
+**Frage des Nutzers zum SoftAP (Antwort, weil schon einmal schiefgegangen):**
+Der AP ist **standardmäßig AN** (`CONFIG_ESPNOW_RECEIVER_DISABLE_AP` default `n`,
+live bestätigt: „AP started: SSID=ESP32-IR-Meter, channel=1"). Ein **Laufzeit**-Aus
+des AP wurde am 2026-10-17 gebaut (`04add16`) und **zurückgenommen** (`71409c8`),
+weil er den ESP-NOW-Link killte: die Empfänger-Peers liegen auf `WIFI_IF_AP`
+(`ESPNOW_IF`), und `wifi_set_ap_enabled(false)` = `esp_wifi_set_mode(WIFI_MODE_STA)`
+reißt das AP-Interface ab → jeder Austausch (diag, Backfill, OTA, Broadcast) stoppt
+still nach `STA_GOT_IP` (am Gerät belegt). Ein AP-Aus geht nur **compile-time**
+(`CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y`), dann läuft ESP-NOW auf `WIFI_IF_STA` und
+es gibt gar kein AP-Interface zum Abreißen — aber dann muss der Router fest auf
+`CONFIG_ESPNOW_CHANNEL` (1) stehen. Siehe TODO-Abschnitt „Empfänger AP aus".
+
 ## 2026-10-21 23:20 UTC · Bau-Chat (Branch feat/boot-button-config-restore, Commit 40538a9)
 **Auftrag:** BOOT-Taste am Empfänger – ≥3 s halten = **vorherige Laufzeit-Config
 zurückholen**, ≥10 s halten = **vorherige Firmware zurückrollen**; „zwei Werte in

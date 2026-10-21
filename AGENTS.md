@@ -817,19 +817,27 @@ dem Odroid, Key in KEY, Doku in README.md).
 - Nur genau dieser Praefix ist unterdrueckt — andere SML-Zeilen (Fehler, "batch ring
   full") bleiben im Bootlog. Host-Test: `test/test_boot_log.c`.
 
-## BOOT-Taste: Config-Restore (3 s) / Firmware-Rollback (10 s) – Empfänger
-- Eine gelötete Taste am **BOOT-Pin** (`CONFIG_RECOVERY_BUTTON_GPIO`, Default 0;
-  `-1` = aus) treibt zwei Aktionen, unterschieden nach Haltedauer **nach** dem Boot
-  (der ROM sampelt den Strap-Pin beim Download-Mode, daher erst danach beobachten):
+## BOOT-Taste: Config-Restore (3 s) / Firmware-Rollback (10 s) – **beide Rollen**
+- Eine gelötete Taste am **BOOT-Pin** (`CONFIG_RECOVERY_BUTTON_GPIO`, Default **0
+  für beide Rollen**; `-1` = aus) treibt zwei Aktionen, unterschieden nach
+  Haltedauer **nach** dem Boot (der ROM sampelt den Strap-Pin beim Download-Mode,
+  daher erst danach beobachten):
   - **≥3 s, dann loslassen** (`RECOVERY_BUTTON_RESTORE_MS`) → **vorherige Config
     zurückholen** und rebooten.
   - **≥10 s gehalten** (`RECOVERY_BUTTON_ROLLBACK_MS`) → **Firmware-Rollback**
     (`esp_ota_mark_app_invalid_rollback_and_reboot`), auch wenn das laufende Image
     schon bestätigt war.
+- **Auch der Sender** honoriert die Taste: Er hat kein USB und ist sonst nur per
+  ESP-NOW erreichbar, also ist die Taste dort der lokale Rückweg für ein Image,
+  das nicht weit genug hochkommt, um das Relais-OTA (`/update-sender`) anzunehmen.
+  Die Verdrahtung in `app_main` ist rollen-agnostisch; `recovery_start.c` gatet
+  nur noch auf `CONFIG_RECOVERY_BUTTON_GPIO >= 0`, nicht mehr auf die Rolle.
+  Eine nicht bestückte Taste (Pin hochgezogen) liest sich als „nicht gedrückt".
 - **Restore feuert beim Loslassen**, nicht während des Haltens — sonst würde ein
   3-s-Halt rebooten, bevor die 10-s-Rollback erreichbar ist. Reine Logik in
   `main/recovery_button.{c,h}` (host-getestet, `test/test_recovery_button.c`);
-  GPIO/OTA/Callback-Glue in `main/recovery_start.{c,h}` (nur Empfänger; Sender-Stub).
+  GPIO/OTA/Callback-Glue in `main/recovery_start.{c,h}` (beide Rollen; `-1` =
+  Stub).
 - **Zwei NVS-Slots im Namespace `rtcfg`:** `cfg` (committed) und **`prev`** (der
   zuletzt ersetzte committed Wert). Jedes committed `set` legt **vorher** `prev` ab
   (`runtime_config_store_prev`); die Taste/`restore-config` holen `prev` zurück.

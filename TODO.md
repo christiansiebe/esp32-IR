@@ -53,14 +53,27 @@ angewandt – ein Reboot hilft also nicht. Deshalb:
 - [ ] **Physischer Tastentest** (echtes 3-s- und 10-s-Halten am Gerät) – steht
       noch aus; der Code-Pfad ist über `restore-config` funktional bewiesen, die
       GPIO-/OTA-Anbindung nur syntaktisch + per Log.
+- [x] **Sender bekommt dieselbe Taste** (`5106ab5`): Die Verdrahtung in
+      `app_main` war bereits rollen-agnostisch; nur `recovery_start.c` gatete die
+      echte Implementierung hinter `!CONFIG_ESPNOW_ROLE_SENDER`. Gate geöffnet,
+      `RECOVERY_BUTTON_GPIO`-Default ist jetzt **0 für beide Rollen** (die
+      Onboard-BOOT-Taste), `-1` schaltet weiter auf Stubs. Der Sender hat kein USB
+      und ist sonst nur per ESP-NOW erreichbar — ohne die Taste gab es für ein
+      Image, das nicht weit genug hochkommt, um das Relais-OTA anzunehmen, keinen
+      lokalen Rückweg. GPIO0 ist Strapping-Pin, wird aber erst **nach** der
+      ROM-Download-Mode-Entscheidung beobachtet; eine nicht bestückte Taste (Pin
+      hochgezogen) liest sich als „nicht gedrückt". Sender-Build grün
+      (940304 B, Button-Strings im Image), Host-Suite grün, CI-Syntaxcheck deckt
+      jetzt beide Rollen **und** den Stub ab.
+- [ ] **Sender-Flash**: noch nicht geflasht (der Sender hängt am Messpunkt ohne
+      USB; Flash über `/update-sender` vom Empfänger aus). Damit die Taste im
+      Feld wirkt, muss der Sender dieses Image bekommen.
 - [x] **Push** `feat/boot-button-config-restore` (Commit `fcff403`) – Token war
       zwischenzeitlich wieder da (93 B).
 - [x] **CI grün** (Run `39678171966`): Build receiver / receiver-apoff / sender +
       Host-Tests, alle `success`. Repo-Hygiene ebenfalls grün (`39678172017`).
 - [ ] **PR** öffnen (`feat/boot-button-config-restore` → `fix/integration`), sobald
       gewünscht – der Branch ist gepusht, aber noch kein PR gestellt.
-- [ ] **Sender** bekommt dieselbe Taste erst später (der Sender hat kein USB und
-      wird über den Relais-OTA-Weg gerettet, s. Kconfig-Hilfe).
 - Hinweis: Der angestrebte Versionssprung „von `0.1.1-2` weiter" ergibt wegen der
   **separaten** WDT-Korrektur (`f475c01`) `v0.1.1-4`, nicht `-3` – beide Commits
   sind echte Änderungen, daher bewusst so belassen.
