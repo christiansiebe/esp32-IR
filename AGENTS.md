@@ -854,7 +854,9 @@ dem Odroid, Key in KEY, Doku in README.md).
   `/root/.config/github-bridge/git-credential.sh` (liest nur die Datei; kein Secret in
   einer git-Config/URL). `/root/.bashrc` exportiert `GITHUB_TOKEN`/`GITHUB_WRITE_TOKEN`
   aus derselben Datei (Agenten-Shells lesen `.bashrc`, HOME ist leer).
-- **BLOCKER (2026-10-21):** Der PAT ist **read-only** — `git ls-remote` (upload-pack)
-  ok, `git push` (receive-pack) → **HTTP 403**. Die Repo-`permissions` der API
-  (`push:true`) sind die *Nutzer*-Rechte, nicht die Token-Scopes. Erst wenn der PAT
-  unter *Contents: Read and write* steht, funktioniert der Push ohne weiteres Zutun.
+- **Status (2026-10-21 23:xx):** Push **funktioniert wieder** (receive-pack 200,
+  Branch `feat/boot-button-config-restore` gepusht) — der PAT hat offenbar wieder
+  Schreibrechte bzw. wurde getauscht. Früher am selben Tag war er noch read-only
+  (`git push` → HTTP 403). Wenn ein Push mit **403** scheitert, fehlt dem PAT
+  unter *Contents: Read and write*; die Repo-`permissions` der API (`push:true`)
+  sind die *Nutzer*-Rechte, nicht die Token-Scopes.

@@ -53,10 +53,12 @@ angewandt – ein Reboot hilft also nicht. Deshalb:
 - [ ] **Physischer Tastentest** (echtes 3-s- und 10-s-Halten am Gerät) – steht
       noch aus; der Code-Pfad ist über `restore-config` funktional bewiesen, die
       GPIO-/OTA-Anbindung nur syntaktisch + per Log.
-- [ ] **Push** von `feat/boot-button-config-restore` – in der Sandbox ist
-      `/root/.config/github-bridge/token` **leer (0 B)**, `git push` schlägt fehl
-      („could not read Username"). Der Branch liegt lokal vor; Push nachreichen,
-      sobald ein Write-Token gesetzt ist.
+- [x] **Push** `feat/boot-button-config-restore` (Commit `fcff403`) – Token war
+      zwischenzeitlich wieder da (93 B).
+- [x] **CI grün** (Run `39678171966`): Build receiver / receiver-apoff / sender +
+      Host-Tests, alle `success`. Repo-Hygiene ebenfalls grün (`39678172017`).
+- [ ] **PR** öffnen (`feat/boot-button-config-restore` → `fix/integration`), sobald
+      gewünscht – der Branch ist gepusht, aber noch kein PR gestellt.
 - [ ] **Sender** bekommt dieselbe Taste erst später (der Sender hat kein USB und
       wird über den Relais-OTA-Weg gerettet, s. Kconfig-Hilfe).
 - Hinweis: Der angestrebte Versionssprung „von `0.1.1-2` weiter" ergibt wegen der

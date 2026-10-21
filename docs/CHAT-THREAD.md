@@ -70,11 +70,11 @@ errors: 0`, Sequence weiter bei 10773). Grenzfall **ohne `prev`** (nach
 `reset-config`): kein Reboot, Gerät bleibt sofort erreichbar. Physischer
 3-s/10-s-Tastentest steht noch aus.
 
-**Offen:** **Push** fehlt – `/root/.config/github-bridge/token` ist in der Sandbox
-**leer (0 B)** (`git push` → „could not read Username"). Branch liegt lokal vor.
-Versionssprung ergibt wegen einer **separaten** WDT-Korrektur (`f475c01`)
-`v0.1.1-4` statt `-3`; beide Commits sind echte Änderungen. Sender bekommt die
-Taste später (kein USB → Relais-OTA-Rettung).
+**Push + CI:** Branch gepusht (Commit `fcff403`); CI **grün** (Run `39678171966`:
+Build receiver / receiver-apoff / sender + Host-Tests, alle `success`). Noch
+**kein PR** gestellt. Versionssprung ergibt wegen einer **separaten**
+WDT-Korrektur (`f475c01`) `v0.1.1-4` statt `-3`; beide Commits sind echte
+Änderungen. Sender bekommt die Taste später (kein USB → Relais-OTA-Rettung).
 
 ## 2026-10-18 21:20 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 57e010b)
 **Nachtrag 2 zu PR #32:** `main` ist erneut weitergelaufen (`#48` Sender-Link-Fix, `#27`
