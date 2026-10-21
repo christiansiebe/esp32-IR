@@ -671,3 +671,35 @@ TODO-Befund (Router-Kanalwechsel, ~6 h Stillstand), kein neuer Reachability-Bug.
 
 **Tests:** Host-Suite gruen inkl. neuer `test/test_boot_log.c` (6 Checks); Builds
 `tools/build.sh receiver` (1329280 B) und `sender` (935312 B) mit IDF v6.1 ok.
+
+## 2026-10-21 18:45 UTC · OTA-Flash + Schreib-Token (Branch fix/integration, Commit cad898c)
+
+**Auftrag:** (1) Schreib-faehigen GitHub-Token auf dem Odroid hinterlegen und Push
+freigeben; (2) beide ESPs per OTA flashen; (3) Bootlog-Filter am Geraet verifizieren.
+
+**(1) Token — erledigt.** Der Nutzer hat `/root/.config/github-bridge/token`
+(0600, `github_pat_…`, 93 B) neu gesetzt. Nachweis:
+`git-receive-pack` → **HTTP 200** (vorher 403), `git credential fill` liefert
+`x-access-token` + Passwort aus dem Helper. **Push erfolgreich:**
+`origin/fix/integration` = `cad898c` (Branch neu angelegt). Token laeuft 2026-11-11
+ab. Kein Secret im Baum (`git grep` findet nur den beschreibenden Prefix-Text in
+`HANDOFF.md`/`TODO.md`, nicht den Wert).
+
+**(2) OTA — erledigt, beide Rollen auf `v0.1.1-2-gcad898c`.**
+- Receiver `POST /update` (1329280 B): **erster Versuch rollte zurueck** — Geraet
+  meldete danach weiter `v0.1.1`, Ring voller `SML value:`-Zeilen. Zweiter Versuch
+  hielt; Bootlog zeigt `Image pending verification: yes` →
+  `boot_confirm: Image confirmed after 45 s up`. Verdacht: die 30-s-Grace
+  (`boot_policy.c: boot_grace_ms`) ist auf einem Kaltstart knapp, wenn der Webserver
+  spaeter als 30 s steht → Rollback. **OFFEN/zu beobachten** (Grace evtl. anheben).
+- Sender `POST /update-sender` (935312 B, relayed): „validated and activated";
+  danach `counters.version = v0.1.1-2-gcad898c`, `storage_write_errors=0`,
+  `uart_rx_bytes` steigend, `last_rx_ago_ms` < 1 s.
+
+**(3) Bootlog-Filter — verifiziert am Geraet.** Ring (3993 B nach Kaltstart) enthaelt
+**0** `SML value:`-Zeilen und beginnt mit den echten Startmeldungen ab `t=759 ms`
+(WLAN-Init, AP-Start, CPU-Config, SNTP, „minute history enabled"). Konsole bleibt
+unveraendert (Filter wirkt nur im RAM-Ring).
+
+**Gesamtstatus:** `esp32-diag` worst=OK, Empfaenger `v0.1.1-2-gcad898c`,
+Sender `v0.1.1-2-gcad898c`, `/healthz` 200, Sender-Proxy 200, UART laeuft.

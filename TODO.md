@@ -34,9 +34,11 @@ fror bei `seq 10075` ein; der Empfänger folgte dem Router automatisch, der
       `tools/build.sh receiver` (1325808 B) und `receiver-apoff`
       (`CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y`, 1323904 B). Der neue Code
       (`link_fallback_should_realign` + Worker) ist in Sender- und Empfänger-Image.
-- [ ] **Push** `fix/link-realign` — in der Sandbox fehlt ein GitHub-Write-Token.
-- [ ] OTA-Flash beider ESPs vom Odroid aus; danach Router-Kanalwechsel erzwingen
-      und im Bootlog `Link re-align: ... channel X -> Y` prüfen.
+- [x] **Push** (2026-10-21): Schreib-Token hinterlegt, `fix/integration` (=`cad898c`,
+      enthält den Re-align-Fix) nach `origin` gepusht.
+- [x] OTA-Flash beider ESPs vom Odroid aus (2026-10-21, `v0.1.1-2-gcad898c`).
+- [ ] Danach Router-Kanalwechsel erzwingen und im Bootlog
+      `Link re-align: ... channel X -> Y` prüfen.
 - Hinweis Quick-Fix ohne Firmware: FRITZ!Box 2,4 GHz fest auf Kanal 1 pinnen
   (muss zu `CONFIG_ESPNOW_CHANNEL=1` passen); Repeater auf Kanal 7 bleibt Störer.
 
@@ -71,11 +73,22 @@ antwortet auch ohne WLAN), `health_task` sieht nur SML-Stille + Heap,
       Stufen: Reconnect (120 s) → Reboot via `boot_confirm_fail()` (120 s+300 s),
       Grace 120 s; Flapping rebootet nicht. `Kconfig`/`CMakeLists`/`status`.
 - [x] Host-Suite grün (`./test/run_host_tests.sh`, exit 0).
-- [ ] **Push** `fix/net-watchdog` (Commit `f166d7b`) — in der Sandbox fehlt ein
-      GitHub-Write-Token (`GITHUB_TOKEN`/`GITHUB_WRITE_TOKEN` leer).
+- [x] **Push** `fix/net-watchdog` (Commit `f166d7b`): steckt bereits in
+      `fix/integration` → mit `cad898c` nach `origin` gepusht. Separater Branch
+      `fix/net-watchdog` existiert lokal noch (Duplikat, kann weg).
 - [ ] CI-Build (`receiver`/`receiver-apoff`/`sender`) abwarten.
-- [ ] OTA-Flash beider ESPs vom Odroid aus; danach beobachten, ob ein
-      Reconnect/Reboot-Log auftritt, wenn der Router kurz weg ist.
+- [x] OTA-Flash beider ESPs vom Odroid aus (2026-10-21, Image `v0.1.1-2-gcad898c`,
+      enthält den Net-Watchdog `f166d7b`).
+- [ ] Danach beobachten, ob ein Reconnect/Reboot-Log auftritt, wenn der Router kurz weg ist.
+
+**NEU (2026-10-21): Receiver-OTA-Rollback beim ersten Versuch.**
+Erster `POST /update` mit `v0.1.1-2-gcad898c` wurde akzeptiert, das Gerät fiel aber
+im Boot wieder auf `v0.1.1` zurück (Ring voller `SML value:`-Zeilen, Version alt).
+Zweiter Versuch hielt (`Image pending verification: yes` → `Image confirmed after
+45 s up`). Verdacht: `boot_policy.c` `boot_grace_ms = 30 s` (Webserver muss vorher
+`boot_confirm_note_dashboard(true)` erreicht haben) ist auf einem Kaltstart knapp.
+- [ ] Grace anheben (z. B. 60 s) **oder** die Bestätigung an ein erfolgreiches
+      `/healthz`-Selbstprobe statt an `httpd_start()` koppeln; danach OTA mehrfach testen.
 
 ## NEU (2026-10-17): Laufzeit-Knöpfe überleben Reboot + OTA (NVS)
 **Bisher waren `set cpu|freq|cpu-min|sleep|retries` RAM-only** — ein Reboot warf
@@ -254,6 +267,12 @@ Zu prüfen / zu tun:
       0 Schreibfehler. Am Gerät verifizieren.
 
 ### Push / Zugang (gelöst)
+- [x] **Read-only-Token 2026-10-21 ersetzt.** Der zuvor einzige Token
+      (`/root/.config/github-bridge/token`) war **read-only**: `git-upload-pack` 200,
+      `git-receive-pack` **403** (die API-`permissions.push:true` sind Nutzer-,
+      nicht Token-Rechte). Der Nutzer hat einen **Schreib-PAT** in dieselbe 0600-Datei
+      gelegt; `git-receive-pack` → **200**. Push verifiziert.
+- [x] `origin/fix/integration` = `cad898c` (Bootlog-Filter + Re-align + Net-Watchdog).
 - [x] **Schreibzugang gefunden (2026-10-12).** `GITHUB_TOKEN` = GitHub-App-Token (`ghu_…`),
       read-only (`git push` -> `403`). `GITHUB_WRITE_TOKEN` = gültiges fine-grained PAT
       (`github_pat_…`, läuft 2026-11-11 ab), Prefix `github_pat_…` -> **darf pushen**
@@ -261,9 +280,10 @@ Zu prüfen / zu tun:
       alter/abgelaufener Tokenstand.
 - [x] Beide Commits (`e7e7cb7` Tagesgrenzen, `af88bbd` Kapazitäts-Fix) auf
       `cline/power-history-diag` gepusht; CI grün (Run `38312096355`).
-- Workaround: `origin`-URL trägt jetzt den Write-Token, `git push` funktioniert direkt.
-      `gh` liest weiterhin `GITHUB_TOKEN` (Env schlägt gespeicherte Credentials) —
-      dafür `GH_TOKEN=$GITHUB_WRITE_TOKEN gh …` setzen.
+- Zugang heute: `origin`-URL ist **sauber** (`https://github.com/…`, kein Secret);
+      `/etc/gitconfig` registriert den Helper `/root/.config/github-bridge/git-credential.sh`,
+      der den Token aus der 0600-Datei liest. `gh` braucht weiterhin
+      `GH_TOKEN=$GITHUB_WRITE_TOKEN gh …` (Env schlägt gespeicherte Credentials).
 - [x] Bergungs-Branch `recovered/ams-features-salvage` (Commit `d10ea8c`) gepusht
       (`origin/recovered/ams-features-salvage`). Integration nach `main.c` bleibt offen.
 
