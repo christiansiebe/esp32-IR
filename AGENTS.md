@@ -790,3 +790,19 @@ dem Odroid, Key in KEY, Doku in README.md).
   esp32-channel, pollt alle 5 s). Skripte auch unter /files/odroid_agent.sh.
 - Damit ist der serielle Web-Monitor (/console, POST /api/console) und der
   OTA-Pull (POST /api/ota-pull) am echten Geraet aus dem Chat bedienbar.
+
+## ESP32-Fehlerdiagnose (Odroid, wiederkehrend)
+- Skript: `/usr/local/sbin/esp32_diag.py` (stdlib, kein USB). Fragt den Empfaenger
+  (`192.168.178.70`) per HTTP ab und zieht Sender-Daten ueber dessen Proxy
+  (`/api/sender`), weil der Sender keine eigene IP hat.
+- Units: `esp32-diag.timer` (alle 10 min, `OnBootSec=90s`) + `esp32-diag.service`
+  (oneshot, `SuccessExitStatus=0 2`). Exit 2 = CRITICAL-Befund, kein Dienstfehler.
+- Ausgabe: Journal (`journalctl -u esp32-diag`), State `/var/lib/esp32-diag/state.json`,
+  Verlauf `/var/lib/esp32-diag/history.jsonl`. Manuell: `esp32_diag.py --print`.
+- Befunde je Lauf: `receiver-unreachable` (CRIT), `sender-no-answer` (CRIT, /api/sender
+  504), `sender-uart-dead` (CRIT, `uart_rx_bytes=0`), `no-sml-frames` (WARN),
+  `version-skew` (WARN), `sender-rebooted`/`sender-queue-drops` (WARN, Zustandsvergleich).
+- Schwellen: `TH_SENDER_SILENT_S=120`, `TH_HEAP_LOW=20 KiB`, `TH_STORAGE_DROPS_DELTA=50`,
+  `TH_UPTIME_RESET_S=120`. Empfaenger-IP via `ESP32_RECEIVER` ueberschreibbar.
+- OFFENER BEFUND (2026-10-21): `sender-uart-dead` — der Sender liest 0 Bytes vom
+  SML-Zaehler; das ist der naechste zu behebende Bug (nicht der Reachability-Fix).
