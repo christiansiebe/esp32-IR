@@ -1,5 +1,37 @@
 # To-do – esp32-IR
 
+
+## SML-Robustheit: CRC-Varianten geprüft + Golden-Fixtures (2026-10-18)
+**Ergebnis: Der Parser braucht KEINE zweite CRC-Variante — die Vermutung war
+falsch, und das ist jetzt belegt statt geraten.**
+- Ausgangsfrage (Lehre aus `spacemanspiff2007/sml2mqtt`): sml2mqtt prüft per
+  Default `crc: ['x25','kermit']`, weil „nicht jeder Zähler die Standard-CRC
+  nutzt". Also: brauchen echte Zähler Kermit?
+- **Gegen den kompletten öffentlichen `devZer0/libsml-testing`-Korpus geprüft**
+  (232 Telegramme: EMH eHZ/ED300L/mME, EasyMeter Q3A, **Holley DTZ541** (der
+  Kandidat aus der Vermutung), ISKRA MT175/MT631/MT691, DZG DVS/DWSB, ITRON
+  OpenWay, eBZ DD3, DrNeuhaus SMARTY): **alle 232 validieren mit CRC-16/X-25**
+  (`init 0xFFFF`, final XOR `0xFFFF`, poly 0x8408 reflektiert), **kein einziges
+  Telegramm mit Kermit**. Der Holley DTZ541-ZDBA ist ein stinknormales
+  X-25-Telegramm. Damit ist die bestehende einzelne CRC-Prüfung im Parser
+  **korrekt**; ein blinder Umbau wäre eine Regression.
+- Neues, reines Modul `components/sml_parser/src/sml_crc16.{c,h}`: eine
+  256er-Tabelle (geteilt), `sml_crc16_x25()` (= was der Parser nutzt) und
+  `sml_crc16_kermit()` (init 0x0000, kein XOR) als **verifizierter, getesteter
+  Baustein** für einen späteren Kermit-Zähler — nicht blind verdrahtet.
+  `sml.cpp`'s `crc16()` ruft jetzt `sml_crc16_update()` (verhaltensidentisch).
+- **Golden-Fixtures** `test/fixtures/sml/*.bin`: echte Einzel-Telegramme von EMH
+  eHZ, EasyMeter Q3A, **Holley DTZ541**, ISKRA MT691 + eine absichtlich
+  korrumpierte Kopie (`*_crc_error.bin`, ein Payload-Byte gekippt). `.gitignore`
+  hat die Ausnahme `!test/fixtures/sml/*.bin`.
+- Host-Tests: `test/test_sml_crc16.c` (17 Checks: X-25=0x906E, Kermit=0x2189,
+  Tabellen-Äquivalenz, alle Fixtures X-25, korrupte Kopie nicht) und
+  `test/test_sml_golden_bin.cpp` (30 Checks: Adapter dekodiert die echten
+  Telegramme exakt, korrupte Kopie → `crc_valid=false`, keine Werte). Beide im
+  Runner (`run_host_tests.sh`), ASan+UBSan.
+- Offen: keine.
+
+
 ## NEU (2026-10-17): Laufzeit-Knöpfe überleben Reboot + OTA (NVS)
 **Bisher waren `set cpu|freq|cpu-min|sleep|retries` RAM-only** — ein Reboot warf
 sie auf die Compile-Time-Defaults zurück, also musste man zum dauerhaften Ändern
