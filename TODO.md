@@ -1281,7 +1281,11 @@ Apache-2.0 ist damit möglich, GPL-3.0 bleibt tabu.
   nach 90 s ohne Erholung `esp_restart()` (→ Boot-Policy greift wieder). Guard
   bleibt **passiv**, bis der Selbst-Probe einmal klappt (`probe_works`) — kein
   Reboot eines gesunden Geräts ohne funktionierenden Loopback. `status` zeigt
-  `web health: guarded/passive, restarts N`. `max_open_sockets=10`.
+  `web health: guarded/passive, restarts N`. `max_open_sockets =
+  CONFIG_LWIP_MAX_SOCKETS - 3` (httpd behält 3 selbst); mit
+  `CONFIG_LWIP_MAX_SOCKETS=16` sind 13 Sockets nutzbar (vorher 7 beim IDF-Default
+  10 — dann lief der Pool unter den parallelen Dashboard-Polls + der Probe leer,
+  Folge `accept (23)` = ENFILE).
   **Hardware-Verifikation offen** (Loopback-Probe + Restart am Gerät prüfen).
 - **Versionsnummern (2026-10-14, `cline/auftrag-history-dubletten`).** Root-CMake
   löst die Version aus `$FIRMWARE_VERSION` (CI) bzw. `git describe` auf und

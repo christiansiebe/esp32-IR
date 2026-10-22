@@ -64,3 +64,14 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 # with the receiver SoftAP anyway (CONFIG_ESPNOW_SENDER_ASSOCIATE); this flag
 # also covers the window before association and after a drop.
 CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
+
+# Socket headroom for the receiver's web server. httpd reserves 3 sockets for
+# itself, so with the IDF default of 10 the server can serve only 7 concurrent
+# connections (see start_webserver(): max_open_sockets = CONFIG_LWIP_MAX_SOCKETS
+# - 3). The dashboard polls several endpoints in parallel and the web-health
+# guard's self-probe needs its own connection; under that load the pool ran dry
+# and lwIP refused new connections with ENFILE ("httpd_accept_conn: error in
+# accept (23)"), which also made the guard's probe fail. 16 leaves 13 usable
+# sockets, and MEMP_NUM_NETCONN (= CONFIG_LWIP_MAX_SOCKETS in lwipopts.h) still
+# costs only a few hundred bytes of static RAM.
+CONFIG_LWIP_MAX_SOCKETS=16

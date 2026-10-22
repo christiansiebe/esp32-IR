@@ -677,7 +677,10 @@ alle host-getestet:
   **passiv**, bis der Selbst-Probe **einmal** geklappt hat (`probe_works`); ein
   Build ohne funktionierenden Loopback rebootet kein gesundes Gerät. Status im
   Console-Kommando `status` (`web health: guarded/passive, last activity … ms,
-  restarts …`). `max_open_sockets` auf 10 erhöht (Headroom für die Probe).
+  restarts …`). `max_open_sockets = CONFIG_LWIP_MAX_SOCKETS - 3` (httpd keeps 3
+  for itself); `CONFIG_LWIP_MAX_SOCKETS=16` gives 13 usable sockets (was 7 with
+  the IDF default of 10, which let the pool run dry under the dashboard's
+  parallel polls + the probe and produced `accept (23)` = ENFILE).
 
 
 ## 🔨 BAUAUFTRAG (2026-10-14): History-Dubletten nach Backfill
