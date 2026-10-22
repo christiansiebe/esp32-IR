@@ -682,6 +682,16 @@ alle host-getestet:
   the IDF default of 10, which let the pool run dry under the dashboard's
   parallel polls + the probe and produced `accept (23)` = ENFILE).
 
+### Socket-Erschöpfung `accept (23)` (2026-10-22)
+`httpd_accept_conn: error in accept (23)` ist **ENFILE**: der lwIP-Socket-Pool ist leer.
+`start_webserver()` setzt `max_open_sockets = CONFIG_LWIP_MAX_SOCKETS - 3` (httpd hält 3
+Sockets selbst) — bei `CONFIG_LWIP_MAX_SOCKETS=10` also nur **7** nutzbar, und das reichte
+unter den parallelen Dashboard-Polls + der Web-Probe nicht. `CONFIG_LWIP_MAX_SOCKETS=16`
+in `sdkconfig.defaults` → 13 nutzbar (Commit `51a0ee4`). Die `104` daneben ist
+**ECONNRESET** (Client gibt auf), die fehlgeschlagene Probe ist die Folge, nicht die Ursache.
+`MEMP_NUM_NETCONN` folgt `CONFIG_LWIP_MAX_SOCKETS` (`lwipopts.h`), Kosten nur ein paar
+hundert Byte statisches RAM.
+
 
 ## 🔨 BAUAUFTRAG (2026-10-14): History-Dubletten nach Backfill
 **Status: Auftrag erteilt, noch NICHT gebaut.** Auftraggeber: Kontroll-Chat

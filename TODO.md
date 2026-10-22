@@ -1,4 +1,26 @@
 # To-do – esp32-IR
+## ERLEDIGT+GEFLASHT (2026-10-22): Socket-Erschöpfung des Empfängers (`accept (23)`)
+**Symptom (Bootlog):** `httpd_accept_conn: error in accept (23)`, `httpd_sock_err: error in
+send/recv : 104` und `web_guard: self-probe failed: ESP_ERR_HTTP_FETCH_HEADER`.
+**Ursache:** errno **23 = ENFILE** — der lwIP-Socket-Pool war leer, nicht der alte
+`web_guard`-Unterlauf. `start_webserver()` setzt `max_open_sockets = CONFIG_LWIP_MAX_SOCKETS - 3`
+(httpd behält 3 Sockets selbst), beim IDF-Default 10 also nur **7** nutzbar. Das Dashboard
+pollt mehrere Endpunkte parallel und die Web-Probe braucht eine eigene Verbindung; unter der
+Last lief der Pool leer, lwIP lehnte neue Verbindungen mit ENFILE ab (Folge: ECONNRESET 104,
+fehlgeschlagene Probe).
+**Fix (Commit `51a0ee4`, Branch `fix/receiver-socket-headroom`):** `CONFIG_LWIP_MAX_SOCKETS=16`
+in `sdkconfig.defaults` → **13** nutzbare Sockets. Kosten: `MEMP_NUM_NETCONN` ist in
+`lwipopts.h` an `CONFIG_LWIP_MAX_SOCKETS` gekoppelt, die 6 zusätzlichen netconns sind nur ein
+paar hundert Byte statisches RAM (free heap am Gerät: 84272 → 83912 B, ~360 B).
+**Verifiziert am Gerät (Empfänger, OTA geflasht):** Version **`v0.1.1-9-g51a0ee4`** läuft,
+`web probe failures 0`, kein `accept (23)` im neuen Bootlog. **Lasttest:** 16 parallele
+`GET /api/dashboard` → **16× HTTP 200** (der alte Pool hätte nur 7 bedient). ESP-NOW-Link
+weiter gesund (Sender `v0.1.1-2-gcad898c`, ch 1, `last_rx_ago` ~165 ms, `fallback_stage 0`),
+History-Pull intakt. Der Flash lief über `POST /update` (rohes `.bin`, `X-OTA-Key`) — das
+Gerät hat **kein USB**, OTA ist der einzige Weg; Netze: Auto-Rollback (30 s Grace) + BOOT-Taste.
+**Doku korrigiert:** die veraltete Notiz „`max_open_sockets` auf 10 erhöht" in `AGENTS.md` und
+`TODO.md` auf den echten Wert (`- 3`) gebracht.
+**Offen:** PR (`fix/receiver-socket-headroom` → ?) noch nicht gestellt; Branch ist gepusht.
 
 ## ERLEDIGT+GEFLASHT (2026-10-21): BOOT-Taste – 3 s stellt Config zurück, 10 s Firmware-Rollback
 **Auftrag:** Eine gelötete BOOT-Taste soll zwei Rettungsaktionen auslösen; zwei Werte
