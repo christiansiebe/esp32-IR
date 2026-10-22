@@ -1,5 +1,65 @@
 # To-do – esp32-IR
 
+## OFFEN (2026-10-21): ESP-NOW-Link bleibt nach Kanalwechsel des Routers tot
+**Nutzer:** „trotz Empfänger- und Sender-Neustart kam die Verbindung nicht
+wieder." **Am Gerät belegt (Odroid, 21.10.):** Die FRITZ!Box „Wohnzimmer" hat
+ihren 2,4-GHz-Kanal **gewechselt** (Bootlog des Empfängers:
+`wifi:ap channel adjust o:11→n:7→n:11→n:1`; die AP-off-Sektion weiter unten hielt
+noch Kanal 1 als „verifiziert" fest). Ausfall **02:15Z → 08:21Z (~6 h)**, Historie
+fror bei `seq 10075` ein; der Empfänger folgte dem Router automatisch, der
+**Sender blieb auf dem alten Kanal**.
+**Ursache (belegt):**
+- Der Empfänger-SoftAP `ESP32-IR-Meter` **folgt** dem Heim-AP-Kanal (APSTA); der
+  Sender sucht den AP nur **1× pro Boot** (`main.c` ~1112) und der Fallback war
+  **einmalig sticky bis Reboot** (`g_link_fallback_active → continue`).
+- **Zusätzlich:** Der Sender sendet per **Broadcast**, dessen Send-Callback
+  **immer** `ESP_NOW_SEND_SUCCESS` meldet — auch ins Leere. `note_send_ok` hielt
+  damit `last_ok_ms` frisch, sodass `link_fallback_should_fallback()` **nie
+  auslöste**. Deshalb half auch ein Neustart nicht: der Sender merkte die Stille
+  gar nicht.
+- [x] Reines Modul `main/link_fallback.{c,h}` erweitert: `realign_interval_ms` +
+      `link_fallback_set_realign_interval()` + `link_fallback_should_realign()`.
+      Re-align **nur** auf die **Empfangsrichtung** geschlüsselt (`last_rx`), damit
+      ein Broadcast-Sender die Stille trotz „erfolgreicher" Sends bemerkt; nie
+      latcht (der Router kann erneut wechseln); ratenbegrenzt auf 1 Scan/Intervall.
+- [x] Kleber in `main.c` (`link_fallback_worker`): solange der Peer stumm ist,
+      periodisch `espnow_align_channel_from_receiver_ap()` + Broadcast-Peer neu
+      setzen. Kconfig `ESPNOW_LINK_REALIGN_MS` (Default 60000, Sender-only).
+- [x] Host-Test `test/test_link_fallback.c` erweitert (22 Checks: off-by-default,
+      kein Re-align bei Traffic, Re-align trotz „erfolgreicher" Sends,
+      Ratenbegrenzung, Grace, Re-arm nach Heilung, Clock-Rücklauf, NULL).
+- [x] Host-Suite grün (`./test/run_host_tests.sh`, exit 0).
+- [x] **Build lokal verifiziert (Docker, `espressif/idf:v6.1`, 21.10.):** alle drei
+      CI-Rollen kompilieren fehlerfrei — `tools/build.sh sender` (933696 B),
+      `tools/build.sh receiver` (1325808 B) und `receiver-apoff`
+      (`CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y`, 1323904 B). Der neue Code
+      (`link_fallback_should_realign` + Worker) ist in Sender- und Empfänger-Image.
+- [ ] **Push** `fix/link-realign` — in der Sandbox fehlt ein GitHub-Write-Token.
+- [ ] OTA-Flash beider ESPs vom Odroid aus; danach Router-Kanalwechsel erzwingen
+      und im Bootlog `Link re-align: ... channel X -> Y` prüfen.
+- Hinweis Quick-Fix ohne Firmware: FRITZ!Box 2,4 GHz fest auf Kanal 1 pinnen
+  (muss zu `CONFIG_ESPNOW_CHANNEL=1` passen); Repeater auf Kanal 7 bleibt Störer.
+
+**Nachtrag (Odroid, 21.10. ~09:30Z) – Quick-Fix reicht NICHT:**
+FRITZ!Box 2,4 GHz fest auf **Kanal 1** gepinnt, Empfänger neu gestartet — der Link
+bleibt trotzdem tot. Live geprüft:
+- Der **Empfänger ist im Web** (HTTP 200 auf `/`, `/api/dashboard` 6× stabil,
+  mDNS `esp32-meter.local` → 192.168.178.70). `status`: `fritzbox: connected`,
+  `esp-now channel: 1`, `link fallback: active` (d. h. der Empfänger hat die
+  **Stille erkannt** — `Link fallback: no sender traffic for 60000 ms` im Bootlog).
+  → „kein Web-Zugang" meint also die **Sender-Daten** (`/api/sender` 503
+  „No sender MAC known yet"), nicht den Empfänger selbst.
+- Die Historie steht **weiter bei `latest_sequence 10079`** (seit 08:24Z), also
+  **keine** Sender-Frames. Der Empfänger-AP sendet auf **Kanal 1**, passend zu
+  `CONFIG_ESPNOW_CHANNEL=1` — der Kanal stimmt jetzt, trotzdem kommt nichts an.
+  Das stützt die Diagnose: der **Sender hängt** (merkt die Stille nicht / sendet
+  ins Leere); erst der Re-align-Fix macht den Sender selbstheilend.
+- Der **Sender ist vom Odroid aus nicht erreichbar**: kein `/dev/ttyUSB*`/`ttyACM*`
+  (nur der TP-Link-WLAN-Stick + NVMe hängen am USB), keine zweite ESP-MAC im ARP,
+  kein `esp32-sender.local`. Er läuft (vermutlich) ohne USB am Messpunkt.
+- Letzter Reset-Grund des Empfängers: `power-on` (kein Crash/Watchdog-Reset).
+
+
 ## NEU (2026-10-17): Laufzeit-Knöpfe überleben Reboot + OTA (NVS)
 **Bisher waren `set cpu|freq|cpu-min|sleep|retries` RAM-only** — ein Reboot warf
 sie auf die Compile-Time-Defaults zurück, also musste man zum dauerhaften Ändern
@@ -36,8 +96,9 @@ Blob):
       ok, `sender_rssi_valid: true`), keine Daten verloren.
 - Kanal-Zwang: ohne AP kann der Sender den Kanal nicht mehr entdecken; beide
   Seiten müssen denselben `CONFIG_ESPNOW_CHANNEL` (Default 1) nutzen, und da die
-  Station an den Heim-AP-Kanal gebunden ist, muss dieser 1 sein (verifiziert:
-  FRITZ!Box „Wohnzimmer" = Kanal 1).
+  Station an den Heim-AP-Kanal gebunden ist, muss dieser 1 sein (bei der
+  Verifikation 2026-10-17 war FRITZ!Box „Wohnzimmer" = Kanal 1; **Stand
+  2026-10-21 wechselt der Router den Kanal dynamisch**, siehe ganz oben).
 
 ## BEHOBEN (PR #14): Empfänger-`web_guard` startete den HTTP-Server im Leerlauf neu
 **Ursache am Gerät belegt: vorzeichenloser Unterlauf in `web_guard_tick()`.**
