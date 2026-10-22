@@ -17,6 +17,10 @@
 
 #include "task_wdt_guard.h"
 
+#ifdef ESP_PLATFORM
+#include "esp_timer.h"
+#endif
+
 #define POWER_HISTORY_MAGIC 0x50484C31u
 /* Format versions live in power_history.h so the host tests and the migration
  * helper agree on them. The header version is the current record version.
@@ -40,6 +44,17 @@
  * task must be able to give up and answer quickly rather than stalling until
  * the browser's own request timeout fires (the reported "AbortError"). */
 #define POWER_HISTORY_READ_LOCK_TIMEOUT_MS 800u
+/* The startup repair can sort a whole ring on disk (ring_heap_sort), which is
+ * thousands of SPIFFS reads/writes with no natural blocking point. That runs
+ * inside app_main before the web server starts, so a large damaged ring used to
+ * starve the IDLE task (which feeds the task watchdog) for >120 s, tripping the
+ * TWDT and boot-looping the device. The repair loops therefore yield to the
+ * scheduler every POWER_HISTORY_REPAIR_YIELD_STEPS steps, and the whole repair
+ * is bounded by a wall-clock budget so a pathological ring cannot delay the boot
+ * without limit. On budget expiry the repair is abandoned best-effort (the ring
+ * is left as it was; a later boot retries) and the device continues booting. */
+#define POWER_HISTORY_REPAIR_YIELD_STEPS 2048u
+#define POWER_HISTORY_REPAIR_BUDGET_MS 15000u
 
 static const char *TAG = "power_history";
 static FILE *g_history_file;
@@ -524,9 +539,57 @@ static bool record_precedes(const power_history_record_t *a,
     return a->sequence < b->sequence;
 }
 
+/* Paces a long on-disk repair loop: yields to the scheduler every
+ * POWER_HISTORY_REPAIR_YIELD_STEPS steps so the IDLE task (and with it the task
+ * watchdog) keeps running, and reports when the wall-clock budget is spent so
+ * the caller can abandon the repair instead of blocking the boot forever. */
+typedef struct {
+    uint32_t steps;
+    uint32_t budget_ms;
+    int64_t deadline_us; /* 0 = no clock available (host build): no budget */
+    bool expired;
+} repair_pacer_t;
+
+static int64_t repair_now_us(void)
+{
+#ifdef ESP_PLATFORM
+    return esp_timer_get_time();
+#else
+    return 0; /* host build has no esp_timer; the pacer then never expires */
+#endif
+}
+
+static void repair_pacer_begin(repair_pacer_t *pacer)
+{
+    pacer->steps = 0;
+    pacer->budget_ms = POWER_HISTORY_REPAIR_BUDGET_MS;
+    pacer->expired = false;
+    int64_t now = repair_now_us();
+    pacer->deadline_us = (now != 0)
+                             ? now + (int64_t)pacer->budget_ms * 1000
+                             : 0;
+}
+
+/* Account one unit of work. Returns false once the budget is spent; the caller
+ * must then stop and report the repair as incomplete. */
+static bool repair_pacer_step(repair_pacer_t *pacer)
+{
+    if (++pacer->steps % POWER_HISTORY_REPAIR_YIELD_STEPS == 0) {
+        /* Let the IDLE task feed the task watchdog. Delay(1) blocks this task
+         * for one tick (10 ms at 100 Hz), long enough for IDLE to run. */
+        vTaskDelay(1);
+        if (pacer->deadline_us != 0 && repair_now_us() >= pacer->deadline_us) {
+            pacer->expired = true;
+            return false;
+        }
+    }
+    return true;
+}
+
 /* Sift the root of an implicit max-heap down to `end`. Reads/writes single
  * records, so it needs no buffer. */
-static bool ring_sift_down(uint32_t oldest_slot, uint32_t root, uint32_t end)
+static bool ring_sift_down(uint32_t oldest_slot, uint32_t root, uint32_t end,
+                           repair_pacer_t *pacer)
 {
     while (2u * root + 1u <= end) {
         uint32_t child = 2u * root + 1u;
@@ -555,6 +618,9 @@ static bool ring_sift_down(uint32_t oldest_slot, uint32_t root, uint32_t end)
             !write_record_idx(oldest_slot, child, &rv)) {
             return false;
         }
+        if (!repair_pacer_step(pacer)) {
+            return false;
+        }
         root = child;
     }
     return true;
@@ -563,13 +629,14 @@ static bool ring_sift_down(uint32_t oldest_slot, uint32_t root, uint32_t end)
 /* In-place heap sort of the whole ring by (minute, sequence) using O(1) RAM
  * (two record buffers). Used only when the store is too large to sort in one
  * buffer; O(n log n) disk I/O instead of O(n) RAM. */
-static bool ring_heap_sort(uint32_t oldest_slot, uint32_t count)
+static bool ring_heap_sort(uint32_t oldest_slot, uint32_t count,
+                           repair_pacer_t *pacer)
 {
     if (count < 2) {
         return true;
     }
     for (uint32_t i = count / 2u; i > 0; --i) {
-        if (!ring_sift_down(oldest_slot, i - 1u, count - 1u)) {
+        if (!ring_sift_down(oldest_slot, i - 1u, count - 1u, pacer)) {
             return false;
         }
     }
@@ -580,7 +647,7 @@ static bool ring_heap_sort(uint32_t oldest_slot, uint32_t count)
             !read_record_idx(oldest_slot, end, &last) ||
             !write_record_idx(oldest_slot, 0, &last) ||
             !write_record_idx(oldest_slot, end, &first) ||
-            !ring_sift_down(oldest_slot, 0, end - 1u)) {
+            !ring_sift_down(oldest_slot, 0, end - 1u, pacer)) {
             return false;
         }
     }
@@ -590,7 +657,8 @@ static bool ring_heap_sort(uint32_t oldest_slot, uint32_t count)
 /* Streaming pass over a sorted ring: drop duplicate minutes (adjacent after the
  * sort) and skip corrupt records, compacting survivors to the front. Writes to
  * a lower index than it reads, so it never clobbers unread data. */
-static bool ring_compact(uint32_t oldest_slot, uint32_t count, uint32_t *unique_out)
+static bool ring_compact(uint32_t oldest_slot, uint32_t count,
+                         uint32_t *unique_out, repair_pacer_t *pacer)
 {
     uint32_t write = 0;
     int64_t prev = 0;
@@ -610,6 +678,9 @@ static bool ring_compact(uint32_t oldest_slot, uint32_t count, uint32_t *unique_
             return false;
         }
         ++write;
+        if (!repair_pacer_step(pacer)) {
+            return false;
+        }
     }
     *unique_out = write;
     return true;
@@ -618,7 +689,7 @@ static bool ring_compact(uint32_t oldest_slot, uint32_t count, uint32_t *unique_
 /* Renumber the first `unique` records contiguously so sequence == oldest + index
  * and recompute their checksums. */
 static bool ring_renumber(uint32_t oldest_slot, uint32_t unique,
-                          uint32_t oldest_sequence)
+                          uint32_t oldest_sequence, repair_pacer_t *pacer)
 {
     for (uint32_t i = 0; i < unique; ++i) {
         power_history_record_t record;
@@ -628,6 +699,9 @@ static bool ring_renumber(uint32_t oldest_slot, uint32_t unique,
         record.sequence = oldest_sequence + i;
         record.checksum = record_checksum(&record);
         if (!write_record_idx(oldest_slot, i, &record)) {
+            return false;
+        }
+        if (!repair_pacer_step(pacer)) {
             return false;
         }
     }
@@ -683,6 +757,11 @@ static bool repair_ring_if_needed(void)
     uint32_t count = g_history_header.record_count;
     uint32_t oldest_slot = oldest_slot_of(g_history_header.next_slot, count);
 
+    /* Paces every loop below (the damage scan is already O(count) SPIFFS
+     * reads) so the boot cannot be starved of the IDLE task. */
+    repair_pacer_t pacer;
+    repair_pacer_begin(&pacer);
+
     /* Streaming damage check: O(1) RAM, so it also covers a full ring. */
     bool damaged = false;
     int64_t prev = INT64_MIN;
@@ -698,6 +777,11 @@ static bool repair_ring_if_needed(void)
         }
         prev = record.interval_start_utc;
         have_prev = true;
+        if (!repair_pacer_step(&pacer)) {
+            ESP_LOGW(TAG, "History repair scan exceeded its time budget; "
+                          "leaving the ring for a later boot");
+            return true; /* best-effort: boot on, retry next time */
+        }
     }
     if (!damaged) {
         return true; /* already sorted and duplicate-free */
@@ -708,6 +792,7 @@ static bool repair_ring_if_needed(void)
             heap_caps_malloc((size_t)count * sizeof(*records), MALLOC_CAP_8BIT);
         if (records != NULL) {
             size_t valid = 0;
+            bool scan_ok = true;
             for (uint32_t i = 0; i < count; ++i) {
                 power_history_record_t record = {0};
                 if (!read_record_idx(oldest_slot, i, &record) ||
@@ -716,6 +801,16 @@ static bool repair_ring_if_needed(void)
                 }
                 (void)power_history_migrate_record(&record);
                 records[valid++] = record;
+                if (!repair_pacer_step(&pacer)) {
+                    scan_ok = false;
+                    break;
+                }
+            }
+            if (!scan_ok) {
+                heap_caps_free(records);
+                ESP_LOGW(TAG, "History repair (RAM) exceeded its time budget; "
+                              "leaving the ring for a later boot");
+                return true;
             }
             /* Stable insertion sort: the store is "almost sorted" (live minutes
              * in order, a few backfill blocks), so this is fast. */
@@ -728,6 +823,12 @@ static bool repair_ring_if_needed(void)
                     --j;
                 }
                 records[j] = key;
+                if (!repair_pacer_step(&pacer)) {
+                    heap_caps_free(records);
+                    ESP_LOGW(TAG, "History repair (RAM sort) exceeded its time budget; "
+                                  "leaving the ring for a later boot");
+                    return true;
+                }
             }
             size_t unique = 0;
             for (size_t i = 0; i < valid; ++i) {
@@ -761,11 +862,21 @@ static bool repair_ring_if_needed(void)
     }
 
     /* Full store: sort in place on disk with O(1) RAM. */
-    if (!ring_heap_sort(oldest_slot, count)) {
+    if (!ring_heap_sort(oldest_slot, count, &pacer)) {
+        if (pacer.expired) {
+            ESP_LOGW(TAG, "History repair (disk sort) exceeded its time budget; "
+                          "leaving the ring for a later boot");
+            return true;
+        }
         return false;
     }
     uint32_t unique = 0;
-    if (!ring_compact(oldest_slot, count, &unique)) {
+    if (!ring_compact(oldest_slot, count, &unique, &pacer)) {
+        if (pacer.expired) {
+            ESP_LOGW(TAG, "History repair (compact) exceeded its time budget; "
+                          "leaving the ring for a later boot");
+            return true;
+        }
         return false;
     }
     uint32_t next_sequence = g_history_header.next_sequence;
@@ -773,7 +884,7 @@ static bool repair_ring_if_needed(void)
     if (oldest_sequence == 0) {
         oldest_sequence = 1;
     }
-    if (!ring_renumber(oldest_slot, unique, oldest_sequence) ||
+    if (!ring_renumber(oldest_slot, unique, oldest_sequence, &pacer) ||
         !finish_repair(oldest_slot, unique)) {
         return false;
     }

@@ -242,6 +242,35 @@ config ESPNOW_LINK_REALIGN_MS
         re-aligns. Set 0 to disable the periodic re-align (boot-time scan only).
         The receiver has no channel to chase and ignores this.
 
+config ESPNOW_SENDER_WIFI_RSSI_LOG
+    bool "Sender: log the home WLAN signal strength once per period"
+    depends on ESPNOW_ROLE_SENDER
+    default y
+    help
+        The sender is deliberately not associated with the home WLAN (it only
+        uses ESP-NOW on the channel the receiver's SoftAP shares with the home
+        AP), so nothing shows how well that AP is heard. This scans for the SSID
+        once per period and records the RSSI without ever associating. The scan
+        is limited to the current ESP-NOW channel, so the radio never leaves the
+        link's channel and the minute log cannot drop SML telegrams or backfill
+        pages.
+
+config ESPNOW_SENDER_WIFI_RSSI_SSID
+    string "Sender: home WLAN SSID to log the signal strength of"
+    depends on ESPNOW_SENDER_WIFI_RSSI_LOG
+    default "Wohnzimmer"
+    help
+        SSID to look for. Only the RSSI of a matching beacon is recorded; the
+        sender never authenticates or associates, so no credentials are needed.
+
+config ESPNOW_SENDER_WIFI_RSSI_PERIOD_MS
+    int "Sender: signal-strength log period (ms)"
+    depends on ESPNOW_SENDER_WIFI_RSSI_LOG
+    range 10000 3600000
+    default 60000
+    help
+        How often the home WLAN is scanned. One minute by default.
+
 config ESPNOW_RECEIVER_HEALTH_WATCHDOG
     bool "Receiver: self-healing health watchdog (reboot on stale data / low heap)"
     depends on ESPNOW_ROLE_RECEIVER

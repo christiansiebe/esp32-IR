@@ -201,6 +201,18 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_link_fallback"
 
+# Sender home-WLAN RSSI log: the pure due/period bookkeeping and the sample ring
+# (no early sample, a backwards clock must not busy-loop, min/max/average over
+# valid samples only, the ring rolls instead of overflowing).
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/wifi_rssi_log.c" \
+    "$here/test_wifi_rssi_log.c" \
+    -o "$out/test_wifi_rssi_log"
+
+"$out/test_wifi_rssi_log"
+
 # Receiver Wi-Fi link watchdog: a lost association/IP must escalate to a
 # reconnect and then a reboot instead of leaving the device silently offline
 # (web_guard only probes the loopback and never notices a dead link). Pure C.

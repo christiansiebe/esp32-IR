@@ -67,6 +67,7 @@
 #include "sml_adapter.h"
 #include "tx_batch.h"
 #include "uart_recovery.h"
+#include "wifi_rssi_log.h"
 #endif
 
 static const char *TAG = "espnow_meter";
@@ -437,6 +438,13 @@ static uint32_t g_time_request_count;
 static uint8_t g_receiver_mac[ESP_NOW_ETH_ALEN];
 static bool g_receiver_mac_valid;
 static bool g_uart_silence_reported;
+#if CONFIG_ESPNOW_SENDER_WIFI_RSSI_LOG
+/* Periodic signal-strength log of the home WLAN. The sender is not associated
+ * with it; a scan limited to the current ESP-NOW channel records the RSSI of a
+ * matching beacon without leaving the link's channel. */
+static wifi_rssi_log_t g_wifi_rssi_log;
+static portMUX_TYPE g_wifi_rssi_log_lock = portMUX_INITIALIZER_UNLOCKED;
+#endif
 static espnow_diag_event_t g_diag_events[ESPNOW_DIAG_EVENT_RING];
 static size_t g_diag_event_count;
 static size_t g_diag_event_next;
@@ -5219,6 +5227,35 @@ static void console_cmd_wifi(const char *args, char *out, size_t out_size)
                            "esp-now channel: %u\n",
                            (unsigned int)g_espnow_channel);
 #endif
+#if CONFIG_ESPNOW_SENDER_WIFI_RSSI_LOG
+    if (written > 0 && (size_t)written < out_size) {
+        portENTER_CRITICAL(&g_wifi_rssi_log_lock);
+        int8_t latest = g_wifi_rssi_log.latest_dbm;
+        int8_t mn = g_wifi_rssi_log.min_dbm;
+        int8_t mx = g_wifi_rssi_log.max_dbm;
+        uint32_t valid = g_wifi_rssi_log.valid_count;
+        uint32_t miss = g_wifi_rssi_log.miss_count;
+        bool have = valid != 0;
+        portEXIT_CRITICAL(&g_wifi_rssi_log_lock);
+        int extra = snprintf(out + written, out_size - (size_t)written,
+                             "home wlan \"%s\": %s\n",
+                             CONFIG_ESPNOW_SENDER_WIFI_RSSI_SSID,
+                             have ? "seen" : "not seen yet");
+        if (extra > 0 && (size_t)extra < out_size - (size_t)written) {
+            written += extra;
+        }
+        if (have && (size_t)written < out_size) {
+            extra = snprintf(out + written, out_size - (size_t)written,
+                             "  rssi: %d dBm (min %d, max %d, avg %d; "
+                             "%lu ok / %lu miss)\n",
+                             latest, mn, mx, wifi_rssi_log_average_dbm(&g_wifi_rssi_log),
+                             (unsigned long)valid, (unsigned long)miss);
+            if (extra > 0 && (size_t)extra < out_size - (size_t)written) {
+                written += extra;
+            }
+        }
+    }
+#endif
 #else
     int written = snprintf(out, out_size,
                            "configured ssid: %s\n"
@@ -8465,6 +8502,90 @@ static void link_fallback_worker(void *arg)
 }
 #endif /* CONFIG_ESPNOW_LINK_FALLBACK */
 
+#if CONFIG_ESPNOW_SENDER_WIFI_RSSI_LOG
+/* Scan for the home WLAN's beacon and return its RSSI, without ever
+ * authenticating. The scan is pinned to the current ESP-NOW channel so the
+ * radio does not leave the link's channel (the home AP and the receiver's
+ * SoftAP share it), which keeps the minute log from costing SML telegrams or
+ * backfill pages. Returns false when the SSID was not seen this round. */
+static bool scan_home_ap_rssi(int8_t *rssi_dbm)
+{
+    wifi_scan_config_t scan_config = {
+        .ssid = (uint8_t *)CONFIG_ESPNOW_SENDER_WIFI_RSSI_SSID,
+        .channel = g_espnow_channel,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .show_hidden = false,
+    };
+    esp_err_t err = esp_wifi_scan_start(&scan_config, true);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Home WLAN RSSI scan failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    uint16_t count = 16;
+    wifi_ap_record_t records[16];
+    err = esp_wifi_scan_get_ap_records(&count, records);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not read home WLAN scan results: %s",
+                 esp_err_to_name(err));
+        return false;
+    }
+    for (uint16_t i = 0; i < count; ++i) {
+        if (strcmp((const char *)records[i].ssid,
+                   CONFIG_ESPNOW_SENDER_WIFI_RSSI_SSID) == 0) {
+            *rssi_dbm = records[i].rssi;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Once per period, record the home WLAN's signal strength. Sender only: the
+ * receiver is associated and reports its own link. Runs at the lowest priority
+ * so a minute's scan never competes with the UART/ESP-NOW workers. */
+static void wifi_rssi_log_worker(void *arg)
+{
+    (void)arg;
+    uint64_t started_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    portENTER_CRITICAL(&g_wifi_rssi_log_lock);
+    wifi_rssi_log_init(&g_wifi_rssi_log, CONFIG_ESPNOW_SENDER_WIFI_RSSI_PERIOD_MS,
+                       started_ms);
+    portEXIT_CRITICAL(&g_wifi_rssi_log_lock);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        portENTER_CRITICAL(&g_wifi_rssi_log_lock);
+        bool due = wifi_rssi_log_due(&g_wifi_rssi_log, now_ms);
+        portEXIT_CRITICAL(&g_wifi_rssi_log_lock);
+        if (!due) {
+            continue;
+        }
+
+        int8_t rssi = 0;
+        bool found = scan_home_ap_rssi(&rssi);
+        portENTER_CRITICAL(&g_wifi_rssi_log_lock);
+        wifi_rssi_log_add(&g_wifi_rssi_log, rssi, found, now_ms);
+        int8_t latest = g_wifi_rssi_log.latest_dbm;
+        int8_t mn = g_wifi_rssi_log.min_dbm;
+        int8_t mx = g_wifi_rssi_log.max_dbm;
+        uint32_t valid = g_wifi_rssi_log.valid_count;
+        uint32_t miss = g_wifi_rssi_log.miss_count;
+        portEXIT_CRITICAL(&g_wifi_rssi_log_lock);
+
+        if (found) {
+            ESP_LOGI(TAG, "WLAN \"%s\" RSSI %d dBm (min %d, max %d, avg %d; "
+                          "%lu ok / %lu miss)",
+                     CONFIG_ESPNOW_SENDER_WIFI_RSSI_SSID, latest, mn, mx,
+                     wifi_rssi_log_average_dbm(&g_wifi_rssi_log),
+                     (unsigned long)valid, (unsigned long)miss);
+        } else {
+            ESP_LOGW(TAG, "WLAN \"%s\" not seen on channel %u",
+                     CONFIG_ESPNOW_SENDER_WIFI_RSSI_SSID, g_espnow_channel);
+        }
+    }
+}
+#endif /* CONFIG_ESPNOW_SENDER_WIFI_RSSI_LOG */
+
 #if !CONFIG_ESPNOW_ROLE_SENDER
 #if CONFIG_ESPNOW_NET_WATCHDOG
 /* Receiver Wi-Fi link watchdog. Runs only when a home WLAN is configured: with
@@ -8725,6 +8846,16 @@ static void run_sender(void)
                               4096, NULL, 2, NULL);
     if (task_result != pdPASS) {
         ESP_LOGW(TAG, "Could not start the link-fallback worker");
+    }
+#endif
+#if CONFIG_ESPNOW_SENDER_WIFI_RSSI_LOG
+    /* Own 16-entry wifi_ap_record_t array (~1.6 kB) on the stack, like the
+     * link-fallback scan. Lowest priority: a minute's scan must never compete
+     * with the UART/ESP-NOW workers. */
+    task_result = xTaskCreate(wifi_rssi_log_worker, "wifi_rssi_log",
+                              4096, NULL, 1, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the WLAN RSSI log worker");
     }
 #endif
 }

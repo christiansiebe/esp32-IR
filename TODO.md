@@ -1,4 +1,54 @@
 # To-do – esp32-IR
+## IN ARBEIT (2026-10-23): WDT-Fix `power_history.c` + Sender-WLAN-RSSI-Log
+**Auftrag (User):** (1) Watchdog-Fix in `power_history.c` bauen (behebt die Ursache
+des Boot-Loops dauerhaft), (2) Re-align-Fix auf den Sender flashen, damit die
+Historie zurückkommt; **Zusatz:** der Sender soll zusätzlich einen
+**Signalstärken-Log des WLAN „Wohnzimmer" 1×/Minute** mitschreiben, **ohne sich
+dort einzuloggen** (nur RSSI), Timing-schonend.
+
+**Befund Empfänger (live, 23.10.):** Der Boot-Loop vom 22.10. kam von einem
+kaputten History-Ring (10.197 Records, `ring_heap_sort`/`read_record_idx` ohne
+Yield → TWDT-Abort). Nach Storage-Wipe läuft der Empfänger stabil
+(`v0.1.1-9-g51a0ee4`). **Der Sender lebt wieder** (RSSI −83 dBm,
+`storage_records` ~7185) und der Backfill hat die Historie **zurückgeholt**:
+`record_count` 0 → **6622** (Backfill `merged_total` 6604, `sessions` 106,
+`cursor_utc` wandert). Der Link-Fallback-Log „no sender traffic" ist nur die
+Anlaufphase, danach kam der Sender.
+
+**Fix (1) – WDT im Repair-Pfad (`main/power_history.c`):** `repair_ring_if_needed()`
+läuft in `app_main` **vor** dem Webserver und war nicht am TWDT angemeldet. Ein
+großer/kaputter Ring sättigte die IDLE-Task > 120 s → TWDT → Boot-Loop.
+Eingebaut: `repair_pacer_t` mit `vTaskDelay(1)` alle
+`POWER_HISTORY_REPAIR_YIELD_STEPS` (2048) Schritte (IDLE kommt dran, WDT wird
+gefüttert) **und** Wall-Clock-Budget `POWER_HISTORY_REPAIR_BUDGET_MS` (15 s); bei
+Budget-Ablauf bricht der Repair best-effort ab und der Boot läuft weiter (nächster
+Boot versucht es erneut). Durchgefädelt in `ring_sift_down`, `ring_heap_sort`,
+`ring_compact`, `ring_renumber` sowie die Damage-Scan- und RAM-Sort-Schleife.
+Include `esp_timer.h` nur unter `#ifdef ESP_PLATFORM` (Host-Shim unverändert).
+
+**Fix (2) – Re-align:** `f8aec56` (`fix/link-realign`) ist **bereits Vorfahre von
+HEAD**; der Re-align-Code (`link_fallback_should_realign`,
+`espnow_align_channel_from_receiver_ap`, periodischer Re-Scan) ist im aktuellen
+Branch enthalten. Für den Sender ist also kein zusätzlicher Re-align-Patch nötig –
+das neue Image trägt ihn bereits.
+
+**Feature (3) – Sender-WLAN-RSSI-Log:** neues pures Modul
+`main/wifi_rssi_log.{c,h}` (due/period, Sample-Ring 60, min/max/avg, Miss-Zähler;
+host-getestet in `test/test_wifi_rssi_log.c`). Glue in `main.c`: Sender-Task
+`wifi_rssi_log_worker` (Priorität 1) scannt **1×/Minute** per
+`scan_home_ap_rssi()` nach der SSID und schreibt nur die RSSI. Der Scan ist auf den
+**aktuellen ESP-NOW-Kanal** begrenzt (`scan_config.channel = g_espnow_channel`),
+damit das Radio den Link-Kanal nicht verlässt – kein SML-Telegramm/Backfill geht
+verloren. **Kein `esp_wifi_connect`/keine Assoziation**, keine Credentials nötig.
+Kconfig: `ESPNOW_SENDER_WIFI_RSSI_LOG` (default y),
+`..._SSID` (default `"Wohnzimmer"`), `..._PERIOD_MS` (default 60000). Anzeige über
+die Sender-Konsole `wifi`.
+
+**Stand:** Host-Suite grün (u. a. `wifi rssi log: 21 checks`, Vollring-Repair
+10 checks), Sender- und Receiver-Build grün (Sender 942800 B, Receiver 1331088 B).
+**Offen:** OTA-Flash Sender (`/update-sender`) + Receiver, danach Live-Verifikation
+(RSSI-Zeile im Sender-Log, Historie bleibt).
+
 ## ERLEDIGT+GEFLASHT (2026-10-22): Socket-Erschöpfung des Empfängers (`accept (23)`)
 **Symptom (Bootlog):** `httpd_accept_conn: error in accept (23)`, `httpd_sock_err: error in
 send/recv : 104` und `web_guard: self-probe failed: ESP_ERR_HTTP_FETCH_HEADER`.
@@ -1435,3 +1485,33 @@ Kurz-Changelog der funktionalen Aenderungen, abgeleitet aus der Git-Historie
 - `4ffdcf0` SML-Parser-Abhaengigkeit deklariert (Referenz-Commit).
 - `5035efc` / `44b6fe0` / `e5fdec1` Firmware-Staging/Upload im Workflow.
 - `664e927` / `0070840` Artefakt-Pfade + `ota_data_initial.bin` im Build.
+
+## BEHOBEN (2026-10-22): Empfänger-Boot-Loop durch kaputten History-Ring
+**Symptom:** Empfänger bootete in Schleife, Web/Port 80 zu, Ping antwortete aber.
+Nach `System clock synchronized` (main.c:595) Stillstand, kein `Receiver ready`.
+**Ursache (Backtrace gegen ELF, WDT-Abort):**
+`app_main` → `power_history_init` (power_history.c:887) → `repair_ring_if_needed`
+(:764) → `ring_heap_sort` (:572) → `read_record_idx` (:209). Der Ring hatte
+**10.197 Records** (> `POWER_HISTORY_REPAIR_RAM_LIMIT` 4096) und war **unsortiert**
+→ On-Disk-Heapsort. Jeder Zugriff ist `fseek`/`SPIFFS_lseek` mit linearem
+Objektindex-Scan → O(n²), **ohne Yield** → IDLE0 verhungert → Task-WDT (120 s) →
+`panic`/Reboot → Loop. `start_webserver()` wurde nie erreicht.
+Nebenfund in einem Boot: `***ERROR*** A stack overflow in task sys_evt`
+(`CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2304`, Backtrace: `vApplicationStackOverflowHook`).
+**Nicht** die Ursache: die persistierte CPU-Config (`rtcfg`). Testweise `cfg`+`prev`
+aus NVS entfernt (3 Bytes in der Entry-Bitmap, Page-Header-CRC unberührt) → Defaults
+griffen (`40-240 MHz, light sleep off`) — Hänger blieb. Damit war die Config
+ausgeschlossen.
+**Fix am Gerät:** `storage`-Partition (0x320000, 0xE0000) gelöscht. `power_history_init`
+fand eine leere Datei → frischer Header, **kein Repair** → Boot sauber.
+`Receiver ready` wieder da, HTTP 200, Ping 0 % Verlust, `Persistent history ready:
+0 of 29000`.
+**Backups (Odroid):** `backup-storage.bin` + `.keep` (917504 B, md5
+`b62660e0df805352b0d8754574bab88e`), `backup-nvs-original.bin`, `nvs-patched.bin`.
+**Offen (Firmware-Fix):** `ring_heap_sort`/`repair_ring_if_needed` müssen den
+Watchdog füttern (`vTaskDelay(1)` pro N Schritte) bzw. zeitlich begrenzt werden,
+sonst tritt der Loop bei jedem unsortierten großen Ring erneut auf.
+**Historie:** wird per `history-pull`/Backfill (30-min-Intervall) vom **Sender**
+nachgezogen. Aktuell `sender_latest_utc: 0` → der **Sender ist stumm**, siehe
+offenen Punkt (b) „ESP-NOW-Link nach Kanalwechsel" — dort ist der Re-align-Fix
+implementiert, aber noch **nicht geflasht**.

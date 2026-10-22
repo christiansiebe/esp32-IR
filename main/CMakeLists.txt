@@ -41,7 +41,8 @@ if(CONFIG_ESPNOW_ROLE_RECEIVER)
                           "net_watchdog.c")
 endif()
 if(CONFIG_ESPNOW_ROLE_SENDER)
-    list(APPEND main_srcs "tx_batch.c" "uart_sleep_window.c" "uart_recovery.c")
+    list(APPEND main_srcs "tx_batch.c" "uart_sleep_window.c" "uart_recovery.c"
+                          "wifi_rssi_log.c")
 endif()
 
 idf_component_register(SRCS ${main_srcs}
