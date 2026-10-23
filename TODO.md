@@ -1,5 +1,80 @@
 # To-do – esp32-IR
 
+## ANALYSE (2026-10-23): Sparhebel – der größte lag in der Compiler-Optimierung
+
+**Auftrag (User):** „Finde Tricks wie man clever mehr sparen kann."
+**Methode:** Jede Zahl unten kommt aus einem **echten Build** (IDF v6.1, ccache),
+nicht aus einer Schätzung. Testvarianten lagen in eigenen `build/*`-Ordnern und
+wurden danach entfernt.
+
+### Kernbefund: das Projekt wurde mit `-Og` gebaut, nicht `-Os`
+
+`CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` (= `-Og`) ist der **IDF-Default** und stand
+nirgends in `sdkconfig.defaults` – nie bewusst gewählt, nie aufgefallen. Umstellen
+auf `CONFIG_COMPILER_OPTIMIZATION_SIZE=y` (`-Os`) ist ein **Config-Einzeiler ohne
+jede Code-Änderung** und spart auf beiden Rollen deutlich:
+
+| Rolle | jetzt (`-Og`) | `-Os` | Ersparnis |
+|---|---|---|---|
+| Empfänger | 1.251.280 B (79,4 %) | **1.162.864 B (73,8 %)** | **−88.416 B (−86 KB)** |
+| Sender | 851.056 B (54,1 %) | **794.656 B (50,5 %)** | **−56.400 B (−55 KB)** |
+
+Der Bootloader nutzt `-Os` schon (`BOOTLOADER_COMPILER_OPTIMIZATION_SIZE=y`,
+0x6680 B) – die App war der Ausreißer. Trade-off: Backtraces/Zeilen bleiben, aber
+optimierter Code ist beim Single-Step schwerer zu lesen. **Empfehlung:** erst den
+laufenden WDT-Fix verifizieren, dann umstellen.
+
+### Zweiter Hebel: Cert-Bundle FULL → CMN (−51 KB)
+
+`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y` zog **145 CA-Roots (68 KB)** in
+das Image. `..._DEFAULT_CMN=y` sind **41 Roots (~17 KB)** → **−51 KB**.
+**Sicherheitsprüfung vor dem Kürzen:** `main/ota_policy.c` akzeptiert *jedes*
+`https://`-Ziel, und das Sandbox-Frontend präsentiert ein **Let's-Encrypt**-Zert.
+Beide Let's-Encrypt-Roots sind im CMN-Bundle enthalten
+(`Internet Security Research Group: ISRG Root X1 + X2`) → die Kürzung bricht den
+Pull-OTA-Pfad nicht. Wer später einen Broker/Host mit anderer CA nutzt, muss die
+Liste anpassen.
+
+### Kleinvieh (risikoarm, ~30 KB)
+
+| Hebel | Wirkung | Trade-off |
+|---|---|---|
+| `COMPILER_OPTIMIZATION_ASSERTION_LEVEL` 2→1 | ~12 KB | `assert()`-Texte (Datei/Zeile) verschwinden aus Panic/Log; NULL-/ISR-Checks bleiben |
+| `ESP_ERR_TO_NAME_LOOKUP=n` | ~2 KB | `esp_err_to_name()` liefert nur noch „UNKNOWN ERROR" |
+| mDNS: `ENABLE_CONSOLE_CLI`, `ENABLE_BROWSE`, `PREDEF_NETIF_ETH`, `MAX_SERVICES` 10→4 | ~16 KB | Konsolen-CLI/Browse-API fallen weg (nur für Debug genutzt) |
+| MQTT: `TRANSPORT_WEBSOCKET`/`_SECURE` aus | klein | nur nötig, wenn der Broker ein `ws://`/`wss://`-URI ist |
+
+### Falsche Fährten (verworfen – nicht wieder aufmachen)
+
+- **`libmesh.a` = 189 KB:** im Map nur in der `LOAD`-**Präambel** (Kandidatenliste),
+  in `size-components` **nicht vorhanden** → gar nicht gelinkt. Kein Einsparpotenzial.
+- **`esp_stdio` rodata = 113 KB:** **Map-Artefakt.** Die Sektion
+  `.rodata.esp_stdio_register.str1.4` ist real **81 Byte**; der Map-Eintrag
+  adressiert den **gemergten String-Pool** aller Module (2579 Strings: Log-Formate
+  *und* Assert-Texte). Deshalb hilft die Assert-Kürzung oben – aber ein „esp_stdio
+  abschalten" gibt es nicht.
+- **Schon aus, nichts zu holen:** BT, Coex, Trace/AppTrace, Coredump, GDBstub,
+  IPv6 + WPA3/Enterprise (Commit `365a79d`).
+
+### Kombiniert (gemessen, Empfänger)
+
+| Variante | Größe | frei im 1,5-MB-Slot |
+|---|---|---|
+| Basis (`-Og`, FULL, Assert 2) | 1.251.280 B (79,4 %) | 20,6 % |
+| `-Os` + CMN-Bundle | 1.111.792 B (70,6 %) | 29,4 % |
+| `-Os` + CMN + mDNS/MQTT-Trims | **1.095.408 B (69,6 %)** | **30,4 %** |
+| `-Os` + CMN + Assert 1 + ErrName=n | 1.104.208 B (70,1 %) | 29,9 % |
+
+Alles zusammen (nicht separat gemessen, Summe der Einzelbeiträge): **~1.083.000 B
+(~68,8 %) → ~310 KB frei** im Slot, statt 20,6 %.
+
+**Fazit:** Der Flash war nie zu klein – das Image füllte nur 79 % eines Slots, den
+niemand bedrängt. Der clevere Trick ist unspektakulär: **der Optimierungsgrad**.
+`-Os` + CMN-Bundle allein geben **−139 KB** für eine Handvoll Config-Zeilen und
+null Risiko im Code. **Noch nicht eingebaut** – wartet auf die Entscheidung des
+Users (und auf den verifizierten WDT-Fix, s. o.).
+
+
 ## ERLEDIGT (2026-10-23): Flash-Diät (IPv6 + WPA3/Enterprise) – gemessen −78 KB
 
 **Auftrag (User):** (1) Lean-Config dauerhaft einbauen und verifizieren, (2) prüfen,

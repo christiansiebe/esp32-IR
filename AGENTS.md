@@ -628,6 +628,21 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   cleanly on IDF v6.1 and shrinks an update from 1.25 MB to ~88 KB (measured,
   no compression beats heatshrink). It saves **transfer, not flash**: both OTA
   slots still hold a full image. Not integrated yet - see TODO.md.
+- **The app was built with `-Og`, not `-Os`.** IDF's default
+  `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` was never overridden, so the receiver
+  image was 86 KB (sender 55 KB) larger than necessary. Setting
+  `CONFIG_COMPILER_OPTIMIZATION_SIZE=y` is a one-line config change with no code
+  edit. Measured: receiver 1251280 -> 1162864 B, sender 851056 -> 794656 B. The
+  bootloader already used `-Os`. Trade-off: harder single-step debugging.
+- The full CA bundle costs 68 KB (`..._CERTIFICATE_BUNDLE_DEFAULT_FULL=y`, 145
+  roots); `..._DEFAULT_CMN=y` is 41 roots / ~17 KB and still contains both
+  Let's Encrypt roots (ISRG X1/X2), which is what `main/ota_policy.c` (any
+  `https://`) and the sandbox frontend need. Assertion level 2->1 (~12 KB) and
+  the mDNS console/browse/eth options (~16 KB) are further low-risk trims.
+- **Two map traps:** a library listed only in the `LOAD` preamble of
+  `esp32-IR.map` (e.g. `libmesh.a`) is a *link candidate*, not linked - check
+  `idf.py size-components` instead. And a huge `.rodata.*.str1.4` entry in the
+  map is the merged string pool, not one object's data.
 
 ## Managed components (IDF v6)
 - ESP-IDF v6 moved ESP-MQTT and cJSON out of the core. They come from the ESP
