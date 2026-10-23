@@ -630,15 +630,20 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   slots still hold a full image. Not integrated yet - see TODO.md.
 - **The app was built with `-Og`, not `-Os`.** IDF's default
   `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` was never overridden, so the receiver
-  image was 86 KB (sender 55 KB) larger than necessary. Setting
-  `CONFIG_COMPILER_OPTIMIZATION_SIZE=y` is a one-line config change with no code
-  edit. Measured: receiver 1251280 -> 1162864 B, sender 851056 -> 794656 B. The
-  bootloader already used `-Os`. Trade-off: harder single-step debugging.
-- The full CA bundle costs 68 KB (`..._CERTIFICATE_BUNDLE_DEFAULT_FULL=y`, 145
-  roots); `..._DEFAULT_CMN=y` is 41 roots / ~17 KB and still contains both
-  Let's Encrypt roots (ISRG X1/X2), which is what `main/ota_policy.c` (any
-  `https://`) and the sandbox frontend need. Assertion level 2->1 (~12 KB) and
-  the mDNS console/browse/eth options (~16 KB) are further low-risk trims.
+  image was 86 KB (sender 55 KB) larger than necessary. This is now fixed in
+  `sdkconfig.defaults` (`CONFIG_COMPILER_OPTIMIZATION_SIZE=y`), together with the
+  CMN certificate bundle and the mDNS/MQTT trims - all config, no source change.
+  Combined, the receiver went 1251280 -> 1095424 B (-152 KB, 79.4 % -> 69.6 %)
+  and the sender 851056 -> 792624 B (-57 KB). Rebuild with
+  `tools/build.sh <role> --clean`: an existing `sdkconfig.<role>` keeps the old
+  values, SDKCONFIG_DEFAULTS only seeds a fresh config. Trade-off: optimised code
+  is harder to single-step; flip back to DEBUG when chasing a bench bug.
+- The full CA bundle cost 68 KB (`..._CERTIFICATE_BUNDLE_DEFAULT_FULL=y`, 145
+  roots). The CMN bundle is 41 roots / 16.7 KB (measured in the ELF) and still
+  has both Let's Encrypt roots (ISRG X1/X2), which is all `main/ota_policy.c`
+  (any `https://`) and the sandbox frontend need. Assertion level 2->1 (~12 KB)
+  and `ESP_ERR_TO_NAME_LOOKUP=n` (~2 KB) were deliberately left alone - the
+  assert text is worth more than 14 KB on a device without USB.
 - **Two map traps:** a library listed only in the `LOAD` preamble of
   `esp32-IR.map` (e.g. `libmesh.a`) is a *link candidate*, not linked - check
   `idf.py size-components` instead. And a huge `.rodata.*.str1.4` entry in the

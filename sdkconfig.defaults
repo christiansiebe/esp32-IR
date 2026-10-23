@@ -107,3 +107,39 @@ CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=n
 CONFIG_ESP_WIFI_WPA3_COMPATIBLE_SUPPORT=n
 CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_SOFTAP=n
 CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+
+# --- Build for size -------------------------------------------------------
+# The app has been compiled with IDF's default -Og
+# (CONFIG_COMPILER_OPTIMIZATION_DEBUG) since the project was created; it was
+# never a deliberate choice. -Os is pure codegen, no source change, and the
+# single biggest lever: measured -86 KB on the receiver and -55 KB on the
+# sender. The bootloader already builds with -Os
+# (CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_SIZE). Trade-off: optimised code is
+# harder to single-step and line info is less exact, so flip back to DEBUG when
+# chasing a bug on the bench.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# --- Certificate bundle: FULL -> CMN --------------------------------------
+# The full bundle is 145 roots (68 KB in the image). The CMN bundle is 41 roots
+# (~17 KB) and still carries both Let's Encrypt roots (ISRG Root X1/X2), which
+# is all pull-OTA needs: main/ota_policy.c accepts any https:// URL and the
+# sandbox front door presents a Let's Encrypt certificate. Measured -51 KB.
+# If a future OTA host or broker uses a different CA, add it here (or go back
+# to the full bundle).
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+
+# --- mDNS: advertise only, no discovery / debug CLI -----------------------
+# The device only calls mdns_hostname_set + mdns_service_add (one _http
+# service); it never browses, and the mDNS console command is unused. The ETH
+# netif is never used (STA + SoftAP only). Measured -16 KB.
+CONFIG_MDNS_ENABLE_CONSOLE_CLI=n
+CONFIG_MDNS_ENABLE_BROWSE=n
+CONFIG_MDNS_PREDEF_NETIF_ETH=n
+CONFIG_MDNS_MAX_SERVICES=4
+
+# --- MQTT: plain TCP only -------------------------------------------------
+# main/mqtt_bridge.c builds the broker URI from NVS; the deployment broker is a
+# plain mqtt:// (TCP) endpoint, so the WebSocket transports are unused. Remove
+# these two lines if a ws:// or wss:// broker is ever configured.
+CONFIG_MQTT_TRANSPORT_WEBSOCKET=n
+CONFIG_MQTT_TRANSPORT_WEBSOCKET_SECURE=n

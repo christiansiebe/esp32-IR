@@ -71,8 +71,71 @@ Alles zusammen (nicht separat gemessen, Summe der Einzelbeiträge): **~1.083.000
 **Fazit:** Der Flash war nie zu klein – das Image füllte nur 79 % eines Slots, den
 niemand bedrängt. Der clevere Trick ist unspektakulär: **der Optimierungsgrad**.
 `-Os` + CMN-Bundle allein geben **−139 KB** für eine Handvoll Config-Zeilen und
-null Risiko im Code. **Noch nicht eingebaut** – wartet auf die Entscheidung des
-Users (und auf den verifizierten WDT-Fix, s. o.).
+null Risiko im Code.
+
+## ERLEDIGT (2026-10-23): Sparmaßnahmen eingebaut und gemessen
+
+`-Os`, CMN-Bundle, mDNS-Trims und MQTT-WebSocket-aus stehen jetzt in
+`sdkconfig.defaults` (Abschnitte „Build for size", „Certificate bundle",
+„mDNS", „MQTT"). **Kein Quellcode geändert** – reine Config.
+
+| Rolle | vorher | nachher | Ersparnis | frei im 1,5-MB-Slot |
+|---|---|---|---|---|
+| Empfänger | 1.251.280 B (79,4 %) | **1.095.424 B (69,6 %)** | **−152 KB** | 20,6 % → **30 %** |
+| Sender | 851.056 B (54,1 %) | **792.624 B (50,3 %)** | **−57 KB** | 45,9 % → **50 %** |
+
+Verifiziert am Build: `CONFIG_COMPILER_OPTIMIZATION_SIZE=y`,
+`..._BUNDLE_DEFAULT_CMN=y` im generierten `sdkconfig.receiver`; Zertifikats-Bundle
+im ELF **16.738 B** (vorher 68 KB, beide Let's-Encrypt-Roots weiter enthalten);
+mDNS-CLI/Browse/ETH `not set`, `MDNS_MAX_SERVICES=4`, MQTT-WebSocket `not set`.
+Host-Suite **grün** (`./test/run_host_tests.sh`, exit 0). Beide Rollen bauen
+sauber (`tools/build.sh receiver|sender --clean`).
+
+**Bewusst NICHT mitgenommen:** Assertion-Level 2→1 (~12 KB) und
+`ESP_ERR_TO_NAME_LOOKUP=n` (~2 KB) – die Assert-Texte sind beim Debuggen eines
+Geräts ohne USB zu wertvoll für 14 KB.
+
+**Noch offen:** Flash am Gerät (beide Rollen) + Gegenprobe, dass die STA-Assoziation
+und der ESP-NOW-Link danach tragen. **Erst flashen, wenn der Rollback-Pfad am Gerät
+belegt ist** (s. u.).
+
+## OFFEN (2026-10-23): Rollback-Pfad am Gerät ist NICHT belegt
+
+Anlass: Frage „haben wir NVS und OTA-Rollback über die BOOT-Taste getestet?"
+
+**Was am echten Gerät verifiziert ist** (TODO 2026-10-21, Version `v0.1.1-4`):
+- **Config-Restore (3-s-Geste)** – über den gleichwertigen Konsolenbefehl
+  `restore-config`: `set retries 5` → committed; Restore → Reboot; danach
+  `retries=3`. **NVS-Slot `rtcfg/prev` funktioniert also am Gerät.**
+- **SPIFFS-Historie unversehrt** nach dem Restore (9390/29000, `write errors: 0`).
+- **Grenzfall ohne `prev`** (nach `reset-config`): Restore rebottet nicht, Gerät
+  bleibt erreichbar – kein Hänger.
+
+**Was NICHT am Gerät getestet ist** – nur host-getestet bzw. per Log bewiesen:
+- **Firmware-Rollback über 10-s-Halten** (echter Tastendruck am GPIO).
+- **Post-OTA-Rollback-Pfad** (`boot_confirm`): OTA → Dashboard bleibt aus →
+  Rollback in den anderen Slot. TODO 2026-10-21 sagt selbst
+  „Hardware-Verifikation offen"; `test/test_boot_confirm_trigger.c` deckt nur den
+  Kleber auf dem Host ab.
+- **Physischer Tastentest** (3 s / 10 s am Gerät) – steht laut TODO noch aus; die
+  GPIO-Anbindung ist nur syntaktisch + per Log geprüft.
+- **Sender-Taste**: Sender-Image mit Tasten-Support ist **noch nicht geflasht**
+  (Sender hängt am Messpunkt ohne USB).
+
+**Warum das vor dem Flash der Sparmaßnahmen wichtig ist:** Ein neues Image landet
+in `ESP_OTA_IMG_PENDING_VERIFY`. Kommt das Dashboard nicht hoch, muss der Rollback
+greifen – sonst bleibt nur der Weg über die Taste. Solange der Rollback am Gerät
+unbelegt ist, ist ein Flash mit unbekanntem Rückweg riskant. **Reihenfolge: erst
+Rollback am Gerät belegen (kontrolliert, mit laufendem Ersatz-Image im anderen
+Slot), dann die Sparmaßnahmen flashen.**
+
+**Code-Prüfung (host-seitig, gegen IDF v6.1 `esp_ota_ops.c`):** Die 10-s-Geste ruft
+`esp_ota_mark_app_invalid_rollback_and_reboot()` → `esp_ota_current_ota_is_workable(false)`.
+Das prüft **nicht** den aktuellen Zustand, sondern markiert den laufenden Slot als
+INVALID, sofern `esp_ota_check_rollback_is_possible()` true ist (anderer Slot hat
+ein valides Image). Die Behauptung „rollt auch ein bestätigtes Image zurück" deckt
+sich damit – **aber nur, wenn im anderen Slot ein valides Image liegt**; gibt
+`check_rollback_is_possible` false, passiert nichts (Fehlerlog, kein Reboot).
 
 
 ## ERLEDIGT (2026-10-23): Flash-Diät (IPv6 + WPA3/Enterprise) – gemessen −78 KB
