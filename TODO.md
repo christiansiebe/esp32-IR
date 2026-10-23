@@ -46,8 +46,25 @@ die Sender-Konsole `wifi`.
 
 **Stand:** Host-Suite grün (u. a. `wifi rssi log: 21 checks`, Vollring-Repair
 10 checks), Sender- und Receiver-Build grün (Sender 942800 B, Receiver 1331088 B).
-**Offen:** OTA-Flash Sender (`/update-sender`) + Receiver, danach Live-Verifikation
-(RSSI-Zeile im Sender-Log, Historie bleibt).
+**GEFLASHT + LIVE VERIFIZIERT (2026-10-23):** Beide Geräte laufen jetzt auf
+**`v0.1.1-10-gea88af2-dirty`** (OTA-Key `Cholbe123`).
+- Empfänger: `POST /update` (rohes `.bin`). Läuft auf Slot `ota_0`, `valid (confirmed)`,
+  **kein Rollback**. Historie intakt: 7252 Records, `caught_up true`, `lag 0 s`.
+- Sender: `POST /update-sender` (ESP-NOW-Relay, 942800 B in ~42 s). Meldet
+  `sender_fw_version v0.1.1-10-...`, ch 1, `storage_records` ~7264.
+- **RSSI-Log live:** Sender-Konsole `wifi` → `home wlan "Wohnzimmer": seen`,
+  `rssi: -85 dBm (min -87, max -85, avg -86; 2 ok / 0 miss)`. Kein SML-Verlust
+  (`sml_sent_ok` steigt), `last_send_status 0`.
+- **Link-Fallback live:** Bootlog zeigt `Link fallback: no sender traffic for
+  60000 ms` während des Sender-Reboots; danach kam der Sender von selbst zurück
+  (TX-Zähler steigen), der Align-/Fallback-Pfad arbeitet also.
+- **WDT-Pacer:** kein Boot-Loop, `Persistent history ready` bei ~2.5 s, TWDT armed,
+  keine `exceeded its time budget`-Warnung (Ring war nicht kaputt).
+- **Hinweis Flash-Tücke:** Die ersten `/update`-Versuche meldeten HTTP 200
+  „Firmware accepted", das Gerät rollte aber per Boot-Confirm (30 s Grace) auf den
+  alten Slot `ota_1` zurück, weil das neue Image beim ersten Boot nicht rechtzeitig
+  hochkam. Erst der dritte Upload blieb stehen — Version erst nach dem Reboot prüfen
+  (`/api` + `simulate`: Slot/State), nicht auf die 200-Antwort allein verlassen.
 
 ## ERLEDIGT+GEFLASHT (2026-10-22): Socket-Erschöpfung des Empfängers (`accept (23)`)
 **Symptom (Bootlog):** `httpd_accept_conn: error in accept (23)`, `httpd_sock_err: error in
