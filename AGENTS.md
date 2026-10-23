@@ -612,6 +612,23 @@ incoming diagnostic requests; until it is known the request is broadcast. The
    zurück. Kein Messverlust. Der Ring ist jetzt 256 groß; die Meldung heißt
    „DISPLAY GAP", nicht mehr „VALUE GAP".
 
+## Flash budget / lean config
+- The 4 MB flash is ~98 % allocated (2×1.5 MB OTA + 896 KB SPIFFS) and the
+  receiver image used to fill 84.6 % of its 1.5 MB slot, so unused IDF defaults
+  that still get linked are real cost. `sdkconfig.defaults` ("Flash diet")
+  disables IPv6 and the WPA3/SAE/OWE/Enterprise Wi-Fi family: measured **−78 KB**
+  on the receiver (84.6 % → 79.4 %) and **−90 KB** on the sender. Neither feature
+  is used (no IPv6 code; SoftAP is `WIFI_AUTH_WPA2_PSK`; ESP-NOW is a separate
+  CCMP link layer, not SAE).
+- **Do not disable `CONFIG_ESP_WIFI_MBEDTLS_CRYPTO`**: WPA2 needs it. The OWE
+  options `select` it, so turning the WPA3 family off would drop it - that is why
+  it is pinned `=y` in `sdkconfig.defaults`. Keep
+  `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` too (pull OTA trusts the public CA).
+- Delta OTA (`espressif/esp_delta_ota`, 7.3 KB flash, 0 B static RAM) builds
+  cleanly on IDF v6.1 and shrinks an update from 1.25 MB to ~88 KB (measured,
+  no compression beats heatshrink). It saves **transfer, not flash**: both OTA
+  slots still hold a full image. Not integrated yet - see TODO.md.
+
 ## Managed components (IDF v6)
 - ESP-IDF v6 moved ESP-MQTT and cJSON out of the core. They come from the ESP
   Component Registry (`espressif/mqtt`, `espressif/cjson`) via

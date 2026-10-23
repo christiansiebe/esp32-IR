@@ -1,4 +1,81 @@
 # To-do – esp32-IR
+
+## ERLEDIGT (2026-10-23): Flash-Diät (IPv6 + WPA3/Enterprise) – gemessen −78 KB
+
+**Auftrag (User):** (1) Lean-Config dauerhaft einbauen und verifizieren, (2) prüfen,
+ob `esp_delta_ota` zum Partitionslayout und zum ESP-NOW-Relay-Pfad passt.
+**Vorgeschichte:** 4-MB-Flash ist zu 98 % belegt (2×1,5 MB OTA + 896 KB SPIFFS),
+Empfänger füllte 84,6 % seines Slots.
+
+**Was abgeschaltet wurde** (`sdkconfig.defaults`, Abschnitt „Flash diet"):
+`CONFIG_LWIP_IPV6=n` sowie die WPA3/SAE/OWE- und Enterprise-Familie
+(`ESP_WIFI_ENABLE_WPA3_SAE`, `SAE_H2E`, `SAE_PK`, `SOFTAP_SAE_SUPPORT`,
+`ENABLE_WPA3_OWE_STA`, `WPA3_COMPATIBLE_SUPPORT`, `ENABLE_WPA3_OWE_SOFTAP`,
+`ESP_WIFI_ENTERPRISE_SUPPORT`). **Bewusst behalten:**
+`CONFIG_ESP_WIFI_MBEDTLS_CRYPTO=y` (WPA2 braucht die Crypto-APIs; wird sonst von den
+OWE-Optionen per `select` gezogen, die jetzt weg sind → deshalb explizit gepinnt) und
+`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` (Pull-OTA vertraut dem Public-CA-Bundle).
+
+**Belege:** Kein `AF_INET6`/`sockaddr_in6`/IPv6-Code in `main/`; SoftAP ist
+`WIFI_AUTH_WPA2_PSK` (`main.c:1121`), STA joint nur ein WPA2-PSK-Heim-WLAN; ESP-NOW
+nutzt CCMP (eigener Link-Layer), nicht SAE, und läuft hier unverschlüsselt
+(`peer.encrypt = false`).
+
+**Messung (beide Rollen, saubere Builds, ccache):**
+
+| Rolle | vorher | nachher | Ersparnis |
+|---|---|---|---|
+| Empfänger | 1.331.088 B (84,6 %) | **1.251.280 B (79,4 %)** | **−79.808 B (−78 KB)** |
+| Sender | 942.800 B (59,9 %) | **851.056 B (54,1 %)** | **−91.744 B (−90 KB)** |
+
+**Verifikation:** Host-Suite grün (`test/run_host_tests.sh`, EXIT 0 – u. a. sml,
+stability, virtual day, history-sync). Bootloader unverändert 0x6680 (8 % frei).
+In `sdkconfig.receiver`/`.sender` bestätigt: `# CONFIG_LWIP_IPV6 is not set`,
+`# CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT is not set`, `ESP_WIFI_MBEDTLS_CRYPTO=y`,
+`MBEDTLS_CERTIFICATE_BUNDLE=y`.
+**OFFEN (Hardware):** Noch **nicht geflasht**. Auf der Bank bestätigen, dass STA
+weiter assoziiert und ESP-NOW weiter trägt (Config-Aussage dazu steht im
+`sdkconfig.defaults`-Kommentar).
+
+## ANALYSE (2026-10-23): `esp_delta_ota` – passt, spart aber nur Transfer
+
+**Frage:** Kann Delta-OTA die Update-Größe über die schwache Funkstrecke senken?
+**Ergebnis: Ja, und zwar deutlich – aber nur die Übertragung, nicht den Flash.**
+Beide OTA-Slots müssen weiter die volle Firmware halten (sonst kein Rollback), das
+Partitionslayout bleibt also unverändert.
+
+**Machbarkeit geprüft (real, nicht aus der Doku):**
+- Komponente `espressif/esp_delta_ota` **1.1.4** aus der Registry, deklariert nur
+  `idf >= 4.3`; **eigenes Testprojekt mit IDF v6.1 baut sauber** (`EXIT=0`).
+- Footprint: **7,3 KB Flash** (`esp_delta_ota.c` 1270 B + `detools.c` 5117 B +
+  `heatshrink_decoder.c` 1083 B), **0 B statisches RAM** (Kontext/Puffer per
+  `calloc`). Chunk-Puffer im Beispiel 512 B.
+- API ist **transport-agnostisch**: `read_cb` (Patch-Basis) und `write_cb`
+  (schreibt per `esp_ota_write` in den Ziel-Slot). Der Referenz-`read_cb` liest die
+  **laufende Partition** (`esp_partition_read(current_partition, …)`), das passt zum
+  A/B-Layout. Patch-Header enthält SHA-256 der laufenden Firmware → Patch nur für
+  exakt diese Version gültig.
+- **Kein Bootloader-Umbau, keine zusätzliche Partition nötig.**
+
+**Gemessener Delta (Empfänger alt→neu, die obige Lean-Änderung als Testfall):**
+
+| | Größe | Anteil |
+|---|---|---|
+| Voll-Image (neu) | 1.251.280 B | 100 % |
+| Delta, sequentiell | **89.774 B (87,7 KB)** | **7,2 % → −92,8 %** |
+| Delta, heatshrink-komprimiert | 127.252 B (124,3 KB) | 10,2 % |
+| Gegenprobe (gleiche Datei) | 281 B | Sanity ok |
+
+Überraschung: **ohne** Kompression ist der Patch kleiner als mit heatshrink (das
+Delta ist schon dicht) – die `-c heatshrink`-Variante lohnt hier nicht.
+
+**Einordnung:** Delta-OTA ist der richtige Hebel für „schnelle, kleine Updates über
+−86 dBm", nicht für Platznot. Und es braucht einen **HTTPS- oder HTTP-Client** als
+Transport (Referenzpfad), bzw. eine Anpassung, wenn der Patch über das ESP-NOW-Relay
+laufen soll – der `feed_patch`-Callback nimmt aber beliebige Quellen.
+**Nicht umgesetzt** (nur Machbarkeit + Zahlen). Offene Entscheidung: erst Lean-Config
+flashen, dann entscheiden, ob Delta-OTA über HTTPS-Pull oder ESP-NOW kommen soll.
+
 ## IN ARBEIT (2026-10-23): WDT-Fix `power_history.c` + Sender-WLAN-RSSI-Log
 **Auftrag (User):** (1) Watchdog-Fix in `power_history.c` bauen (behebt die Ursache
 des Boot-Loops dauerhaft), (2) Re-align-Fix auf den Sender flashen, damit die

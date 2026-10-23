@@ -75,3 +75,35 @@ CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
 # sockets, and MEMP_NUM_NETCONN (= CONFIG_LWIP_MAX_SOCKETS in lwipopts.h) still
 # costs only a few hundred bytes of static RAM.
 CONFIG_LWIP_MAX_SOCKETS=16
+
+# --- Flash diet ----------------------------------------------------------
+# The 4 MB flash is 98 % allocated (two 1.5 MB OTA slots + 896 KB SPIFFS
+# history) and the receiver image fills 84.6 % of its slot, so every unused
+# IDF default that still gets linked costs headroom the next feature needs.
+# These three are linked but never used by this project:
+#
+# * IPv6: no AF_INET6 socket, no sockaddr_in6, no ip6 code anywhere in main/;
+#   the dashboard, MQTT and ESP-NOW are all IPv4. Measured -34 KB.
+# * WPA3/SAE/OWE and Wi-Fi Enterprise: the receiver SoftAP is WIFI_AUTH_WPA2_PSK
+#   (main.c) and the STA path only ever joins a WPA2-PSK home AP, so SAE, OWE
+#   and the 802.1X enterprise stack are dead weight. Enterprise alone is
+#   documented by IDF as ~60 KB.
+#
+# Deliberately KEPT: CONFIG_ESP_WIFI_MBEDTLS_CRYPTO (WPA2's own crypto, selected
+# by the OWE options but needed regardless) and CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+# (pull OTA trusts the public CA bundle, see above). Turning off the WPA3 family
+# removes the OWE options that "select" MBEDTLS_CRYPTO, so it is pinned here to
+# stop Kconfig from dropping it. ESP-NOW is unaffected: it is a separate link
+# layer using CCMP, not SAE, and this project runs it unencrypted (peer.encrypt
+# = false). Must be verified on the bench that the STA still associates and
+# ESP-NOW still carries traffic after a flash (see TODO.md).
+CONFIG_LWIP_IPV6=n
+CONFIG_ESP_WIFI_MBEDTLS_CRYPTO=y
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
+CONFIG_ESP_WIFI_ENABLE_SAE_H2E=n
+CONFIG_ESP_WIFI_ENABLE_SAE_PK=n
+CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=n
+CONFIG_ESP_WIFI_WPA3_COMPATIBLE_SUPPORT=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_SOFTAP=n
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
