@@ -287,6 +287,9 @@ python3 "$repo/remote-shell/ha/test_odroid_ap_config.py"
 # network or board. The real power cut needs hardware and is not exercised.
 python3 "$repo/remote-shell/ha/test_watchdog_monitor.py"
 python3 "$repo/remote-shell/ha/test_watchdog_actor.py"
+# Wiring: simulated heartbeat outage through decide() + the power-cut wrapper
+# (dry run) plans exactly one cut; the durable cooldown suppresses a second.
+python3 "$repo/remote-shell/ha/test_watchdog_integration.py"
 
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.

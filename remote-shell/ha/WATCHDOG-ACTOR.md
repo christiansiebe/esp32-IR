@@ -346,24 +346,51 @@ ungueltiger Plan (fehlende `--url`/`--topic`/`--command`, halber Puls).
 
 ### 5.1 Zusammenspiel mit `watchdog_monitor.py` (unveraendert)
 
-Der Monitor startet den Aktor ueber `--reboot-cmd` (Shell-Befehl). Empfohlen ist
-ein **Wrapper**, damit die verschachtelten Anfuehrungszeichen nicht zur
-Fehlerquelle werden:
+Der Monitor startet den Aktor ueber `--reboot-cmd` (Shell-Befehl). Damit die
+verschachtelten Anfuehrungszeichen nicht zur Fehlerquelle werden und der
+**durable Cooldown** erhalten bleibt, gibt es den Wrapper
+`remote-shell/ha/watchdog_powercut.sh`:
 
 ```sh
-# /usr/local/sbin/watchdog-powercut.sh  (off-board, vom Monitor gerufen)
-#!/bin/sh
-exec /usr/bin/python3 /usr/local/sbin/watchdog_actor.py \
-  --kind command --off-cmd '/usr/bin/usbrelay REL1=0' \
-  --on-cmd '/usr/bin/usbrelay REL1=1' --pulse-seconds 5 \
-  --cooldown 900 --state-file /var/lib/watchdog/actor-state --execute
+# /usr/local/sbin/watchdog_powercut.sh  (off-board, vom Monitor gerufen)
+# Baut den Aktor-Aufruf aus Umgebungsvariablen und laeuft per Default im
+# Trockenlauf. Scharf nur mit WATCHDOG_POWERCUT_ARMED=1.
 ```
 
 ```sh
 python3 watchdog_monitor.py --heartbeat /var/lib/watchdog/board-heartbeat \
   --interval 60 --grace 30 --miss-needed 3 --cooldown 900 \
-  --reboot-cmd /usr/local/sbin/watchdog-powercut.sh
+  --reboot-cmd /usr/local/sbin/watchdog_powercut.sh
 ```
+
+Der Wrapper ist konfigurierbar ueber Umgebungsvariablen (Defaults in Klammern):
+
+| Variable | Bedeutung |
+|---|---|
+| `WATCHDOG_ACTOR` | Pfad zu `watchdog_actor.py` (`/usr/local/sbin/watchdog_actor.py`) |
+| `WATCHDOG_ACTOR_KIND` | `command` \| `http` \| `mqtt` (`command`) |
+| `WATCHDOG_OFF_CMD` / `WATCHDOG_ON_CMD` | Relais-AUS/-EIN (`usbrelay REL1=0/1`) |
+| `WATCHDOG_COMMAND` | einzelner Befehl statt Puls |
+| `WATCHDOG_URL` / `WATCHDOG_TOPIC`+`WATCHDOG_PAYLOAD` | Ziel fuer `http`/`mqtt` |
+| `WATCHDOG_PULSE_SECONDS` | Power-Cut-Laenge (`5`) |
+| `WATCHDOG_COOLDOWN` | **durablem** Cooldown (`900`) — gleich wie der Monitor |
+| `WATCHDOG_STATE_FILE` | durabler Zustand (`/var/lib/watchdog/actor-state`) |
+| `WATCHDOG_MIN_QUORUM` / `WATCHDOG_QUORUM_VOTES` | Quorum (`1` / leer) |
+| `WATCHDOG_POWERCUT_ARMED` | `1` = scharf; sonst Trockenlauf (`0`) |
+
+Beispiel (USB-Relais, Trockenlauf):
+
+```sh
+WATCHDOG_ACTOR_KIND=command \
+WATCHDOG_OFF_CMD='usbrelay REL1=0' WATCHDOG_ON_CMD='usbrelay REL1=1' \
+WATCHDOG_COOLDOWN=900 WATCHDOG_STATE_FILE=/var/lib/watchdog/actor-state \
+  /usr/local/sbin/watchdog_powercut.sh
+```
+
+Der Wrapper ist **derselbe** `--reboot-cmd` fuer alle drei Aktor-Arten; nur die
+Umgebungsvariablen aendern sich. Der durable `--state-file` sorgt dafuer, dass
+der Cooldown einen **Monitor-Neustart** uebersteht (der Monitor haelt seinen
+eigenen Cooldown nur im RAM).
 
 ---
 
@@ -371,66 +398,51 @@ python3 watchdog_monitor.py --heartbeat /var/lib/watchdog/board-heartbeat \
 
 Die **Board-Seite** bleibt wie gemergt: `watchdog-heartbeat.timer` schreibt den
 Heartbeat (`/run/board-heartbeat`). Der **Beobachter** laeuft auf dem
-**OFF-BOARD-Host** (Sandbox-Kanal, zweiter Rechner oder MCU). Hier ein
-systemd-Unit-Vorschlag fuer diesen Host.
+**OFF-BOARD-Host** (Sandbox-Kanal, zweiter Rechner oder MCU).
 
-`/etc/systemd/system/watchdog-monitor.service`:
+Die Beobachter-Seite liegt fertig im Repo:
+
+- `watchdog-monitor.service` — systemd-Unit (Restart=always, der Monitor ist
+  selbst ein SPOF), verdrahtet mit `--reboot-cmd` auf den Wrapper.
+- `watchdog_powercut.sh` — der Aktor-Wrapper (Abschnitt 5.1).
+- `deploy_watchdog_actor.sh` — installiert Monitor + Aktor + Wrapper + Unit auf
+  dem Off-Board-Host; **Trockenlauf per Default**, `--armed` schreibt ein
+  Drop-in mit `WATCHDOG_POWERCUT_ARMED=1`.
+
+`watchdog-monitor.service` (Kern):
 
 ```ini
-[Unit]
-Description=Off-board watchdog monitor (external heartbeat + power-cut actor)
-Documentation=file:/usr/local/share/remote-shell/WATCHDOG-ACTOR.md
-# Netz nicht zwingend (der Heartbeat kann eine lokale Datei sein), aber der
-# Aktor (HTTP/MQTT) braucht es meist -> nach dem Netz starten.
-After=network-online.target
-Wants=network-online.target
-
 [Service]
 Type=simple
-# Heartbeat + Aktor + Cooldown muessen zu watchdog-heartbeat.timer passen
-# (INTERVAL 60 s). --reboot-cmd ruft den Wrapper (Abschnitt 5.1), der den
-# Aktor mit --execute und durablem Cooldown startet.
 ExecStart=/usr/bin/python3 /usr/local/sbin/watchdog_monitor.py \
     --heartbeat /var/lib/watchdog/board-heartbeat \
     --interval 60 --grace 30 --miss-needed 3 --cooldown 900 \
-    --reboot-cmd /usr/local/sbin/watchdog-powercut.sh
-# Der Beobachter ist selbst ein Single Point of Failure -> immer neu starten.
+    --reboot-cmd /usr/local/sbin/watchdog_powercut.sh
 Restart=always
 RestartSec=10
 StateDirectory=watchdog
-
-# Haertung: der Monitor braucht nur Datei lesen + Aktor rufen.
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=/var/lib/watchdog
-
-[Install]
-WantedBy=multi-user.target
 ```
 
 Installation / Betrieb:
 
 ```sh
-sudo install -m 0755 watchdog_monitor.py  /usr/local/sbin/watchdog_monitor.py
-sudo install -m 0755 watchdog_actor.py    /usr/local/sbin/watchdog_actor.py
-sudo install -m 0755 watchdog-powercut.sh /usr/local/sbin/watchdog-powercut.sh
-sudo install -m 0644 watchdog-monitor.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now watchdog-monitor.service
+# Off-board-Host: Monitor + Aktor installieren (Trockenlauf).
+sudo remote-shell/ha/deploy_watchdog_actor.sh
 journalctl -u watchdog-monitor -f     # Trockenlauf zuerst pruefen!
+
+# Erst nach Trockenlauf + markierter Testdose scharf schalten:
+sudo remote-shell/ha/deploy_watchdog_actor.sh --armed
 ```
 
 **Reihenfolge (wichtig):**
 
-1. **Trockenlauf**: erst ohne `--execute` (Abschnitt 5) und mit
-   `--reboot-cmd` **leer** starten → der Monitor loggt nur „waere rebootet".
+1. **Trockenlauf**: `deploy_watchdog_actor.sh` ohne `--armed` (Abschnitt 5) →
+   der Monitor loggt nur „waere rebootet", der Wrapper plant nur.
 2. Board-Heartbeat-Transport pruefen (Abschnitt 2.0): kommt der Heartbeat beim
    Beobachter an, und **aendert er sich** (seq steigt)?
-3. Aktor-Wrapper mit markierter **Testdose** und `--execute` testen.
-4. Erst dann am echten Board scharf schalten. Cooldowns (`--cooldown` Monitor
-   **und** Aktor) gleich setzen.
+3. Aktor-Wrapper mit markierter **Testdose** und `--armed` testen.
+4. Erst dann am echten Board scharf lassen. Cooldowns (`--cooldown` Monitor
+   **und** Aktor) gleich setzen (beide 900 s).
 
 **Grenzen / Betriebsnotizen**
 
@@ -458,20 +470,31 @@ journalctl -u watchdog-monitor -f     # Trockenlauf zuerst pruefen!
 
 ```sh
 python3 remote-shell/ha/test_watchdog_actor.py
-python3 remote-shell/ha/test_watchdog_monitor.py   # unveraendert
+python3 remote-shell/ha/test_watchdog_monitor.py        # unveraendert
+python3 remote-shell/ha/test_watchdog_integration.py    # Monitor -> Wrapper -> Aktor
 ```
 
-Beide sind in `test/run_host_tests.sh` eingehaengt und laufen ohne Board, ohne
-Netz und ohne Mocks (reine Logik). Der echte Power-Cut braucht Hardware und ist
-absichtlich **nicht** Teil der Tests.
+Alle drei sind in `test/run_host_tests.sh` eingehaengt und laufen ohne Board,
+ohne Netz und ohne Mocks (reine Logik). Der Integrationstest simuliert einen
+**ausfallenden Heartbeat**: ueber die echte `decide()`-Logik + den Wrapper im
+Trockenlauf wird **genau EIN** Power-Cut geplant, ein zweiter Ausfall im
+**durablen Cooldown** wird unterdrueckt, danach wieder erlaubt. Der echte
+Power-Cut braucht Hardware und ist absichtlich **nicht** Teil der Tests — der
+Wrapper laeuft ohne `WATCHDOG_POWERCUT_ARMED`, also ohne `--execute`.
 
 ## 9. Offene Punkte (an den Parent)
+
+**Host-seitig verdrahtet (dieses PR):** Wrapper, systemd-Unit, Deploy-Skript und
+Integrationstest stehen; der Pfad Monitor → Wrapper → Aktor ist trockenlauf-faehig.
+
+**Verbleibende NUTZER-Entscheide** (nicht host-seitig entscheidbar):
 
 1. **Aktor festlegen** (Abschnitt 3): schaltbare Steckdose vorhanden? Nur fuer
    das Board? Erreichbar per HTTP oder MQTT?
 2. **Heartbeat-Transport** (Abschnitt 2.0) waehlen (MQTT retained oder
    Datei-Pull) und testen, dass die `seq` steigt.
 3. **Fail-safe-Verdrahtung** bestaetigen (stromlos = Board versorgt).
-4. **Cooldowns** festlegen (Vorschlag 900 s) und in Monitor **und** Aktor gleich
-   setzen.
-5. Erst danach scharf schalten; vorher Trockenlauf mit markierter Testdose.
+4. **Cooldown-Wert** bestaetigen (Vorschlag 900 s) — in Monitor **und** Aktor
+   gleich setzen.
+5. Erst danach scharf schalten (`deploy_watchdog_actor.sh --armed`); vorher
+   Trockenlauf mit markierter Testdose.
