@@ -25,7 +25,9 @@ sys_pll (big) = N * 12 MHz
 | 2400 MHz (Werksmaximum) | 200 | 0xd80104c8 |
 | 2448 MHz | 204 | 0xd80104cc |
 | 2460 MHz | 205 | — |
-| **2496 MHz (stabil)** | **208** | — |
+| **2472 MHz (stabil, OC-Punkt)** | **206** | **0xd80104ce** |
+| 2484 MHz | 207 | — |
+| 2496 MHz | 208 | — |
 | 2508 MHz | 209 | — |
 | 2520 MHz | 210 | — |
 | 2532 MHz | 211 | — |
@@ -48,15 +50,17 @@ zuerst stille Bitfehler, also aendert sich der Hash.
 |---|---|---|
 | 204 | 2448 | PASS |
 | 205 | 2460 | PASS, 25 s Soak, 59 Laeufe, 0 Fehler |
-| 206 | 2472 | PASS |
+| 206 | **2472** | **PASS, 30 min Soak, 22828 Laeufe, 0 Fehler** |
 | 207 | 2484 | PASS |
-| 208 | **2496** | **PASS, 120 s Soak, 570 Laeufe, 0 Fehler** |
+| 208 | 2496 | PASS, 120 s Soak, 570 Laeufe, 0 Fehler |
 | 209 | 2508 | einmal PASS (10 s), **Hang im 90-s-Soak** |
 | 210 | 2520 | grenzwertig: einmal Hang, danach 2x PASS |
 | 211 | 2532 | **Hang** (Watchdog-Reboot) |
 
-Verlaessliche Obergrenze: **2496 MHz (N=208)**. 2508-2520 grenzwertig,
-2532 faellt aus. Bei 2460 MHz bleibt das Board kuehl (<= 39 °C unter Last).
+Verlaesslicher OC-Punkt: **2472 MHz (N=206)** - am laengsten (30 min) und
+fehlerfrei vermessen. 2496/2484 PASS, aber kuerzer erprobt; 2508-2520
+grenzwertig, 2532 faellt aus. Bei 2460 MHz bleibt das Board kuehl
+(<= 39 °C unter Last).
 
 ## Risiko: die Spannung ist am Anschlag
 
@@ -68,7 +72,7 @@ die Spannung zur Absicherung zu erhoehen. Deshalb:
 - `gen_oc_dts.py` traegt fuer den OC-Punkt die **Regler-Obergrenze** ein
   (Standard 1040 mV) und lehnt Werte unter dem Regler-Boden 680 mV ab.
 - Der Punkt ist ein Einzelexperiment; er wird **nicht** als Dauerbetrieb
-  empfohlen. 2496 MHz ist gemessen stabil, aber ohne Spannungsreserve.
+  empfohlen. 2472 MHz ist gemessen stabil, aber ohne Spannungsreserve.
 
 Ein roher Register-Poke ist zudem **nicht** die sichere Sequenz des Treibers:
 der Treiber muxed auf einen glitchfreien Parent, programmiert um und muxed
@@ -79,7 +83,7 @@ bei diesem Takt versagt - das Overlay geht den Treiber-Weg (neuer OPP-Punkt).
 
 | Datei | Zweck |
 |---|---|
-| `gen_oc_dts.py` | erzeugt `oc.dts` mit dem OC-Punkt (Standard 2496 MHz) |
+| `gen_oc_dts.py` | erzeugt `oc.dts` mit dem OC-Punkt (Standard 2472 MHz) |
 | `deploy_oc_safe.sh` | Test-Overlay: ein Boot aktiv, danach automatisch zurueck; `--promote` dauerhaft |
 | `restore-stock-oc.sh` | idempotente Ruecknahme von Overlay + Waechtern |
 | `oc-freq-guard.sh` / `.service` | deckelt `scaling_max_freq` auf den Werkswert |
@@ -93,7 +97,7 @@ teilen sich die Rendering-Funktion `render()`; der Standardlauf von
 ## Erzeugen
 
 ```bash
-# nur der OC-Punkt (Standard: 2496 MHz @ 1040 mV)
+# nur der OC-Punkt (Standard: 2472 MHz @ 1040 mV)
 python3 gen_oc_dts.py
 
 # OC-Punkt UND die Tief-Takte unter 1 GHz in einem Overlay
@@ -104,7 +108,7 @@ python3 gen_oc_dts.py --rate-mhz 2460 --mv 1040
 ```
 
 `--rate-mhz` muss ein Vielfaches von 12 MHz sein (PLL-Grenze), `--mv` mindestens
-680 (Regler-Boden). Ein Lauf oberhalb von 2496 MHz gibt eine Warnung aus.
+680 (Regler-Boden). Ein Lauf oberhalb von 2472 MHz gibt eine Warnung aus.
 
 ## Boot-Sicherheit (umkehrbar)
 
@@ -148,15 +152,15 @@ Der systemd-Hardware-Watchdog (`RuntimeWatchdogSec=60`) faengt einen echten Hang
 python3 /root/ha/gen_oc_dts.py --out /root/oc.dts
 sh /root/ha/deploy_oc_safe.sh
 reboot            # Reboot 1: Werkswerte, Overlay wird scharf gemacht
-reboot            # Reboot 2: Testboot mit 2496 MHz
+reboot            # Reboot 2: Testboot mit 2472 MHz
 reboot            # Reboot 3: automatisch wieder Werkswerte
 
 # 2. waehrend Reboot 2 pruefen: ist der Punkt ueberhaupt da?
 cat /sys/devices/system/cpu/cpufreq/policy2/scaling_available_frequencies
-#    -> 2496000 muss auftauchen (zusaetzlich zu 2400000)
+#    -> 2472000 muss auftauchen (zusaetzlich zu 2400000)
 
 # 3. den OC-Punkt ausdruecklich anwaehlen (nur Testboot!)
-echo 2496000 > /sys/devices/system/cpu/cpufreq/policy2/scaling_max_freq
+echo 2472000 > /sys/devices/system/cpu/cpufreq/policy2/scaling_max_freq
 cat /sys/devices/system/cpu/cpufreq/policy2/scaling_cur_freq
 
 # 4. dauerhaft uebernehmen (optional, auf eigenes Risiko)

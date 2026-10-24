@@ -1,5 +1,5 @@
 #!/bin/sh
-# deploy_oc_safe.sh - install the OC CPU overlay (2496 MHz, big cluster) as a
+# deploy_oc_safe.sh - install the OC CPU overlay (2472 MHz, big cluster) as a
 # *test* overlay: active for exactly one boot, then removed again, unless it is
 # explicitly promoted to a permanent install.
 #
@@ -21,7 +21,7 @@
 #   * cpu-freq-guard.service pins scaling_min_freq to 1.0 GHz (the low points,
 #     if the overlay carries them, are not auto-selected).
 #   * oc-freq-guard.service caps scaling_max_freq back to the stock 2400 MHz,
-#     so the 2496 MHz point is only reachable by an explicit runtime raise.
+#     so the 2472 MHz point is only reachable by an explicit runtime raise.
 #
 # Everything installed here is removed again by restore-stock-oc.sh.
 set -u
@@ -151,9 +151,9 @@ if [ -f "$DTS" ] && command -v dtc >/dev/null 2>&1; then
         if [ "$DRY" != 1 ]; then
                 dtc -I dtb -O dts /tmp/merged-oc.dtb > /tmp/merged-oc.dts 2>/dev/null
                 # Anker " {" noetig: "opp-2400000" ist Praefix von "opp-24000000".
-                n=$(grep -c "opp-2496000000 {" /tmp/merged-oc.dts)
-                [ "$n" = 1 ] || die "opp-2496000000 $n mal im gemergten DTB (erwartet 1)"
-                say '   OC-OPP 2496 MHz im gemergten DTB vorhanden'
+                n=$(grep -c "opp-2472000000 {" /tmp/merged-oc.dts)
+                [ "$n" = 1 ] || die "opp-2472000000 $n mal im gemergten DTB (erwartet 1)"
+                say '   OC-OPP 2472 MHz im gemergten DTB vorhanden'
         fi
 else
         say '   HINWEIS: dtc oder oc.dts fehlt - ueberspringe die Bau-/Pruefstufe.'
