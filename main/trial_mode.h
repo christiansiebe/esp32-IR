@@ -71,10 +71,10 @@ bool trial_boot_should_revert(bool pending_at_boot);
  * cutting SML telegrams. The signal is therefore the SML data path itself: the
  * risky knobs can only cost telegrams, never add them.
  *
- * `loss` is the cumulative SML-loss count (a gap that cost a telegram plus a
- * parser resync) and `loss_at_arm` the same value when the trial began. Both are
- * monotonic, so a normal meter pause cannot trip it - only new loss can. Pure, so
- * the rule is host-tested. */
+ * `loss` is the cumulative SML-loss count (a gap that cost a telegram, a parser
+ * resync, a failed/timed-out ESP-NOW send) and `loss_at_arm` the same value when
+ * the trial began. All are monotonic, so a normal meter pause cannot trip it -
+ * only new loss can. Pure, so the rule is host-tested. */
 bool trial_sender_health_ok(uint32_t loss_at_arm, uint32_t loss_now);
 
 #endif /* TRIAL_MODE_H */
