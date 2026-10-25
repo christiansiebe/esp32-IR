@@ -73,6 +73,63 @@ niemand bedrängt. Der clevere Trick ist unspektakulär: **der Optimierungsgrad*
 `-Os` + CMN-Bundle allein geben **−139 KB** für eine Handvoll Config-Zeilen und
 null Risiko im Code.
 
+## ERLEDIGT (2026-10-23): `set sleep on` nimmt sich jetzt selbst zurück
+
+**Auftrag (Nutzer):** „patch den code, wir wählen die sicherste Variante, dass er
+sich zurück setzen wird."
+
+**Befund vorab (zwei stille Lücken):**
+1. Der **Trial-Health-Check war auf dem Sender ein Placebo.** `trial_health_ok()`
+   gab `true` zurück, sobald `CONFIG_ESPNOW_SENDER_ASSOCIATE` aus ist (so wird das
+   ausgelieferte Image gebaut) – der Trial **committete also immer** und konnte
+   nie bemerken, dass ein Light-Sleep-Fenster Telegramme zerschneidet. Und er lief
+   nur bei explizitem `set trial …`, nicht bei einem normalen `set sleep on`.
+2. Der **Link-Fallback** (die eingebaute „schlaf abschalten"-Rücknahme) kann auf
+   dem Sender ebenfalls nie feuern: `send_callback` frischt bei **jedem**
+   erfolgreichen Broadcast (alle 5 s, `SML_TX_CYCLE_MS`) `last_ok_ms` auf, und
+   `link_fallback_should_fallback()` nimmt `max(last_rx, last_ok)`. Ein Broadcast
+   meldet aber auch Erfolg „ins Leere". **Historie:** `3746762` hatte dafür einen
+   `sender_role`-Parameter eingebaut (Sender = nur die ACK-Uhr), dieser Parameter
+   fehlt in `ea88af2`/HEAD aber wieder. **Nicht in diesem Patch behoben** – der
+   Trial deckt die Lücke jetzt ab; der Link-Fallback sollte separat wieder auf die
+   ACK-Uhr umgestellt werden.
+
+**Umsetzung (sicherste Variante):**
+- `trial_mode.{c,h}`: neue pure, host-getestete Regel
+  `trial_sender_health_ok(loss_at_arm, loss_now)`. Das Sender-Health-Signal ist
+  jetzt der **SML-Datenpfad selbst**: nur **neuer** Verlust seit dem Armieren ist
+  ungesund. `loss` = `gap_loss` (Gap, der ein Telegramm kostete) +
+  `parser_resyncs` (Wedge, den die Stall-Recovery brechen musste) +
+  `sml_send_fail` (ESP-NOW-Send fehlgeschlagen/Timeout – das Radio hat
+  durchgeschlafen). Alle drei sind monoton, ein normaler Zähler-Pause-Gap zählt
+  also **nicht** als Verlust.
+- `main.c`: `trial_health_ok()` nutzt für den Sender dieses Signal;
+  `trial_arm()` erfasst die Verlust-Baseline. Die drei Zähler werden unter
+  `g_uart_stats_lock` gelesen (so werden sie auch geschrieben).
+- `console_cmd_set`: **Light Sleep EINschalten läuft jetzt immer als Trial**
+  (Sender-only), auch ohne `set trial` – kostet es ein Telegramm, nimmt es sich
+  selbst zurück. **AUSschalten bleibt sofort** (die sichere Richtung und der
+  Notausstieg) und überlebt einen Reboot.
+
+**Rückweg-Mechanik (unverändert, jetzt wirksam):** Der Kandidat liegt nur unter
+`trial/cand` und in RAM; `rtcfg/cfg` (committed) bleibt unangetastet.
+`trial_revert_now()` rebootet über `boot_confirm_fail()`, der nächste Boot findet
+den Marker und verwirft den Kandidaten (`trial_boot_recover()` →
+`apply_power_management()` lädt das committed `cfg`). Der Boot-Pfad ist geprüft:
+`apply_power_management()` vor `trial_boot_recover()`, beide laden das committed
+`cfg`.
+
+**Verifikation:** `test/test_trial_mode.c` um `test_sender_health` erweitert
+(35 Checks grün). **Beide Rollen bauen mit `-Werror` fehlerfrei** (IDF v6.1,
+Sender 0xc1890 B, Empfänger unverändert) – das deckt beide `#if`-Zweige ab. Volle
+Host-Suite `./test/run_host_tests.sh` grün. Commits `5a87be4` + `acf420a`.
+
+**Noch offen:** Am echten Gerät ist der Selbst-Rückzug nicht belegt (Sender hängt
+am Messpunkt ohne USB). Der Beweis braucht einen Bench-Test: `set sleep on`, dann
+ein Telegramm-Verlust provozieren → Gerät muss sich selbst zurücknehmen.
+
+
+
 ## ERLEDIGT (2026-10-23): Sparmaßnahmen eingebaut und gemessen
 
 `-Os`, CMN-Bundle, mDNS-Trims und MQTT-WebSocket-aus stehen jetzt in
