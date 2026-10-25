@@ -35,6 +35,16 @@ bool trial_boot_should_revert(bool pending_at_boot)
     return pending_at_boot;
 }
 
+bool trial_sender_health_ok(uint32_t loss_at_arm, uint32_t loss_now)
+{
+    /* Any new SML loss since the trial began is the trial's own doing: the risky
+     * knob (a shorter light-sleep window, a lower DFS ceiling, fewer retries) can
+     * only cost telegrams, never gain them. Revert on the first one - the signal
+     * errs toward the known-good committed config. Monotonic counters, so a
+     * normal meter pause (no new loss) is never mistaken for a broken setting. */
+    return loss_now <= loss_at_arm;
+}
+
 trial_action_t trial_tick(trial_t *t, uint64_t now_ms, bool healthy)
 {
     if (t == NULL || !t->pending) {
