@@ -98,6 +98,22 @@ static void test_boot_decision(void)
     check(!trial_boot_should_revert(false), "no marker -> keep committed");
 }
 
+/* The sender's health signal is the SML data path: only NEW loss since the trial
+ * was armed is unhealthy. A normal meter pause adds no loss, so it never trips. */
+static void test_sender_health(void)
+{
+    /* No new loss -> healthy, however long the window runs. */
+    check(trial_sender_health_ok(0, 0), "no loss at all -> healthy");
+    check(trial_sender_health_ok(100, 100), "loss unchanged -> healthy");
+
+    /* A single new loss reverts: the trial's own doing, err toward known-good. */
+    check(!trial_sender_health_ok(100, 101), "one new loss -> unhealthy");
+    check(!trial_sender_health_ok(0, 1), "first loss -> unhealthy");
+
+    /* Counters only grow; a "decrease" (a wrap) must not read as loss. */
+    check(trial_sender_health_ok(5, 4), "counter wrap -> not treated as new loss");
+}
+
 /* Defaults are sane and the begin call resets a previously decided trial. */
 static void test_begin_resets(void)
 {
@@ -119,6 +135,7 @@ int main(void)
     test_blip_inside_grace();
     test_inactive();
     test_boot_decision();
+    test_sender_health();
     test_begin_resets();
     printf("trial_mode: %d checks passed\n", g_checks);
     return 0;

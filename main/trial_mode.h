@@ -63,4 +63,18 @@ trial_action_t trial_tick(trial_t *t, uint64_t now_ms, bool healthy);
  * config. Pure, so the boot path is host-testable. */
 bool trial_boot_should_revert(bool pending_at_boot);
 
+/* --- Sender-specific health signal ---------------------------------------
+ * The sender has no station association (CONFIG_ESPNOW_SENDER_ASSOCIATE is off
+ * in the shipped image), so the receiver-style "am I associated?" proof does not
+ * exist and trial_health_ok() used to return true unconditionally - the trial
+ * always committed and could never notice that the light-sleep window was
+ * cutting SML telegrams. The signal is therefore the SML data path itself: the
+ * risky knobs can only cost telegrams, never add them.
+ *
+ * `loss` is the cumulative SML-loss count (a gap that cost a telegram plus a
+ * parser resync) and `loss_at_arm` the same value when the trial began. Both are
+ * monotonic, so a normal meter pause cannot trip it - only new loss can. Pure, so
+ * the rule is host-tested. */
+bool trial_sender_health_ok(uint32_t loss_at_arm, uint32_t loss_now);
+
 #endif /* TRIAL_MODE_H */

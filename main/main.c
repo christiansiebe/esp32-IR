@@ -5661,6 +5661,10 @@ static runtime_config_t *active_runtime_config(void)
 #define TRIAL_NVS_CAND_KEY "cand"
 
 static trial_t g_trial;
+/* SML-loss count when the current trial was armed (see trial_sender_health_ok).
+ * Captured by trial_arm() so the sender's health signal is "did this trial cost
+ * any telegrams", not an association it never has. */
+static uint32_t g_trial_loss_at_arm;
 
 static bool trial_marker_load(void)
 {
@@ -5720,9 +5724,25 @@ static void trial_boot_recover(void)
  * link (association + a DHCP lease), because that is how its dashboard stays
  * reachable; with no home WLAN the dashboard lives on the SoftAP, which is up by
  * construction. The sender has no IP of its own (its IP_EVENT handler is
- * deliberately not registered), so its proof is the association with the
- * receiver AP. A false "unhealthy" only costs a revert to the committed config,
- * so the signal errs toward the known-good value. */
+ * deliberately not registered) and, with CONFIG_ESPNOW_SENDER_ASSOCIATE off, no
+ * association either - so its proof is the SML data path: a trial that costs a
+ * telegram (or wedges the parser) is reverted. A false "unhealthy" only costs a
+ * revert to the committed config, so the signal errs toward the known-good
+ * value. */
+static uint32_t trial_sml_loss_now(void)
+{
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* gap_loss (a gap that cost a telegram) + parser_resyncs (a wedge the stall
+     * recovery had to break) are the two ways a trial can silently destroy data. */
+    portENTER_CRITICAL(&g_uart_stats_lock);
+    uint32_t loss = g_uart_gap_loss + g_uart_parser_resyncs;
+    portEXIT_CRITICAL(&g_uart_stats_lock);
+    return loss;
+#else
+    return 0; /* the receiver has no SML path; its health is the station link */
+#endif
+}
+
 static bool trial_health_ok(void)
 {
     if (esp_get_free_heap_size() <= 40960) {
@@ -5730,10 +5750,12 @@ static bool trial_health_ok(void)
     }
 #if CONFIG_ESPNOW_ROLE_SENDER
 #if CONFIG_ESPNOW_SENDER_ASSOCIATE
-    return g_wifi_connected;
-#else
-    return true;
+    if (!g_wifi_connected) {
+        return false;
+    }
 #endif
+    /* The sender's radio proof is the SML path itself (see above). */
+    return trial_sender_health_ok(g_trial_loss_at_arm, trial_sml_loss_now());
 #else
     if (g_wifi_configured) {
         return g_wifi_connected && g_sta_got_ip;
@@ -5784,6 +5806,9 @@ static void trial_arm(const runtime_config_t *candidate)
     trial_policy_t policy;
     trial_policy_defaults(&policy);
     trial_marker_store(candidate);
+    /* Capture the SML-loss baseline before the worker can judge the trial, so
+     * the sender's health signal counts only loss this trial causes. */
+    g_trial_loss_at_arm = trial_sml_loss_now();
     trial_begin(&g_trial, &policy, (uint64_t)(esp_timer_get_time() / 1000));
     ESP_LOGW(TAG, "Trial armed for %u ms; a health failure reverts it",
              (unsigned)policy.window_ms);
@@ -6052,7 +6077,18 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         return;
     }
     bool applied = runtime_config_apply(cfg);
-    if (as_trial) {
+    /* Turning light sleep ON is the risky direction: a window that is too long
+     * silently cuts SML telegrams, and the sender cannot prove it with an
+     * association (it has none). So that one change is always armed as a trial
+     * even without 'set trial': if it costs a telegram the trial reverts it by
+     * itself. Turning sleep OFF is the conservative direction (and the escape),
+     * so it commits at once and survives a reboot. Light sleep is sender-only. */
+    bool sleep_key = false;
+#if CONFIG_ESPNOW_ROLE_SENDER
+    sleep_key = (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0);
+#endif
+    bool trial_active = as_trial || (sleep_key && cfg->light_sleep);
+    if (trial_active) {
         /* Keep the committed value in NVS; the candidate lives only in RAM and
          * under the trial marker, so a reset drops it. */
         trial_arm(cfg);
@@ -6070,7 +6106,6 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     bool cpu_key = (strcmp(key, "cpu") == 0 || strcmp(key, "cpu-mhz") == 0 ||
                     strcmp(key, "freq") == 0 || strcmp(key, "freq-mhz") == 0 ||
                     strcmp(key, "cpu-min") == 0 || strcmp(key, "cpu-min-mhz") == 0);
-    bool sleep_key = (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0);
     char note[80] = {0};
     if (cpu_key) {
         char *end = NULL;
@@ -6098,7 +6133,7 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
 #endif
     int written = snprintf(out, out_size,
                            "%s=%s%s%s%s\n", key, value, note,
-                           as_trial ? " [trial: reverts unless it survives 60 s]" : "",
+                           trial_active ? " [trial: reverts unless it survives 60 s]" : "",
                            applied ? "" : " (hardware rejected the change)");
     if (written > 0 && (size_t)written < out_size) {
         runtime_config_render(cfg, out + written, out_size - (size_t)written);
