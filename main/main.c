@@ -5732,10 +5732,13 @@ static void trial_boot_recover(void)
 static uint32_t trial_sml_loss_now(void)
 {
 #if CONFIG_ESPNOW_ROLE_SENDER
-    /* gap_loss (a gap that cost a telegram) + parser_resyncs (a wedge the stall
-     * recovery had to break) are the two ways a trial can silently destroy data. */
+    /* The three ways a light-sleep window can silently break the sender:
+     * gap_loss (a gap that cost a received telegram), parser_resyncs (a wedge
+     * the stall recovery had to break) and sml_send_fail (the ESP-NOW send of a
+     * telegram failed or timed out - the radio slept through it). All monotonic,
+     * so a normal meter pause adds none of them. */
     portENTER_CRITICAL(&g_uart_stats_lock);
-    uint32_t loss = g_uart_gap_loss + g_uart_parser_resyncs;
+    uint32_t loss = g_uart_gap_loss + g_uart_parser_resyncs + g_sml_send_fail;
     portEXIT_CRITICAL(&g_uart_stats_lock);
     return loss;
 #else
