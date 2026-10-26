@@ -26,14 +26,46 @@
 - Der Sender (gleicher Code `9fafed0`) hat `records 11845, write_errors 0,
   queue_drops 0` → reiner **Empfänger**-Defekt (Backfill-/Merge-Pfad).
 
-**Mechanismus:** Jeder Merge schiebt Minuten ein, die **älter** sind als der
-lokale Ring-Schwanz (Cursor 22.10. vs. Ring bis 26.10.). `write_records()` löst
-dann `shift_up_renumber()` aus und schreibt **alle neueren Records** neu — pro
-Minute den halben Ring, ~5,8 s je Session. Der Ring ist mit 793 KiB in einer
-896-KiB-Partition **88,5 % voll**; SPIFFS hat kaum Platz für Garbage Collection,
-Schreibvorgänge scheitern (`ENOSPC`), die 16-Platz-Queue läuft voll → Drops →
-Cursor bleibt stehen → nächste Session schiebt dieselben alten Minuten erneut
-ein → **Livelock**.
+**Mechanismus (nach Live-Messung korrigiert):** Kein Platzmangel. Jede Minute
+**unter** dem lokalen Ring-Schwanz ruft in `write_records()` den
+`shift_up_renumber()`-Zweig: er liest und schreibt **alle neueren Records**
+(fseek+fread+fwrite je 28-Byte-Satz) und hält dabei `g_history_mutex`. Über
+~11.800 Records sind das ~23.600 Datei-Syscalls **pro Minute**, mehrere Sekunden.
+In der Zeit kommt der Writer nicht an die 16-Platz-Queue → Drops; jeder Reader
+läuft in den 800-ms-Timeout (`record_count: 0`). Der Shift bricht zudem
+mittendrin mit **EIO** ab.
+
+**Live-Beweis (geflasht, `v0.1.1-19-g9fafed0-dirty`, 2026-10-26):**
+```
+E power_history: History persist failed at shift: errno=5 (I/O error), spiffs=ok used=334332/836081
+E power_history: Could not persist power-history batch
+E power_history: History queue full (16 slots); dropping minute    (alle ~10 s)
+```
+- `storage_used 334332 / 836081` = **40 % voll** → **kein** Platzproblem
+  (die frühere 88,5-%-Zahl war falsch).
+- `errno=5` = **EIO**, **nicht** ENOSPC (28). In der IDF-Quelle liefert
+  `spiffs_res_to_errno()` ENOSPC nur bei `SPIFFS_ERR_FULL`; EIO ist der
+  Sammel-Fall für alle übrigen SPIFFS-Fehler.
+- `splices: 0` — der Zähler steigt erst **nach** dem Shift, deshalb bleibt er bei
+  einem Abbruch *im* Shift auf 0. Die Stage-Angabe (`shift`) verrät den Pfad.
+- `write_errors` steigt langsam (5→6/60 s), `queue_drops` schneller (74→81/60 s).
+- **0 von 25** `/api/power-history`-Reads kamen durch (alle 800-ms-Timeout,
+  `record_count: 0`), obwohl der Bootlog `11799 of 29000` meldet.
+
+**Damit ist die Kette klar:** nicht „voller Ring → ENOSPC", sondern „teurer
+O(n)-Shift hält den Mutex sekundenlang und scheitert mit EIO". Der EIO-Grund
+selbst ist noch **nicht** bewiesen (Kandidaten: SPIFFS-Schreibfehler an einer
+noch nicht angelegten Seite bzw. GC-Grenze, oder ein echter Flash-Fehler in
+einem Block). Ein gezielter Probelauf (errno je einzelnem `write_record_idx`
+loggen) würde das klären.
+
+**Nächster Schritt (Fix, noch offen):** Den O(n)-Splice ganz vermeiden — der
+Backfill darf den Ring nicht rückwärts einsortieren müssen. Zwei Wege:
+(a) nur Minuten **oberhalb** des lokalen Schwanzes mergen (Lücken in der Mitte
+als Marker führen), oder (b) bei unsortiertem Einfügen den Datensatz verwerfen
+statt zu spließen. Beides macht einen Merge O(1) statt O(Ring) und nimmt dem
+EIO den Auslöser. Regression danach über die Konsole `history` (splice-Zähler).
+
 
 **Instrumentierung (eingebaut, host-getestet):**
 - `log_persist_failure(stage)`: nennt **Stufe** (`shift`/`splice-write`/
