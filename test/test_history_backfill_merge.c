@@ -209,6 +209,14 @@ static void test_out_of_order_backfill_keeps_sorted(void)
     wait_for_count(before + 20);
     power_history_get_status(&st);
     CHECK(st.record_count == before + 20, "store grew by the older minutes");
+    /* Merging minutes BELOW the local tail forces the ring to splice: every
+     * existing newer record is rewritten to keep the ring time-sorted. That
+     * write amplification is the suspected cause of the receiver's SPIFFS write
+     * failures, so assert it is actually counted (and therefore observable in
+     * the status/diag output). */
+    CHECK(st.splice_batches > 0, "out-of-order merge records splice batches");
+    CHECK(st.splice_records >= st.splice_batches,
+          "splice record count at least one per batch");
 
     /* The existing live minutes must STILL be found (binary search works on a
      * sorted ring), otherwise a re-merge would duplicate them. */

@@ -1,5 +1,6 @@
 #include "power_history.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,6 +65,13 @@ static QueueHandle_t g_history_queue;
 static SemaphoreHandle_t g_history_mutex;
 static uint32_t g_queue_drops;
 static uint32_t g_write_errors;
+/* Write-amplification counters (see power_history_status_t). Written by the
+ * history writer under g_history_mutex, read via get_status under the same
+ * mutex, so no separate lock is needed. */
+static uint32_t g_splice_batches;
+static uint32_t g_splice_records;
+static uint32_t g_storage_used_bytes;
+static uint32_t g_storage_total_bytes;
 static bool g_history_ready;
 static bool g_history_ram_fallback;
 static power_history_record_t g_history_ram_records[POWER_HISTORY_PAGE_SIZE];
@@ -361,6 +369,29 @@ static bool minute_is_stored(const power_history_header_t *header, int64_t ts)
     return false;
 }
 
+/* Report *where* and *why* a persistence attempt failed. The VFS sets errno on
+ * the SPIFFS path, but the caller only ever saw "could not persist", so a
+ * GC-starved, nearly-full SPIFFS (writes fail with ENOSPC while reads still
+ * work) was indistinguishable from a plain I/O fault. Log the errno plus the
+ * partition fill so the two can be told apart from the device log alone. */
+static void log_persist_failure(const char *stage)
+{
+    int err = errno;
+#ifdef ESP_PLATFORM
+    size_t total = 0;
+    size_t used = 0;
+    esp_err_t info = esp_spiffs_info(POWER_HISTORY_PARTITION, &total, &used);
+    ESP_LOGE(TAG, "History persist failed at %s: errno=%d (%s), spiffs=%s used=%u/%u",
+             stage, err, strerror(err),
+             info == ESP_OK ? "ok" : esp_err_to_name(info),
+             (unsigned)used, (unsigned)total);
+#else
+    ESP_LOGE(TAG, "History persist failed at %s: errno=%d (%s)", stage, err,
+             strerror(err));
+    (void)stage; /* ESP_LOGE is a no-op on the host */
+#endif
+}
+
 /* Append/insert a batch of validated records into the ring, keeping it sorted by
  * interval_start_utc. The live recorder appends (newest minute = tail) so that is
  * a cheap write at next_slot; a backfill merge carries an OLDER minute and is
@@ -415,9 +446,18 @@ static bool write_records(power_history_record_t *records, size_t record_count)
              * ring stays sorted by minute AND by sequence (the after_sequence
              * cursor needs the latter). */
             if (!shift_up_renumber(oldest_slot, updated.record_count, at)) {
+                log_persist_failure("shift");
                 return false;
             }
+            /* Count the splice: (record_count - at) records were rewritten just
+             * to make room for one older minute. A backfill that keeps merging
+             * minutes below the local tail drives this to the full ring per
+             * minute - the write-amplification that starves SPIFFS garbage
+             * collection on an almost-full partition. */
+            ++g_splice_batches;
+            g_splice_records += updated.record_count - at;
             if (!write_record_idx(oldest_slot, at, &records[i])) {
+                log_persist_failure("splice-write");
                 return false;
             }
         } else {
@@ -425,6 +465,7 @@ static bool write_records(power_history_record_t *records, size_t record_count)
                                  updated.next_slot * sizeof(records[i]));
             if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
                 fwrite(&records[i], sizeof(records[i]), 1, g_history_file) != 1) {
+                log_persist_failure("append-write");
                 return false;
             }
         }
@@ -439,6 +480,7 @@ static bool write_records(power_history_record_t *records, size_t record_count)
         updated.next_slot = (updated.next_slot + 1u) % POWER_HISTORY_CAPACITY;
     }
     if (fflush(g_history_file) != 0 || fsync(fileno(g_history_file)) != 0) {
+        log_persist_failure("flush");
         return false;
     }
     ++updated.generation;
@@ -446,6 +488,7 @@ static bool write_records(power_history_record_t *records, size_t record_count)
 
     uint8_t next_copy = (uint8_t)(1u - g_active_header_copy);
     if (!write_header_copy(next_copy, &updated)) {
+        log_persist_failure("header");
         return false;
     }
     g_history_header = updated;
@@ -1015,6 +1058,17 @@ esp_err_t power_history_init(void)
         return ESP_FAIL;
     }
 
+    /* Record the partition fill once: a store that is ~88% full still reads
+     * fine but has little room for SPIFFS garbage collection, so writes start
+     * failing with ENOSPC while reads keep working. Having used/total in the
+     * status/diag makes that visible without a separate query. */
+    size_t spiffs_total = 0;
+    size_t spiffs_used = 0;
+    if (esp_spiffs_info(POWER_HISTORY_PARTITION, &spiffs_total, &spiffs_used) == ESP_OK) {
+        g_storage_total_bytes = (uint32_t)spiffs_total;
+        g_storage_used_bytes = (uint32_t)spiffs_used;
+    }
+
     ESP_LOGI(TAG, "Persistent history ready: %lu of %u minute records",
              (unsigned long)g_history_header.record_count,
              POWER_HISTORY_CAPACITY);
@@ -1023,12 +1077,23 @@ esp_err_t power_history_init(void)
 
 bool power_history_enqueue(const power_history_record_t *record)
 {
-    if (!g_history_ready || record == NULL ||
-        xQueueSend(g_history_queue, record, 0) != pdTRUE) {
+    if (!g_history_ready || record == NULL) {
         portENTER_CRITICAL(&g_stats_lock);
         ++g_queue_drops;
         portEXIT_CRITICAL(&g_stats_lock);
-        ESP_LOGE(TAG, "Completed interval could not be queued for persistence");
+        ESP_LOGE(TAG, "History enqueue rejected: %s",
+                 record == NULL ? "null record" : "store not ready");
+        return false;
+    }
+    if (xQueueSend(g_history_queue, record, 0) != pdTRUE) {
+        /* A full queue means the writer is slower than the producers (a stalled
+         * or GC-thrashing SPIFFS). That is a different fault from an invalid
+         * call, so name it instead of lumping both into one message. */
+        portENTER_CRITICAL(&g_stats_lock);
+        ++g_queue_drops;
+        portEXIT_CRITICAL(&g_stats_lock);
+        ESP_LOGE(TAG, "History queue full (%u slots); dropping minute",
+                 (unsigned)POWER_HISTORY_QUEUE_LENGTH);
         return false;
     }
     return true;
@@ -1258,6 +1323,13 @@ void power_history_get_status(power_history_status_t *status)
     status->queue_drops = g_queue_drops;
     status->write_errors = g_write_errors;
     portEXIT_CRITICAL(&g_stats_lock);
+    /* Splice counters and the SPIFFS fill are written by the writer under
+     * g_history_mutex; read them without it (single-word reads, the exact value
+     * is not critical for a diagnostic). */
+    status->splice_batches = g_splice_batches;
+    status->splice_records = g_splice_records;
+    status->storage_used_bytes = g_storage_used_bytes;
+    status->storage_total_bytes = g_storage_total_bytes;
 }
 
 esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,

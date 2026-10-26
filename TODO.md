@@ -1,5 +1,64 @@
 # To-do – esp32-IR
 
+## ANALYSE+INSTRUMENTIERT (2026-10-26): Empfänger-Historie friert ein (Livelock)
+**Frage (User):** „Ist die Zeitumstellung von Samstag auf Sonntag schuld?" –
+**Nein.** Und die eigentliche Ursache ist gefunden: der Backfill steckt in einem
+**Schreib-Amplifikations-Livelock**.
+
+**Zeitumstellung ist ausgeschlossen (belegt, nicht vermutet):**
+- Die Firmware rechnet **nur in UTC**: `interval_start_utc`, `timegm()`,
+  `floor_div(utc, 86400)`. `localtime`/`tzset`/`setenv("TZ")`/`"CET"` kommen im
+  ganzen Repo **nicht** vor (grep über `main/` + `components/`).
+- Uhr stimmt auf die Sekunde: Empfänger `1793047681` == Host
+  `2026-10-26 20:48:01 UTC`, **kein 3600-s-Versatz**.
+- In UTC gibt es keinen Rücksprung; ein Duplikat bräuchte lokale Zeit.
+- Der Boot ist erst **~1,25 h** alt (Bootlog-Marke ~4.500.300 ms), die Umstellung
+  (25.10. 01:00 UTC) liegt **vor** dem Boot und ~3 Tage vor dem Cursor.
+
+**Der Livelock (gemessen):**
+- `/api/history-pull`: `cursor_utc 1792720920` (22.10. 23:22 UTC), `lag 91 h`,
+  `caught_up false`, `merged_total 243` über **498 Sessions**, `last_merged 5`,
+  `last_pages 1`, `last_duration_ms 5852`, `errors 0`.
+- Ohne jede externe Anfrage (90 s Pause): `queue_drops` 263→**505**,
+  `write_errors` 20→**40**. Der Defekt läuft **von selbst**.
+- `energy_day_wh` steht konstant bei 4913.843 (kein neuer Datensatz wird
+  verbucht), obwohl ~747 W fließen.
+- Der Sender (gleicher Code `9fafed0`) hat `records 11845, write_errors 0,
+  queue_drops 0` → reiner **Empfänger**-Defekt (Backfill-/Merge-Pfad).
+
+**Mechanismus:** Jeder Merge schiebt Minuten ein, die **älter** sind als der
+lokale Ring-Schwanz (Cursor 22.10. vs. Ring bis 26.10.). `write_records()` löst
+dann `shift_up_renumber()` aus und schreibt **alle neueren Records** neu — pro
+Minute den halben Ring, ~5,8 s je Session. Der Ring ist mit 793 KiB in einer
+896-KiB-Partition **88,5 % voll**; SPIFFS hat kaum Platz für Garbage Collection,
+Schreibvorgänge scheitern (`ENOSPC`), die 16-Platz-Queue läuft voll → Drops →
+Cursor bleibt stehen → nächste Session schiebt dieselben alten Minuten erneut
+ein → **Livelock**.
+
+**Instrumentierung (eingebaut, host-getestet):**
+- `log_persist_failure(stage)`: nennt **Stufe** (`shift`/`splice-write`/
+  `append-write`/`flush`/`header`), `errno`+`strerror` und bei ESP32 zusätzlich
+  `esp_spiffs_info` (`used/total`). Vorher stand nur „Could not persist".
+- `power_history_status_t` um `splice_batches`, `splice_records`,
+  `storage_used_bytes`, `storage_total_bytes` erweitert; in `/api/power-history`
+  (beide JSON-Varianten), Konsole `history` und Diag sichtbar.
+- `power_history_enqueue()` unterscheidet jetzt **„store not ready" / „null
+  record" / „queue full"** statt einer Sammelmeldung.
+- Host-Shim `esp_spiffs_info` ergänzt (meldet `ESP_ERR_NOT_SUPPORTED`, Werte 0).
+- Test `test_history_backfill_merge.c`: prüft, dass ein Out-of-Order-Merge
+  `splice_batches > 0` zählt. **Host-Suite grün** (merge 67 checks).
+
+**Erwartete Live-Ausgabe (nach dem Flash):** `errno=28 (No space left on
+device)` am `shift`/`splice-write`-Pfad plus `spiffs used≈812000/917504` wäre der
+Beweis. Falls stattdessen ein anderer `errno` kommt, ist es ein I/O- statt
+Platz-Problem — die Diagnose unterscheidet das jetzt.
+
+**Nächster Schritt (noch offen):** der Fix. Naheliegend: den Backfill **nur
+vorwärts** mergen lassen (Cursor darf nie unter den Ring-Anfang fallen) bzw. den
+Merge bei vollem Ring **nicht spließen**, sondern verwerfen — dann kostet ein
+Merge O(1) statt O(Ring). Das ist ein eigener, größerer Eingriff und noch nicht
+umgesetzt.
+
 ## ANALYSE (2026-10-23): Sparhebel – der größte lag in der Compiler-Optimierung
 
 **Auftrag (User):** „Finde Tricks wie man clever mehr sparen kann."
@@ -271,6 +330,45 @@ laufen soll – der `feed_patch`-Callback nimmt aber beliebige Quellen.
 **Nicht umgesetzt** (nur Machbarkeit + Zahlen). Offene Entscheidung: erst Lean-Config
 flashen, dann entscheiden, ob Delta-OTA über HTTPS-Pull oder ESP-NOW kommen soll.
 
+## ERLEDIGT (2026-10-23): T1-Fix (Flash-IO im Callback) + Sender-Rollback bei Panic
+
+**Auftrag (User):** „Mach den t1 fix und den watchdog der sender rollback bei Panik
+auslöst."
+
+### T1: Flash-Zugriff aus dem Wi-Fi-Callback entfernt (Ursache des Boot-Loops)
+
+`wall_clock_mark_trusted()` (läuft im **ESP-NOW-Empfangs-** und im **SNTP-Callback**)
+machte dort Flash-IO: `boot_marker_fill → power_history_read → fread → esp_flash_read`.
+Ein Flash-Read aus dem Wi-Fi-Callback **deadlockt mit der Wi-Fi-ISR** → Interrupt-WDT
+(beobachtet: Panic alle ~66–89 s). Jetzt **setzt der Callback nur noch ein Flag**
+(`g_wall_clock_trusted_event`); `wall_clock_worker` (Task-Kontext) erledigt
+`boot_marker_on_clock_valid()` und die Persistenz. Der Worker pollt 1 s statt 60 s,
+aber `wall_clock_persist_if_due()` bleibt auf
+`WALL_CLOCK_PERSIST_INTERVAL_SECONDS` gegatet – **keine zusätzlichen Flash-Writes**.
+Dazu: die Marker-Page (128 × 28 B = 3584 B) liegt jetzt auf dem **Heap** statt auf dem
+Stack, Worker-Stack 3072 → 4096 B.
+
+### Sender-Rollback bei Panic: Liveness-Watchdog geht durch `boot_confirm_fail()`
+
+`liveness_guard_worker` (läuft auch auf dem Sender) rebootete im `LIVENESS_PANIC`-Fall
+mit einem **blanken `esp_restart()`**. Jetzt ruft er – wie `health_task` und
+`net_watchdog` – `boot_confirm_fail("liveness watchdog: stalled")`: ein **noch
+unbestätigtes** Image rollt in den vorigen Slot zurück, ein bestätigtes wird normal
+neu gestartet.
+
+**Warum das garantiert ist (im gepinnten IDF v6.1 nachgelesen, nicht aus dem
+Gedächtnis):** `bootloader_utility.c` markiert ein Image im Zustand
+`ESP_OTA_IMG_PENDING_VERIFY` bei **jedem** Reset als `ESP_OTA_IMG_ABORTED`
+(`bootloader_common_ota_select_invalid()` wertet ABORTED als ungültig) → der
+Bootloader bootet den anderen Slot. Der Sender ist seit dem Boot-Confirm-Umbau
+180 s (`CONFIG_ESPNOW_SENDER_CONFIRM_STABILITY_S`) **unbestätigt**; jeder Panic,
+Watchdog oder Reboot in diesem Fenster führt also zum Rückfall – unabhängig davon,
+wer den Reset ausgelöst hat.
+
+**Verifikation:** beide Rollen `-fsyntax-only` sauber (Sender + Empfänger, keine neuen
+Warnungen); volle Host-Suite `./test/run_host_tests.sh` grün (EXIT 0). Der echte
+Panic→Rollback-Beweis am Gerät steht noch aus (Sender ohne USB, OTA-only).
+
 ## IN ARBEIT (2026-10-23): WDT-Fix `power_history.c` + Sender-WLAN-RSSI-Log
 **Auftrag (User):** (1) Watchdog-Fix in `power_history.c` bauen (behebt die Ursache
 des Boot-Loops dauerhaft), (2) Re-align-Fix auf den Sender flashen, damit die
@@ -286,6 +384,32 @@ Yield → TWDT-Abort). Nach Storage-Wipe läuft der Empfänger stabil
 `record_count` 0 → **6622** (Backfill `merged_total` 6604, `sessions` 106,
 `cursor_utc` wandert). Der Link-Fallback-Log „no sender traffic" ist nur die
 Anlaufphase, danach kam der Sender.
+
+**⚠️ `record_count: 0` am Empfänger heißt NICHT „Speicher leer" (Befund 23.10.).**
+Am laufenden Empfänger (`v0.1.1-10-gea88af2-dirty`) meldet `/api/power-history`
+fast immer `record_count: 0` **bei `storage_ready: true`** — im Schnitt 29 von 30
+Abfragen. Der Speicher ist trotzdem voll: der **Bootlog** sagt
+`power_history: Persistent history ready: 11798 of 29000 minute records`, und ein
+seltener, sauberer Read liefert dieselben `11798`. Auch `/api/simulate` zeigt
+`history records : 0 (written 0, dropped N)` — es liest dieselbe
+`power_history_get_status()`.
+Ursache: `power_history_read()`/`_aggregate()` nehmen den Store-Lock nur mit
+`POWER_HISTORY_READ_LOCK_TIMEOUT_MS` (**800 ms**). Hält der History-Writer oder
+der Backfill-Merge den Lock (Import in einen zu **88,5 %** vollen Ring,
+`POWER_HISTORY_CAPACITY` 29000), läuft der HTTP-Read in den Timeout → Handler
+loggt `Power history busy; serving empty dataset` und antwortet mit
+`record_count: 0`. Im Bootlog: **13× „busy; serving empty"**, **0**
+Mount-/Format-Fehler. Das Dashboard zeigt deshalb „0 / 29000".
+**Folgerung:** bei „0 Records" zuerst den Bootlog
+(`Persistent history ready: N of 29000`) und `queue_drops`/`write_errors` prüfen —
+nicht die `storage`-Partition löschen. Der Wipe vom 22.10. war **Absicht**
+(Boot-Loop-Bruch), kein Defekt; der Sender-Backfill hat den Ring danach wieder
+gefüllt (Sender selbst: `storage_records` 11553, 0 Schreibfehler).
+`format_if_mount_failed = true` (`power_history.c`, `esp_vfs_spiffs_register`)
+bleibt ein **latentes** Risiko (ein fehlgeschlagener Mount formatiert still), hat
+aber nicht gefeuert — kein `formatting`/`mount failed` im Log. Der Receiver hatte
+zwischendurch einen `last reset reason: panic / exception`, passend dazu, dass
+`ea88af2` den WDT-sicheren Repair (`0b94f29`) noch **nicht** enthält.
 
 **Fix (1) – WDT im Repair-Pfad (`main/power_history.c`):** `repair_ring_if_needed()`
 läuft in `app_main` **vor** dem Webserver und war nicht am TWDT angemeldet. Ein

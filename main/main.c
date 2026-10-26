@@ -4235,7 +4235,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
             status.ready = false;
             ESP_LOGW(TAG, "Power history busy; serving empty aggregation");
         }
-        char agg_header[512];
+        char agg_header[640];
         int agg_header_len = -1;
         double energy_day_wh = 0.0;
         double energy_month_wh = 0.0;
@@ -4253,6 +4253,8 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 "\"oldest_sequence\":%lu,"
                 "\"latest_sequence\":%lu,\"record_count\":%lu,"
                 "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
+                "\"splice_batches\":%lu,\"splice_records\":%lu,"
+                "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
                 "\"aggregated\":true,\"window_hours\":%.2f,\"bucket_seconds\":%lld,"
                 "\"day_start_utc\":%lld,\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
                 "\"capacity\":%u,\"records\":[",
@@ -4265,6 +4267,10 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 (unsigned long)status.queue_drops,
                 (unsigned long)status.write_errors,
                 overflow ? "true" : "false",
+                (unsigned long)status.splice_batches,
+                (unsigned long)status.splice_records,
+                (unsigned long)status.storage_used_bytes,
+                (unsigned long)status.storage_total_bytes,
                 window_hours_out,
                 (long long)bucket_seconds,
                 (long long)window_start_utc,
@@ -4328,7 +4334,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     current_sample_count = g_sml_power_sample_count;
     portEXIT_CRITICAL(&g_sml_history_lock);
 
-    char header[448];
+    char header[576];
     double energy_day_wh = 0.0;
     double energy_month_wh = 0.0;
     if (system_time_is_valid()) {
@@ -4344,6 +4350,8 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         "\"oldest_sequence\":%lu,"
         "\"latest_sequence\":%lu,\"record_count\":%lu,"
         "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
+        "\"splice_batches\":%lu,\"splice_records\":%lu,"
+        "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
         "\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
         "\"capacity\":%u,\"records\":[",
         system_time_is_valid() ? "true" : "false",
@@ -4355,6 +4363,10 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         (unsigned long)status.queue_drops,
         (unsigned long)status.write_errors,
         overflow ? "true" : "false",
+        (unsigned long)status.splice_batches,
+        (unsigned long)status.splice_records,
+        (unsigned long)status.storage_used_bytes,
+        (unsigned long)status.storage_total_bytes,
         energy_day_wh,
         energy_month_wh,
         (unsigned int)POWER_HISTORY_CAPACITY);
@@ -5169,7 +5181,9 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         "storage: %s\n"
         "records: %u / %u\n"
         "sequence: oldest %u, latest %u\n"
-        "write errors: %u, queue drops: %u\n",
+        "write errors: %u, queue drops: %u\n"
+        "splices: %u batch(es), %u record rewrite(s)\n"
+        "spiffs: %u / %u bytes used\n",
         !status.ready ? "unavailable"
                       : (status.persistent ? "ready (SPIFFS)"
                                            : "RAM fallback (not persistent)"),
@@ -5177,7 +5191,11 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         (unsigned int)status.oldest_sequence,
         (unsigned int)status.latest_sequence,
         (unsigned int)status.write_errors,
-        (unsigned int)status.queue_drops);
+        (unsigned int)status.queue_drops,
+        (unsigned int)status.splice_batches,
+        (unsigned int)status.splice_records,
+        (unsigned int)status.storage_used_bytes,
+        (unsigned int)status.storage_total_bytes);
     if (written < 0 || (size_t)written >= out_size) {
         snprintf(out, out_size, "history: output truncated\n");
         return;

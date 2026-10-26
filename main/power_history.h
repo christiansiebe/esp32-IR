@@ -95,6 +95,18 @@ typedef struct {
     uint32_t record_count;
     uint32_t queue_drops;
     uint32_t write_errors;
+    /* Write-amplification diagnostic: how many records the ring had to shift
+     * (shift_up_renumber) because a merged minute fell before the local tail,
+     * and how many persist attempts performed such a splice. A backfill that
+     * pulls minutes older than the newest stored one rewrites every newer
+     * record on SPIFFS, so a large splice_records/splice_batches ratio next to
+     * a full partition is the signature of a GC-starved, thrashing store. */
+    uint32_t splice_batches;
+    uint32_t splice_records;
+    /* SPIFFS fill at init, so "is the partition nearly full" is visible in the
+     * status/diag without a separate query. */
+    uint32_t storage_used_bytes;
+    uint32_t storage_total_bytes;
 } power_history_status_t;
 
 typedef struct __attribute__((packed)) {
