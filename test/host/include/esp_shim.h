@@ -216,4 +216,19 @@ static inline esp_err_t esp_vfs_spiffs_register(const esp_vfs_spiffs_conf_t *c)
     return ESP_OK;
 }
 
+/* No SPIFFS on the host: report "not supported" so the storage-fill diagnostic
+ * stays at 0/0 instead of claiming a bogus size. */
+static inline esp_err_t esp_spiffs_info(const char *label, size_t *total,
+                                        size_t *used)
+{
+    (void)label;
+    if (total != NULL) {
+        *total = 0;
+    }
+    if (used != NULL) {
+        *used = 0;
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
 #endif /* HOST_ESP_SHIM_H */
