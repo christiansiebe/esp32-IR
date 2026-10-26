@@ -255,6 +255,75 @@ static void test_rollback_never_before_grace(void)
           "rollback fires exactly at the grace window");
 }
 
+/* --- Sender policy ---------------------------------------------------------
+ * The sender has no dashboard. Its regression is a boot-looping image: an
+ * image that panics every ~74 s reaches app_main every time, so a confirm
+ * window shorter than the loop period would accept it and disarm the
+ * bootloader fallback (observed 2026-10-23). These checks pin the window to
+ * the loop period and prove the decision either way. */
+
+/* Run the sender policy for `run_ms` of uptime (one boot attempt) and return
+ * the first non-NONE action, or NONE if the run ended undecided. */
+static boot_action_t simulate_sender(uint32_t readiness_at_ms, uint32_t run_ms,
+                                     uint32_t *at)
+{
+    boot_policy_t policy;
+    boot_policy_sender_defaults(&policy);
+    boot_state_t state;
+    boot_state_reset(&state);
+    for (uint32_t t = 0; t <= run_ms; t += 1000u) {
+        boot_inputs_t in = {
+            .is_pending_verify = true,
+            .dashboard_ok = (readiness_at_ms != 0 && t >= readiness_at_ms),
+        };
+        boot_action_t a = boot_evaluate(&policy, &state, t, &in);
+        if (a != BOOT_TAKE_NONE) {
+            if (at != NULL) {
+                *at = t;
+            }
+            return a;
+        }
+    }
+    return BOOT_TAKE_NONE;
+}
+
+static void test_sender_window_outlasts_the_crash_loop(void)
+{
+    /* The window must exceed the observed ~74 s panic period, otherwise a
+     * looping image would be confirmed mid-loop. */
+    boot_policy_t policy;
+    boot_policy_sender_defaults(&policy);
+    CHECK(policy.stability_ms > 74000u,
+          "sender confirm window is longer than the ~74 s crash loop");
+    CHECK(policy.boot_grace_ms < policy.stability_ms,
+          "sender grace window precedes the stability window");
+
+    /* One loop period (74 s) with the stack up must NOT confirm: the image is
+     * accepted only after it has stayed up for the whole window in one run. */
+    boot_action_t a = simulate_sender(2000, 74000, NULL);
+    CHECK(a == BOOT_TAKE_NONE,
+          "a device that resets at 74 s is never confirmed");
+}
+
+static void test_sender_confirms_only_after_full_window(void)
+{
+    /* A genuinely stable sender is confirmed, but not before the window. */
+    uint32_t at = 0;
+    boot_action_t a = simulate_sender(2000, 300000, &at);
+    CHECK(a == BOOT_TAKE_CONFIRM, "a stable sender is confirmed");
+    CHECK(at >= 180000u, "confirmation waits for the full sender window");
+}
+
+static void test_sender_rolls_back_when_stack_never_up(void)
+{
+    /* Workers never start (the image is up but unusable): roll back at grace. */
+    uint32_t at = 0;
+    boot_action_t a = simulate_sender(0, 300000, &at);
+    CHECK(a == BOOT_TAKE_ROLLBACK, "unusable sender image rolls back");
+    CHECK(at >= 30000u, "sender rollback waits for the grace window");
+    CHECK(at < 180000u, "sender rollback precedes any confirmation");
+}
+
 int main(void)
 {
     printf("boot-policy simulator\n");
@@ -270,6 +339,9 @@ int main(void)
     test_failure_cases_roll_back();
     test_flapping_dashboard_rolls_back();
     test_rollback_never_before_grace();
+    test_sender_window_outlasts_the_crash_loop();
+    test_sender_confirms_only_after_full_window();
+    test_sender_rolls_back_when_stack_never_up();
 
     printf("%d checks, %d failures\n", g_checks, g_failures);
     if (g_failures != 0) {

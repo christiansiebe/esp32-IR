@@ -601,8 +601,8 @@ static void time_sync_notification(struct timeval *tv)
 {
     (void)tv;
     ESP_LOGI(TAG, "System clock synchronized; minute history enabled");
-    /* Trusted source: persist the real time and, on the sender, mark the
-     * offline gap now that it can be bounded. */
+    /* Trusted source: only latch the flag here (SNTP callback context). The
+     * persistence and the boot-marker fill run in the wall-clock worker. */
     wall_clock_mark_trusted();
 }
 
@@ -648,6 +648,10 @@ static int64_t g_wall_clock_last_saved_utc;
  * seeded clock is valid but not trusted, so the offline gap is still marked
  * with the real time once a sync arrives. */
 static bool g_wall_clock_trusted;
+/* Set when the clock first becomes trusted. The wall-clock worker consumes it
+ * and does the flash I/O there: the setter runs inside the ESP-NOW/SNTP
+ * callbacks, where a flash read deadlocks with the Wi-Fi ISR. */
+static bool g_wall_clock_trusted_event;
 
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* Defined with the sender diagnostics / boot-marker block further down. */
@@ -741,16 +745,19 @@ static void wall_clock_mark_trusted(void)
     portENTER_CRITICAL(&g_wall_clock_lock);
     was_trusted = g_wall_clock_trusted;
     g_wall_clock_trusted = true;
-    portEXIT_CRITICAL(&g_wall_clock_lock);
-    if (was_trusted) {
-        return;
+    if (!was_trusted) {
+        g_wall_clock_trusted_event = true;
     }
-#if CONFIG_ESPNOW_ROLE_SENDER
-    /* The real time is in: the offline gap of this boot can now be bounded and
-     * marked (a seeded clock cannot do that - it is too close to "now"). */
-    boot_marker_on_clock_valid();
-#endif
-    wall_clock_persist_if_due();
+    portEXIT_CRITICAL(&g_wall_clock_lock);
+    /* Deliberately no flash I/O here: this runs inside the ESP-NOW receive
+     * callback (and the SNTP callback). A flash read from the Wi-Fi callback
+     * deadlocks with the Wi-Fi ISR and trips the interrupt watchdog - observed
+     * 2026-10-26, every ~66-89 s on the sender:
+     *   wall_clock_mark_trusted -> boot_marker_fill -> power_history_read ->
+     *   fread -> esp_flash_read, while wDev_ProcessFiq (Wi-Fi ISR) blocked in
+     *   vPortEnterCritical -> spinlock_acquire -> "Interrupt wdt timeout".
+     * The wall-clock worker does the marker fill and the persistence in task
+     * context instead. */
 }
 
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -765,14 +772,32 @@ static bool wall_clock_is_trusted(void)
 }
 #endif
 
-/* Low-rate persistence worker (both roles): refresh the stored clock every
- * WALL_CLOCK_PERSIST_INTERVAL_SECONDS while it is usable, so a power cut or
- * crash never loses more than that. */
+/* Clock persistence worker (both roles). Polls once a second: the persist
+ * itself is gated to WALL_CLOCK_PERSIST_INTERVAL_SECONDS by
+ * wall_clock_persist_if_due(), so the fast poll only exists to react quickly
+ * when the clock first becomes trusted. That transition is signalled by
+ * wall_clock_mark_trusted() from the ESP-NOW/SNTP callbacks, which must not
+ * touch flash; the marker fill happens here, in task context. */
 static void wall_clock_worker(void *arg)
 {
     (void)arg;
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(60000));
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        bool trusted_event;
+        portENTER_CRITICAL(&g_wall_clock_lock);
+        trusted_event = g_wall_clock_trusted_event;
+        g_wall_clock_trusted_event = false;
+        portEXIT_CRITICAL(&g_wall_clock_lock);
+#if CONFIG_ESPNOW_ROLE_SENDER
+        if (trusted_event) {
+            /* The real time is in: the offline gap of this boot can now be
+             * bounded and marked (a seeded clock cannot do that - it is too
+             * close to "now"). Idempotent, and safe here: task context. */
+            boot_marker_on_clock_valid();
+        }
+#else
+        (void)trusted_event;
+#endif
         wall_clock_persist_if_due();
     }
 }
@@ -1665,20 +1690,30 @@ static uint32_t boot_marker_fill(int64_t now_utc, uint8_t reason)
     if (now_utc < 1704067200) {
         return 0; /* clock not valid yet; retried after time sync */
     }
-    /* Newest measured minute currently stored. power_history_read() with a
-     * zero recent_count pages from the oldest record; the last one is the
-     * newest because the store is time ordered. */
-    power_history_record_t page[POWER_HISTORY_PAGE_SIZE];
+    /* Heap, not stack: the page holds POWER_HISTORY_PAGE_SIZE records
+     * (128 * 28 = 3584 bytes), which on its own exceeds the stack of some
+     * callers (the wall-clock worker and the main task). A stack overflow here
+     * would corrupt whatever sits below and is very hard to read from a
+     * backtrace. */
+    power_history_record_t *page =
+        (power_history_record_t *)malloc(sizeof(*page) * POWER_HISTORY_PAGE_SIZE);
+    if (page == NULL) {
+        return 0;
+    }
+    uint32_t written = 0;
     size_t count = 0;
     power_history_status_t status;
     bool overflow = false;
-    if (power_history_read(0, 0, page, POWER_HISTORY_PAGE_SIZE, &count,
-                           &status, &overflow) != ESP_OK) {
-        return 0;
-    }
-    /* Page forward to the newest record (a full store needs several pages). */
     int64_t newest_measured = 0;
     uint32_t last_sequence = 0;
+    /* Newest measured minute currently stored. power_history_read() with a
+     * zero recent_count pages from the oldest record; the last one is the
+     * newest because the store is time ordered. */
+    if (power_history_read(0, 0, page, POWER_HISTORY_PAGE_SIZE, &count,
+                           &status, &overflow) != ESP_OK) {
+        goto done;
+    }
+    /* Page forward to the newest record (a full store needs several pages). */
     while (count != 0) {
         for (size_t i = 0; i < count; ++i) {
             if (page[i].reason == POWER_HISTORY_REASON_NONE &&
@@ -1701,13 +1736,13 @@ static uint32_t boot_marker_fill(int64_t now_utc, uint8_t reason)
         count = next_count;
     }
     if (newest_measured == 0) {
-        return 0; /* cold boot: nothing was measured before, no gap to fill */
+        goto done; /* cold boot: nothing was measured before, no gap to fill */
     }
 
     int64_t boot_minute = now_utc - (now_utc % 60);
     int64_t first_missing = newest_measured + 60;
     if (boot_minute <= first_missing) {
-        return 0; /* no whole missing minute between the two boots */
+        goto done; /* no whole missing minute between the two boots */
     }
     uint32_t minutes = (uint32_t)((boot_minute - first_missing) / 60);
     if (minutes > BOOT_MARKER_MAX_MINUTES) {
@@ -1717,7 +1752,6 @@ static uint32_t boot_marker_fill(int64_t now_utc, uint8_t reason)
         minutes = BOOT_MARKER_MAX_MINUTES;
     }
 
-    uint32_t written = 0;
     for (uint32_t i = 0; i < minutes; ++i) {
         power_history_record_t marker = {0};
         marker.interval_start_utc = first_missing + (int64_t)i * 60;
@@ -1729,6 +1763,8 @@ static uint32_t boot_marker_fill(int64_t now_utc, uint8_t reason)
             ++written;
         }
     }
+done:
+    free(page);
     return written;
 }
 
@@ -2526,22 +2562,17 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             if ((response.header.flags & ESPNOW_DIAG_SECTION_TIME_SYNC) &&
                 response.valid && response.utc_seconds > 0) {
                 int64_t uptime_us = (int64_t)response.uptime_ms * 1000;
-                bool was_trusted;
                 portENTER_CRITICAL(&g_time_sync_lock);
-                was_trusted = g_utc_trusted;
                 g_utc_offset_us = response.utc_seconds * 1000000 - uptime_us;
                 g_utc_valid = true;
                 g_utc_trusted = true;
                 ++g_time_sync_count;
                 portEXIT_CRITICAL(&g_time_sync_lock);
-                if (!was_trusted) {
-                    /* First *trusted* calibration this session: a boot without a
-                     * clock (e.g. battery change while the receiver was down) can
-                     * now bound its offline window and fill it with boot markers.
-                     * A boot that only had a seeded (approximate) clock has not
-                     * marked the gap yet, so this still runs. */
-                    boot_marker_on_clock_valid();
-                }
+                /* Only flag the transition; the flash work (boot-marker fill
+                 * and clock persistence) runs in the wall-clock worker. Doing
+                 * it here is what crashed the sender: this callback runs in the
+                 * Wi-Fi task/ISR context, where a flash read deadlocks with the
+                 * Wi-Fi ISR (interrupt-wdt panic, 2026-10-26). */
                 wall_clock_mark_trusted();
             }
         }
@@ -8739,8 +8770,10 @@ static void liveness_guard_worker(void *arg)
                      (unsigned)silence);
             break;
         case LIVENESS_PANIC:
-            /* Breadcrumb first, so the crash journal names the stall; then
-             * reboot to a known-good state. */
+            /* Breadcrumb first, so the crash journal names the stall; then hand
+             * over to the boot-confirm path (as health_task and net_watchdog
+             * do): a still-unconfirmed image rolls back to the previous slot, a
+             * confirmed one is a plain reboot. */
 #if CONFIG_ESPNOW_ROLE_SENDER
             diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
                            "liveness: stalled %ums, rebooting", (unsigned)silence);
@@ -8748,7 +8781,7 @@ static void liveness_guard_worker(void *arg)
             ESP_LOGE(TAG, "liveness watchdog: stalled %u ms, rebooting",
                      (unsigned)silence);
             vTaskDelay(pdMS_TO_TICKS(500));
-            esp_restart();
+            boot_confirm_fail("liveness watchdog: stalled");
             break;
         case LIVENESS_REBOOT:
             /* The panic reboot did not take: force it once more. */
@@ -9018,7 +9051,7 @@ void app_main(void)
 
     /* Refresh the persisted wall clock on both roles so a reboot without a fresh
      * sync can always seed from it (a crash/power cut must not lose the time). */
-    if (xTaskCreate(wall_clock_worker, "wall_clock", 3072, NULL, 2, NULL) != pdPASS) {
+    if (xTaskCreate(wall_clock_worker, "wall_clock", 4096, NULL, 2, NULL) != pdPASS) {
         ESP_LOGW(TAG, "Could not start the wall-clock persistence worker");
     }
 
@@ -9041,37 +9074,29 @@ void app_main(void)
     (void)esp_pm_light_sleep_register_cbs(&sleep_cbs);
 #endif
 
-#if CONFIG_ESPNOW_ROLE_SENDER
-    /* The sender has no dashboard to confirm against, so it keeps the previous
-     * behaviour: accept the running image immediately (no rollback safety net).
-     * A dashboard-independent confirm policy for the sender is a separate task
-     * (see TODO). */
-    const esp_partition_t *running_partition = esp_ota_get_running_partition();
-    if (running_partition == NULL) {
-        ESP_LOGE(TAG, "Could not determine the running app partition");
-    } else if (running_partition->type == ESP_PARTITION_TYPE_APP &&
-               running_partition->subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MIN &&
-               running_partition->subtype < ESP_PARTITION_SUBTYPE_APP_OTA_MAX) {
-        esp_err_t ota_state_err = esp_ota_mark_app_valid_cancel_rollback();
-        if (ota_state_err != ESP_OK &&
-            ota_state_err != ESP_ERR_OTA_ROLLBACK_INVALID_STATE) {
-            ESP_LOGE(TAG, "Could not mark current OTA image valid: %s",
-                     esp_err_to_name(ota_state_err));
-        }
-    }
-#else
-    /* The BOOT-button check already ran early in app_main (before the persisted
-     * knobs were applied), so the restore/rollback gesture is handled there.
-     * Receiver: do not accept the running image right away. It is confirmed
-     * only after the dashboard is up and a stability window has passed; an
-     * image that never comes up is rolled back to the previous OTA slot. This
-     * keeps the CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE safety net intact.
-     * Hardware verification of the confirm/rollback path is still open. */
+    /* Both roles start unconfirmed. The image is accepted only after the
+     * role's readiness signal appears and the stability window has passed; an
+     * image that never becomes usable is rolled back at the grace deadline.
+     * This keeps the CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE safety net intact —
+     * the sender used to confirm here in app_main, which disarmed it and let a
+     * boot-looping image run forever.
+     *
+     * The BOOT-button check already ran early in app_main (before the persisted
+     * knobs were applied), so the restore/rollback gesture is handled there. */
     ESP_ERROR_CHECK(boot_confirm_init());
-#endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
     run_sender();
+    /* Reaching here means every sender worker started, so the image is usable
+     * right now. That is only half the proof: the 2026-10-23 image got here on
+     * every attempt too and still reset ~74 s later. Marking readiness lets the
+     * policy confirm only after the image has *stayed* up for the whole sender
+     * window, so a boot loop never gets confirmed. */
+    boot_confirm_note_dashboard(true);
+    while (1) {
+        boot_confirm_poll();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 #else
     start_webserver();
     /* Backstop for a global stall: fed by every worker and by HTTP/console

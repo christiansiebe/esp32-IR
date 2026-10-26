@@ -53,6 +53,37 @@ config RECOVERY_BUTTON_ROLLBACK_MS
         even when the running image was already confirmed. Holding this long
         always rolls back, so it takes precedence over the config restore.
 
+config ESPNOW_SENDER_CONFIRM_STABILITY_S
+    int "Sender: seconds up before the new image is accepted"
+    depends on ESPNOW_ROLE_SENDER
+    range 30 3600
+    default 180
+    help
+        How long a freshly flashed sender image must stay up before it calls
+        esp_ota_mark_app_valid_cancel_rollback(). Until then the bootloader's
+        CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE safety net is armed: any reset
+        (panic, task/interrupt watchdog) marks the image ABORTED and the next
+        boot falls back to the previous OTA slot.
+
+        The receiver confirms after 45 s because its dashboard makes a bad image
+        obvious immediately. The sender has no dashboard and no user watching
+        it, so "the code reached this point" is not proof: an image that
+        boot-loops every ~74 s (observed 2026-10-23) reaches it every time. The
+        window must therefore outlast any plausible crash period. 180 s covers
+        the observed ~74 s loop twice over with margin, at the cost of the
+        previous slot staying the fallback for three minutes after an OTA.
+
+config ESPNOW_SENDER_CONFIRM_GRACE_S
+    int "Sender: seconds for the sender stack to come up before rollback"
+    depends on ESPNOW_ROLE_SENDER
+    range 5 600
+    default 30
+    help
+        If the sender's own readiness signal (radio and worker stack up) has not
+        appeared within this window, the image is treated as unusable and
+        rolled back at the deadline instead of waiting for the stability window.
+        This mirrors the receiver's boot_grace_ms.
+
 config ESPNOW_CPU_MAX_MHZ
     int "Maximum CPU frequency (MHz) for the DFS ceiling"
     range 40 240

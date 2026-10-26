@@ -9,8 +9,18 @@
 
 static const char *TAG = "boot_confirm";
 
-/* Only the receiver confirms/rolls back; the sender has no dashboard. */
-#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Both roles use the same confirm/rollback machinery. They differ only in the
+ * window and in what counts as "the device is usable":
+ *
+ *   receiver -> the dashboard answered; confirm 45 s after it is up
+ *   sender   -> its own radio/worker stack came up; confirm only after a long
+ *               stability window (CONFIG_ESPNOW_SENDER_CONFIRM_STABILITY_S)
+ *
+ * The sender used to skip all of this and confirm the image in app_main, which
+ * disarmed CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE and let a boot-looping image
+ * (observed 2026-10-23: a panic every ~74 s) run forever. Staying unconfirmed
+ * for the window keeps the bootloader fallback armed instead.
+ */
 
 static boot_policy_t g_policy;
 static boot_state_t g_state;
@@ -18,6 +28,16 @@ static boot_inputs_t g_inputs = {.is_pending_verify = false, .dashboard_ok = fal
 
 static bool g_initialised;
 static bool g_confirmed;
+
+/* What "not usable" means for this role, used in the rollback log line. */
+static const char *unusable_reason(void)
+{
+#if CONFIG_ESPNOW_ROLE_SENDER
+    return "sender stack did not come up";
+#else
+    return "dashboard did not come up";
+#endif
+}
 
 #ifdef BOOT_CONFIRM_TEST_HOOKS
 /* Host tests drive a virtual uptime and observe the effects. */
@@ -73,7 +93,11 @@ esp_err_t boot_confirm_init(void)
     if (g_initialised) {
         return ESP_OK;
     }
+#if CONFIG_ESPNOW_ROLE_SENDER
+    boot_policy_sender_defaults(&g_policy);
+#else
     boot_policy_defaults(&g_policy);
+#endif
     boot_state_reset(&g_state);
     g_inputs.dashboard_ok = false;
     g_inputs.is_pending_verify = false;
@@ -108,10 +132,10 @@ void boot_confirm_poll(void)
         boot_effect_confirm();
         break;
     case BOOT_EFFECT_ROLLBACK:
-        /* The image stayed up but never brought the dashboard up inside the
-         * grace window. The bootloader only rolls back on a reset, so an image
-         * that comes up but stays unusable must trigger the rollback itself. */
-        boot_effect_rollback("dashboard did not come up");
+        /* The image stayed up but never became usable inside the grace window.
+         * The bootloader only rolls back on a reset, so an image that comes up
+         * but stays unusable must trigger the rollback itself. */
+        boot_effect_rollback(unusable_reason());
         break;
     case BOOT_EFFECT_NONE:
     default:
@@ -173,16 +197,4 @@ bool boot_confirm_test_confirmed(void)
 {
     return g_confirmed;
 }
-#endif
-
-#else /* CONFIG_ESPNOW_ROLE_SENDER */
-
-/* The sender has no dashboard and (currently) no boot-confirmation policy, so
- * these are inert: the sender keeps the pre-existing boot behaviour. When the
- * sender gets its own confirm criterion, implement it here. */
-esp_err_t boot_confirm_init(void) { return ESP_OK; }
-void boot_confirm_note_dashboard(bool ok) { (void)ok; }
-void boot_confirm_poll(void) { }
-void boot_confirm_fail(const char *reason_name) { (void)reason_name; }
-
 #endif

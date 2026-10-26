@@ -36,7 +36,11 @@ typedef struct {
 
 typedef struct {
     bool is_pending_verify; /* running image is awaiting confirmation */
-    bool dashboard_ok;      /* local dashboard subsystem reached up */
+    /* The role's local readiness signal. Receiver: the dashboard answered.
+     * Sender: its own radio/UART/worker stack came up (there is no dashboard to
+     * ask). Named "dashboard" for the receiver's sake; the policy itself only
+     * treats it as "the device is usable". */
+    bool dashboard_ok;
 } boot_inputs_t;
 
 typedef struct {
@@ -53,7 +57,13 @@ typedef enum {
     BOOT_EFFECT_ROLLBACK = 2, /* boot_confirm_fail() -> rollback + reboot */
 } boot_effect_t;
 
+/* Receiver: waits for the dashboard (30 s grace) and confirms after 45 s up. */
 void boot_policy_defaults(boot_policy_t *policy);
+
+/* Sender: no dashboard and no user watching, so it stays unconfirmed longer.
+ * The window has to outlast any plausible crash period — a sender that
+ * panicked every ~74 s (observed 2026-10-23) must not be confirmed at 45 s. */
+void boot_policy_sender_defaults(boot_policy_t *policy);
 
 void boot_state_reset(boot_state_t *state);
 

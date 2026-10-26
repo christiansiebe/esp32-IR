@@ -94,6 +94,22 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_boot_confirm_trigger"
 
+# The sender half of the same glue: with CONFIG_ESPNOW_ROLE_SENDER=1 the real
+# boot_confirm.c must keep a boot-looping image unconfirmed (so the bootloader
+# falls back) and only accept an image that stays up for the full sender window.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -DBOOT_CONFIRM_TEST_HOOKS \
+    -DCONFIG_ESPNOW_ROLE_SENDER=1 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/boot_policy.c" \
+    "$repo/main/boot_confirm.c" \
+    "$here/test_boot_confirm_sender.c" \
+    -o "$out/test_boot_confirm_sender"
+
+"$out/test_boot_confirm_sender"
+
 # JSON string escaper: the sender-diagnostics JSON interpolates free-form event
 # texts, so a stray control character must not break the payload the browser
 # parses ("bad control character in string literal").
