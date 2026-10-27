@@ -14,6 +14,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <errno.h>
+#include <unistd.h>
 
 typedef int esp_err_t;
 
@@ -229,6 +230,15 @@ static inline esp_err_t esp_spiffs_info(const char *label, size_t *total,
         *used = 0;
     }
     return ESP_ERR_NOT_SUPPORTED;
+}
+
+/* The host has no real SPIFFS. power_history_format() closes the file and
+ * recreates it with fopen("w+b") right after this, so reporting success is
+ * enough on the host; the fresh file replaces the old one via truncation. */
+static inline esp_err_t esp_spiffs_format(const char *label)
+{
+    (void)label;
+    return ESP_OK;
 }
 
 #endif /* HOST_ESP_SHIM_H */
