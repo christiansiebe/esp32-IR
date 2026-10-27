@@ -1087,6 +1087,59 @@ esp_err_t power_history_init(void)
     return ESP_OK;
 }
 
+esp_err_t power_history_format(void)
+{
+    if (g_history_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Could not lock history store for formatting");
+        return ESP_ERR_TIMEOUT;
+    }
+    if (g_history_file != NULL) {
+        fclose(g_history_file);
+        g_history_file = NULL;
+    }
+    /* Format the whole partition, then recreate the history file with fresh
+     * headers. The sender backfill re-imports the minute history afterwards, so
+     * a damaged ring is replaced cleanly instead of being read around forever. */
+    esp_err_t err = esp_spiffs_format(POWER_HISTORY_PARTITION);
+    if (err != ESP_OK) {
+        xSemaphoreGive(g_history_mutex);
+        ESP_LOGE(TAG, "Could not format persistent SPIFFS partition: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+    g_history_file = fopen(POWER_HISTORY_FILE, "w+b");
+    if (g_history_file == NULL) {
+        xSemaphoreGive(g_history_mutex);
+        ESP_LOGE(TAG, "Could not recreate persistent history file after format");
+        return ESP_FAIL;
+    }
+    power_history_make_fresh_header(&g_history_header);
+    power_history_header_t previous = g_history_header;
+    previous.generation = 0;
+    previous.checksum = header_checksum(&previous);
+    bool headers_ok = write_header_copy(0, &previous) &&
+                      write_header_copy(1, &g_history_header);
+    if (!headers_ok) {
+        ESP_LOGE(TAG, "Could not write fresh headers after format");
+    }
+    g_active_header_copy = 1;
+    g_history_ram_fallback = false;
+    g_history_ram_count = 0;
+    g_splice_batches = 0;
+    g_splice_records = 0;
+    g_splice_skipped = 0;
+    g_write_errors = 0;
+    g_queue_drops = 0;
+    g_storage_used_bytes = 0;
+    g_storage_total_bytes = 0;
+    xSemaphoreGive(g_history_mutex);
+    ESP_LOGW(TAG, "Persistent history partition reformatted; waiting for sender backfill");
+    return headers_ok ? ESP_OK : ESP_FAIL;
+}
+
 bool power_history_enqueue(const power_history_record_t *record)
 {
     if (!g_history_ready || record == NULL) {
@@ -1436,10 +1489,14 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
         power_history_record_t record;
         if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
             fread(&record, sizeof(record), 1, g_history_file) != 1) {
-            xSemaphoreGive(g_history_mutex);
-            ESP_LOGE(TAG, "Could not read persistent history record at slot %lu",
+            /* A physically unreadable slot (EIO from a damaged SPIFFS file,
+             * e.g. leftovers of an interrupted splice) must not take the whole
+             * history down with a 500. Skip it; a later format + sender
+             * backfill will restore the minute. Reading on keeps the dashboard
+             * graph usable even while the store is partially damaged. */
+            ESP_LOGW(TAG, "Skipping unreadable history record at slot %lu",
                      (unsigned long)slot);
-            return ESP_FAIL;
+            continue;
         }
         if (!record_is_valid(&record)) {
             ESP_LOGW(TAG, "Ignoring corrupt history record at slot %lu",
@@ -1590,10 +1647,22 @@ esp_err_t power_history_read_window(int64_t from_utc, int64_t to_utc,
                              slot * sizeof(power_history_record_t));
         if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
             fread(block, sizeof(block[0]), chunk, g_history_file) != chunk) {
-            xSemaphoreGive(g_history_mutex);
-            ESP_LOGE(TAG, "Could not read history window at slot %lu",
-                     (unsigned long)slot);
-            return ESP_FAIL;
+            /* Block read hit a physically unreadable slot; recover by reading
+             * the block record-by-record and keeping the readable ones, so one
+             * damaged slot cannot blank the whole window. */
+            size_t got = 0;
+            ESP_LOGW(TAG, "History window block read failed at slot %lu; "
+                          "recovering per-record", (unsigned long)slot);
+            while (got < chunk) {
+                uint32_t rslot = (slot + got) % POWER_HISTORY_CAPACITY;
+                long roffset = (long)(2u * sizeof(power_history_header_t) +
+                                      rslot * sizeof(power_history_record_t));
+                if (fseek(g_history_file, roffset, SEEK_SET) != 0 ||
+                    fread(&block[got], sizeof(block[0]), 1, g_history_file) != 1) {
+                    memset(&block[got], 0, sizeof(block[0]));
+                }
+                ++got;
+            }
         }
         for (uint32_t i = 0; i < chunk; ++i) {
             if (!record_is_valid(&block[i])) {
@@ -1696,10 +1765,21 @@ esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
                              slot * sizeof(power_history_record_t));
         if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
             fread(block, sizeof(block[0]), chunk, g_history_file) != chunk) {
-            xSemaphoreGive(g_history_mutex);
-            ESP_LOGE(TAG, "Could not read history page at slot %lu",
-                     (unsigned long)slot);
-            return ESP_FAIL;
+            /* Block read hit a physically unreadable slot; recover per-record so
+             * one damaged slot cannot blank the whole page. */
+            size_t got = 0;
+            ESP_LOGW(TAG, "History page block read failed at slot %lu; "
+                          "recovering per-record", (unsigned long)slot);
+            while (got < chunk) {
+                uint32_t rslot = (slot + got) % POWER_HISTORY_CAPACITY;
+                long roffset = (long)(2u * sizeof(power_history_header_t) +
+                                      rslot * sizeof(power_history_record_t));
+                if (fseek(g_history_file, roffset, SEEK_SET) != 0 ||
+                    fread(&block[got], sizeof(block[0]), 1, g_history_file) != 1) {
+                    memset(&block[got], 0, sizeof(block[0]));
+                }
+                ++got;
+            }
         }
         for (uint32_t i = 0; i < chunk; ++i) {
             if (!record_is_valid(&block[i])) {
@@ -1997,10 +2077,21 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
                              slot * sizeof(power_history_record_t));
         if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
             fread(block, sizeof(block[0]), chunk, g_history_file) != chunk) {
-            xSemaphoreGive(g_history_mutex);
-            ESP_LOGE(TAG, "Could not read persistent history records at slot %lu",
-                     (unsigned long)slot);
-            return ESP_FAIL;
+            /* Block read hit a physically unreadable slot; recover per-record so
+             * one damaged slot cannot blank the whole aggregation. */
+            size_t got = 0;
+            ESP_LOGW(TAG, "History aggregate block read failed at slot %lu; "
+                          "recovering per-record", (unsigned long)slot);
+            while (got < chunk) {
+                uint32_t rslot = (slot + got) % POWER_HISTORY_CAPACITY;
+                long roffset = (long)(2u * sizeof(power_history_header_t) +
+                                      rslot * sizeof(power_history_record_t));
+                if (fseek(g_history_file, roffset, SEEK_SET) != 0 ||
+                    fread(&block[got], sizeof(block[0]), 1, g_history_file) != 1) {
+                    memset(&block[got], 0, sizeof(block[0]));
+                }
+                ++got;
+            }
         }
         if (power_history_aggregate_core(window_start_utc, bucket_seconds, block,
                                          chunk, sum_w, count, bucket_count) != ESP_OK) {

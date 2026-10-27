@@ -142,6 +142,15 @@ void power_history_make_fresh_header(power_history_header_t *header);
 bool power_history_header_is_valid(const power_history_header_t *header);
 
 esp_err_t power_history_init(void);
+
+/* Reformat the persistent storage partition and recreate the history file with
+ * fresh (empty) headers. Used to repair a ring whose file is physically
+ * damaged (unreadable slots); the sender backfill re-imports the minute
+ * history afterwards. The running writer and the queue are left intact, so
+ * fresh measurements keep being recorded during and after the format.
+ * Returns ESP_OK once the fresh headers are on disk. */
+esp_err_t power_history_format(void);
+
 bool power_history_enqueue(const power_history_record_t *record);
 
 /* Observer for records that were just persisted (newly placed, not a duplicate).
