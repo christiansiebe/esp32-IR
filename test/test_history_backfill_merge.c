@@ -66,6 +66,18 @@ static void wait_for_count(uint32_t expected)
     }
 }
 
+static void wait_for_splice_skipped(uint32_t expected)
+{
+    power_history_status_t st;
+    for (int i = 0; i < 300; ++i) {
+        power_history_get_status(&st);
+        if (st.splice_skipped >= expected) {
+            return;
+        }
+        usleep(10000);
+    }
+}
+
 /* Enqueue `n` minute records in one burst and wait until the writer has flushed
  * them. The writer flushes every 5 records, so bursts are multiples of 5. */
 static void enqueue_batch(const int64_t *minutes, const int32_t *mw, size_t n,
@@ -267,6 +279,107 @@ static void test_out_of_order_backfill_keeps_sorted(void)
           "window read starts at the oldest older minute");
 }
 
+/* The receiver's livelock: a backfill that keeps merging minutes far below the
+ * local tail made write_records() splice the whole newer ring every session
+ * (O(ring) SPIFFS I/O under the mutex, seconds long, aborting with EIO). The
+ * store now refuses a splice deeper than POWER_HISTORY_MAX_SPLICE_RECORDS and
+ * drops that minute instead - the ring stays sorted, the writer keeps up, and
+ * the merge still counts the record so the sync cursor moves past it (no
+ * re-pull livelock). This drives both sides of the bound through the real
+ * writer: a shallow merge still splices, a deep one is dropped and counted. */
+static void test_deep_merge_is_dropped_not_spliced(void)
+{
+    printf("test_deep_merge_is_dropped_not_spliced\n");
+    power_history_status_t st;
+
+    /* Build a local tail taller than the splice cap, with a single hole just
+     * below the newest minute. The writer flushes in batches of five, so every
+     * burst enqueues exactly five (drained before the next), otherwise a
+     * trailing partial batch would sit in the queue for the 60 s batch timeout. */
+    const int64_t base = 9000000000LL;
+    const uint32_t tail = POWER_HISTORY_MAX_SPLICE_RECORDS + 98u; /* multiple of 5 */
+    const uint32_t hole = tail - 2u; /* the minute base + hole*60 is left out */
+    power_history_get_status(&st);
+    uint32_t start_count = st.record_count;
+    uint32_t enqueued = 0;
+    uint32_t idx = 0;
+    while (enqueued < tail) {
+        uint32_t burst = 0;
+        while (burst < 5) {
+            if (idx != hole) {
+                power_history_record_t r =
+                    make_record(2000u + idx, base + (int64_t)idx * 60, 4000);
+                CHECK(power_history_enqueue(&r), "enqueue tail minute");
+                ++enqueued;
+                ++burst;
+            }
+            ++idx;
+        }
+        wait_for_count(start_count + enqueued); /* writer flushed this burst */
+    }
+    power_history_get_status(&st);
+    uint32_t after_tail = st.record_count;
+    CHECK(after_tail >= start_count + tail,
+          "local tail is taller than the splice cap");
+    CHECK(!power_history_has_minute(base + (int64_t)hole * 60), "hole is absent");
+
+    /* Deep merge: five minutes below the whole tail -> position 0, a splice
+     * would move after_tail records > cap -> dropped, not stored, but counted
+     * as merged. Five at once so the writer flushes the batch immediately
+     * (a single record would wait for the 60 s batch timeout). */
+    uint32_t skipped_before = st.splice_skipped;
+    uint32_t batches_before = st.splice_batches;
+    power_history_record_t deep[5];
+    for (int i = 0; i < 5; ++i) {
+        deep[i] = make_record(3000u + (uint32_t)i,
+                              base - (int64_t)(tail + 10u - (uint32_t)i) * 60, 1111);
+    }
+    size_t merged = 0;
+    CHECK(power_history_merge(deep, 5, &merged) == ESP_OK, "deep merge returns OK");
+    CHECK(merged == 5, "deep minutes are accepted (cursor must advance past them)");
+    wait_for_splice_skipped(skipped_before + 5u);
+    power_history_get_status(&st);
+    CHECK(st.record_count == after_tail, "deep minutes are not stored");
+    CHECK(st.splice_skipped == skipped_before + 5, "deep splices are counted as skipped");
+    CHECK(st.splice_batches == batches_before, "deep merge performs no splice");
+    CHECK(!power_history_has_minute(base - (int64_t)(tail + 10u) * 60),
+          "deep minute stays absent");
+
+    /* Shallow merge: the hole sits just below the newest minute, so filling it
+     * splices exactly one record. That must still work, otherwise a late live
+     * minute could never be filed in order. Four more live minutes complete the
+     * writer batch so the flush happens now. */
+    power_history_record_t shallow = make_record(3001u, base + (int64_t)hole * 60, 2222);
+    CHECK(power_history_merge(&shallow, 1, &merged) == ESP_OK, "shallow merge OK");
+    CHECK(merged == 1, "shallow minute accepted");
+    for (uint32_t i = 0; i < 4; ++i) {
+        power_history_record_t r = make_record(3100u + i,
+                                               base + (int64_t)(tail + 1u + i) * 60, 5000);
+        CHECK(power_history_enqueue(&r), "enqueue live minute");
+    }
+    wait_for_count(after_tail + 5u);
+    power_history_get_status(&st);
+    CHECK(st.record_count == after_tail + 5, "hole and four live minutes stored");
+    CHECK(st.splice_batches == batches_before + 1, "shallow merge splices");
+    CHECK(power_history_has_minute(base + (int64_t)hole * 60),
+          "shallow minute is present");
+
+    /* The ring is still time-sorted (the drop never unsorted it). */
+    power_history_record_t page[POWER_HISTORY_PAGE_SIZE];
+    size_t count = 0;
+    bool overflow = false;
+    CHECK(power_history_read(0, 0, page, POWER_HISTORY_PAGE_SIZE, &count, &st,
+                             &overflow) == ESP_OK,
+          "read page after deep merge");
+    int sorted = 1;
+    for (size_t i = 1; i < count; ++i) {
+        if (page[i].interval_start_utc < page[i - 1].interval_start_utc) {
+            sorted = 0;
+        }
+    }
+    CHECK(sorted, "ring stays time-sorted after a dropped deep merge");
+}
+
 static void cleanup(void)
 {
     remove(POWER_HISTORY_FILE);
@@ -398,6 +511,10 @@ int main(void)
 
     /* Regression: a backfill merge of older minutes must not unsort the ring. */
     test_out_of_order_backfill_keeps_sorted();
+
+    /* Regression: a merge far below the tail is dropped, not spliced (the
+     * receiver livelock), while a shallow one still splices. */
+    test_deep_merge_is_dropped_not_spliced();
 
     printf("  history-backfill-merge: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

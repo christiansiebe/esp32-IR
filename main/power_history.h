@@ -24,6 +24,16 @@
 
 #define POWER_HISTORY_PAGE_SIZE 128u
 
+/* Largest in-ring splice a merge/restore may perform. Inserting a minute below
+ * the local tail rewrites every newer record (shift_up_renumber) while holding
+ * the history mutex, so an unbounded splice is O(ring): a backfill that keeps
+ * merging minutes deep below the tail held the mutex for seconds per session on
+ * a ~12k-record store, starved the writer queue and aborted mid-shift with EIO.
+ * A minute whose insert position is further than this below the tail is dropped
+ * instead (the gap stays, the ring stays sorted and the device stays live).
+ * 512 records is ~1000 SPIFFS reads+writes, well under the reader timeout. */
+#define POWER_HISTORY_MAX_SPLICE_RECORDS 512u
+
 /* SPIFFS mount point and history file. Overridable so the reboot-persistence
  * host test can point the store at a scratch directory instead of the
  * device-only /powerlog mount. */
@@ -103,6 +113,11 @@ typedef struct {
      * a full partition is the signature of a GC-starved, thrashing store. */
     uint32_t splice_batches;
     uint32_t splice_records;
+    /* Minutes a merge/restore refused to insert because the splice would have
+     * exceeded POWER_HISTORY_MAX_SPLICE_RECORDS (too far below the tail). A
+     * non-zero value next to a stalled cursor names a backfill that is asking
+     * for minutes the ring can no longer take in order. */
+    uint32_t splice_skipped;
     /* SPIFFS fill at init, so "is the partition nearly full" is visible in the
      * status/diag without a separate query. */
     uint32_t storage_used_bytes;
