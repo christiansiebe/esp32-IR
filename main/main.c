@@ -4253,7 +4253,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 "\"oldest_sequence\":%lu,"
                 "\"latest_sequence\":%lu,\"record_count\":%lu,"
                 "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
-                "\"splice_batches\":%lu,\"splice_records\":%lu,"
+                "\"splice_batches\":%lu,\"splice_records\":%lu,\"splice_skipped\":%lu,"
                 "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
                 "\"aggregated\":true,\"window_hours\":%.2f,\"bucket_seconds\":%lld,"
                 "\"day_start_utc\":%lld,\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
@@ -4269,6 +4269,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 overflow ? "true" : "false",
                 (unsigned long)status.splice_batches,
                 (unsigned long)status.splice_records,
+                (unsigned long)status.splice_skipped,
                 (unsigned long)status.storage_used_bytes,
                 (unsigned long)status.storage_total_bytes,
                 window_hours_out,
@@ -4350,7 +4351,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         "\"oldest_sequence\":%lu,"
         "\"latest_sequence\":%lu,\"record_count\":%lu,"
         "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
-        "\"splice_batches\":%lu,\"splice_records\":%lu,"
+        "\"splice_batches\":%lu,\"splice_records\":%lu,\"splice_skipped\":%lu,"
         "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
         "\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
         "\"capacity\":%u,\"records\":[",
@@ -4365,6 +4366,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         overflow ? "true" : "false",
         (unsigned long)status.splice_batches,
         (unsigned long)status.splice_records,
+        (unsigned long)status.splice_skipped,
         (unsigned long)status.storage_used_bytes,
         (unsigned long)status.storage_total_bytes,
         energy_day_wh,
@@ -5182,7 +5184,7 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         "records: %u / %u\n"
         "sequence: oldest %u, latest %u\n"
         "write errors: %u, queue drops: %u\n"
-        "splices: %u batch(es), %u record rewrite(s)\n"
+        "splices: %u batch(es), %u record rewrite(s), %u skipped (too deep)\n"
         "spiffs: %u / %u bytes used\n",
         !status.ready ? "unavailable"
                       : (status.persistent ? "ready (SPIFFS)"
@@ -5194,6 +5196,7 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         (unsigned int)status.queue_drops,
         (unsigned int)status.splice_batches,
         (unsigned int)status.splice_records,
+        (unsigned int)status.splice_skipped,
         (unsigned int)status.storage_used_bytes,
         (unsigned int)status.storage_total_bytes);
     if (written < 0 || (size_t)written >= out_size) {

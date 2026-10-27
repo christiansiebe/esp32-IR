@@ -70,6 +70,7 @@ static uint32_t g_write_errors;
  * mutex, so no separate lock is needed. */
 static uint32_t g_splice_batches;
 static uint32_t g_splice_records;
+static uint32_t g_splice_skipped;
 static uint32_t g_storage_used_bytes;
 static uint32_t g_storage_total_bytes;
 static bool g_history_ready;
@@ -442,6 +443,17 @@ static bool write_records(power_history_record_t *records, size_t record_count)
         records[i].checksum = record_checksum(&records[i]);
 
         if (at < updated.record_count) {
+            /* Bound the splice: shifting more than POWER_HISTORY_MAX_SPLICE_
+             * RECORDS newer records costs O(ring) SPIFFS I/O under the mutex and
+             * is what let the receiver's backfill livelock. A minute that far
+             * below the tail is a deep gap the ring cannot take in order; drop
+             * it so the store stays sorted and the writer keeps up. The record
+             * is counted as merged by the caller, so the sync cursor still moves
+             * past it and the session does not re-pull it forever. */
+            if (updated.record_count - at > POWER_HISTORY_MAX_SPLICE_RECORDS) {
+                ++g_splice_skipped;
+                continue;
+            }
             /* Splice in: shift the newer records up and renumber them, so the
              * ring stays sorted by minute AND by sequence (the after_sequence
              * cursor needs the latter). */
@@ -1226,6 +1238,14 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
         record.reserved = 0;
         record.checksum = record_checksum(&record);
         if (at < updated.record_count) {
+            /* Same splice bound as the live/merge path: a restore that asks to
+             * insert a minute deep below the tail is dropped instead of
+             * rewriting the whole newer ring under the mutex. */
+            if (updated.record_count - at > POWER_HISTORY_MAX_SPLICE_RECORDS) {
+                ++g_splice_skipped;
+                ++skipped;
+                continue;
+            }
             if (!shift_up_renumber(oldest_slot, updated.record_count, at)) {
                 xSemaphoreGive(g_history_mutex);
                 if (imported_out != NULL) {
@@ -1328,6 +1348,7 @@ void power_history_get_status(power_history_status_t *status)
      * is not critical for a diagnostic). */
     status->splice_batches = g_splice_batches;
     status->splice_records = g_splice_records;
+    status->splice_skipped = g_splice_skipped;
     status->storage_used_bytes = g_storage_used_bytes;
     status->storage_total_bytes = g_storage_total_bytes;
 }
