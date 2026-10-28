@@ -320,6 +320,14 @@ int main(int argc, char **argv)
         test_repair_and_backup_upload();
     }
 
+    /* power_history_init() starts the background repair task. That task must
+     * delete itself; a task function that returns is undefined behaviour on
+     * the device (the IDF release build has no task wrapper, so the first
+     * v0.2.0 flash panicked and rolled back). The host shim counts any task
+     * that returns without vTaskDelete(NULL); the count must stay zero. */
+    CHECK(host_tasks_returned_without_delete() == 0,
+          "every task function deletes itself (no bare return)");
+
     printf("history_ring_repair: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
