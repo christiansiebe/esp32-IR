@@ -165,12 +165,35 @@ typedef struct {
     void *arg;
 } host_task_t;
 
+/* A FreeRTOS task function that returns without deleting itself is undefined
+ * behaviour. On the real release build the task wrapper that would turn that
+ * into a clear abort() is compiled out, so such a task silently corrupts the
+ * scheduler and panics the device (that is exactly how the first v0.2.0 flash
+ * boot-looped and got rolled back). The host build cannot reproduce the crash,
+ * but it can reproduce the *contract violation*: the trampoline notes when a
+ * task returns and vTaskDelete() was never called, and the tests assert the
+ * counter stays zero. */
+static volatile int g_host_tasks_returned_without_delete;
+static _Thread_local int g_host_task_deleted;
+
 static void *host_task_trampoline(void *p)
 {
     host_task_t *t = (host_task_t *)p;
+    g_host_task_deleted = 0;
     t->fn(t->arg);
+    if (!g_host_task_deleted) {
+        __sync_fetch_and_add(&g_host_tasks_returned_without_delete, 1);
+        fprintf(stderr,
+                "  HOST-TASK BUG: a task function returned without calling "
+                "vTaskDelete(NULL) (undefined behaviour on the device)\n");
+    }
     free(t);
     return NULL;
+}
+
+static inline int host_tasks_returned_without_delete(void)
+{
+    return g_host_tasks_returned_without_delete;
 }
 
 static inline BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack,
@@ -198,7 +221,7 @@ static inline void portEXIT_CRITICAL(portMUX_TYPE *m) { (void)m; }
 /* Only the syntax-check of the sleep glue calls this; real wait behaviour is
  * not exercised on the host. */
 static inline void vTaskDelay(uint32_t ticks) { (void)ticks; }
-static inline void vTaskDelete(void *task) { (void)task; }
+static inline void vTaskDelete(void *task) { (void)task; g_host_task_deleted = 1; }
 
 typedef struct {
     const char *partition_label;

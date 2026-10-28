@@ -44,7 +44,13 @@
  * writer (or a CSV import) holds it for a long in-place ring insert, the HTTP
  * task must be able to give up and answer quickly rather than stalling until
  * the browser's own request timeout fires (the reported "AbortError"). */
-#define POWER_HISTORY_READ_LOCK_TIMEOUT_MS 800u
+/* Wait for the store lock. A reader must outlast one writer round: the writer
+ * holds the mutex while it splices a backfill batch (shift_up_renumber moves up
+ * to POWER_HISTORY_MAX_SPLICE_RECORDS records, each a fseek+fwrite). At 800 ms
+ * every reader timed out under backfill load and the dashboard showed an empty
+ * graph even though the ring was full. The bound still keeps the HTTP task from
+ * blocking indefinitely. */
+#define POWER_HISTORY_READ_LOCK_TIMEOUT_MS 2500u
 /* The startup repair must never block the boot: a damaged/full SPIFFS store
  * used to make a single lseek hang for minutes, wedging app_main before the
  * web server started and boot-looping the device. Two independent safeguards:
@@ -1367,28 +1373,20 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
     return ESP_OK;
 }
 
-void power_history_get_status(power_history_status_t *status)
+/* Fill the status fields that need no store lock: readiness, the stats counters
+ * and the SPIFFS fill. The header-derived fields (record_count/latest/oldest)
+ * stay zero here; the caller fills them while it holds g_history_mutex. A read
+ * path uses this so it can take the lock exactly once, instead of get_status()
+ * taking it and the read taking it again - under backfill load that second wait
+ * alone pushed every read past the timeout and the dashboard showed an empty
+ * graph even though the ring was full. */
+static void status_fill_unlocked(power_history_status_t *status)
 {
-    if (status == NULL) {
-        return;
-    }
     memset(status, 0, sizeof(*status));
     status->ready = g_history_ready;
     /* `ready` is also true in the RAM-only fallback, so report the real
      * persistence separately: only an open SPIFFS file survives a reboot. */
     status->persistent = g_history_ready && g_history_file != NULL;
-    if (g_history_ready && xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) == pdTRUE) {
-        status->record_count = g_history_header.record_count;
-        status->latest_sequence = g_history_header.next_sequence - 1u;
-        if (status->record_count != 0) {
-            status->oldest_sequence =
-                g_history_header.next_sequence - status->record_count;
-            if (status->oldest_sequence == 0) {
-                status->oldest_sequence = 1;
-            }
-        }
-        xSemaphoreGive(g_history_mutex);
-    }
     portENTER_CRITICAL(&g_stats_lock);
     status->queue_drops = g_queue_drops;
     status->write_errors = g_write_errors;
@@ -1403,6 +1401,32 @@ void power_history_get_status(power_history_status_t *status)
     status->storage_total_bytes = g_storage_total_bytes;
 }
 
+/* Fill the header-derived status fields. The caller must hold g_history_mutex. */
+static void status_fill_header_locked(power_history_status_t *status)
+{
+    status->record_count = g_history_header.record_count;
+    status->latest_sequence = g_history_header.next_sequence - 1u;
+    if (status->record_count != 0) {
+        status->oldest_sequence =
+            g_history_header.next_sequence - status->record_count;
+        if (status->oldest_sequence == 0) {
+            status->oldest_sequence = 1;
+        }
+    }
+}
+
+void power_history_get_status(power_history_status_t *status)
+{
+    if (status == NULL) {
+        return;
+    }
+    status_fill_unlocked(status);
+    if (g_history_ready && xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) == pdTRUE) {
+        status_fill_header_locked(status);
+        xSemaphoreGive(g_history_mutex);
+    }
+}
+
 esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
                              power_history_record_t *records, size_t capacity,
                              size_t *record_count, power_history_status_t *status,
@@ -1414,7 +1438,7 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
     }
     *record_count = 0;
     *overflow = false;
-    power_history_get_status(status);
+    status_fill_unlocked(status);
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1422,13 +1446,7 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
         return ESP_ERR_TIMEOUT;
     }
 
-    status->record_count = g_history_header.record_count;
-    status->latest_sequence = g_history_header.next_sequence - 1u;
-    status->oldest_sequence = status->record_count == 0 ? 0 :
-                              g_history_header.next_sequence - status->record_count;
-    if (status->oldest_sequence == 0 && status->record_count != 0) {
-        status->oldest_sequence = 1;
-    }
+    status_fill_header_locked(status);
 
     uint32_t oldest_sequence = status->oldest_sequence;
     uint32_t latest_sequence = status->latest_sequence;
@@ -1595,7 +1613,7 @@ esp_err_t power_history_read_window(int64_t from_utc, int64_t to_utc,
     if (max_records == 0 || max_records > capacity) {
         max_records = (uint32_t)capacity;
     }
-    power_history_get_status(status);
+    status_fill_unlocked(status);
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1603,13 +1621,7 @@ esp_err_t power_history_read_window(int64_t from_utc, int64_t to_utc,
         return ESP_ERR_TIMEOUT;
     }
 
-    status->record_count = g_history_header.record_count;
-    status->latest_sequence = g_history_header.next_sequence - 1u;
-    status->oldest_sequence = status->record_count == 0 ? 0 :
-                              g_history_header.next_sequence - status->record_count;
-    if (status->oldest_sequence == 0 && status->record_count != 0) {
-        status->oldest_sequence = 1;
-    }
+    status_fill_header_locked(status);
 
     esp_err_t result = ESP_OK;
     if (g_history_file == NULL) {
@@ -1702,7 +1714,7 @@ esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
     if (max_records == 0 || max_records > capacity) {
         max_records = (uint32_t)capacity;
     }
-    power_history_get_status(status);
+    status_fill_unlocked(status);
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1710,13 +1722,7 @@ esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
         return ESP_ERR_TIMEOUT;
     }
 
-    status->record_count = g_history_header.record_count;
-    status->latest_sequence = g_history_header.next_sequence - 1u;
-    status->oldest_sequence = status->record_count == 0 ? 0 :
-                              g_history_header.next_sequence - status->record_count;
-    if (status->oldest_sequence == 0 && status->record_count != 0) {
-        status->oldest_sequence = 1;
-    }
+    status_fill_header_locked(status);
 
     esp_err_t result = ESP_OK;
     if (g_history_file == NULL) {
@@ -2030,7 +2036,7 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
     }
     power_history_aggregate_init(window_start_utc, bucket_seconds, sum_w, count,
                                  bucket_start_ms, bucket_count);
-    power_history_get_status(status);
+    status_fill_unlocked(status);
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -2038,13 +2044,7 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
         return ESP_ERR_TIMEOUT;
     }
 
-    status->record_count = g_history_header.record_count;
-    status->latest_sequence = g_history_header.next_sequence - 1u;
-    status->oldest_sequence = status->record_count == 0 ? 0 :
-                              g_history_header.next_sequence - status->record_count;
-    if (status->oldest_sequence == 0 && status->record_count != 0) {
-        status->oldest_sequence = 1;
-    }
+    status_fill_header_locked(status);
 
     if (g_history_file == NULL) {
         esp_err_t core_err = power_history_aggregate_core(

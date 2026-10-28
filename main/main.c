@@ -3659,7 +3659,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "byId('history-status').textContent=(d.clock_synced?'Netzwerkzeit synchronisiert':'Warte auf Netzwerkzeit')+"
         "' · gespeicherte Minutenwerte: '+d.record_count+' / '+d.capacity+' · letztes: '+latest+"
         "' · aktuelle Messwerte im Intervall: '+d.current_sample_count+"
-        "' · Speicher: '+(d.storage_ready?'bereit':'nicht bereit')+"
+        "' · Speicher: '+(d.busy?'kurz belegt, wird nachgeladen':(d.storage_ready?'bereit':'nicht bereit'))+"
         "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
         "if(typeof d.energy_day_wh==='number'){byId('history-day-info').textContent+=(' · heute '+fmt(d.energy_day_wh/1000,2)+' kWh · Monat '+fmt(d.energy_month_wh/1000,2)+' kWh');}"
         "}catch(e){byId('history-status').textContent='Verlauf nicht verfügbar: '+e;}"
@@ -4173,6 +4173,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     size_t record_count = 0;
     power_history_status_t status;
     bool overflow = false;
+    bool history_busy = false;
     esp_err_t err = power_history_read(after_sequence, recent_count, records,
                                        POWER_HISTORY_PAGE_SIZE, &record_count,
                                        &status, &overflow);
@@ -4187,9 +4188,13 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     } else if (err == ESP_ERR_TIMEOUT) {
         /* Writer/import holds the lock for a long in-place ring insert. Serve an
          * empty snapshot instead of blocking the HTTP task until the browser's
-         * request timeout fires; the dashboard retries on its next poll. */
+         * request timeout fires; the dashboard retries on its next poll. The
+         * `busy` flag tells the UI apart "store is empty" from "store is
+         * momentarily locked" - otherwise a full ring under backfill load looked
+         * like an empty store. */
         record_count = 0;
         status.ready = false;
+        history_busy = true;
         ESP_LOGW(TAG, "Power history busy; serving empty dataset");
     } else if (err != ESP_OK) {
         free(records);
@@ -4231,7 +4236,8 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         bool agg_busy = (agg_err == ESP_ERR_TIMEOUT);
         if (agg_busy) {
             /* Writer/import holds the lock: emit an empty (but valid) aggregated
-             * window instead of blocking the HTTP task. The dashboard retries. */
+             * window instead of blocking the HTTP task. The dashboard retries.
+             * The `busy` flag keeps that apart from a genuinely empty store. */
             status.ready = false;
             ESP_LOGW(TAG, "Power history busy; serving empty aggregation");
         }
@@ -4249,7 +4255,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         if (agg_err == ESP_OK || agg_busy) {
             agg_header_len = snprintf(
                 agg_header, sizeof(agg_header),
-                "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
+                "{\"clock_synced\":%s,\"storage_ready\":%s,\"busy\":%s,\"current_sample_count\":%u,"
                 "\"oldest_sequence\":%lu,"
                 "\"latest_sequence\":%lu,\"record_count\":%lu,"
                 "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
@@ -4260,6 +4266,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 "\"capacity\":%u,\"records\":[",
                 system_time_is_valid() ? "true" : "false",
                 status.persistent ? "true" : "false",
+                agg_busy ? "true" : "false",
                 (unsigned int)current_sample_count_agg,
                 (unsigned long)status.oldest_sequence,
                 (unsigned long)status.latest_sequence,
@@ -4347,7 +4354,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     }
     int header_len = snprintf(
         header, sizeof(header),
-        "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
+        "{\"clock_synced\":%s,\"storage_ready\":%s,\"busy\":%s,\"current_sample_count\":%u,"
         "\"oldest_sequence\":%lu,"
         "\"latest_sequence\":%lu,\"record_count\":%lu,"
         "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
@@ -4357,6 +4364,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         "\"capacity\":%u,\"records\":[",
         system_time_is_valid() ? "true" : "false",
         status.persistent ? "true" : "false",
+        history_busy ? "true" : "false",
         (unsigned int)current_sample_count,
         (unsigned long)status.oldest_sequence,
         (unsigned long)status.latest_sequence,

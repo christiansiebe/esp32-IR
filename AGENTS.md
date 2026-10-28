@@ -983,3 +983,52 @@ allein waere ein PATCH, aber ein Tag deckt den ganzen Baum ab.)*
 - **Sender-Telemetrie nach DB-Fehler:** Der Receiver bekommt `caught_up:
   True` mit dem Sender, sobald die DB leer/frisch ist; der Backfill laeuft nur
   bei Luecken und ist der Grund fuer die frueheren API-Timeouts (splices).
+
+## WW-Ladung startet nicht: Sollwert-Sprung statt charge=start (2026-10-28)
+Symptom: `extra_warmwasser`-Schalter an, aber es wird nicht geheizt - Zylinder
+faellt sogar (38,2 -> 33,9 C). Der Verdichter lief nur 3-7 min und ging dann auf
+13-22 W zurueck (gemessen 10:33-10:36, 11:48-11:51, 12:02-12:27, 12:45-12:49).
+`activeHeatSource` sprang dabei auf `none` bzw. `appliance_only` (Gas).
+
+**Ursache - zwei Dinge kommen zusammen:**
+1. `dhwCircuits/dhw1/charge` = `stop` und `currentSetpoint` = 0.0. Der
+   Ladungsbefehl wurde von der Anlage nicht als neue Waermeanforderung
+   aufgenommen. Ein Sollwert, der (scheinbar) schon erfuellt ist, loest keine
+   Ladung aus - auch `charge=start` allein greift nicht zuverlaessig.
+2. Der **Vorlauf lag UNTER dem Zylinder** (Vorlauf 29-31 C, Zylinder 35-38 C) =
+   negativer Hub. Die WP kann den Speicher so nicht laden; die Automation
+   `cop_ww_hub_waechter` ueberwacht genau diese 2-K-Grenze.
+
+**Was zuverlaessig wirkt (Nutzer-Ansatz, verifiziert):**
+`temperatureLevels/low` einmal auf 30 und dann auf 47 setzen (je PUT -> 204).
+Der Sprung erzeugt eine NEUE Anforderung. Messung 13:58 -> 14:42:
+Zylinder 33,4 -> 36,2 C, Vorlauf 33,7 -> 40,5 C (Hub ~4 K), Verdichter
+843 -> 2103 W, `activeHeatSource` = heatpump_only. Laeuft stabil durch.
+Also: **Sollwert-Sprung (entweder `singleChargeSetpoint` oder
+`temperatureLevels/low`) ist der Ausloeser, nicht `charge`.**
+
+**Fallen/Beobachtungen:**
+- `singleChargeSetpoint` (= `number...solltemperatur_extra_warmwasser`, Ziel der
+  Einmalladung) stand zeitweise auf **30** - das ist UNTER der Zylindertemperatur
+  und legt die Extra-WW-Funktion lahm. Gehoert auf 48. Nach dem Test pruefen.
+- `chargeDuration` ist eine FESTE Laufzeit, kein Zielwert (Werkswert 30 min lief
+  waehrend der Anti-Takt-Sperre ab, ohne dass geheizt wurde). Steht jetzt auf 180.
+- Die Anlage fuehrt WW-Programm A: `11:00=low, 16:00=off` (alle Tage), `low`=48,
+  `high`=50. `operationMode` = ownprogram.
+
+**Optimierungs-Stand (gemessen, NICHTS geschrieben):**
+- `controlStrategy` = `cost` (richtig fuer Bivalenz). Wichtig: Bei
+  `maxRenewableShare` verschwinden die `energyTariff`-Ressourcen (404) und die
+  Tarif-Entitaeten werden unavailable. Zurueck auf `cost` -> Tarife sofort wieder
+  da (28/9/17 ct). Die Anlage hatte am 27.10. 23:01 selbst umgestellt.
+- hc2: `controlType` = wdcoptimized, `setpointOptimization` = **on** (gut),
+  `maxFlowTemp` 40 C, `suWiThreshold` 15, `suWiSwitchMode` automatic.
+- hc1: wdcsimplified, maxFlowTemp 53, suWiThreshold 15, automatic.
+- hc3: wdcsimplified, maxFlowTemp 55, suWiSwitchMode **off**.
+- Zeitprogramme: hc2 06:00=21,5 / 23:00=21,0 | hc1 08:00=20 / 23:00=19 |
+  hc3 08:00=19 / 23:00=19. Der Morgen-Peak ist der Sprung 06:00/08:00.
+- `silentMode` = off, `powerReduction` = 30 %, `lowNoise` = inactive.
+- Gesperrt (403, Kontoberechtigung): `heatCurve`, `roomSetpoint`,
+  `awayMode`, `bivalentPoint`, `switchoverTemp`, `dhwPriority`.
+- `hc2/setpointOptimization` ist der eingebaute Glaettungshebel (Anlage faehrt
+  den Sollwert vor dem Programmpunkt langsam an) - steht bereits auf `on`.
