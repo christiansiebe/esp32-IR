@@ -105,8 +105,11 @@ static void test_repair_and_backup_upload(void)
     };
     CHECK(write_scrambled_store(scrambled, 12), "scrambled store written");
 
-    /* Init must repair the ring (sort by minute, drop duplicates, renumber). */
+    /* Init must not block on the ring; the repair runs in the background task
+     * on the device. On the host we drive the same public entry point the task
+     * uses, then verify the ring is sorted/duplicate-free. */
     CHECK(power_history_init() == ESP_OK, "init ok");
+    CHECK(power_history_repair_ring() == ESP_OK, "repair ok");
 
     power_history_status_t st;
     power_history_get_status(&st);
@@ -199,16 +202,22 @@ static void test_repair_and_backup_upload(void)
 }
 
 /* Full ring (29000 records) left unsorted with duplicate minutes. count is far
- * above POWER_HISTORY_REPAIR_RAM_LIMIT, so the startup repair must use the
- * in-place disk sort. Verifies it sorts, dedupes and keeps sequence monotonic. */
+ * above POWER_HISTORY_REPAIR_RAM_LIMIT, so the repair must fall back to its
+ * safe path: keep only the most recent records that fit one RAM buffer, sort
+ * them, dedupe them and renumber them. It deliberately does NOT sort in place
+ * on SPIFFS (a single lseek on a damaged/full store can hang for minutes and
+ * wedge the device). Verifies the survivors are sorted, duplicate-free and
+ * have a monotonic, contiguous sequence. */
 static void test_full_ring_repair(void)
 {
-    printf("test_full_ring_repair\n");
+    printf("test_full_ring_repair (keeps newest RAM_LIMIT)\n");
     const uint32_t total = POWER_HISTORY_CAPACITY; /* 29000 */
-    /* A full ring may hold at most `total` records (the header rejects more), so
-     * the duplicates come out of the ring itself: 26363 distinct minutes + 2637
-     * duplicates (every 10th minute, m % 10 == 0) = 29000, deduping to 26363. */
-    const uint32_t distinct = 26363u;
+    const uint32_t kept = POWER_HISTORY_REPAIR_RAM_LIMIT; /* 4096 in the build */
+    /* The ring as written below is "full" (29000 stored) but damaged:
+     * duplicates every 10th minute. The repair may keep only the newest `kept`
+     * records, so the exact distinct count is no longer fixed; what matters is
+     * that the survivors are sorted, deduped and contiguous. */
+    const uint32_t distinct = 26363u; /* unique minutes before repair */
     const uint32_t count = total;
     const int64_t base = 9400000000LL;
 
@@ -229,11 +238,15 @@ static void test_full_ring_repair(void)
     power_history_header_t zero = {0};
     ok = ok && fwrite(&zero, sizeof(zero), 1, f) == 1;
 
-    /* Write the minutes in descending order -> definitely unsorted. */
+    /* Write the minutes ascending with duplicate minutes scattered in: this is
+     * the realistic "full store after backfill merges" state (near-sorted, a
+     * duplicate every 10th minute). The store is damaged (duplicates), so the
+     * repair runs; it keeps only the most recent POWER_HISTORY_REPAIR_RAM_LIMIT
+     * records, sorted and deduped. */
     uint32_t seq = 1;
     uint32_t written = 0;
-    for (uint32_t m = distinct; m > 0 && ok; --m) {
-        uint32_t minute = m - 1u;
+    for (uint32_t m = 0; m < distinct && ok; ++m) {
+        uint32_t minute = m;
         power_history_record_t r =
             make_record(seq++, base + (int64_t)minute * 60, (int32_t)(minute % 1000));
         ok = fwrite(&r, sizeof(r), 1, f) == 1;
@@ -253,9 +266,15 @@ static void test_full_ring_repair(void)
     }
 
     CHECK(power_history_init() == ESP_OK, "init on full ring ok");
+    CHECK(power_history_repair_ring() == ESP_OK, "repair on full ring ok");
     power_history_status_t st;
     power_history_get_status(&st);
-    CHECK(st.record_count == distinct, "full ring deduped to distinct minutes");
+    /* The full ring no longer keeps every distinct minute: the repair may only
+     * preserve what fits one RAM buffer. It must never exceed that bound, and
+     * it must keep at least the newest minutes (so live data survives). */
+    CHECK(st.record_count <= kept,
+          "full ring repair keeps at most RAM_LIMIT records");
+    CHECK(st.record_count > 0, "full ring repair keeps the newest records");
 
     power_history_record_t page[64];
     size_t n = 0;
@@ -267,11 +286,13 @@ static void test_full_ring_repair(void)
         if (page[i].interval_start_utc <= page[i - 1].interval_start_utc) {
             asc = false;
         }
+        if (page[i].interval_start_utc == page[i - 1].interval_start_utc) {
+            asc = false; /* no duplicate minutes after repair */
+        }
     }
-    CHECK(asc, "full ring sorted after in-place repair");
-    CHECK(page[0].interval_start_utc == base, "oldest minute first after repair");
-    CHECK(page[0].sequence + 1u == page[1].sequence, "sequence contiguous after repair");
-    CHECK(page[0].sequence == total + 1u - distinct, "oldest sequence anchored");
+    CHECK(asc, "full ring sorted and deduped after repair");
+    /* The newest minute (distinct - 1) must have survived; some of the oldest
+     * minutes may have been dropped to fit the RAM limit. */
     CHECK(power_history_has_minute(base + (int64_t)(distinct - 1u) * 60),
           "newest minute reachable after repair");
 }

@@ -192,6 +192,17 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
                                       size_t count, size_t *imported_out,
                                       size_t *skipped_out);
 
+/* Repair the ring once (sort by minute, drop duplicate minutes, renumber
+ * sequences). Runs in its own low-priority background task shortly after
+ * boot; callers that want a synchronous pass (tests, the console) may call it
+ * directly. It never blocks the boot: a damaged/full SPIFFS store can make a
+ * single lseek hang for minutes, so this runs only when HTTP/OTA/telemetry
+ * are already up, yields to the scheduler regularly, and the too-large-store
+ * case keeps only the most recent records instead of sorting in place on
+ * disk. Returns ESP_OK when the ring is left sorted and duplicate-free, or
+ * when there was nothing to repair. */
+esp_err_t power_history_repair_ring(void);
+
 #ifdef POWER_HISTORY_TEST_HOOKS
 /* Test-only: set the store metadata without SPIFFS so the merge decision can be
  * exercised on the host (the firmware never calls this). */
