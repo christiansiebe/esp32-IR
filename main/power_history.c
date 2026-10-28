@@ -258,6 +258,59 @@ static bool write_record_idx(uint32_t oldest_slot, uint32_t index,
            fwrite(record, sizeof(*record), 1, g_history_file) == 1;
 }
 
+/* Batched ring I/O: read/write `count` consecutive records starting at ring
+ * index `start`. The slots of a contiguous index range are contiguous modulo
+ * POWER_HISTORY_CAPACITY, so this needs at most two stdio runs (one split at the
+ * wrap) instead of one fseek+fread/fwrite per record.
+ *
+ * This matters for the lock hold time: every fseek discards the stdio buffer,
+ * so a per-record loop turns each 32-byte record into its own SPIFFS page
+ * operation. A deep backfill splice of ~350 records then held g_history_mutex
+ * for ~4 s, which made every dashboard read time out (the graph showed an empty
+ * store). Reading a whole chunk in one call cuts the syscalls by the chunk
+ * factor, so the lock is free again between splices. */
+static bool read_range_idx(uint32_t oldest_slot, uint32_t start, uint32_t count,
+                           power_history_record_t *buf)
+{
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t slot = (oldest_slot + start + done) % POWER_HISTORY_CAPACITY;
+        uint32_t run = count - done;
+        if (slot + run > POWER_HISTORY_CAPACITY) {
+            run = POWER_HISTORY_CAPACITY - slot;
+        }
+        long offset = (long)(2u * sizeof(power_history_header_t) +
+                             slot * sizeof(power_history_record_t));
+        if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
+            fread(buf + done, sizeof(buf[0]), run, g_history_file) != run) {
+            return false;
+        }
+        done += run;
+    }
+    return true;
+}
+
+static bool write_range_idx(uint32_t oldest_slot, uint32_t start, uint32_t count,
+                            const power_history_record_t *buf)
+{
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t slot = (oldest_slot + start + done) % POWER_HISTORY_CAPACITY;
+        uint32_t run = count - done;
+        if (slot + run > POWER_HISTORY_CAPACITY) {
+            run = POWER_HISTORY_CAPACITY - slot;
+        }
+        long offset = (long)(2u * sizeof(power_history_header_t) +
+                             slot * sizeof(power_history_record_t));
+        if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
+            fwrite(buf + done, sizeof(buf[0]), run, g_history_file) != run) {
+            return false;
+        }
+        done += run;
+    }
+    return true;
+}
+
 /* First index in [0, count] whose minute is >= ts. The ring is time-sorted, so
  * this is the insertion point for a record of that minute. */
 static uint32_t find_first_at_or_after_time(uint32_t oldest_slot, uint32_t count,
@@ -327,10 +380,8 @@ static bool shift_up_renumber(uint32_t oldest_slot, uint32_t count, uint32_t at)
             chunk = POWER_HISTORY_SHIFT_CHUNK;
         }
         uint32_t start = index - chunk; /* move [start, index) -> [start+1, index+1) */
-        for (uint32_t i = 0; i < chunk; ++i) {
-            if (!read_record_idx(oldest_slot, start + i, &buf[i])) {
-                return false;
-            }
+        if (!read_range_idx(oldest_slot, start, chunk, buf)) {
+            return false;
         }
         for (uint32_t i = 0; i < chunk; ++i) {
             ++buf[i].sequence;
@@ -338,9 +389,9 @@ static bool shift_up_renumber(uint32_t oldest_slot, uint32_t count, uint32_t at)
                 buf[i].sequence = 1;
             }
             buf[i].checksum = record_checksum(&buf[i]);
-            if (!write_record_idx(oldest_slot, start + i + 1u, &buf[i])) {
-                return false;
-            }
+        }
+        if (!write_range_idx(oldest_slot, start + 1u, chunk, buf)) {
+            return false;
         }
         index = start;
         if (++chunks_done % POWER_HISTORY_SHIFT_YIELD_CHUNKS == 0) {
