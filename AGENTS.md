@@ -1032,3 +1032,394 @@ Also: **Sollwert-Sprung (entweder `singleChargeSetpoint` oder
   `awayMode`, `bivalentPoint`, `switchoverTemp`, `dhwPriority`.
 - `hc2/setpointOptimization` ist der eingebaute Glaettungshebel (Anlage faehrt
   den Sollwert vor dem Programmpunkt langsam an) - steht bereits auf `on`.
+
+## Silent-Mode-Drosselung bei WW-Ladung: Vorlauf bleibt oben, Wasser zieht hoch (2026-10-28)
+Nutzer-Beobachtung: "Ich hab zum Ende 60% Leistung reduziert, dabei bleibt Vorlauf
+auf 51 grad und Wasser zieht hoch." **Bestaetigt - und es ist ein nutzbares
+Steuersignal.**
+
+**Messung (Ladung 14:20-15:56, Anlagen-eigene Waermemengenzaehler):**
+```
+Fenster              Verd(avg)  Vorlauf  Zylinder  dTherm dElek  COP   P_th
+volle Leistung        2481 W     48.9     44.4     2.49   0.77   3.23  9.34 kW
+60% gedrosselt        1767 W     50.9     45.9     1.05   0.32   3.28  6.30 kW
+```
+- Der **Vorlauf stieg** trotz Drosselung von 48,9 auf 50,9 C (Hub 4,5 -> 5,0 K).
+  Der Zylinder zog weiter hoch (44,4 -> 45,9, am Ende 47,9 C).
+- Die **Leistungsreduzierung drosselt den Verdichter, nicht den Vorlauf**: bei
+  halber Verdichterleistung bleibt der Vorlauf gleich oder steigt, weil die
+  Waermemenge pro Zeit sinkt und die Anlage laenger auf Temperatur faehrt.
+- **COP blieb praktisch gleich (3,23 -> 3,28).** Die Drosselung kostet also
+  keinen COP, sie **streckt nur die Laufzeit** (P_th 9,34 -> 6,30 kW).
+
+**Wichtig - Semantik von powerReduction:** Der Wert ist der PROZENTSATZ DER
+REDUZIERUNG, nicht die Restleistung. `60` = staerker gedrosselt als `30`.
+Gegengeprueft: Red=60 -> 1205 W, Red=50 -> 756 W, Red=30 (silent off) -> 2666 W.
+**Der Wert wirkt nur, wenn `silentMode/enabled` = `on` ist** - steht silentMode
+auf `off`, ist `powerReduction` wirkungslos (Anlage faehrt voll).
+
+**Anlagen-eigenes Rueckmelde-Signal (neu gefunden):**
+`binary_sensor.mx_400_hybman_compressor_speed_limited_due_to_silent_mode`
+-> `on`, sobald die Anlage den Verdichter wegen Silent Mode begrenzt
+(15:45-15:55 on, passend zur Drosselung). Dazu
+`binary_sensor.mx_400_hybman_low_noise_mode_active`. Das ist die **bestaetigte**
+Rueckmeldung, dass die Drosselung angekommen ist - besser als der Sollwert allein.
+
+**Konflikt in der bestehenden Automation `cop_hc2_raum_und_pv` (gefunden):**
+```
+limit = (not ww_running) and importing and (...)
+red   = red_base if limit else red_pv     # red_pv = 30
+mode  = 'on' if limit else 'off'
+```
+Waehrend einer WW-Ladung ist `ww_running` True -> `limit` False -> es wird
+`powerReduction=30` UND `silentMode=off` geschrieben, also **Drosselung
+aufgehoben**. Genau das war beim Nutzer-Eingriff zu sehen: die Werte pendelten
+15:44-16:36 zwischen 30/40/50/60 und silent on/off, weil Automation und
+Nutzer-Eingriff gegeneinander schrieben. Die Automation behandelt WW als
+"Nicht-Drosseln"-Fall - obwohl gerade WW der Fall ist, wo Drosselung nuetzt
+(COP gleich, laengerer Lauf, weniger Spitzenlast).
+
+**Nutzbar fuer die Steuerung:** Bei WW-Ladung ist die Drosselung ein
+**kostenloser Laufzeit-Strecker** (COP 3,23 -> 3,28, keine Einbusse) und
+glaettet die Verdichterspitze (2705 -> 1159 W). Fuer PV-Ueberschuss ist das
+sogar ideal: weniger Netzbezug pro Minute, mehr Stunden mit Eigenverbrauch.
+`cop_ww_hub_waechter` hebt die Drosselung dagegen ABSICHTLICH auf, wenn der Hub
+unter 2 K faellt - das ist der richtige Schutz, aber er greift hier nicht, weil
+der Hub bei 4,5-5,0 K lag.
+
+**Wichtig zur Messaufloesung:** Die Waermemengenzaehler liefern nur alle
+~305 s einen Wert, Vorlauf/Zylinder alle ~625 s. Kurze Fenster (<5 min) sind
+damit NICHT belastbar. Verdichterleistung kommt alle 61 s.
+
+## Wetterbasierte WW-Startverschiebung: gemessen, 14:30 ist zu spaet (2026-10-28)
+Frage des Nutzers: "Wenn erst nachmittags die Sonne kommt, schieben wir WW-Start
+bis spaetestens 14:30 nach hinten?" **Antwort: die Idee ist richtig gedacht,
+aber 14:30 liegt hinter dem Ende des Ueberschussfensters.**
+
+**Was an Wetterdaten da ist:**
+- `weather.forecast_home` (met.no), **48 h stuendlich**, mit `cloud_coverage`
+  und `uv_index`. Abruf: `POST /api/services/weather/get_forecasts`
+  `{"entity_id":"weather.forecast_home","type":"hourly"}`.
+- **KEINE PV-Prognose** installiert: kein forecast.solar, kein Solcast
+  (Integrationsliste enthaelt nur `met`, `sun`, `template`, ...).
+- **Die Anlage hat ein PV-Signal, aber gesperrt (403):**
+  `pv/surplusAvailable`, `pv/power`, `pv/status`, `pv/setpoint`,
+  `heatSources/hybrid/pvSurplus`, `hc*/solarInfluence` - alle 403. Sie kann es
+  also nicht selbst.
+- **Vorhersage-Guete ist NICHT pruefbar:** `weather.*` hat 0 Eintraege in
+  `statistics` und nur den aktuellen Zustand in `states`. Es gibt keine
+  Historie der Vorhersagen, also laesst sich rueckwirkend nicht sagen, wie gut
+  met.no die Bewoelkung hier trifft. Ehrliche Grenze.
+
+**Der harte Befund (10 Tage echte Messung, `stromzaehler_leistung_15_min_mittel`):**
+Ueberschuss = letzter Wert <= -800 W (also >=800 W Einspeisung):
+```
+ Tag     Fensterende   spaetester Start (90-min-Ladung)
+ 20.10     14:51          13:21
+ 22.10     12:59          11:29
+ 23.10     14:44          13:14
+ 24.10     15:40          14:10
+ 25.10     14:19          12:49
+ 26.10     13:54          12:24
+ 27.10     12:20          10:50
+ 28.10     13:31          12:01
+ Median-Ende 14:19 | spaetestes Ende 15:40 | fruehestes 12:20
+```
+**0 von 7 Tagen erlauben einen Start um 14:30** (bei 90 min Ladung). Selbst der
+beste Tag (24.10., Ende 15:40) erlaubt nur 14:10.
+
+**Der Grund ist Sonnengeometrie, nicht Wetter.** 10-Tage-Mittel Netz je Stunde:
+```
+ 09h -470 | 10h -582 | 11h -1114 | 12h -1482 | 13h -140 | 14h -458
+ 15h +129 | 16h +327 | 17h +888 | 18h +916 | 19h +1743   (negativ = Ueberschuss)
+```
+Ab 13h bricht der Ueberschuss ein und kippt ab 15h in Bezug. Im Oktober steht
+die Sonne dann zu tief, waehrend der Hausverbrauch abends steigt. **Das laesst
+sich nicht wegwarten.**
+
+**"Sonne erst nachmittags" ist im Oktober selten UND dann schwach:**
+Von 9 auswertbaren Tagen: 1 Tag "NUR NACHMITTAG" (24.10.), 2 "nur VORMITTAG"
+(25./28.10.), 1 "beide gut" (20.10.), 5 "beide schlecht". Die Wetterlage, fuer
+die die Idee gedacht ist, trat **einmal in 10 Tagen** auf - und am 24.10. lag
+das Fenster 13-15h, also haette ein 14:30-Start wieder nicht gepasst.
+Beispiel 30.10. (Vorhersage): Vormittag Nebel 100 %, Nachmittag 14-15h sonnig -
+aber UV nur 0,8/0,4, also **kaum Ertrag**. Ein Nachmittag im Oktober bringt
+wenig Ueberschuss, auch wenn die Sonne scheint.
+
+**Wichtiger Nebenfund - Bug in `cop_ww_start_optimal`:**
+Die Automation heisst "WW-Start bei PV-Ueberschuss", hat aber **KEINEN
+Einschalt-Zweig**. Der `choose` enthaelt genau eine Bedingung mit
+`switch.turn_off`. In der ganzen `automations.yaml` gibt es **kein einziges
+`switch.turn_on`** (`grep -c` = 0). Sie schaltet also nur AB, nie AN - passend
+dazu, dass der Nutzer den Extra-WW-Ansatz verworfen hat. Der Name ist
+irrefuehrend; die Startfunktion fehlt komplett.
+
+**Bessere Loesung als 14:30 (Vorschlag, nicht umgesetzt):**
+Das WW-Programm laeuft ohnehin 11:00=low(48) - und die Messung zeigt, dass die
+Ladungen real 10-13h starten, also **schon im PV-Fenster**. Die Verschiebung
+sollte deshalb in beide Richtungen gehen und **gedeckelt** sein:
+- Guter Vormittag erwartet -> frueh laden (10:00), statt auf den Nachmittag zu
+  warten.
+- trueber Vormittag, Besserung ab Mittag -> nach hinten, aber **maximal auf
+  ~12:30** (nicht 14:30), damit 90-115 min Ladung noch im Fenster endet.
+- Fensterende aus der Vorhersage schaetzen (Stunden mit hohem UV und niedriger
+  Bewoelkung) und den Start als `fensterende - 120 min` setzen.
+- Mit Silent-Mode-Drosselung dauert die Ladung 115 statt 60 min -> der
+  spaeteste Start rueckt NOCH weiter nach vorne (siehe Abschnitt Silent-Mode).
+
+## WW-Planung nach Wetterbericht: umgesetzt + Dashboard (2026-10-28)
+
+**Auftrag:** Warmwasser nicht nach fester Uhrzeit, sondern in das PV-Fenster
+legen, und im Dashboard sichtbar machen. **Erledigt.**
+
+### Aufbau (4 Vorhersage-Sensoren + 2 Automationen + 6 Helfer)
+- `templates.yaml` (ab ~Zeile 246): trigger-basierte Sensoren, die aus
+  `weather.forecast_home` (met.no, 48 h stuendlich) rechnen:
+  * `sensor.ww_plan_fenster_start` / `_fenster_ende` - die PV-Stunden
+    (UV >= 0,3 UND Bewoelkung <= 70 %).
+  * `sensor.ww_plan_ziel_start` - `fensterende - 120 min`, gedeckelt
+    **10:00-12:30**. Gemessen (10 Tage): das Ueberschussfenster endet im
+    Median um **14:19**, fruehestens 12:20 -> ein Start nach 12:30 waere
+    nicht mehr im Fenster. Ohne erkennbares Fenster: 11:00.
+  * `sensor.ww_plan_status` - Lage als Text ("2 PV-Stunden, Ertrag-Index 0.7").
+- `automations.yaml`:
+  * `cop_ww_plan_start` (Alias "WW-Plan Start (Wetterbericht + Sollwert-Sprung)")
+  * `cop_ww_plan_drossel` (Alias "WW-Plan Drosselung (Flag fuer hc2)")
+- Helfer: `input_boolean.ww_plan_aktiv` (on), `input_boolean.ww_plan_drossel_aktiv`,
+  `input_number.ww_plan_zieltemperatur` (48), `input_number.ww_plan_ladedauer` (180),
+  `input_text.ww_plan_meldung`, `input_datetime.ww_plan_letzter_start`.
+
+### Warum Sollwert-Sprung statt charge=start
+Ein Sollwert, der schon erfuellt scheint, loest **keine** Ladung aus - auch
+`charge=start` nicht. Der Sprung `temperatureLevels/low` erst auf **30**, 8 s
+warten, dann auf die Zieltemperatur erzeugt eine neue Waermeanforderung
+(verifiziert 28.10.: Zylinder 33,4 -> 47,9 C, Verdichter bis 2,7 kW).
+
+### Nur EINE Schreibstelle fuer Silent Mode / Leistungsreduzierung
+`cop_hc2_raum_und_pv` schreibt alle 2 min Silent Mode und Leistungsreduzierung.
+Eine zweite Automation, die dasselbe schreibt, wuerde sich mit ihr **bekaempfen**.
+Deshalb setzt `cop_ww_plan_drossel` **nur das Flag** `ww_plan_drossel_aktiv`;
+hc2 wertet es aus:
+```
+ww_hub_ok    = (Vorlauf - Zylinder) >= 2.0
+ww_throttle  = ww_laeuft and ww_plan_drossel_aktiv and ww_hub_ok
+red          = min(red_base, red_phys) if limit else (drosselung_bei_ww if ww_throttle else red_pv)
+mode         = 'on' if (limit or ww_throttle) else 'off'
+```
+Der Hub-Schutz (>= 2 K) ist doppelt abgesichert: in hc2 **und** in
+`cop_ww_hub_waechter`. Grund (Messung 28.10.): bei 60 % Reduzierung bleibt der
+COP praktisch gleich (3,23 -> 3,28), die Verdichterspitze faellt von 2705 auf
+1159 W - ideal fuer PV-Eigenverbrauch, aber nur solange der Vorlauf den Zylinder
+hochziehen kann.
+
+### `shell_command` wirft NICHT bei Exit-Code != 0 (wichtiger Fallstrick)
+Live nachgestellt: bei ausgefallener Cloud (HTTP 504) scheiterten alle drei
+`pointt_set`-Aufrufe, **der Lauf ging trotzdem bis zum Ende** und setzte den
+Tagesmarker - ein ganzer Tag ohne Warmwasserladung, ohne Fehler im Ablauf.
+Ursache im Code: `shell_command/__init__.py` **loggt** nur
+`Error running command ... return code: N` und kehrt normal zurueck
+(`SupportsResponse.OPTIONAL`, aber kein `raise`).
+**Fix:** `response_variable` auswerten und mit `stop:` abbrechen:
+```
+- service: shell_command.pointt_set
+  data: {path: ..., value: ...}
+  response_variable: w_laden
+- if:
+  - condition: template
+    value_template: '{{ w_laden.returncode | default(1) != 0 or ... }}'
+  then:
+  - stop: Schreibfehler - Tagesslot bleibt frei
+```
+Der Marker wird **ganz zuletzt** gesetzt. Verifiziert: bei 504 bleibt der Slot
+frei, die Meldung nennt die Rueckgabecodes (`Ladedauer 1, Sollwert 1`).
+
+### Tagesmarker: 00:00:00 zaehlt als NICHT gestartet
+Ein frisch angelegter `input_datetime`-Helfer steht auf dem **Erstellungstag um
+Mitternacht**. Ein reiner Tagesvergleich haette den ersten Start blockiert.
+Jetzt:
+`letzter_start[:10] != heute or letzter_start[11:19] == '00:00:00'`.
+
+### Dashboard
+Neuer Abschnitt **"WW-Planung (Wetterbericht)"** im Dashboard `wp-native`
+(View "Waermepumpe", sections-Layout), eingefuegt an Position 2 - direkt nach
+"Temperaturen". Vier Karten: Markdown-Erklaerung, "Heute" (Plan, Fenster, Lage,
+letzter Start, Meldung, **Anlage erreichbar (PointT)**), "Einstellungen"
+(Schalter + Zieltemperatur + Ladedauer), Verlauf "Zylinder + Vorlauf (24 h)".
+Der Cloud-Status steht bewusst mit dabei - faellt die Bosch-Cloud aus, sieht
+man das sofort an dieser Zeile (`unavailable`).
+
+**Wichtig - Dashboard-Speicherung:** `.storage/lovelace.wp_native` direkt zu
+editieren genuegt NICHT, HA liefert die **gecachte** Config (im Browser fehlte
+der Abschnitt). Richtig ist der WebSocket-Aufruf
+`{"type":"lovelace/config/save","url_path":"wp-native","config":<config>}`.
+Danach ist der Abschnitt sofort live.
+
+### Verifikation (alles ohne echten Reboot, HA 2026.10.4)
+- `homeassistant/check_config` -> 200, keine Fehler im Log.
+- Alle 12 referenzierten Dashboard-Entitaeten existieren (`/api/states`).
+- Rendering headless (Firefox ESR + geckodriver): Abschnitt und **alle**
+  Beschriftungen im DOM, 231 Textelemente, Verlaufs-Karte mit Titel
+  "Zylinder + Vorlauf (24 h)", **keine** Fehler-/Leer-Texte aus dem Abschnitt.
+- Fehlerpfad scharf getestet (Cloud auf 504): Marker blieb frei, Meldung
+  geschrieben, `stop` griff.
+- Keine Zombie-Prozesse nach den Browsertests.
+
+### WICHTIGER NEBENBEFUND: die Bosch-Cloud (PointT) war den ganzen Tag gestoert
+`https://pointt-api.bosch-thermotechnology.com/pointt-api/api/v1` antwortet seit
+**11:44** durchgehend **HTTP 504 (Gateway Timeout)** - reproduziert um 18:13,
+18:19, 18:22 und 18:26. Folge: **alle 158** `bosch_buderus_heating`-Entitaeten
+sind `unavailable` (auch Silent Mode und Leistungsreduzierung), die Integration
+hat um 18:19 ihren Circuit Breaker fuer 300 s geoeffnet.
+**Das ist NICHT durch diese Arbeit entstanden** - die ersten 504-Ausfaelle
+stehen um 11:44 im Log, die Aenderungen liefen ab ~18:05. Die lokale
+`bosch_k40rf`-Integration liest weiter (124 von 186 Entitaeten verfuegbar).
+Wer schreiben will, muss warten, bis die Cloud sich erholt; die Automation
+versucht es alle 2 min und laesst den Tagesslot so lange frei.
+
+### Backups
+`/root/backup-ww-plan-20261028/`: `automations.yaml.vor-ww-plan`,
+`.vor-konfliktfix`, `.vor-robustheit`, `.vor-returncode-fix`,
+`lovelace.wp_native.vor-ww-plan`, `input_boolean`, `input_number`, `input_text`,
+`input_datetime`.
+
+## Cloud-Ausfall war voruebergehend + 21 Steuer-Entitaeten fehlen (2026-10-28/29)
+
+Zwei Fragen des Nutzers: (1) warum ist die Cloud nicht mehr schreibbar,
+(2) warum nicht um 8/9 Uhr starten. Beide beantwortet, **nichts geaendert**.
+
+### 1. Die Cloud ist wieder da - der 504 war voruebergehend
+Gemessen um 23:16-23:40: **alle** Endpunkte wieder 200/204, Schreiben
+funktioniert (`PUT /system/silentMode/powerReduction` -> **204**,
+`PUT /heatingCircuits/hc2/setpointOptimization` -> **204**). Die Integration
+hat sich selbst erholt: **158 -> 21** unavailable, `requests_by_status_class`
+= `{"2xx": 57}`, `success_rate_percent: 100.0`, `requests_failed: 0`.
+Es war also ein **Bosch-seitiger Ausfall** (Gateway-Timeout), kein Defekt hier.
+
+**Nebenbefund: der Bulk-Lesepfad ist fuer das Konto gesperrt.**
+`POST /gateways/<gw>/bulk` -> **403 Forbidden** (HTML-Fehlerseite von Bosch).
+Einzelressourcen (`/gateways/<gw>/resource/<pfad>`) gehen weiter. Die
+Integration faellt darauf zurueck (21 einzelne `resource`-Requests im Log).
+
+### 2. Der eigentliche Fund: 21 Steuer-Entitaeten sind dauerhaft `unavailable`
+Darunter genau die, die die HK2-Regelung braucht:
+```
+number...heizkreis_2_temporary_room_setpoint   <- schreibt cop_hc2_raum_und_pv
+select...heizkreis_2_sollwertoptimierung
+select...heizkreis_2_regelungsart
+select...warmeerzeuger_control_strategy
+number...heizkreis_{1,2,3}_su_wi_threshold
+number...anlage_{gas,pv,electricity,duration}
+select...anlage_mode, heizkreis_1_*, warmeerzeuger_reminder_enable
+sensor...heizkreis_3_su_wi_threshold
+```
+**Das ist NICHT die Cloud.** Beweis: die **Lese-Sensoren derselben Pfade
+liefern Werte** (`sensor.buderus_mx400_heizkreis_2_temporary_room_setpoint`
+= 21.5, `..._sollwertoptimierung` = on), und die Diagnose sagt
+`bulk_result: success` + `discovered: true` fuer
+`/heatingCircuits/hc2/temporaryRoomSetpoint`.
+
+**Ursache: die Integration wurde heute aktualisiert - und dabei ist die
+Schreib-Allowlist geschrumpft.** HACS hat am **28.10. 09:47** auf **v0.8.2**
+gehoben (vorher 0.8.1, `manifest.json` mtime 09:47). Danach wurden
+`writes.py` (12:46), `number.py` (12:47) und `resource_catalog.py` (12:55)
+nochmals angefasst. Messung der `NumberWritePolicy`-Eintraege:
+
+| Version | NumberWritePolicy |
+|---|---|
+| 0.8.1 | 5 |
+| 0.8.2 | 9 |
+
+**Aber: keiner der neuen Eintraege deckt `temporaryRoomSetpoint`,
+`suWiThreshold`, `controlType`, `setpointOptimization`, `controlStrategy`
+oder `energyTariff` ab** - `grep` in beiden Versionen: **0 Treffer**.
+`assess_control()` gibt fuer diese Pfade `no_scalar_control_policy` zurueck,
+und `available` verlangt eine passende Policy
+(`number.py:149`, `select.py:204`) -> **Entitaet wird `unavailable`**.
+
+**Wichtig - der Zustand ist neu, nicht dauerhaft.** Die Historie zeigt, dass
+diese Entitaeten **bis heute 11:57 Werte hatten** (z. B.
+`heizkreis_2_temporary_room_setpoint`: 21.5/22.0/22.5 bis 11:48, letzter Wert
+11:48:14). Erst danach kippt es dauerhaft auf `unavailable`. Die Entitaeten
+existieren noch als **Waisen** im Register (`restored: true`, min/max/step
+bekannt), aber ohne Schreib-Policy.
+
+**Folge fuer die Regelung (wichtig):** `cop_hc2_raum_und_pv` ruft
+`number.set_value` auf diese Entitaet. HA loggt seit 11:52 **82x**
+`Referenced entities number.haus_buderus_mx400_heizkreis_2_temporary_room_setpoint
+are missing or not currently available`. Der Aufruf laeuft also **ins Leere** -
+die Raum-Sollwert-Anhebung passiert derzeit **nicht**. Die Silent-Mode-/
+Leistungsreduzierungs-Pfade sind **davon nicht betroffen** (eigene Policy,
+`select.buderus_mx400_anlage_silent_mode` = on, `number...leistungsreduzierung`
+= 40.0, beide verfuegbar).
+
+**Lokale Abweichungen von Upstream 0.8.2** (per `diff` gegen das Tag geprueft):
+`writes.py` 9 Zeilen, `number.py` 1, `resource_catalog.py` 7 - alle drei
+ergaenzen **nur** den `powerReduction`-Pfad (`integerValue` + `%`-Einheit +
+Namens-Tail). Also eigene Anpassungen, die den Verlust nicht erklaeren.
+
+**Rueckweg / Handlungsoptionen (noch NICHT gemacht):**
+- Auf **0.8.1** zurueck (HACS) - dann sind die alten Policies wieder da.
+- Oder die fehlenden Pfade in `writes.py` ergaenzen (`EnumWritePolicy` bzw.
+  `NumberWritePolicy` + `_number_identity`-Tail). **Achtung:** `_number_identity`
+  ist ein `{...}[tail]`-Dict - ein unbekannter Tail wirft `KeyError` und reisst
+  das ganze Number-Setup ab.
+- Die Regelung bis dahin **nicht** auf die tote Entitaet schreiben lassen
+  (sonst nur Log-Spam; ein Schaden entsteht nicht, es passiert einfach nichts).
+
+### 3. Startzeit: 8/9 Uhr ist messbar schlechter - aber die Formel ist es auch
+Frage war, ob WW bei starker Morgensonne schon um 8 oder 9 starten soll.
+Gemessen an **8 Tagen mit echter Einspeisung** (`sensor.esp32_ir_stromzaehler_
+leistung`, Minutenraster, Fenster = Einspeisung >= 800 W), Ladedauer 150 min:
+
+| Start | PV-Abdeckung der Ladung (Mittel) | Median |
+|---|---|---|
+| **08:00** | **14 %** | 14 % |
+| 09:00 | 34 % | 40 % |
+| 10:00 (IST, Deckel) | 50 % | 45 % |
+| **Fensterende - 150 min** | **63 %** | 62 % |
+| Tagesoptimum | 74 % | 75 % |
+
+**Das PV-Fenster beginnt im Median erst um 09:43** (fruehestens 08:55,
+spaetestens 12:12). Ein Start um 08:00 liegt an **0 von 8 Tagen** im Fenster,
+um 09:00 an **1 von 8**. Der Nutzerwunsch "Sonne so frueh" trifft auf die
+Oktober-Realitaet nicht zu - das Fenster ist im Herbst spaet und kurz.
+
+**Aber der zweite Teil der Frage stimmt:** der **Deckel 12:30 kostet Abdeckung.**
+Ohne Deckel steigt der Mittelwert auf **61-66 %** (Deckel: 63 %) und der Median
+von 62 auf **66 %**; die harten 10:00 sind mit 50 % deutlich schlechter. Der
+Deckel ist nur noetig, damit die Ladung noch im Fenster endet - er ist aber
+etwas zu streng, wenn das Fenster bis 15:42 reicht (24.10.).
+
+**Und: die Raeume sind morgens NICHT warm, sondern am kaeltesten.**
+`sensor.fussboden_room_temperature` (bzw. `..._heizkreis_2_raumtemperatur`),
+Stundenmittel: 06h 20.85, 07h 21.10, 08h 21.00, 09h 21.00 gegen **14-16h 21.63-
+21.72**. Die Morgenstunden sind das **Tagestief** (Nachtabsenkung). Ein
+WW-Start um 8/9 wuerde also mit der Heizung um dieselbe knappe Vorlauftemperatur
+konkurrieren, statt sie zu nutzen.
+
+**Empfehlung (nicht umgesetzt, auf Wunsch):** Startzeit weiter aus der
+**Vorhersage** ableiten (das tut die Automation schon), aber
+1. den **Deckel 12:30 auf ~13:00-13:30 lockern** (kostet nichts, bringt
+   ~4 % Median-Abdeckung),
+2. bei **Spaetstart-Tagen** (Fenster beginnt erst nach 12:00, wie 24.10.) die
+   Ladung eher **verkuerzen** als spaet zu starten,
+3. den **Morgen nicht als WW-Fenster** einplanen - dort ist es dunkel UND der
+   Raum kalt. Der Nutzen einer WW-Verschiebung liegt in den Schultermonaten,
+   nicht im Herbstmorgen.
+
+### Der Ausweg, verifiziert: direkt an der PointT-API geht es
+Der Pfad ist **nicht** gesperrt - nur HA's Entitaet ist es. No-Op-Schreibtest
+(identischer Wert, aendert nichts):
+```
+PUT /gateways/102090608/resource/heatingCircuits/hc2/temporaryRoomSetpoint
+    {"value": 21.5}                       -> 204
+PUT /gateways/102090608/resource/heatingCircuits/hc2/setpointOptimization
+    {"value": "on"}                       -> 204
+```
+**Das heisst:** die HK2-Raum-Sollwert-Anhebung kann weiter funktionieren, wenn
+sie statt `number.set_value` den schon vorhandenen Umweg
+`shell_command.pointt_set` benutzt (`path: heatingCircuits/hc2/temporaryRoomSetpoint`).
+Das ist derselbe Mechanismus, den die WW-Automation fuer
+`dhwCircuits/dhw1/temperatureLevels/low` nutzt - und dort ist die
+Rueckgabewert-Pruefung (`response_variable` + `stop`) schon eingebaut.
+**Nicht umgesetzt** - das ist eine Entscheidung des Nutzers (siehe Frage oben).
