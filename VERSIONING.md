@@ -20,8 +20,14 @@ Wann welche Zahl steigt:
 | MINOR | neue Funktion, abwärtskompatibel                | `v0.1.0` → `v0.2.0`             |
 | PATCH | Bugfix, keine neue Funktion                     | `v0.1.0` → `v0.1.1`             |
 
-Aktueller Stand: **`v0.1.0`** ist der erste getaggte Baseline-Stand. Vorher gab
-es keine Tags, deshalb war die Version `unknown`.
+Getaggte Stände: **`v0.1.0`** (erster Baseline) und **`v0.1.1`** (letzter Tag,
+2026-10-21). Alles danach ist **ungetaggt**; der Build meldet dann
+`v0.1.1-<N>-g<sha>` (mit `-dirty`, solange Änderungen uncommitted sind). Vor
+`v0.1.0` gab es keine Tags, deshalb war die Version `unknown`.
+
+> Beim Taggen **immer diese Zeile mitziehen** — sie ist die einzige Stelle, an
+> der die aktuelle Nummer in der Doku steht, und sie ist in der Vergangenheit
+> zweimal stehengeblieben (nach `v0.1.0` und nach `v0.1.1`).
 
 ## Wie die Nummer ins Gerät kommt
 

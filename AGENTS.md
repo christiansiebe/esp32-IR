@@ -61,7 +61,9 @@ Two firmware roles are built from one source tree.
   `safe.directory $GITHUB_WORKSPACE` and exports `FIRMWARE_VERSION`. Tag releases
   (`git tag -a vX.Y.Z`) give a clean version instead of a bare SHA.
 - **Versioning + commit convention: see `VERSIONING.md`.** One SemVer tag per
-  firmware (`v0.1.0` is the first baseline; before it the version was `unknown`).
+  firmware (`v0.1.0` and `v0.1.1` are tagged; the current tip is untagged, so
+  `git describe` reports `v0.1.1-<N>-g<sha>[-dirty]`). Before `v0.1.0` the
+  version was `unknown`.
   The sender's `fw_version()` also travels in the counters frame
   (`espnow_diag_counters_t.fw_version`, `ESPNOW_DIAG_VERSION` 2) and is shown on
   the receiver's sender page as `sender fw:` — so the other device's build is
@@ -918,3 +920,66 @@ dem Odroid, Key in KEY, Doku in README.md).
   (`git push` → HTTP 403). Wenn ein Push mit **403** scheitert, fehlt dem PAT
   unter *Contents: Read and write*; die Repo-`permissions` der API (`push:true`)
   sind die *Nutzer*-Rechte, nicht die Token-Scopes.
+
+## Power-History: robust gegen kaputte Datenbank (2026-10-27, ungetaggt nach v0.1.1)
+Ziel: **Eine kaputte/vollgeschriebene SPIFFS-DB darf das Geraet nie mehr
+lahmlegen.** Boot, Web-UI, OTA, Telemetrie laufen immer; im DB-Fehlerfall sind
+nur die DB-Werte weg (leer bzw. nur die neuesten Minuten), der Backfill vom
+Sender fuellt nach. Ausloeser war ein echtes Hardware-Ereignis am Receiver:
+die SPIFFS-Partition war korrupt/voll, **ein einzelnes `fseek` haengte >120 s**
+und der Boot-Repair (`ring_heap_sort`, in-place auf SPIFFS) schickte das Geraet
+in einen TWDT-Boot-Loop.
+*(Diese Aenderung traegt noch keinen Tag; die geflashte Firmware meldet
+`v0.1.1-<N>-g<sha>-dirty`. Seit `v0.1.1` liegen **2 `feat(...)`-Commits**
+ungetaggt (BOOT-Button-Recovery) — nach `VERSIONING.md` ist das ein
+**MINOR-Bump, also `v0.2.0`**, nicht ein PATCH. Die Robustheits-Aenderung
+allein waere ein PATCH, aber ein Tag deckt den ganzen Baum ab.)*
+
+### Die zwei Wurzeln (beide beseitigt)
+1. **In-place-Disk-Heapsort beim Boot.** `ring_heap_sort`/`ring_sift_down`
+   machten tausende `fseek`/`fread`/`fwrite` auf SPIFFS, mit einem Pacer, der
+   nur bei Datentausch zaehlte - auf einem fast-sortierten grossen Ring kam der
+   Watchdog nie dazwischen. **Geloescht** (Funktionen entfernt).
+2. **Repair lief synchron im Boot (`power_history_init`).** Der HTTP-Server
+   startet erst nach `power_history_init` - ein haengender Repair blockierte
+   den ganzen Boot.
+
+### Design (main/power_history.c)
+- **`power_history_repair_ring()`** (public, nimmt den Store-Mutex): die einzige
+  Reparatur-Stelle. Kleine Ringe (<= `POWER_HISTORY_REPAIR_RAM_LIMIT` 4096)
+  werden in einem RAM-Buffer sortiert/dedupliziert (bestehender Pfad). **Zu
+  grosse Ringe werden NICHT in-place sortiert, sondern auf die neuesten 4096
+  Records gekuerzt** (RAM-Sort + Kompakt-Schreiben + `finish_repair`). Alte
+  Minuten gehen verloren, der Sender-Backfill importiert sie wieder - ein
+  laufendes Geraet mit kuerzerer Historie schlaegt einen keilenden.
+- **Der Boot ruft den Repair nicht mehr auf.** Ein Hintergrund-Task
+  `power_history_repair_worker` (Prio 1, Stack `POWER_HISTORY_REPAIR_STACK`
+  3072) startet nach dem Writer und verzögert sich um
+  `POWER_HISTORY_REPAIR_DELAY_MS` (10 s) - HTTP/OTA/Telemetrie sind laengst
+  oben. **Bewusst NICHT am Task-Watchdog subscribed**: friert der Repair in
+  einem haengenden SPIFFS-`lseek` ein, rebootet das Geraet nicht - es laeuft
+  mit kaputter DB weiter, der naechste Boot versucht es erneut.
+- Der Pacer (`repair_pacer_step`, Budget `POWER_HISTORY_REPAIR_BUDGET_MS`
+  15000, Yield `POWER_HISTORY_REPAIR_YIELD_STEPS` 2048) bleibt in allen
+  Repair-Schleifen.
+- Tests: `test_history_ring_repair.c` ruft nach `power_history_init()` jetzt
+  explizit `power_history_repair_ring()` (im Firmware-Lauf macht das der
+  Background-Task). `test_full_ring_repair` prueft die neue Semantik: volle
+  DB -> hoechstens `RAM_LIMIT` Records, sortiert, dedupliziert, neueste Minute
+  erreichbar. `run_host_tests.sh` gruen.
+
+### Erfahrungen aus dem echten Fall (Receiver, 2026-10-26/27)
+- **Diagnose eines haengenden Boots:** nicht nur `ping`/HTTP prüfen - die
+  serielle Konsole zeigt den TWDT-Abort (`task_wdt: Aborting.` + Backtrace).
+  `addr2line` (aarch64) auf die Backtrace-Adressen gegen die `.elf` nennt die
+  exakte Stelle (hier: `SPIFFS_lseek` -> `spiffs_obj_lu_find_id_and_span` ->
+  Endlossuche in der Objekt-Table).
+- **Rettungsweg fuer einen gebrickten Receiver (beide OTA-Slots booten nicht):**
+  USB-TTL-Adapter (CP2102) an den Receiver, `esptool --no-stub` (Stub startet
+  auf diesem Chip nicht), dann `erase_region 0x320000 0xE0000` (nur die
+  Storage-Partition!) und die App neu schreiben - die History-Partition ist
+  gemeinsam, die App-Slots sind getrennt. Der Backfill vom Sender fuellt die
+  geleerte DB wieder.
+- **Sender-Telemetrie nach DB-Fehler:** Der Receiver bekommt `caught_up:
+  True` mit dem Sender, sobald die DB leer/frisch ist; der Backfill laeuft nur
+  bei Luecken und ist der Grund fuer die frueheren API-Timeouts (splices).
