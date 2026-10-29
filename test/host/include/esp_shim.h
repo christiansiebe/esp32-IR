@@ -264,4 +264,13 @@ static inline esp_err_t esp_spiffs_format(const char *label)
     return ESP_OK;
 }
 
+/* power_history_repair_ring() calls this to heal SPIFFS' index before touching
+ * the ring. The host store is a plain file with no index, so the check is a
+ * no-op that reports success. */
+static inline esp_err_t esp_spiffs_check(const char *label)
+{
+    (void)label;
+    return ESP_OK;
+}
+
 #endif /* HOST_ESP_SHIM_H */

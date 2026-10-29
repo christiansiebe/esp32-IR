@@ -65,6 +65,13 @@
  *     (the ring is left as it was; a later boot retries). */
 #define POWER_HISTORY_REPAIR_YIELD_STEPS 2048u
 #define POWER_HISTORY_REPAIR_BUDGET_MS 15000u
+/* Heap slice the repair leaves untouched for the HTTP/OTA/Wi-Fi paths that
+ * allocate while it runs. The repair buffer is clamped to
+ * (largest free block - this), so it can never starve a concurrent allocation. */
+#define POWER_HISTORY_REPAIR_HEAP_HEADROOM 16384u
+/* Smallest repair buffer worth taking. Below this the repair gives up and keeps
+ * the ring as-is (a later boot retries), rather than looping on tiny sizes. */
+#define POWER_HISTORY_REPAIR_MIN_RECORDS 64u
 /* Delay before the background repair task touches the store, giving the boot
  * (Wi-Fi, HTTP server, OTA) time to come up first. */
 #define POWER_HISTORY_REPAIR_DELAY_MS 10000u
@@ -682,6 +689,70 @@ static int64_t repair_now_us(void)
 #endif
 }
 
+/* Records the repair may hold in one RAM buffer for a given largest free block:
+ * the compile-time upper bound, clamped to (largest block - headroom). A fixed
+ * buffer made the repair give up when the free heap had shrunk below it (the
+ * ring then stayed damaged and every new minute failed), so the size follows the
+ * actual heap instead of being assumed. Pure and overflow-safe, so the host test
+ * can drive it with any heap size. */
+uint32_t power_history_repair_keep_limit_for(size_t largest_free_block,
+                                             uint32_t upper)
+{
+    if (largest_free_block <= POWER_HISTORY_REPAIR_HEAP_HEADROOM) {
+        return 0;
+    }
+    size_t usable = largest_free_block - POWER_HISTORY_REPAIR_HEAP_HEADROOM;
+    size_t fits = usable / sizeof(power_history_record_t);
+    if (fits > 0xFFFFFFFFu) {
+        fits = 0xFFFFFFFFu; /* clamp before the narrowing cast */
+    }
+    uint32_t limit = (uint32_t)fits;
+    return limit < upper ? limit : upper;
+}
+
+static uint32_t repair_keep_limit(void)
+{
+    return power_history_repair_keep_limit_for(
+        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+        (uint32_t)POWER_HISTORY_REPAIR_RAM_LIMIT);
+}
+
+/* Allocate the repair buffer for at most `*records_wanted` records, halving the
+ * request until the allocation fits (heap fragmentation can make a size fail
+ * that a smaller one accepts). On success the actually reserved record count is
+ * written back through `*records_wanted`. Returns NULL when even the minimum
+ * does not fit, so the caller keeps the ring as-is instead of aborting. */
+static power_history_record_t *repair_alloc(uint32_t *records_wanted)
+{
+    uint32_t want = *records_wanted;
+    uint32_t limit = repair_keep_limit();
+    if (want > limit) {
+        want = limit;
+    }
+    /* Halve only down to the caller's own size when that is already small (a
+     * short ring is legitimately small); otherwise down to the minimum worth
+     * allocating. */
+    uint32_t floor = want < POWER_HISTORY_REPAIR_MIN_RECORDS
+                         ? want
+                         : (uint32_t)POWER_HISTORY_REPAIR_MIN_RECORDS;
+    while (want >= floor && want != 0) {
+        power_history_record_t *buf =
+            heap_caps_malloc((size_t)want * sizeof(*buf), MALLOC_CAP_8BIT);
+        if (buf != NULL) {
+            *records_wanted = want;
+            return buf;
+        }
+        if (want == floor) {
+            break;
+        }
+        want /= 2u;
+        if (want < floor) {
+            want = floor;
+        }
+    }
+    return NULL;
+}
+
 static void repair_pacer_begin(repair_pacer_t *pacer)
 {
     pacer->steps = 0;
@@ -739,6 +810,24 @@ static bool finish_repair(uint32_t oldest_slot, uint32_t unique)
 
 static bool repair_ring_if_needed(void);
 
+/* Heal SPIFFS' own bookkeeping before touching the ring. A hard reset mid-write
+ * (this board's normal failure mode) can leave the file system's index
+ * inconsistent: reads then fail with ENOENT/EIO on a fixed set of slots even
+ * though the partition has plenty of free space. The ring keeps growing into
+ * that region and every write that reaches it fails, which is exactly the
+ * "write errors climb, ring stalls at the same record count" fault. The
+ * SPIFFS check repairs the index in place and keeps the data (unlike a format),
+ * so it is the right first step. Best-effort: a failure only means the ring
+ * repair below still runs, and a later boot retries. */
+static void heal_spiffs_consistency(void)
+{
+    esp_err_t err = esp_spiffs_check(POWER_HISTORY_PARTITION);
+    if (err == ESP_OK) {
+        return;
+    }
+    ESP_LOGW(TAG, "SPIFFS consistency check failed: %s", esp_err_to_name(err));
+}
+
 /* Repair a ring that an older firmware left time-unsorted and/or holding
  * duplicate minutes (backfill merges used to append out of order, and the
  * binary-search dedupe then failed to see the minutes already stored). The ring
@@ -762,6 +851,9 @@ esp_err_t power_history_repair_ring(void)
         ESP_LOGE(TAG, "Could not lock history store for ring repair");
         return ESP_ERR_TIMEOUT;
     }
+    if (g_history_file != NULL) {
+        heal_spiffs_consistency();
+    }
     bool ok = repair_ring_if_needed();
     xSemaphoreGive(g_history_mutex);
     (void)ok;
@@ -775,7 +867,6 @@ static bool repair_ring_if_needed(void)
     }
     uint32_t count = g_history_header.record_count;
     uint32_t oldest_slot = oldest_slot_of(g_history_header.next_slot, count);
-
     /* Paces every loop below (the damage scan is already O(count) SPIFFS
      * reads) so the boot cannot be starved of the IDLE task. */
     repair_pacer_t pacer;
@@ -788,6 +879,12 @@ static bool repair_ring_if_needed(void)
     for (uint32_t i = 0; i < count && !damaged; ++i) {
         power_history_record_t record;
         if (!read_record_idx(oldest_slot, i, &record) || !record_is_valid(&record)) {
+            /* An unreadable slot is damage too, not something to skip over: a
+             * ring whose readable records happen to be in order must still be
+             * compacted, otherwise the repair never runs and the ring keeps
+             * growing back into the broken region (the "ring stalls at the
+             * same record count" fault). */
+            damaged = true;
             continue;
         }
         (void)power_history_migrate_record(&record);
@@ -806,9 +903,16 @@ static bool repair_ring_if_needed(void)
         return true; /* already sorted and duplicate-free */
     }
 
-    if ((size_t)count <= (size_t)POWER_HISTORY_REPAIR_RAM_LIMIT) {
-        power_history_record_t *records =
-            heap_caps_malloc((size_t)count * sizeof(*records), MALLOC_CAP_8BIT);
+    if ((size_t)count <= (size_t)repair_keep_limit()) {
+        uint32_t want = count;
+        power_history_record_t *records = repair_alloc(&want);
+        if (records != NULL && want < count) {
+            /* The buffer was clamped below the ring; this path must hold all
+             * `count` records, so hand it to the "keep most recent" path
+             * instead of overflowing. */
+            heap_caps_free(records);
+            records = NULL;
+        }
         if (records != NULL) {
             size_t valid = 0;
             bool scan_ok = true;
@@ -886,20 +990,30 @@ static bool repair_ring_if_needed(void)
      * damaged/full store can hang for minutes and take the device down. A
      * device that keeps running with a shorter history beats one that wedges;
      * the sender backfill re-imports the dropped minutes anyway. */
-    uint32_t keep = (uint32_t)POWER_HISTORY_REPAIR_RAM_LIMIT;
+    uint32_t keep = repair_keep_limit();
     if (keep > count) {
         keep = count;
+    }
+    if (keep < POWER_HISTORY_REPAIR_MIN_RECORDS) {
+        ESP_LOGW(TAG, "History repair: only %u records fit the free heap; "
+                      "leaving the ring for a later boot",
+                 (unsigned)keep);
+        return true;
     }
     uint32_t first = count - keep;
     ESP_LOGW(TAG,
              "History ring too large for one RAM buffer (%u records); repairing "
              "the most recent %u", (unsigned)count, (unsigned)keep);
-    power_history_record_t *records =
-        heap_caps_malloc((size_t)keep * sizeof(*records), MALLOC_CAP_8BIT);
+    uint32_t want = keep;
+    power_history_record_t *records = repair_alloc(&want);
     if (records == NULL) {
         ESP_LOGE(TAG, "Could not allocate repair buffer; leaving ring as-is");
         return true;
     }
+    /* The buffer may have been clamped below `keep`; scan the most recent
+     * `want` records (a smaller, still-consistent slice beats no repair). */
+    keep = want;
+    first = count - keep;
     size_t valid = 0;
     bool scan_ok = true;
     for (uint32_t i = first; i < count; ++i) {
