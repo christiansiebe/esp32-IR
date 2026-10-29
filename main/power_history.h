@@ -16,11 +16,14 @@
  * the partition size with components/spiffs/spiffsgen.py. */
 #define POWER_HISTORY_CAPACITY 29000u
 
-/* Largest store the startup repair sorts in one RAM buffer (count * 28 B). A
- * bigger store is sorted in place on disk with O(1) RAM, so a full ring is
- * repaired too. Kept low enough that the buffer fits the free heap next to the
- * Wi-Fi stack on a no-PSRAM ESP32. */
-#define POWER_HISTORY_REPAIR_RAM_LIMIT 4096u
+/* Largest store the startup repair sorts in one RAM buffer (count * 28 B). The
+ * buffer is additionally clamped to the free heap at run time (see
+ * repair_keep_limit()); this value is only the upper bound. Kept low enough
+ * that the buffer can fit next to the Wi-Fi stack on a no-PSRAM ESP32: a fixed
+ * 4096-record buffer is 114 KiB, which no longer fits the ~89 KiB free heap and
+ * made the repair give up (leaving a damaged ring that rejected every new
+ * minute). */
+#define POWER_HISTORY_REPAIR_RAM_LIMIT 2048u
 
 #define POWER_HISTORY_PAGE_SIZE 128u
 
@@ -202,6 +205,13 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
  * disk. Returns ESP_OK when the ring is left sorted and duplicate-free, or
  * when there was nothing to repair. */
 esp_err_t power_history_repair_ring(void);
+
+/* Records the startup repair may hold in one RAM buffer for a given largest
+ * free heap block: the compile-time upper bound (POWER_HISTORY_REPAIR_RAM_LIMIT)
+ * clamped to (block - POWER_HISTORY_REPAIR_HEAP_HEADROOM). Pure, so the host
+ * test can drive the shrink path with any heap size. */
+uint32_t power_history_repair_keep_limit_for(size_t largest_free_block,
+                                             uint32_t upper);
 
 #ifdef POWER_HISTORY_TEST_HOOKS
 /* Test-only: set the store metadata without SPIFFS so the merge decision can be

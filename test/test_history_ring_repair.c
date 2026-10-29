@@ -297,10 +297,135 @@ static void test_full_ring_repair(void)
           "newest minute reachable after repair");
 }
 
+/* Write a store whose readable records are all in ascending order, but with a
+ * single corrupt (checksum-broken) slot in the middle. This is the device state
+ * that used to stall: the damage scan skipped the bad slot, judged the ring
+ * "sorted and duplicate-free", returned without repairing, and the ring kept
+ * growing back into the broken region - every write that reached it failed
+ * ("write errors climb, ring stalls at the same record count"). */
+static bool write_store_with_corrupt_slot(const int64_t *minutes, size_t count,
+                                          size_t corrupt_index)
+{
+    FILE *f = fopen(POWER_HISTORY_FILE, "w+b");
+    if (f == NULL) {
+        return false;
+    }
+    power_history_header_t header = {0};
+    header.magic = 0x50484C31u;
+    header.version = POWER_HISTORY_VERSION;
+    header.generation = 9;
+    header.next_sequence = (uint32_t)count + 1u;
+    header.record_count = (uint32_t)count;
+    header.next_slot = (uint32_t)(count % POWER_HISTORY_CAPACITY); /* oldest_slot = 0 */
+    header.checksum = crc_bytes(&header, offsetof(power_history_header_t, checksum));
+
+    bool ok = fwrite(&header, sizeof(header), 1, f) == 1;
+    power_history_header_t zero = {0};
+    ok = ok && fwrite(&zero, sizeof(zero), 1, f) == 1;
+    for (size_t i = 0; i < count && ok; ++i) {
+        power_history_record_t r =
+            make_record((uint32_t)(i + 1), minutes[i], (int32_t)(7000 + i));
+        if (i == corrupt_index) {
+            /* Break the CRC: the slot reads back but record_is_valid() rejects
+             * it, exactly like a torn write after a hard reset. */
+            r.checksum ^= 0xDEADBEEFu;
+        }
+        ok = fwrite(&r, sizeof(r), 1, f) == 1;
+    }
+    ok = fflush(f) == 0 && ok;
+    fclose(f);
+    return ok;
+}
+
+/* A ring whose readable records are in order must STILL be repaired when a slot
+ * is unreadable: the repair drops the bad slot and compacts the survivors, so
+ * the ring no longer grows back into the broken region. */
+static void test_corrupt_slot_triggers_repair(void)
+{
+    printf("test_corrupt_slot_triggers_repair (unreadable slot is damage)\n");
+    const int64_t base = 9500000000LL;
+    int64_t minutes[8] = {
+        base, base + 60, base + 120, base + 180,
+        base + 240, base + 300, base + 360, base + 420,
+    };
+    CHECK(write_store_with_corrupt_slot(minutes, 8, 3),
+          "store with one corrupt slot written");
+
+    CHECK(power_history_init() == ESP_OK, "init ok");
+    CHECK(power_history_repair_ring() == ESP_OK, "repair ok");
+
+    power_history_status_t st;
+    power_history_get_status(&st);
+    /* The corrupt slot is dropped; the seven readable minutes survive. */
+    CHECK(st.record_count == 7, "repair dropped the corrupt slot");
+    bool kept = true;
+    for (int i = 0; i < 8; ++i) {
+        if (i == 3) {
+            continue; /* the corrupt minute is the one that must be gone */
+        }
+        if (!power_history_has_minute(minutes[i])) {
+            kept = false;
+        }
+    }
+    CHECK(kept, "every readable minute survived the repair");
+    CHECK(!power_history_has_minute(minutes[3]),
+          "the corrupt minute is gone from the compacted ring");
+
+    power_history_record_t page[16];
+    size_t n = 0;
+    bool more = false;
+    CHECK(power_history_read_after(base - 1000, 16, page, 16, &n, &st, &more) == ESP_OK,
+          "read_after after corrupt-slot repair ok");
+    bool asc = n > 1;
+    for (size_t i = 1; i < n; ++i) {
+        if (page[i].interval_start_utc <= page[i - 1].interval_start_utc) {
+            asc = false;
+        }
+    }
+    CHECK(asc, "ring sorted and duplicate-free after corrupt-slot repair");
+}
+
 static void cleanup(void)
 {
     remove(POWER_HISTORY_FILE);
     rmdir(POWER_HISTORY_MOUNT_PATH);
+}
+
+/* The startup repair sizes its RAM buffer from the largest free heap block.
+ * On the real device the free heap had shrunk to ~89 KiB, so a fixed 4096-record
+ * buffer (114 KiB) failed to allocate, the repair gave up, and the damaged ring
+ * then rejected every new minute (errno=5). This pins the clamp arithmetic that
+ * fixes it. */
+static void test_repair_keep_limit_clamp(void)
+{
+    printf("test_repair_keep_limit_clamp (repair buffer follows free heap)\n");
+    const uint32_t upper = POWER_HISTORY_REPAIR_RAM_LIMIT;
+    const size_t rec = sizeof(power_history_record_t); /* 28 */
+
+    /* Plenty of heap: the compile-time bound governs. */
+    CHECK(power_history_repair_keep_limit_for((size_t)1 << 20, upper) == upper,
+          "large heap -> upper bound");
+    /* The observed device state: 89 KiB free. Must yield a buffer that fits
+     * (89 KiB - 16 KiB headroom) / 28 B = 2670 -> clamped to upper (2048). */
+    CHECK(power_history_repair_keep_limit_for(89u * 1024u, upper) == upper,
+          "89 KiB free still fits the upper bound");
+    /* Just above the 114 KiB the old fixed buffer wanted: 130 KiB free gives
+     * (130-16) KiB / 28 = 4169 -> clamped to upper. */
+    CHECK(power_history_repair_keep_limit_for(130u * 1024u, upper) == upper,
+          "130 KiB free fits the upper bound");
+    /* Tiny heap: the limit shrinks with the block instead of assuming 4096. */
+    CHECK(power_history_repair_keep_limit_for(64u * 1024u, upper) ==
+              (uint32_t)((64u * 1024u - 16384u) / rec),
+          "64 KiB free shrinks the limit");
+    /* At/below the headroom there is nothing to give: zero, so the caller keeps
+     * the ring instead of trying a doomed allocation. */
+    CHECK(power_history_repair_keep_limit_for(16384u, upper) == 0,
+          "heap at headroom -> zero");
+    CHECK(power_history_repair_keep_limit_for(4096u, upper) == 0,
+          "heap below headroom -> zero");
+    /* Overflow guard: an absurd "largest block" must not wrap to a tiny limit. */
+    CHECK(power_history_repair_keep_limit_for((size_t)-1, upper) == upper,
+          "SIZE_MAX does not wrap");
 }
 
 int main(int argc, char **argv)
@@ -314,8 +439,11 @@ int main(int argc, char **argv)
     atexit(cleanup);
 
     printf("test_history_ring_repair\n");
+    test_repair_keep_limit_clamp();
     if (argc > 1 && strcmp(argv[1], "full") == 0) {
         test_full_ring_repair();
+    } else if (argc > 1 && strcmp(argv[1], "corrupt") == 0) {
+        test_corrupt_slot_triggers_repair();
     } else {
         test_repair_and_backup_upload();
     }

@@ -17,3 +17,13 @@ static inline void heap_caps_free(void *ptr)
 {
     free(ptr);
 }
+
+/* Largest free block, as the repair path reads it to clamp its buffer. The host
+ * has no heap caps, so report "plenty" (SIZE_MAX) and let the compile-time bound
+ * govern; the clamp arithmetic itself is unit-tested via
+ * power_history_repair_keep_limit_for(). */
+static inline size_t heap_caps_get_largest_free_block(uint32_t caps)
+{
+    (void)caps;
+    return (size_t)-1;
+}

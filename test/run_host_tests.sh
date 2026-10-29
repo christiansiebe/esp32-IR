@@ -406,6 +406,8 @@ trap 'rm -rf "$out"' EXIT
 "$out/test_history_ring_repair"
 # Full ring (29000) unsorted + duplicates -> forces the in-place disk sort.
 "$out/test_history_ring_repair" full
+# Readable-but-unsorted is not required: one corrupt slot must still repair.
+"$out/test_history_ring_repair" corrupt
 
 # Last known wall clock: the record/clock math plus the real NVS store driven
 # through a file-backed NVS shim. A forked "reboot" proves the clock is seeded
