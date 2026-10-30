@@ -426,6 +426,22 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_wall_clock"
 
+# Last ESP-NOW channel of the sender: the pure record plus the real NVS store
+# driven through a file-backed NVS shim. A forked "reboot" proves the sender
+# starts on the channel it worked on last time instead of re-running the boot
+# scan.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DESPNOW_CHANNEL_TEST_DIR="\"$out/espnowch\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/espnow_channel_store.c" \
+    "$here/test_espnow_channel_store.c" \
+    -o "$out/test_espnow_channel_store"
+
+"$out/test_espnow_channel_store"
+
 # Day/month running energy totals: the pure accumulator (day/month split,
 # rollover, boot-marker exclusion, ring eviction, calendar math) plus the real
 # NVS store driven through a file-backed NVS shim. A forked "reboot" proves the

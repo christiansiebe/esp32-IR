@@ -45,6 +45,7 @@
 #include "net_watchdog.h"
 #include "power_history.h"
 #include "energy_totals.h"
+#include "espnow_channel_store.h"
 #include "runtime_config.h"
 #include "sml_selftest.h"
 #include "trial_mode.h"
@@ -1043,6 +1044,12 @@ static uint8_t espnow_align_channel_from_receiver_ap(void)
     g_espnow_channel = detected;
     ESP_ERROR_CHECK(esp_wifi_set_channel(g_espnow_channel, WIFI_SECOND_CHAN_NONE));
     ESP_LOGI(TAG, "Using receiver AP channel %u for ESP-NOW", g_espnow_channel);
+    /* Remember it so the next boot starts on the right channel instead of
+     * re-running the 30 s discovery. Failure is harmless: the channel is still
+     * correct for this boot, only the next one would re-discover it. */
+    if (espnow_channel_store_save(g_espnow_channel) != ESP_OK) {
+        ESP_LOGW(TAG, "Could not persist ESP-NOW channel %u", g_espnow_channel);
+    }
     return detected;
 }
 #endif
@@ -1169,12 +1176,26 @@ static void initialize_wifi_and_espnow(void)
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
+    /* Start on the channel that worked last time so the boot does not wait up to
+     * 30 s for the AP. The scan below still confirms it (and heals a router
+     * channel change); the periodic re-align covers later changes. Without a
+     * stored value the old, patient loop runs unchanged. */
+    uint8_t stored_channel = 0;
+    bool have_stored = false;
+    if (espnow_channel_store_load(&stored_channel, &have_stored) == ESP_OK && have_stored) {
+        g_espnow_channel = stored_channel;
+        ESP_ERROR_CHECK(esp_wifi_set_channel(g_espnow_channel, WIFI_SECOND_CHAN_NONE));
+        ESP_LOGI(TAG, "Starting on the stored ESP-NOW channel %u", g_espnow_channel);
+    }
+
     /* Learn the receiver's SoftAP channel before the first send. This is only a
      * best effort: the receiver may not have its AP up yet, and a stuck channel
      * is repaired later by the link watchdog, so a miss here is not fatal (the
-     * old code gave up permanently after this loop). */
+     * old code gave up permanently after this loop). With a stored channel one
+     * attempt is enough - the fallback below keeps that channel. */
     uint8_t detected_channel = 0;
-    for (unsigned int attempt = 0; attempt < 30 && detected_channel == 0; ++attempt) {
+    unsigned int attempts = have_stored ? 1u : 30u;
+    for (unsigned int attempt = 0; attempt < attempts && detected_channel == 0; ++attempt) {
         detected_channel = espnow_align_channel_from_receiver_ap();
         if (detected_channel == 0) {
             ESP_LOGI(TAG, "Waiting for receiver AP on channel %d", ESPNOW_CHANNEL);
