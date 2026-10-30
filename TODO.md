@@ -1,5 +1,35 @@
 # To-do – esp32-IR
 
+## ERLEDIGT (2026-10-30): Sender merkt sich den ESP-NOW-Kanal (v0.3.0)
+**Der weitere ESP-Plan, Teil „NVS-Kanal" — umgesetzt, getaggt, CI-grün.**
+- Neu: `main/espnow_channel_store.{c,h}` — reiner Record
+  `{magic, version, channel, checksum}`, Kanal **1..13** gültig; NVS-Bindung wie
+  `wall_clock_store.c`. Host-Test `test/test_espnow_channel_store.c` (26 Checks,
+  forked „reboot").
+- Sender-Boot (`initialize_wifi_and_espnow()`): Kanal aus NVS vorbelegen, dann
+  **ein** Bestätigungs-Scan statt 30. Ohne gespeicherten Wert läuft die alte,
+  geduldige Schleife unverändert — der Fix kann den Boot nur schneller machen.
+- Persistiert bei jedem gelernten Kanal
+  (`espnow_align_channel_from_receiver_ap()`: Boot-Scan, Re-align, Link-Fallback).
+  **Nicht** im Wi-Fi-Event-Handler (NVS-I/O dort blockiert den Event-Task).
+- Nutzen: kein bis zu 30-s-Hängen mehr beim Boot, und der Sender hängt nach
+  einem AP-Miss nicht mehr bis zum Link-Watchdog (60 s + Grace) auf dem falschen
+  Kanal.
+- **Ermöglicht (noch nicht getan):** `CONFIG_ESPNOW_RECEIVER_DISABLE_AP`. Mit dem
+  Kanal im NVS braucht der Sender den AP beim Boot nicht mehr, der Empfänger
+  könnte station-only laufen. Der Schalter bleibt **aus** (Kconfig-Hilfe lesen,
+  Risiko: statisch, ohne Neuflash nicht rückholbar).
+- Commit `39baedf`, Tag `v0.3.0`; CI baut sender + receiver + receiver-apoff grün
+  (Run `41080008493`).
+
+## ERLEDIGT (2026-10-29): Ring-Reparatur + SPIFFS-Heilung (v0.2.4)
+Der Empfänger-Ring stand nach einem Hard-Reset bei festem Record-Stand mit
+`errno=2 (ENOENT)`. Behoben: `power_history_repair_ring()` ruft zuerst
+`esp_spiffs_check()` (heilt den Index, behält die Daten), und ein **unlesbarer
+Slot zählt jetzt als Schaden**, damit ein Ring mit noch sortierten lesbaren
+Records nicht fälschlich als gesund gilt. Am Gerät verifiziert: 1 Record/Minute,
+0 Schreibfehler, 24-h-Graph liefert 120 Punkte. Commit `c431d2f`, Tag `v0.2.4`.
+
 ## ANALYSE+INSTRUMENTIERT (2026-10-26): Empfänger-Historie friert ein (Livelock)
 **Frage (User):** „Ist die Zeitumstellung von Samstag auf Sonntag schuld?" –
 **Nein.** Und die eigentliche Ursache ist gefunden: der Backfill steckt in einem
@@ -59,7 +89,7 @@ noch nicht angelegten Seite bzw. GC-Grenze, oder ein echter Flash-Fehler in
 einem Block). Ein gezielter Probelauf (errno je einzelnem `write_record_idx`
 loggen) würde das klären.
 
-**Nächster Schritt (Fix, noch offen):** Den O(n)-Splice ganz vermeiden — der
+**Nächster Schritt (ERLEDIGT, siehe `a060a4b`/`844895b`):** Den O(n)-Splice ganz vermeiden — der
 Backfill darf den Ring nicht rückwärts einsortieren müssen. Zwei Wege:
 (a) nur Minuten **oberhalb** des lokalen Schwanzes mergen (Lücken in der Mitte
 als Marker führen), oder (b) bei unsortiertem Einfügen den Datensatz verwerfen
@@ -85,7 +115,7 @@ device)` am `shift`/`splice-write`-Pfad plus `spiffs used≈812000/917504` wäre
 Beweis. Falls stattdessen ein anderer `errno` kommt, ist es ein I/O- statt
 Platz-Problem — die Diagnose unterscheidet das jetzt.
 
-**Nächster Schritt (noch offen):** der Fix. Naheliegend: den Backfill **nur
+**Nächster Schritt (ERLEDIGT):** der Fix. Naheliegend: den Backfill **nur
 vorwärts** mergen lassen (Cursor darf nie unter den Ring-Anfang fallen) bzw. den
 Merge bei vollem Ring **nicht spließen**, sondern verwerfen — dann kostet ein
 Merge O(1) statt O(Ring). Das ist ein eigener, größerer Eingriff und noch nicht

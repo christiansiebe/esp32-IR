@@ -547,6 +547,34 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   retry above therefore only bites for genuine driver errors. A true
   delivery-confirmed path would need unicast (as the diagnostics already use).
 
+## Sender: the ESP-NOW channel is remembered (v0.3.0)
+- The sender has no channel of its own. The receiver's SoftAP is the channel
+  lighthouse; the sender learns the channel by scanning for the SSID
+  `ESP32-IR-Meter` (`scan_receiver_ap_channel()`). The learned value used to
+  live only in the RAM static `g_espnow_channel`, so every boot restarted from
+  `CONFIG_ESPNOW_CHANNEL` and re-ran discovery:
+  - the boot scan waits up to **30 s** in a 1 s loop for the AP to appear
+    (`initialize_wifi_and_espnow()`), and
+  - a miss pins the compile-time channel until the link watchdog notices the
+    silence (60 s + grace) and re-aligns.
+- Fix: `main/espnow_channel_store.{c,h}` persists the last good channel in NVS
+  (record `{magic, version, channel, checksum}`, channel valid **1..13**; the
+  format is pure C and host-tested, the NVS binding mirrors `wall_clock_store.c`).
+  On boot the sender seeds `g_espnow_channel` from it and runs the scan **once**
+  instead of 30 times; the periodic re-align still heals a later router channel
+  change, so a stale stored value can never strand the link.
+- Persisted at every successful learn (`espnow_align_channel_from_receiver_ap()`
+  — boot scan, periodic re-align, link fallback). Never written from the Wi-Fi
+  event handler (NVS I/O there would block the event task); the STA-connected
+  path only sets the RAM value.
+- With no stored value the old, patient loop runs unchanged — this can only make
+  the boot faster, never slower. Tag `v0.3.0`; host test
+  `test/test_espnow_channel_store.c` (26 checks, forked "reboot").
+- **Enables, but does not yet do**, `CONFIG_ESPNOW_RECEIVER_DISABLE_AP`: with the
+  channel in NVS the sender no longer depends on the AP at boot, so the receiver
+  could run station-only. That switch is still **not** applied (see the Kconfig
+  help and the open TODO item).
+
 ## History backfill (receiver pulls the sender's minutes)
 - Both roles persist their own minute history (`power_history.c`). When the
   receiver misses minutes (radio gap, sleep, a restart of either side) it asks

@@ -20,10 +20,11 @@ Wann welche Zahl steigt:
 | MINOR | neue Funktion, abwärtskompatibel                | `v0.1.0` → `v0.2.0`             |
 | PATCH | Bugfix, keine neue Funktion                     | `v0.1.0` → `v0.1.1`             |
 
-Getaggte Stände: **`v0.1.0`** (erster Baseline) und **`v0.1.1`** (letzter Tag,
-2026-10-21). Alles danach ist **ungetaggt**; der Build meldet dann
-`v0.1.1-<N>-g<sha>` (mit `-dirty`, solange Änderungen uncommitted sind). Vor
-`v0.1.0` gab es keine Tags, deshalb war die Version `unknown`.
+Getaggte Stände: **`v0.1.0`** (erster Baseline), **`v0.1.1`** (2026-10-21),
+**`v0.2.0`/`v0.2.1`/`v0.2.2`/`v0.2.4`** (Empfänger-Historie robust gegen eine
+kaputte Datenbank) und **`v0.3.0`** (Sender merkt sich den ESP-NOW-Kanal im NVS).
+Der Build meldet `v0.3.0-<N>-g<sha>` (mit `-dirty`, solange Änderungen uncommitted
+sind). Vor `v0.1.0` gab es keine Tags, deshalb war die Version `unknown`.
 
 > Beim Taggen **immer diese Zeile mitziehen** — sie ist die einzige Stelle, an
 > der die aktuelle Nummer in der Doku steht, und sie ist in der Vergangenheit
