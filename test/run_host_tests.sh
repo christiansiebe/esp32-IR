@@ -92,6 +92,22 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_boot_confirm_trigger"
 
+# Sender half: the same boot_confirm.c glue, but compiled with the sender role
+# so the sender path (ready_ok instead of dashboard_ok) is exercised and the
+# side effects (confirm / rollback) are asserted on the host.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -DBOOT_CONFIRM_TEST_HOOKS \
+    -DCONFIG_ESPNOW_ROLE_SENDER \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/boot_policy.c" \
+    "$repo/main/boot_confirm.c" \
+    "$here/test_boot_confirm_sender.c" \
+    -o "$out/test_boot_confirm_sender"
+
+"$out/test_boot_confirm_sender"
+
 # JSON string escaper: the sender-diagnostics JSON interpolates free-form event
 # texts, so a stray control character must not break the payload the browser
 # parses ("bad control character in string literal").

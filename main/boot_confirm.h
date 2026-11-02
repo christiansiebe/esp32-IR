@@ -26,8 +26,13 @@
 /* Read the running image state. Call once, early in app_main. */
 esp_err_t boot_confirm_init(void);
 
-/* Record that the local dashboard subsystem came up. */
+/* Record that the local dashboard subsystem came up (receiver). */
 void boot_confirm_note_dashboard(bool ok);
+
+/* Record that the sender's core subsystems fully started (sender). Either this
+ * or note_dashboard() marks the running image as usable for the rollback
+ * policy; exactly one is set per build role. */
+void boot_confirm_note_ready(bool ok);
 
 /* Evaluate the policy once and perform confirm if it is due. Idempotent and
  * cheap; safe to call from any periodic loop. */

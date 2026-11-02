@@ -8238,6 +8238,17 @@ static void liveness_guard_start(void)
 
 
 #if CONFIG_ESPNOW_ROLE_SENDER
+static void boot_confirm_worker(void *arg)
+{
+    (void)arg;
+    while (1) {
+        /* Confirm the running OTA image once it has been stable (and the sender
+         * reported ready) for the policy window; a no-op on a normal boot. */
+        boot_confirm_poll();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 static void run_sender(void)
 {
     /* Load the previous session's journal and report the reset reason first, so
@@ -8356,6 +8367,19 @@ static void run_sender(void)
         ESP_LOGW(TAG, "Could not start the link-fallback worker");
     }
 #endif
+
+    /* All core sender subsystems are up (UART workers, ESP-NOW diag, time
+     * sync, link fallback). This marks the OTA image as usable for the
+     * rollback policy; the image is confirmed after the stability window. */
+    boot_confirm_note_ready(true);
+
+    /* Poll the OTA confirm policy (the sender has no main loop after
+     * run_sender() returns, so this tiny worker drives boot_confirm_poll). */
+    task_result = xTaskCreate(boot_confirm_worker, "boot_confirm",
+                              2048, NULL, 2, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the boot-confirm worker");
+    }
 }
 #endif
 
@@ -8481,23 +8505,12 @@ void app_main(void)
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
-    /* The sender has no dashboard to confirm against, so it keeps the previous
-     * behaviour: accept the running image immediately (no rollback safety net).
-     * A dashboard-independent confirm policy for the sender is a separate task
-     * (see TODO). */
-    const esp_partition_t *running_partition = esp_ota_get_running_partition();
-    if (running_partition == NULL) {
-        ESP_LOGE(TAG, "Could not determine the running app partition");
-    } else if (running_partition->type == ESP_PARTITION_TYPE_APP &&
-               running_partition->subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MIN &&
-               running_partition->subtype < ESP_PARTITION_SUBTYPE_APP_OTA_MAX) {
-        esp_err_t ota_state_err = esp_ota_mark_app_valid_cancel_rollback();
-        if (ota_state_err != ESP_OK &&
-            ota_state_err != ESP_ERR_OTA_ROLLBACK_INVALID_STATE) {
-            ESP_LOGE(TAG, "Could not mark current OTA image valid: %s",
-                     esp_err_to_name(ota_state_err));
-        }
-    }
+    /* Do not accept the running image right away. Instead it is confirmed only
+     * after the sender's core subsystems are up (note_ready) and the stability
+     * window passed; an image that never reports ready is rolled back to the
+     * previous OTA slot. This keeps the CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+     * safety net intact on the sender too. */
+    ESP_ERROR_CHECK(boot_confirm_init());
 #else
     /* Manual recovery: holding the BOOT button at startup forces a rollback to
      * the previous firmware, even when this image was already confirmed. Runs
