@@ -43,6 +43,9 @@ static volatile bool s_disabled;     /* link fallback dropped light sleep */
 static volatile int s_pm_max_override;
 static volatile int s_pm_min_override;
 
+/* Optional sleep-state announcement hook (see the header). */
+static uart_sleep_state_notify_t s_state_notify;
+
 /* Result of the last ESP-NOW wake-window setup, for diagnostics (the function
  * itself only has ESP_LOG, which the sender cannot easily read). */
 static esp_err_t s_last_wake_err = ESP_ERR_INVALID_STATE;
@@ -215,9 +218,23 @@ void uart_sleep_maybe_sleep_idf(void)
     /* Release the lock for exactly the adaptive window. With light sleep
      * enabled and all tasks blocked, tickless idle parks the CPU for it. */
     uint32_t before_ms = s_slept_ms;
+    /* Announce the transition to the peer before the radio goes quiet. The
+     * hook runs here, still in the UART task and with the NO_LIGHT_SLEEP lock
+     * held, so an ESP-NOW broadcast can leave reliably before the park. */
+    if (s_state_notify != NULL) {
+        s_state_notify(true);
+    }
     uart_sleep_lock(false);
     vTaskDelay(pdMS_TO_TICKS(window_ms));
     uart_sleep_lock(true);
+
+    /* A real sleep happened: tell the peer we are awake and reachable again.
+     * Only announce when the CPU actually slept (slept_ms > 0); a window that a
+     * full UART buffer or scheduler delayed is not a state transition. */
+    uint32_t slept_ms = s_slept_ms - before_ms;
+    if (slept_ms > 0 && s_state_notify != NULL) {
+        s_state_notify(false);
+    }
 
     /* If the UART buffer is still empty after the window, nothing arrived while
      * we slept: the window was clean and may grow. If bytes are already pending,
@@ -226,7 +243,6 @@ void uart_sleep_maybe_sleep_idf(void)
     if (uart_get_buffered_data_len(UART_SLEEP_PORT_NUM, &pending) != ESP_OK) {
         pending = 0;
     }
-    uint32_t slept_ms = s_slept_ms - before_ms;
     if (pending == 0) {
         uart_sleep_note_clean(&s_ctrl, slept_ms);
     } else {
@@ -238,6 +254,8 @@ void uart_sleep_maybe_sleep_idf(void)
  * accumulation). Kept separate so the controller only grows a window it actually
  * tested instead of assuming every vTaskDelay parked the CPU. */
 void uart_sleep_set_slept_ms(uint32_t ms) { s_slept_ms = ms; }
+
+void uart_sleep_set_state_notify(uart_sleep_state_notify_t notify) { s_state_notify = notify; }
 
 /* Link fallback: the peer stopped answering while we slept. Turn light sleep off
  * for good (a re-enable would flap) and keep the CPU awake. The DFS ceiling
@@ -349,5 +367,6 @@ void uart_sleep_set_pm_override(int max_mhz, int min_mhz)
 uint32_t uart_sleep_window_ms(void) { return 0; }
 uint32_t uart_sleep_min_gap_ms(void) { return 0; }
 bool uart_sleep_hold_is_active(void) { return false; }
+void uart_sleep_set_state_notify(uart_sleep_state_notify_t notify) { (void)notify; }
 
 #endif

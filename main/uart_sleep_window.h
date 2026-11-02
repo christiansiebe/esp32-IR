@@ -207,6 +207,15 @@ bool uart_sleep_is_enabled(void);
  * range. No-op/false when the feature is compiled out. */
 bool uart_sleep_force_window(uint32_t ms, uint32_t *slept_ms_out);
 
+/* Hook called right before the CPU parks for a light-sleep window (state=1)
+ * and right after a real sleep (state=0). The sender installs it to broadcast
+ * the sleep-state announcement over ESP-NOW; the receiver build does not link
+ * the hook so a plain NULL is a no-op. Called from the UART task context
+ * (never from the PM callbacks / idle task), so the hook may send and wait
+ * briefly for the delivery. */
+typedef void (*uart_sleep_state_notify_t)(bool sleeping);
+void uart_sleep_set_state_notify(uart_sleep_state_notify_t notify);
+
 /* Test console: remember a pinned CPU frequency range (max, min) so a later
  * uart_sleep_set_enabled() re-applies it instead of resetting the clock to the
  * compile-time values. max_mhz <= 0 clears the override. No-op when the feature
