@@ -100,6 +100,10 @@ fleet/fleet.log
 # Sandbox-lokale Laufzeitdaten des remote-shell-Kanals (PIDs, Logs, Queue).
 remote-shell/run/
 
+# agent-server Conversation-/Event-Daten (dieses Repo ist auf dem Odroid der
+# agent-workspace-Bind-Mount). Kein Quellcode -- wird lokal live beschrieben.
+workspace/
+
 # Agent-Memory der Sandbox (wird ueber remote-shell/memory/SHARED.md geteilt).
 .openhands/memory/
 
