@@ -26,3 +26,26 @@ typedef struct __attribute__((packed)) {
     sml_transport_header_t header;
     sml_transport_value_t values[SML_TRANSPORT_MAX_VALUES];
 } sml_transport_packet_t;
+
+/* Sender sleep-state announcement.
+ *
+ * The sender transmits this before the CPU parks for a light-sleep window and
+ * again when it wakes, so the receiver always knows whether the sender is
+ * reachable *right now* without having to poll for it. Packed into the same
+ * ESP-NOW broadcast channel as the SML telegrams.
+ *
+ *   state  1 = about to sleep, 0 = awake (sent right after a real sleep)
+ *   window_ms  the adaptive light-sleep window the sender is about to use
+ *   sequence   monotonically increasing; lets the receiver tell duplicates
+ */
+#define SML_TRANSPORT_SLEEP_MAGIC 0x534C5031u /* "SLP1" */
+#define SML_TRANSPORT_SLEEP_VERSION 1u
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint8_t version;
+    uint8_t state;        /* 1 = sleeping (about to), 0 = awake */
+    uint32_t sequence;    /* monotonic */
+    uint32_t window_ms;   /* adaptive sleep window */
+    uint32_t uptime_ms;   /* sender uptime for correlation */
+} sml_transport_sleep_state_t;

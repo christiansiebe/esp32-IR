@@ -156,6 +156,15 @@ static const char *TAG = "espnow_meter";
 #define ESPNOW_OTA_TIMEOUT_MS 3000
 #define ESPNOW_DIAG_TIMEOUT_MS 1500
 #define ESPNOW_DIAG_QUEUE_LENGTH 4
+/* How long the sender keeps its CPU awake after seeing an ESP-NOW diagnostic
+ * request. The history pull is a multi-page session (the receiver sends one
+ * follow-up request per page), so the sender must stay up for the whole round
+ * and its answer frames: too short a hold made it fall back into light sleep
+ * between pages and silently drop the follow-ups. These requests are rare, so
+ * the long hold costs almost nothing; only the frequent dashboard counters
+ * poll gets the short one to keep the adaptive sleep effective. */
+#define ESPNOW_DIAG_HOLD_LONG_MS 10000u
+#define ESPNOW_DIAG_HOLD_SHORT_MS 500u
 #define WIFI_CONFIG_NAMESPACE "metercfg"
 #define WIFI_SSID_KEY          "wifi_ssid"
 #define WIFI_PASSWORD_KEY      "wifi_pass"
@@ -357,6 +366,11 @@ static volatile uint8_t g_link_fallback_stage;
 #include "uart_sleep_window.h"
 
 static SemaphoreHandle_t g_send_done;
+static SemaphoreHandle_t g_sleep_send_done;
+/* set only around the sleep-state announcement send, so the broadcast send
+ * callback can route the confirmation to g_sleep_send_done and not confuse the
+ * SML send path. */
+static volatile bool g_sleep_announce_in_flight;
 static esp_now_send_status_t g_last_send_status;
 static QueueHandle_t g_espnow_ota_rx_queue;
 static QueueHandle_t g_uart_event_queue;
@@ -457,6 +471,14 @@ static portMUX_TYPE g_sender_mac_lock = portMUX_INITIALIZER_UNLOCKED;
  * the sender->receiver ESP-NOW hop, shown on the tunnelled sender page). */
 static int8_t g_sender_rssi_dbm;
 static bool g_sender_rssi_valid;
+/* Sleep-state announcement from the sender (sml_transport_sleep_state_t). The
+ * sender broadcasts these right before a light-sleep window and after waking,
+ * so the receiver knows whether the sender is reachable *right now* without
+ * polling. Protected by g_sender_mac_lock (same sender, same lock scope). */
+static uint8_t g_sender_sleep_state;      /* 1 = sleeping, 0 = awake, 0xff = unknown */
+static uint32_t g_sender_sleep_window_ms;
+static uint32_t g_sender_sleep_sequence;
+static uint32_t g_sender_sleep_announcements; /* count of sleep packets seen */
 /* History sync: the receiver mirrors the sender's whole minute ring. A session
  * pulls time-ordered pages with a resume cursor persisted in NVS, so a restart
  * continues where it stopped instead of re-pulling; per-minute dedupe keeps the
@@ -2203,6 +2225,14 @@ static void espnow_diag_worker(void *arg)
 
 static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_status_t status)
 {
+    /* The sleep-state announcement goes to the broadcast address too, so it
+     * would release the SML send semaphore. Distinguish it with a flag set by
+     * send_sleep_state_packet() just before its send. The flag is read before
+     * the callback can race us: the callback runs on the Wi-Fi task while the
+     * UART task still owns the flag's critical section around esp_now_send. */
+    const bool was_sleep_announce = g_sleep_announce_in_flight;
+    g_sleep_announce_in_flight = false;
+
     if (status != ESP_NOW_SEND_SUCCESS) {
         ESP_LOGW(TAG, "ESP-NOW send callback reported a failure");
     } else {
@@ -2216,6 +2246,12 @@ static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_statu
 #endif
     }
     if (tx_info == NULL || tx_info->des_addr == NULL) {
+        return;
+    }
+    if (was_sleep_announce) {
+        if (g_sleep_send_done != NULL) {
+            xSemaphoreGive(g_sleep_send_done);
+        }
         return;
     }
     if (memcmp(tx_info->des_addr, broadcast_mac, ESP_NOW_ETH_ALEN) == 0) {
@@ -2426,13 +2462,23 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         }
         espnow_diag_header_t diag_header;
         memcpy(&diag_header, data, sizeof(diag_header));
-        /* Only a genuine data request (history pull / console command) needs the
-         * CPU awake while the receiver paginates; a plain counters/events status
-         * poll must NOT hold it, or a dashboard that polls every few seconds
-         * keeps the sender awake forever and the adaptive sleep never runs. */
+        /* Keep the sender awake while the receiver works through a diagnostic
+         * session. A history pull or console command is a multi-page exchange
+         * (up to HISTORY_BACKFILL_MAX_PAGES pages, each a separate ESP-NOW
+         * round-trip): a hold shorter than the whole session let the light-sleep
+         * window re-engage between pages and the sender then missed the
+         * follow-up request - which showed up on the receiver as rows of
+         * backfill errors and gaps that were never refilled. Historical
+         * measurements: 2000 ms was too short, the sync session exceeded it.
+         * Longer holds cost nothing here because these requests are rare.
+         * A plain counters/events status poll gets a shorter hold so a
+         * dashboard that polls every few seconds cannot pin the radio on
+         * forever, but enough that its answer is not starved either. */
         if (diag_header.flags & (ESPNOW_DIAG_SECTION_HISTORY |
                                  ESPNOW_DIAG_SECTION_CMD)) {
-            uart_sleep_hold(2000);
+            uart_sleep_hold(ESPNOW_DIAG_HOLD_LONG_MS);
+        } else {
+            uart_sleep_hold(ESPNOW_DIAG_HOLD_SHORT_MS);
         }
         espnow_diag_request_item_t request = {
             .request_id = diag_header.request_id,
@@ -2567,6 +2613,27 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 #endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
+    if (data_len == (int)sizeof(sml_transport_sleep_state_t)) {
+        /* The sender announces its light-sleep transitions here so we know
+         * whether it is reachable right now without polling. */
+        sml_transport_sleep_state_t announce;
+        memcpy(&announce, data, sizeof(announce));
+        if (announce.magic == SML_TRANSPORT_SLEEP_MAGIC &&
+            announce.version == SML_TRANSPORT_SLEEP_VERSION) {
+            portENTER_CRITICAL(&g_sender_mac_lock);
+            g_sender_sleep_state = (announce.state != 0) ? 1u : 0u;
+            g_sender_sleep_window_ms = announce.window_ms;
+            g_sender_sleep_sequence = announce.sequence;
+            ++g_sender_sleep_announcements;
+            portEXIT_CRITICAL(&g_sender_mac_lock);
+            ESP_LOGI(TAG,
+                     "Sender sleep announcement: %s (seq=%lu, window=%lums)",
+                     announce.state ? "sleeping" : "awake",
+                     (unsigned long)announce.sequence,
+                     (unsigned long)announce.window_ms);
+            return;
+        }
+    }
     if (data_len < (int)sizeof(sml_transport_header_t)) {
         ESP_LOGW(TAG, "Dropped undersized SML transport packet (%d bytes)", data_len);
         return;
@@ -3056,6 +3123,52 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
              (unsigned int)packet.header.value_count);
     return true;
 }
+
+#if CONFIG_ESPNOW_ROLE_SENDER
+/* Broadcast the sender's light-sleep state so the receiver always knows whether
+ * the sender is reachable *right now*, without polling. Called just before the
+ * CPU parks (state=1) and right after a real sleep window (state=0). We do the
+ * send from the UART task (not from the PM light-sleep callbacks, which run in
+ * the idle task and must not block) so we can wait briefly for the delivery
+ * confirmation; the radio stays owned by us until the frame is away.
+ *
+ * Returns false on a send failure, so the caller knows the announcement did not
+ * reliably leave the radio. The sequence is shared with the SML path so parity
+ * is trivial to eyeball. */
+static void send_sleep_state_packet(bool sleeping)
+{
+    static uint32_t s_sleep_announce_sequence = 0;
+    sml_transport_sleep_state_t packet = {
+        .magic = SML_TRANSPORT_SLEEP_MAGIC,
+        .version = SML_TRANSPORT_SLEEP_VERSION,
+        .state = sleeping ? 1u : 0u,
+        .sequence = ++s_sleep_announce_sequence,
+        .window_ms = uart_sleep_window_ms(),
+        .uptime_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+    };
+    /* Consume a stale confirmation (e.g. a previous timeout) so the wait below
+     * observes only the confirmation of THIS send. */
+    if (g_sleep_send_done != NULL) {
+        xSemaphoreTake(g_sleep_send_done, 0);
+        g_sleep_announce_in_flight = true;
+    }
+    esp_err_t err = esp_now_send(broadcast_mac, (const uint8_t *)&packet,
+                                 sizeof(packet));
+    if (err != ESP_OK) {
+        g_sleep_announce_in_flight = false;
+        ESP_LOGD(TAG, "Sleep-state announce send failed: %s", esp_err_to_name(err));
+        return;
+    }
+    /* Wait briefly for the delivery confirmation so the receiver gets the
+     * announcement before the radio goes quiet. A timeout must not stall the
+     * UART worker: log and continue. */
+    if (g_sleep_send_done != NULL &&
+        xSemaphoreTake(g_sleep_send_done, pdMS_TO_TICKS(20)) != pdTRUE) {
+        ESP_LOGW(TAG, "Sleep-state announce delivery not confirmed within 20 ms");
+    }
+    g_sleep_announce_in_flight = false;
+}
+#endif /* CONFIG_ESPNOW_ROLE_SENDER */
 
 static void uart_capture_worker(void *arg)
 {
@@ -8172,6 +8285,14 @@ static void run_sender(void)
         ESP_LOGE(TAG, "Could not create ESP-NOW send completion semaphore");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
+    g_sleep_send_done = xSemaphoreCreateBinary();
+    if (g_sleep_send_done == NULL) {
+        ESP_LOGE(TAG, "Could not create sleep-state announce semaphore");
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+#if CONFIG_ESPNOW_ROLE_SENDER
+    uart_sleep_set_state_notify(send_sleep_state_packet);
+#endif
     ESP_ERROR_CHECK(esp_now_register_send_cb(send_callback));
 
     g_diag_request_queue = xQueueCreate(ESPNOW_DIAG_QUEUE_LENGTH,
