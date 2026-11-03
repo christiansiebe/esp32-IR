@@ -38,13 +38,20 @@ boot_action_t boot_evaluate(const boot_policy_t *policy, boot_state_t *state,
         return BOOT_TAKE_NONE;
     }
 
-    if (!inputs->dashboard_ok && uptime_ms >= policy->boot_grace_ms) {
+    /* A role signals that this image is usable through exactly one of the two
+     * "ready" inputs. The receiver sets dashboard_ok (its dashboard subsystem
+     * answered); the sender sets ready_ok (its core tasks are all running).
+     * They are OR'd here so the pure policy stays role-neutral and the sender
+     * does not depend on the receiver being reachable to confirm itself. */
+    const bool is_usable = inputs->dashboard_ok || inputs->ready_ok;
+
+    if (!is_usable && uptime_ms >= policy->boot_grace_ms) {
         /* The image came up but never became usable: fall back. */
         state->decided = true;
         return BOOT_TAKE_ROLLBACK;
     }
 
-    if (inputs->dashboard_ok && uptime_ms >= policy->stability_ms) {
+    if (is_usable && uptime_ms >= policy->stability_ms) {
         state->decided = true;
         return BOOT_TAKE_CONFIRM;
     }

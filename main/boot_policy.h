@@ -36,7 +36,8 @@ typedef struct {
 
 typedef struct {
     bool is_pending_verify; /* running image is awaiting confirmation */
-    bool dashboard_ok;      /* local dashboard subsystem reached up */
+    bool dashboard_ok;      /* receiver: local dashboard subsystem reached up */
+    bool ready_ok;          /* sender: core subsystems fully started */
 } boot_inputs_t;
 
 typedef struct {
