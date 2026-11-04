@@ -218,22 +218,29 @@ def chain_matches(ipt, chain, rules, runner=_run):
 def ensure_chain(ipt, chain, rules, runner=_run):
     """Kette + Regeln + INPUT-Sprung in den Soll-Zustand bringen (idempotent).
 
-    Schreibt nur, wenn wirklich etwas fehlt - kein Flush im Normalfall, damit
-    kein kurzzeitig offenes Fenster entsteht.
+    Liefert (changes, failures). failures ist NICHT leer, wenn ein
+    iptables-Aufruf fehlschlaegt (z. B. --multiport mit >15 Ports, oder ein
+    unbekanntes Modul). Frueher wurden die Rueckgabecodes ignoriert -> die
+    Regel fehlte still und INPUT ging trotzdem auf DROP (Lockout 2026-11-04).
     """
-    changes = []
+    changes, failures = [], []
     if runner([ipt, "-S", chain]).returncode != 0:
-        runner([ipt, "-N", chain])
+        if runner([ipt, "-N", chain]).returncode != 0:
+            failures.append("Kette %s konnte nicht angelegt werden" % chain)
         changes.append("Kette %s angelegt" % chain)
     if not chain_matches(ipt, chain, rules, runner=runner):
         runner([ipt, "-F", chain])
         for rule in rules:
-            runner([ipt, "-A", chain] + rule)
+            r = runner([ipt, "-A", chain] + rule)
+            if r.returncode != 0:
+                failures.append("Regel fehlgeschlagen: %s (%s)"
+                                % (" ".join(rule), (r.stderr or "").strip()[:80]))
         changes.append("%d Regeln gesetzt" % len(rules))
     if runner([ipt, "-C", "INPUT", "-j", chain]).returncode != 0:
-        runner([ipt, "-I", "INPUT", "1", "-j", chain])
+        if runner([ipt, "-I", "INPUT", "1", "-j", chain]).returncode != 0:
+            failures.append("INPUT-Sprung konnte nicht eingefuegt werden")
         changes.append("INPUT-Sprung eingefuegt")
-    return changes
+    return changes, failures
 
 
 def set_policy(ipt, policy, runner=_run):
@@ -241,19 +248,23 @@ def set_policy(ipt, policy, runner=_run):
 
 
 def verify(ipt, chain, rules, runner=_run):
-    """Selbstpruefung NACH dem Setzen der DROP-Policy.
+    """Selbstpruefung: sitzt JEDE beabsichtigte Regel wirklich in der Kette?
 
-    Der gefaehrlichste Zustand waere: Policy DROP, aber die Kette fehlt oder ist
-    leer - dann ist der Host von aussen unerreichbar (Lockout). Diese Pruefung
-    ist die Bremse: sie muss die Loopback-Regel UND den INPUT-Sprung sehen.
+    Der gefaehrlichste Zustand waere: Policy DROP, aber eine ACCEPT-Regel fehlt
+    -> der Host ist von aussen unerreichbar (Lockout). Diese Pruefung ist die
+    Bremse und prueft deshalb jede Regel einzeln per `iptables -C`, nicht nur
+    die erste. Fehlt eine (z. B. weil --multiport >15 Ports still abgelehnt
+    wurde), wird DROP NICHT gesetzt.
     """
     problems = []
     if runner([ipt, "-C", "INPUT", "-j", chain]).returncode != 0:
         problems.append("INPUT-Sprung fehlt")
     if not rules:
         problems.append("keine Regeln")
-    elif runner([ipt, "-C", chain] + rules[0]).returncode != 0:
-        problems.append("erste Regel (Loopback) fehlt")
+        return problems
+    for rule in rules:
+        if runner([ipt, "-C", chain] + rule).returncode != 0:
+            problems.append("Regel fehlt: %s" % " ".join(rule))
     return problems
 
 
@@ -361,9 +372,14 @@ def main(argv=None):
     except OSError:
         return 0
 
-    changes = []
-    changes += ensure_chain(IPTABLES, CHAIN, rules4)
-    changes += ensure_chain(IP6TABLES, CHAIN, rules6)
+    changes, failures = [], []
+    c4, f4 = ensure_chain(IPTABLES, CHAIN, rules4)
+    c6, f6 = ensure_chain(IP6TABLES, CHAIN, rules6)
+    changes += c4 + c6
+    failures += f4 + f6
+    if failures:
+        print("fw_rules: Regelanwendung fehlgeschlagen (%s) - Policy bleibt ACCEPT" % "; ".join(failures), file=sys.stderr)
+        return 1
 
     # Erst pruefen, dann sperren. Fehlt etwas, bleibt INPUT offen statt zu.
     for ipt, rules, fam in ((IPTABLES, rules4, "v4"), (IP6TABLES, rules6, "v6")):
