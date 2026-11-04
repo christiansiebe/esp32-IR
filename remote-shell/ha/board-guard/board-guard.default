@@ -1,0 +1,52 @@
+# Konfiguration fuer board_guard.py (/etc/default/board-guard)
+# Managed by remote-shell/ha/deploy_board_guard.sh - nicht von Hand aendern.
+
+# --- Health-Ueberwachung (Haenger erkennen, dann Dienst neu starten) -------
+# Format: unit|url|timeout_s   (mehrere durch Komma)
+# agent-ui hat KEINEN API-Endpunkt -> eigener Eintrag mit leerer URL prueft nur
+# "laeuft der Dienst ueberhaupt" (tot -> starten).
+HEALTH=openhands-agent|http://127.0.0.1:8000/health|12,agent-ui||12
+HEALTH_FAILS=3
+HEALTH_UNIT_GRACE_S=180
+HEALTH_COOLDOWN_S=180
+# Einen NICHT laufenden Dienst (failed/gestoppt) ebenfalls neu starten.
+# Ohne das blieb der Agent nach einem Absturz dauerhaft tot.
+HEALTH_RESTART_INACTIVE=1
+# Schonfrist nach dem Boot (Sekunden), damit der Waechter nicht mit dem
+# Bootvorgang kaempft.
+HEALTH_BOOT_GRACE_S=180
+# Wartungs-Sperre: existiert diese Datei, wird nicht neu gestartet (z. B.
+# waehrend prepare_nvme_removal.sh den Dienst absichtlich stoppt).
+HEALTH_HOLD_FILE=/run/board-guard-hold
+
+# --- Harter Deckel je Einzelprozess (entlaufene Kindprozesse) --------------
+# Ein Prozess, der dieses RSS erreicht, wird gekillt - unabhaengig von der
+# Systemnot. Geschuetzte Prozesse (agent-server, Home Assistant) sind ausgenommen.
+PER_PROC_HARD_MB=1600
+
+# --- Systemweite Speichernot (NICHT pro Prozess) ---------------------------
+# Getoetet wird nur der EINZIGE groesste, nicht geschuetzte Prozess - und nur
+# wenn das ganze System unter MEM_AVAIL_HARD_MB faellt. Ein grosser agent-server
+# ist NORMAL und wird nicht wegen seiner Groesse getoetet.
+MEM_AVAIL_HARD_MB=150
+MEM_KILL_FLOOR_MB=400
+KILL_GRACE_S=3
+KILL_COOLDOWN_S=120
+
+# Diese Prozesse werden nie getoetet (Teilstring im Namen).
+# agent-server/agent-ui = Arbeit + Oberflaeche des Nutzers: absoluter Vorrang.
+# homeassistant/supervisor = das System des Nutzers: nie anfassen.
+PROTECT=systemd sshd dockerd containerd Xorg Xtigervnc earlyoom hassio_supervisor supervisor homeassistant board_guard init kthreadd agent-server agent-ui cmd_agent sandbox_term vnc
+
+# --- tmpfs aufraeumen ------------------------------------------------------
+TMP_PATH=/tmp
+TMP_PATTERNS=*.ppm *.pnm *.pgm *.pbm *.pam
+TMP_EXCLUDE=
+TMP_HIGH_PCT=50
+TMP_TARGET_PCT=30
+TMP_MIN_AGE_S=3600
+TMP_MIN_SIZE_MB=20
+TMP_CRITICAL_PCT=80
+TMP_CRITICAL_AGE_S=30
+
+INTERVAL_S=15
