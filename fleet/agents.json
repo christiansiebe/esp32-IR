@@ -227,6 +227,12 @@
       ],
       "note": "FERTIG: T1 Fleet-Supervisor-Analyse (Nutzer pausiert), T2 ESP-IDF-Status, T3 167 Junk-Runs geloescht, T4 gitignore+CI-Hygiene (PR #50 gemergt), T5 Sender-Hang-Diagnose+Handoff (Fix blockiert: kein Geraete-Zugang). Alle TASKS.json-Eintraege done. Darf schlafen.",
       "checked_at": "2026-10-20T11:35:45Z"
+    },
+    "8a5419942adf44c7b81cefa4ac0f533b": {
+      "name": "Odroid-Repair + Key-Refresh + Buddy + GitHub-Bridge",
+      "open_tasks": 0,
+      "note": "FERTIG: Odroid-Chat wiederbelebt (E2E odroidn2//root). Key-Refresh OHNE Rotation (read-only Broker + SDK-Hook refresh-on-401). Buddy-Watchdog. GitHub-Schreiben ueber den Odroid (remote-shell/gh-bridge.py, sync-memory.sh push). Managed-Key NIE rotieren.",
+      "checked_at": "2026-11-04T07:41:35Z"
     }
   }
 }
