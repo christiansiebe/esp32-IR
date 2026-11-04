@@ -976,3 +976,2005 @@ CHAT-THREAD). Keine offene Arbeit im Odroid-Zweig.
   weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
 - Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
   ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+<!-- LOCAL-ADDITIONS: nicht von GitHub ueberschreiben -->
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
+
+## 2026-11-04 - Odroid-Chats verloren regelmaessig den Key: ROOT-CAUSE + Fix
+- Symptom: Odroid-Chats fielen immer wieder mit 401 token_not_found_in_db aus.
+- Zwei Ursachen:
+  1. Conversations snapshotten den LLM-Key in base_state.json beim Anlegen. Chats,
+     die VOR einer Rotation entstanden, trugen den alten Key -> dauerhaft 401.
+  2. Der SDK-refresh-on-401-Hook zeigte auf den Sandbox-Broker
+     (https://work-1-<RUNTIME_ID>.prod-runtime...). Die Sandbox pausiert (20 min idle)
+     und resettet regelmaessig -> der Hook war dann tot -> stale Chats heilten nicht.
+     Die Sandbox hatte zudem KEINEN Autostart -> Broker blieb nach Reset aus.
+- Fix (Odroid-seitig, sandbox-unabhaengig):
+  - Neuer lokaler Key-Broker auf dem Odroid: /root/oh/local_broker.py,
+    systemd openhands-keybroker.service (enabled, Restart=always), 127.0.0.1:12099.
+    Liefert den Key aus /etc/openhands/llm-key (read-only, frisch pro Request).
+  - OH_LLM_API_KEY_REFRESH_URL=http://127.0.0.1:12099/current (vorher Sandbox-URL).
+    -> Der Hook funktioniert jetzt IMMER, auch wenn die Sandbox aus ist.
+  - Key-Aktualisierung: key-sync.timer (alle 10 min) ruft /root/oh/key_sync.py,
+    das den Key LESEND vom Sandbox-Broker holt (wenn erreichbar) und bei Aenderung
+    /etc/openhands/llm-key + Profile default/fast aktualisiert. Sandbox aus -> no-op.
+  - Sandbox-Autostart: remote-shell/install_autostart.sh haengt einen idempotenten
+    Hook in ~/.bashrc + ~/.profile -> Supervisor kommt nach jedem Reset zurueck.
+- Verifiziert: falscher Key -> 401 -> Hook holt echten Key vom LOKALEN Broker -> Retry
+  ok, rc=0, Key NICHT rotiert. E2E oh -n -w /root 'hostname && pwd' -> odroidn2//root.
+  openhands_heal.py --once heilte alle stale Chats.
+- Regel bleibt: Managed-Key NIE rotieren (kein POST /managed/refresh), nur lesen.
