@@ -1,0 +1,46 @@
+# fw_rules.py - Default-deny-Firewall fuer INPUT (Odroid N2).
+#
+# Die Quellnetze werden NICHT hier eingetragen: fw_rules.py leitet sie bei jedem
+# Lauf aus den echten LAN-Adressen ab (`ip -j addr show`), weil die FRITZ!Box das
+# globale IPv6-/64 per Router Advertisement neu delegiert. Hier stehen nur die
+# Dienste, die aus dem LAN erreichbar bleiben sollen.
+
+# TCP-Ports, die aus dem LAN offen sind. Jeder Eintrag ist bewusst:
+#   22    sshd
+#   80    nginx (Weiterleitung auf 443)
+#   443   nginx (HA, Chat, Perses-Proxy)
+#   6080  noVNC/websockify (zusaetzlich durch vnc-lan-guard geschuetzt)
+#   631   cupsd (Brother-Drucker)
+#   1883  MQTT (Mosquitto). ACHTUNG: laeuft ueber docker-proxy, also ueber
+#         INPUT - ohne diesen Eintrag waeren die ESP-Geraete abgeschnitten.
+#         Der Broker verlangt Authentifizierung (auth_plugin go-auth.so).
+#   1884  MQTT ueber WebSocket (dito)
+#   8883  MQTT ueber TLS (dito)
+#   8884  MQTT ueber TLS+WebSocket (dito)
+#   8081  nginx -> Perses
+#   8099  meter_server (Bild fuer das FRITZ!Fon)
+#   8123  Home Assistant direkt
+#   18555 go2rtc (Kamera-Streams fuer HA)
+#   39023 Home-Assistant-eigener Port (nur an 192.168.178.71 gebunden)
+LAN_TCP_PORTS=22,80,443,6080,631,1883,1884,8883,8884,8081,8099,8123,8765,18555,39023,8890
+
+# Zusaetzliche UDP-Ports aus dem LAN. Leer = keine. DHCP/Discovery sind
+# ohnehin immer erlaubt (siehe ALWAYS_UDP_* im Skript).
+LAN_UDP_PORTS=53
+
+# ICMP/ICMPv6 erlauben (ping, Path-MTU-Discovery). 0 = aus.
+ALLOW_ICMP=1
+
+# 1 = das globale IPv6-/64 des LAN mit aufnehmen (Android-Clients kommen
+#     bevorzugt ueber IPv6, RFC 6724). Der Schutz kommt hier von der
+#     IPv6-Firewall der FRITZ!Box, nicht vom Paketfilter.
+# 0 = nur Loopback, IPv4-LAN, ULA und link-local.
+ALLOW_GLOBAL_IPV6=1
+
+# Docker-Bruecken: Addons erreichen Host-Dienste von hier. Ohne diese Zeilen
+# waeren z. B. HA-Addons von 172.30.32.x abgeschnitten.
+DOCKER_V4=172.17.0.0/16,172.30.32.0/23
+DOCKER_V6=fd0c:ac1e:2100::/48
+
+# DNS-Proxy fuer Kopplungs-Diagnose (dnsmasq auf 192.168.178.71:53).
+# Temporaer - nach Abschluss der Diagnose wieder entfernen.
