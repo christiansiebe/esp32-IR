@@ -1,0 +1,9 @@
+[Unit]
+Description=Preflight-Audit (bekannte Fehlerbilder proaktiv pruefen)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/sbin/preflight.py
+Nice=10

@@ -1,0 +1,11 @@
+[Unit]
+Description=Preflight-Audit taeglich + beim Boot
+
+[Timer]
+OnBootSec=3min
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target
