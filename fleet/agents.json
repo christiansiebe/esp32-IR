@@ -233,6 +233,86 @@
       "open_tasks": 0,
       "note": "FERTIG: Odroid-Chat wiederbelebt (E2E odroidn2//root). Key-Refresh OHNE Rotation (read-only Broker + SDK-Hook refresh-on-401). Buddy-Watchdog. GitHub-Schreiben ueber den Odroid (remote-shell/gh-bridge.py, sync-memory.sh push). Managed-Key NIE rotieren.",
       "checked_at": "2026-11-04T07:41:35Z"
+    },
+    "fcaec6fc8a2146f58fb7368bee4cd741": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "ee631e56ea004bfc899d16995b3bb1e9": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "1254545a0f1b440fa84ad6c7ae7531b6": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "090353f504cc4b43ab07d216b9301e26": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "187efac3a80e42fe80333cc9f44bc1b1": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "1ef358796225452daacb4e021807e1b8": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "2b07fe6648094eeabcd561580deac4f6": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "37e8c70c671b4742b820fc9299053692": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "88211a86ea9645b1b37f1a9d08ceb674": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "8d15e3f90df046f6a99e969345290a63": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "98783adc37854befb8b6c42fe8096f9a": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "b1f5614d4c424393a42f3256ce9d14ed": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "c557306e26034834bcd0604dbc189ae6": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "e711b15011d54259925cf7c2c77bdf96": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "f108bd430c0646cd89eaeeed85bdd2ca": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
+    },
+    "f50aa61ec12d403eb44ab940a93c9279": {
+      "name": "hostname-Testchat (kein Fleet-Worker)",
+      "open_tasks": 0,
+      "note": "hostname-Testchat: fertig, nie wecken."
     }
   }
 }
