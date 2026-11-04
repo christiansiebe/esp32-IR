@@ -964,3 +964,15 @@ CHAT-THREAD). Keine offene Arbeit im Odroid-Zweig.
 2. Danach duerfen diese Testchats schlafen.
 
 **Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
+
+## 2026-11-04 - GitHub-Schreiben UEBER den Odroid (Bridge) - funktioniert
+- Die Sandbox hat KEINEN GitHub-Token. Der Odroid hat einen gueltigen Schreib-Token
+  in /root/.config/github-bridge/token (0600, fine-grained PAT, admin/push) plus einen
+  git-credential-helper (/etc/gitconfig -> /root/.config/github-bridge/git-credential.sh).
+- Bridge: remote-shell/gh-bridge.py (Sandbox) + /root/oh/gh.py (Odroid). Schickt
+  GitHub-API-Jobs ueber den remote-shell-Kanal; der Token bleibt auf dem Odroid.
+  Aufruf: python3 /workspace/remote-shell/gh-bridge.py whoami|api|get-file|put-file ...
+- sync-memory.sh push nutzt die Bridge jetzt automatisch (vorher 401 Bad credentials,
+  weil Sandbox-Token fehlt/abgelaufen). Verifiziert: Commit 82951c1c (SHARED.md).
+- Hinweis: alte, in Sandbox-Conversations gespeicherte GITHUB_WRITE_TOKENS sind
+  ABGELAUFEN (401). Nur der Odroid-Token ist gueltig.
