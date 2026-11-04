@@ -898,3 +898,36 @@ CHAT-THREAD). Keine offene Arbeit im Odroid-Zweig.
   nicht in MessageEvents -> per zipfile aus `event_*.json` lesen.
 - Ersatz-Chat: `75a2e92947b54cfdbc7a81869298e363` (Branch feat/dfs-clock-visibility),
   geladen mit `docs/CHAT-HANDOFF-ESP-IDF-2026-10-19.md`.
+<!-- LOCAL-ADDITIONS: nicht von GitHub ueberschreiben -->
+## 2026-11-04 - Managed-Key: NIE rotieren + sauberer Refresh (WICHTIG, gilt fuer ALLE Chats)
+- **NIE `POST https://app.all-hands.dev/api/keys/llm/managed/refresh` aufrufen.** Dieser
+  Endpunkt ROTIERT den geteilten Managed-Key sofort. Jede laufende Conversation (Sandbox
+  UND Odroid) haelt noch den alten Key -> 401 `token_not_found_in_db` -> Chat stirbt
+  mitten im Lauf. Genau so wurde am 2026-11-03 der Odroid-Repair-Chat gekillt.
+- Managed-Key **nur LESEN**: `GET https://app.all-hands.dev/api/keys/llm/managed/current`
+  mit Header `X-Session-API-Key: $SESSION_API_KEY` -> liefert den Key als **Plaintext**.
+- **Pull-Refresh statt Rotation:** read-only Broker `remote-shell/keybroker.py` (Port 12000,
+  via Runtime-Proxy `https://work-1-<RUNTIME_ID>.prod-runtime.all-hands.dev/current`,
+  Auth `Authorization: Bearer <remote-shell/token>`). Der Odroid nutzt das als
+  `OH_LLM_API_KEY_REFRESH_URL`; der eingebaute SDK-Hook `register_managed_llm_key_refresh`
+  holt bei **401** einmal neu und wiederholt einmal. Er rotiert nie.
+  Zusaetzlich `OH_LLM_API_KEY_REFRESH_BASE_URLS=https://llm-proxy.app.all-hands.dev` (Pflicht,
+  sonst bleibt der Hook aus) und `OH_LLM_API_KEY_REFRESH_HEADERS={"Authorization":"Bearer <token>"}`
+  in `/etc/openhands/agent-server.env`.
+- `supervise.py` haelt Kanal + Broker + Buddy-Watchdog + memory-sync am Leben
+  (ensure_broker/ensure_watchdog/ensure_memory_sync), ueberlebt Sandbox-Reset.
+- Doku fuer den Nutzer: `/var/www/ansicht/openhands-key-refresh.{md,html}` (nginx /ansicht/).
+- **Falle:** der `sync-memory.sh`-Pull-Loop (alle 90s) ueberschrieb lokale Notizen in
+  `/workspace/MEMORY.md`. Ab jetzt schuetzt der Marker oben lokale Ergaenzungen (Pull haengt
+  sie wieder an). Eigene Regeln IMMER unter diesen Marker schreiben.
+
+## Fleet-Hygiene: hostname-Testchats wecken sich in Endlosschleife (2026-11-04)
+**Befund.** In dieser Sandbox existieren ~17 einmalige "hostname"-Testchats. Sie wurden nie als Fleet-Worker registriert, werden aber vom **Orphan-Guard** des Fleet-Supervisors jeden Zyklus neu adoptiert (open_tasks=1) und geweckt -> jeder Weckruf ist ein LLM-Turn = Kosten. Der Supervisor liest die **GitHub**-Kopie von fleet/agents.json, nicht die lokale.
+
+**Ursache der Nicht-Behebbarkeit:** GITHUB_WRITE_TOKEN ist **abgelaufen** (HTTP 401 "Bad credentials", auch sync-memory.sh push -> 401). Deshalb kann aus der Sandbox NICHT gepusht werden; die Registrierung der Testchats bleibt lokal. (Es gibt eine automations/token-reminder, die genau davor warnt.)
+
+**Was der Parent tun muss (sobald der Token erneuert ist):**
+1. Branch `fleet/register-fcaec6fc` (Commits `6aadcdd`, `378e977`) pushen ODER die `fleet/agents.json` von dort uebernehmen. Er enthaelt alle 17 hostname-Testchats mit open_tasks=0 -> der Orphan-Guard weckt sie dann nicht mehr.
+2. Danach duerfen diese Testchats schlafen.
+
+**Merksatz:** Ein unregistrierter, aber aktiver Chat wird vom Orphan-Guard wachgehalten. Entweder registrieren (open_tasks=0) oder die Konversation inaktiv werden lassen.
