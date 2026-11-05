@@ -53,6 +53,22 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_reboot_persistence"
 
+# Storage recovery: proves the background repair brings a RAM-only store back to
+# a persistent one (formatting as the last resort) when the history file cannot
+# be opened. The obstacle is a directory at the file path (fopen fails on it),
+# removed before the repair retry. Scratch mount point under the build tmp dir.
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog-recovery\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_storage_recovery.c" \
+    -lm -o "$out/test_storage_recovery"
+
+"$out/test_storage_recovery"
+
 # Post-OTA rollback decision (receiver). Pure, host-testable logic: replays boot
 # scenarios tick by tick and asserts confirm / rollback / nothing. No ESP-IDF;
 # the production glue (boot_confirm.c) that calls the OTA API is not part of the
