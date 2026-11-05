@@ -3,6 +3,85 @@
 ESP-IDF firmware for the ESP32-IR project (GitHub `christiansiebe/esp32-IR`).
 Two firmware roles are built from one source tree.
 
+## ⛔ REGEL Nr. 1: NIE auf dem Odroid kompilieren – IMMER auf GitHub
+
+**Kompiliert wird ausschliesslich in der GitHub-CI (GitHub Actions), NICHT auf
+dem Odroid.** Kein `tools/build.sh`, kein `idf.py build`, kein `docker run
+espressif/idf:...` auf dem Board.
+
+**Warum (harte Gruende, nicht Geschmack):**
+- Der Odroid hat nur 3,7 GB RAM. Ein ESP-IDF-Build (`-j2`) hat das Board schon
+  mehrfach **hart resettet** (`/root/AGENTS.md`: „Harter Reset WAEHREND des
+  7.2.8-Builds"). Ein Reset reisst laufende Agenten-Chats, HA und die
+  Heizungsregelung mit.
+- Die SD-Karte ist schleissempfindlich; ein Build schreibt hunderte MB.
+- Die CI baut ohnehin: `.github/workflows/esp-idf-build.yml` (Matrix
+  sender/receiver/receiver-apoff). **Ein lokaler Build ist reine Doppelarbeit.**
+
+**So ist es richtig:**
+1. Aenderungen committen und **pushen** (`git push` auf einen Branch).
+2. Die CI baut automatisch; Ergebnis/Logs im GitHub-Actions-Lauf.
+3. Das fertige Firmware-Image (`esp32-IR.bin`) aus dem CI-Artefakt bzw. dem
+   Flash-Bundle nehmen.
+
+**Wenn ein lokaler Build technisch zwingend noetig scheint:** erst den Nutzer
+fragen. Nur mit ausdruecklicher Freigabe und dann nur `-j1` + `nice -n 19`,
+wenn HA/Agenten ruhig sind.
+
+**Hinweis fuer Agenten (2026-11-05):** Der ESP32-Compiler liegt NICHT auf dem
+Host, sondern im Docker-Image `espressif/idf:v6.1` (xtensa-esp-elf-gcc 15.2.0).
+Ein lokaler Build laeuft also ueber `docker run … idf.py build` – die
+Host-Compiler (gcc/g++/make/cmake) sind daran **unbeteiligt**.
+
+**Das ist jetzt hart unterbunden (2026-11-05):**
+- `tools/build.sh` **verweigert** den Start auf dem Odroid (Exit 3, Guard ueber
+  `/etc/hostname`). Notausgang nur mit Freigabe: `ALLOW_LOCAL_BUILD=1 …`.
+- Das Image `espressif/idf:v6.1` wurde vom Board **entfernt** (8,49 GB frei).
+  Rollback: `docker pull espressif/idf:v6.1`.
+- **Flashen und der tty-Monitor laufen weiter** – sie brauchen das Image nicht:
+  `esptool` (uv-Tool) und `pyserial` (uv, `uv run --with pyserial`) liegen auf
+  dem Host. OTA zieht das Image ohnehin per HTTPS.
+- Die **GitHub-CI ist unberuehrt** (zieht das Image aus der Registry).
+
+## Die CI vom Odroid aus steuern (bewaehrt, 2026-11-05)
+Der Build laeuft in GitHub Actions, **angestossen und beobachtet vom Odroid**
+per REST-API. `gh` ist auf dem Board **nicht installiert**; `curl` + die Tokens
+`GITHUB_TOKEN` (lesen) und `GITHUB_WRITE_TOKEN` (schreiben) reichen. Repo ist
+**public**. Bewaehrtes Rezept:
+
+```bash
+# 1) bauen lassen: Aenderung pushen (push-Trigger) ...
+git push -u origin <branch>
+# ... oder manuell ohne Push (workflow_dispatch; Workflow-ID 378403849):
+curl -s -X POST -H "Authorization: Bearer $GITHUB_WRITE_TOKEN" \
+  -d '{"ref":"<branch>"}' \
+  https://api.github.com/repos/christiansiebe/esp32-IR/actions/workflows/378403849/dispatches
+
+# 2) Lauf finden + Status (status/conclusion), Jobs je Rolle
+curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+  "https://api.github.com/repos/christiansiebe/esp32-IR/actions/runs?branch=<branch>"
+curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+  ".../actions/runs/<run_id>/jobs"          # Host tests + Build {receiver,sender,receiver-apoff}
+
+# 3) Fehler-Log eines Jobs (nur bei failure)
+curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" ".../actions/jobs/<job_id>/logs"
+
+# 4) Artefakte listen + herunterladen (ZIP, enthaelt storage.bin NICHT im flash-args)
+curl -s -H "Authorization: Bearer $GITHUB_TOKEN" ".../actions/runs/<run_id>/artifacts"
+curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" \
+  ".../actions/artifacts/<artifact_id>/zip" -o /tmp/fw.zip
+```
+
+**Belegt am 2026-11-05:** Branch `fix/memory-repair` (Commit `3eba01e`) gepusht
+-> Lauf `42051792737`, **alle 4 Jobs `success`**, Artefakte
+`receiver-sml-firmware-v0.3.0-12-g3eba01e` (742 KB) u. a. Das Flash-Bundle
+schreibt `storage` bewusst **nicht** (`flasher_args.json` ohne `storage.bin`) –
+die Historie-Regel bleibt gewahrt.
+
+**Merke:** `gh` fehlt; `GITHUB_TOKEN` per Env ist gesetzt, der Git-Push laeuft
+ueber den Credential-Helper `/root/.config/github-bridge/git-credential.sh`
+(systemweit in `/etc/gitconfig`). Kein Token in URL/Config noetig.
+
 ## Working in this sandbox (read first)
 - **Read `TODO.md` first.** It holds the current work state (open + done) and,
   at the top, the "Arbeitsweise: Chat-Heartbeat" section with the rules below.
