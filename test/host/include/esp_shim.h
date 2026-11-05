@@ -14,6 +14,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <errno.h>
+#include <unistd.h>
 
 typedef int esp_err_t;
 
@@ -164,12 +165,35 @@ typedef struct {
     void *arg;
 } host_task_t;
 
+/* A FreeRTOS task function that returns without deleting itself is undefined
+ * behaviour. On the real release build the task wrapper that would turn that
+ * into a clear abort() is compiled out, so such a task silently corrupts the
+ * scheduler and panics the device (that is exactly how the first v0.2.0 flash
+ * boot-looped and got rolled back). The host build cannot reproduce the crash,
+ * but it can reproduce the *contract violation*: the trampoline notes when a
+ * task returns and vTaskDelete() was never called, and the tests assert the
+ * counter stays zero. */
+static volatile int g_host_tasks_returned_without_delete;
+static _Thread_local int g_host_task_deleted;
+
 static void *host_task_trampoline(void *p)
 {
     host_task_t *t = (host_task_t *)p;
+    g_host_task_deleted = 0;
     t->fn(t->arg);
+    if (!g_host_task_deleted) {
+        __sync_fetch_and_add(&g_host_tasks_returned_without_delete, 1);
+        fprintf(stderr,
+                "  HOST-TASK BUG: a task function returned without calling "
+                "vTaskDelete(NULL) (undefined behaviour on the device)\n");
+    }
     free(t);
     return NULL;
+}
+
+static inline int host_tasks_returned_without_delete(void)
+{
+    return g_host_tasks_returned_without_delete;
 }
 
 static inline BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack,
@@ -197,7 +221,7 @@ static inline void portEXIT_CRITICAL(portMUX_TYPE *m) { (void)m; }
 /* Only the syntax-check of the sleep glue calls this; real wait behaviour is
  * not exercised on the host. */
 static inline void vTaskDelay(uint32_t ticks) { (void)ticks; }
-static inline void vTaskDelete(void *task) { (void)task; }
+static inline void vTaskDelete(void *task) { (void)task; g_host_task_deleted = 1; }
 
 typedef struct {
     const char *partition_label;
@@ -213,6 +237,39 @@ static inline esp_err_t esp_vfs_spiffs_register(const esp_vfs_spiffs_conf_t *c)
      * base_path/file, which the reboot-persistence host test provisions under
      * POWER_HISTORY_MOUNT_PATH. Tests that never call init() are unaffected. */
     (void)c;
+    return ESP_OK;
+}
+
+/* No SPIFFS on the host: report "not supported" so the storage-fill diagnostic
+ * stays at 0/0 instead of claiming a bogus size. */
+static inline esp_err_t esp_spiffs_info(const char *label, size_t *total,
+                                        size_t *used)
+{
+    (void)label;
+    if (total != NULL) {
+        *total = 0;
+    }
+    if (used != NULL) {
+        *used = 0;
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+/* The host has no real SPIFFS. power_history_format() closes the file and
+ * recreates it with fopen("w+b") right after this, so reporting success is
+ * enough on the host; the fresh file replaces the old one via truncation. */
+static inline esp_err_t esp_spiffs_format(const char *label)
+{
+    (void)label;
+    return ESP_OK;
+}
+
+/* power_history_repair_ring() calls this to heal SPIFFS' index before touching
+ * the ring. The host store is a plain file with no index, so the check is a
+ * no-op that reports success. */
+static inline esp_err_t esp_spiffs_check(const char *label)
+{
+    (void)label;
     return ESP_OK;
 }
 

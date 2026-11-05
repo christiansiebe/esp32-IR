@@ -12,27 +12,77 @@ endchoice
 
 config RECOVERY_BUTTON_GPIO
     int "Recovery button GPIO (BOOT button; -1 disables)"
-    default 0 if ESPNOW_ROLE_RECEIVER
-    default -1
+    default 0
     range -1 39
     help
-        Holding this pin low for RECOVERY_BUTTON_HOLD_MS at startup forces a
-        rollback to the previous firmware (esp_ota_mark_app_invalid_rollback_and_reboot),
-        even when the running image was already confirmed -- the manual escape
-        hatch for a "confirmed but broken" image. The default 0 is the on-board
-        BOOT button on most ESP32 devkits. Set to -1 to disable.
+        Holding this pin low for RECOVERY_BUTTON_RESTORE_MS at startup puts the
+        previous runtime-config values back and reboots; holding it for
+        RECOVERY_BUTTON_ROLLBACK_MS instead rolls back to the previous firmware
+        (esp_ota_mark_app_invalid_rollback_and_reboot), even when the running
+        image was already confirmed -- the manual escape hatch for a "confirmed
+        but broken" image. The default 0 is the on-board BOOT button on most
+        ESP32 devkits. Set to -1 to disable.
 
-        Only the receiver honours this: the sender has no USB and is reachable
-        only over ESP-NOW, so its recovery is the relayed OTA path instead.
+        Both roles honour this. On the sender (no USB, reachable only over
+        ESP-NOW) the button is the local recovery path for an image that no
+        longer comes up far enough to accept the relayed OTA. GPIO0 is a
+        strapping pin, but it is only watched after the ROM has made its
+        download-mode decision, so an unpopulated button (pin pulled high) is
+        harmless.
 
-config RECOVERY_BUTTON_HOLD_MS
-    int "Recovery button hold time (ms)"
+config RECOVERY_BUTTON_RESTORE_MS
+    int "Recovery button hold to restore the config (ms)"
     default 3000
     depends on RECOVERY_BUTTON_GPIO != -1
     range 1000 30000
     help
-        How long the recovery button must be held at startup to force a
-        rollback.
+        How long the BOOT button must be held at startup, then released before
+        the rollback window, to put the previous runtime-config values back and
+        reboot. This undoes a bad 'set cpu-min 40' (or any committed knob) that
+        survives a plain reboot because it is persisted in NVS. Must be below
+        RECOVERY_BUTTON_ROLLBACK_MS so the two gestures stay distinguishable.
+
+config RECOVERY_BUTTON_ROLLBACK_MS
+    int "Recovery button hold to roll back the firmware (ms)"
+    default 10000
+    depends on RECOVERY_BUTTON_GPIO != -1
+    range 1000 60000
+    help
+        How long the BOOT button must be held at startup to force a rollback to
+        the previous firmware (esp_ota_mark_app_invalid_rollback_and_reboot),
+        even when the running image was already confirmed. Holding this long
+        always rolls back, so it takes precedence over the config restore.
+
+config ESPNOW_SENDER_CONFIRM_STABILITY_S
+    int "Sender: seconds up before the new image is accepted"
+    depends on ESPNOW_ROLE_SENDER
+    range 30 3600
+    default 180
+    help
+        How long a freshly flashed sender image must stay up before it calls
+        esp_ota_mark_app_valid_cancel_rollback(). Until then the bootloader's
+        CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE safety net is armed: any reset
+        (panic, task/interrupt watchdog) marks the image ABORTED and the next
+        boot falls back to the previous OTA slot.
+
+        The receiver confirms after 45 s because its dashboard makes a bad image
+        obvious immediately. The sender has no dashboard and no user watching
+        it, so "the code reached this point" is not proof: an image that
+        boot-loops every ~74 s (observed 2026-10-23) reaches it every time. The
+        window must therefore outlast any plausible crash period. 180 s covers
+        the observed ~74 s loop twice over with margin, at the cost of the
+        previous slot staying the fallback for three minutes after an OTA.
+
+config ESPNOW_SENDER_CONFIRM_GRACE_S
+    int "Sender: seconds for the sender stack to come up before rollback"
+    depends on ESPNOW_ROLE_SENDER
+    range 5 600
+    default 30
+    help
+        If the sender's own readiness signal (radio and worker stack up) has not
+        appeared within this window, the image is treated as unusable and
+        rolled back at the deadline instead of waiting for the stability window.
+        This mirrors the receiver's boot_grace_ms.
 
 config ESPNOW_CPU_MAX_MHZ
     int "Maximum CPU frequency (MHz) for the DFS ceiling"
@@ -223,6 +273,35 @@ config ESPNOW_LINK_REALIGN_MS
         re-aligns. Set 0 to disable the periodic re-align (boot-time scan only).
         The receiver has no channel to chase and ignores this.
 
+config ESPNOW_SENDER_WIFI_RSSI_LOG
+    bool "Sender: log the home WLAN signal strength once per period"
+    depends on ESPNOW_ROLE_SENDER
+    default y
+    help
+        The sender is deliberately not associated with the home WLAN (it only
+        uses ESP-NOW on the channel the receiver's SoftAP shares with the home
+        AP), so nothing shows how well that AP is heard. This scans for the SSID
+        once per period and records the RSSI without ever associating. The scan
+        is limited to the current ESP-NOW channel, so the radio never leaves the
+        link's channel and the minute log cannot drop SML telegrams or backfill
+        pages.
+
+config ESPNOW_SENDER_WIFI_RSSI_SSID
+    string "Sender: home WLAN SSID to log the signal strength of"
+    depends on ESPNOW_SENDER_WIFI_RSSI_LOG
+    default "Wohnzimmer"
+    help
+        SSID to look for. Only the RSSI of a matching beacon is recorded; the
+        sender never authenticates or associates, so no credentials are needed.
+
+config ESPNOW_SENDER_WIFI_RSSI_PERIOD_MS
+    int "Sender: signal-strength log period (ms)"
+    depends on ESPNOW_SENDER_WIFI_RSSI_LOG
+    range 10000 3600000
+    default 60000
+    help
+        How often the home WLAN is scanned. One minute by default.
+
 config ESPNOW_RECEIVER_HEALTH_WATCHDOG
     bool "Receiver: self-healing health watchdog (reboot on stale data / low heap)"
     depends on ESPNOW_ROLE_RECEIVER
@@ -271,4 +350,49 @@ config ESPNOW_HEALTH_GRACE_S
     help
         Uptime that must pass before any health rule may fire, so a slow boot
         (Wi-Fi association, first backfill) is not mistaken for a fault.
+
+config ESPNOW_NET_WATCHDOG
+    bool "Receiver: Wi-Fi link watchdog (reconnect then reboot when the link drops)"
+    depends on ESPNOW_ROLE_RECEIVER
+    default y
+    help
+        Watch the station link and act when it is lost. The existing guards each
+        cover another path (web_guard the HTTP server on the loopback,
+        health_task the meter data, link_fallback the ESP-NOW peer), but none of
+        them notices a dropped Wi-Fi association or DHCP lease: every task keeps
+        running, the dashboard answers locally, and the device is nonetheless
+        unreachable from the home LAN. That is the silent "goes offline" case.
+        This watchdog reconnects after CONFIG_ESPNOW_NET_WATCHDOG_DOWN_MS and
+        reboots if that does not help. It runs only when a home WLAN is
+        configured (an AP-only receiver has no station link to lose). The
+        decision is pure and host-tested (test_net_watchdog.c).
+
+config ESPNOW_NET_WATCHDOG_DOWN_MS
+    int "Receiver: link down time before reconnecting (ms)"
+    depends on ESPNOW_NET_WATCHDOG
+    range 10000 3600000
+    default 120000
+    help
+        How long the station may be unassociated or without an IP before the
+        watchdog re-issues esp_wifi_connect(). Comfortably above a normal router
+        reboot or channel switch, so a brief blip does not trigger it.
+
+config ESPNOW_NET_WATCHDOG_REBOOT_MS
+    int "Receiver: extra time after the reconnect before rebooting (ms)"
+    depends on ESPNOW_NET_WATCHDOG
+    range 10000 3600000
+    default 300000
+    help
+        Time the reconnect is given to restore the link. If it is still down
+        after this (measured from the same down edge), the watchdog reboots to a
+        known-good state - the case a reconnect cannot fix (a wedged driver).
+
+config ESPNOW_NET_WATCHDOG_GRACE_MS
+    int "Receiver: network watchdog grace after boot (ms)"
+    depends on ESPNOW_NET_WATCHDOG
+    range 0 3600000
+    default 120000
+    help
+        Uptime that must pass before the link is judged, so association and DHCP
+        at boot are not mistaken for an outage.
 

@@ -32,15 +32,18 @@ set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "history_csv_import.c" "history_upload.c"
               "link_fallback.c" "liveness_guard.c" "ota_policy.c"
               "task_wdt_policy.c" "task_wdt_guard.c"
-              "json_escape.c" "version.c"
+              "json_escape.c" "version.c" "trial_mode.c"
               "wall_clock.c" "wall_clock_store.c"
-              "energy_totals.c" "energy_totals_store.c")
+              "energy_totals.c" "energy_totals_store.c"
+              "espnow_channel_store.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
     list(APPEND main_srcs "mqtt_bridge.c" "mqtt_publish.c" "mqtt_events.c"
-                          "web_guard.c" "health_policy.c" "health_task.c")
+                          "web_guard.c" "health_policy.c" "health_task.c"
+                          "net_watchdog.c")
 endif()
 if(CONFIG_ESPNOW_ROLE_SENDER)
-    list(APPEND main_srcs "tx_batch.c" "uart_sleep_window.c" "uart_recovery.c")
+    list(APPEND main_srcs "tx_batch.c" "uart_sleep_window.c" "uart_recovery.c"
+                          "wifi_rssi_log.c")
 endif()
 
 idf_component_register(SRCS ${main_srcs}

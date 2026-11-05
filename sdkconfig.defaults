@@ -64,3 +64,82 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 # with the receiver SoftAP anyway (CONFIG_ESPNOW_SENDER_ASSOCIATE); this flag
 # also covers the window before association and after a drop.
 CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
+
+# Socket headroom for the receiver's web server. httpd reserves 3 sockets for
+# itself, so with the IDF default of 10 the server can serve only 7 concurrent
+# connections (see start_webserver(): max_open_sockets = CONFIG_LWIP_MAX_SOCKETS
+# - 3). The dashboard polls several endpoints in parallel and the web-health
+# guard's self-probe needs its own connection; under that load the pool ran dry
+# and lwIP refused new connections with ENFILE ("httpd_accept_conn: error in
+# accept (23)"), which also made the guard's probe fail. 16 leaves 13 usable
+# sockets, and MEMP_NUM_NETCONN (= CONFIG_LWIP_MAX_SOCKETS in lwipopts.h) still
+# costs only a few hundred bytes of static RAM.
+CONFIG_LWIP_MAX_SOCKETS=16
+
+# --- Flash diet ----------------------------------------------------------
+# The 4 MB flash is 98 % allocated (two 1.5 MB OTA slots + 896 KB SPIFFS
+# history) and the receiver image fills 84.6 % of its slot, so every unused
+# IDF default that still gets linked costs headroom the next feature needs.
+# These three are linked but never used by this project:
+#
+# * IPv6: no AF_INET6 socket, no sockaddr_in6, no ip6 code anywhere in main/;
+#   the dashboard, MQTT and ESP-NOW are all IPv4. Measured -34 KB.
+# * WPA3/SAE/OWE and Wi-Fi Enterprise: the receiver SoftAP is WIFI_AUTH_WPA2_PSK
+#   (main.c) and the STA path only ever joins a WPA2-PSK home AP, so SAE, OWE
+#   and the 802.1X enterprise stack are dead weight. Enterprise alone is
+#   documented by IDF as ~60 KB.
+#
+# Deliberately KEPT: CONFIG_ESP_WIFI_MBEDTLS_CRYPTO (WPA2's own crypto, selected
+# by the OWE options but needed regardless) and CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+# (pull OTA trusts the public CA bundle, see above). Turning off the WPA3 family
+# removes the OWE options that "select" MBEDTLS_CRYPTO, so it is pinned here to
+# stop Kconfig from dropping it. ESP-NOW is unaffected: it is a separate link
+# layer using CCMP, not SAE, and this project runs it unencrypted (peer.encrypt
+# = false). Must be verified on the bench that the STA still associates and
+# ESP-NOW still carries traffic after a flash (see TODO.md).
+CONFIG_LWIP_IPV6=n
+CONFIG_ESP_WIFI_MBEDTLS_CRYPTO=y
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
+CONFIG_ESP_WIFI_ENABLE_SAE_H2E=n
+CONFIG_ESP_WIFI_ENABLE_SAE_PK=n
+CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=n
+CONFIG_ESP_WIFI_WPA3_COMPATIBLE_SUPPORT=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_SOFTAP=n
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+
+# --- Build for size -------------------------------------------------------
+# The app has been compiled with IDF's default -Og
+# (CONFIG_COMPILER_OPTIMIZATION_DEBUG) since the project was created; it was
+# never a deliberate choice. -Os is pure codegen, no source change, and the
+# single biggest lever: measured -86 KB on the receiver and -55 KB on the
+# sender. The bootloader already builds with -Os
+# (CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_SIZE). Trade-off: optimised code is
+# harder to single-step and line info is less exact, so flip back to DEBUG when
+# chasing a bug on the bench.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# --- Certificate bundle: FULL -> CMN --------------------------------------
+# The full bundle is 145 roots (68 KB in the image). The CMN bundle is 41 roots
+# (~17 KB) and still carries both Let's Encrypt roots (ISRG Root X1/X2), which
+# is all pull-OTA needs: main/ota_policy.c accepts any https:// URL and the
+# sandbox front door presents a Let's Encrypt certificate. Measured -51 KB.
+# If a future OTA host or broker uses a different CA, add it here (or go back
+# to the full bundle).
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+
+# --- mDNS: advertise only, no discovery / debug CLI -----------------------
+# The device only calls mdns_hostname_set + mdns_service_add (one _http
+# service); it never browses, and the mDNS console command is unused. The ETH
+# netif is never used (STA + SoftAP only). Measured -16 KB.
+CONFIG_MDNS_ENABLE_CONSOLE_CLI=n
+CONFIG_MDNS_ENABLE_BROWSE=n
+CONFIG_MDNS_PREDEF_NETIF_ETH=n
+CONFIG_MDNS_MAX_SERVICES=4
+
+# --- MQTT: plain TCP only -------------------------------------------------
+# main/mqtt_bridge.c builds the broker URI from NVS; the deployment broker is a
+# plain mqtt:// (TCP) endpoint, so the WebSocket transports are unused. Remove
+# these two lines if a ws:// or wss:// broker is ever configured.
+CONFIG_MQTT_TRANSPORT_WEBSOCKET=n
+CONFIG_MQTT_TRANSPORT_WEBSOCKET_SECURE=n

@@ -15,6 +15,10 @@ Two firmware roles are built from one source tree.
   it if not), then continue the open `TODO.md` items.
 - Commit and push small steps promptly; never leave important work only in
   `/tmp`.
+- **Scope:** diese Datei ist fuer **Firmware** (Sender/Receiver, ESP-IDF, OTA,
+  History-Ring, Backfill). **Buderus/MX400, Home Assistant, Perses, WLAN/Netz,
+  Kernel/Board** gehoeren NICHT hierher, sondern in `/root/AGENTS.md` (Host).
+  Am 2026-10-29 wurden solche Abschnitte dorthin verschoben.
 
 ## Roles
 - **Sender**: UART SML decoder (9600 baud 8N1 on UART1, RX GPIO16) and ESP-NOW
@@ -61,7 +65,9 @@ Two firmware roles are built from one source tree.
   `safe.directory $GITHUB_WORKSPACE` and exports `FIRMWARE_VERSION`. Tag releases
   (`git tag -a vX.Y.Z`) give a clean version instead of a bare SHA.
 - **Versioning + commit convention: see `VERSIONING.md`.** One SemVer tag per
-  firmware (`v0.1.0` is the first baseline; before it the version was `unknown`).
+  firmware (`v0.1.0` and `v0.1.1` are tagged; the current tip is untagged, so
+  `git describe` reports `v0.1.1-<N>-g<sha>[-dirty]`). Before `v0.1.0` the
+  version was `unknown`.
   The sender's `fw_version()` also travels in the counters frame
   (`espnow_diag_counters_t.fw_version`, `ESPNOW_DIAG_VERSION` 2) and is shown on
   the receiver's sender page as `sender fw:` — so the other device's build is
@@ -541,6 +547,34 @@ incoming diagnostic requests; until it is known the request is broadcast. The
   retry above therefore only bites for genuine driver errors. A true
   delivery-confirmed path would need unicast (as the diagnostics already use).
 
+## Sender: the ESP-NOW channel is remembered (v0.3.0)
+- The sender has no channel of its own. The receiver's SoftAP is the channel
+  lighthouse; the sender learns the channel by scanning for the SSID
+  `ESP32-IR-Meter` (`scan_receiver_ap_channel()`). The learned value used to
+  live only in the RAM static `g_espnow_channel`, so every boot restarted from
+  `CONFIG_ESPNOW_CHANNEL` and re-ran discovery:
+  - the boot scan waits up to **30 s** in a 1 s loop for the AP to appear
+    (`initialize_wifi_and_espnow()`), and
+  - a miss pins the compile-time channel until the link watchdog notices the
+    silence (60 s + grace) and re-aligns.
+- Fix: `main/espnow_channel_store.{c,h}` persists the last good channel in NVS
+  (record `{magic, version, channel, checksum}`, channel valid **1..13**; the
+  format is pure C and host-tested, the NVS binding mirrors `wall_clock_store.c`).
+  On boot the sender seeds `g_espnow_channel` from it and runs the scan **once**
+  instead of 30 times; the periodic re-align still heals a later router channel
+  change, so a stale stored value can never strand the link.
+- Persisted at every successful learn (`espnow_align_channel_from_receiver_ap()`
+  — boot scan, periodic re-align, link fallback). Never written from the Wi-Fi
+  event handler (NVS I/O there would block the event task); the STA-connected
+  path only sets the RAM value.
+- With no stored value the old, patient loop runs unchanged — this can only make
+  the boot faster, never slower. Tag `v0.3.0`; host test
+  `test/test_espnow_channel_store.c` (26 checks, forked "reboot").
+- **Enables, but does not yet do**, `CONFIG_ESPNOW_RECEIVER_DISABLE_AP`: with the
+  channel in NVS the sender no longer depends on the AP at boot, so the receiver
+  could run station-only. That switch is still **not** applied (see the Kconfig
+  help and the open TODO item).
+
 ## History backfill (receiver pulls the sender's minutes)
 - Both roles persist their own minute history (`power_history.c`). When the
   receiver misses minutes (radio gap, sleep, a restart of either side) it asks
@@ -612,6 +646,43 @@ incoming diagnostic requests; until it is known the request is broadcast. The
    zurück. Kein Messverlust. Der Ring ist jetzt 256 groß; die Meldung heißt
    „DISPLAY GAP", nicht mehr „VALUE GAP".
 
+## Flash budget / lean config
+- The 4 MB flash is ~98 % allocated (2×1.5 MB OTA + 896 KB SPIFFS) and the
+  receiver image used to fill 84.6 % of its 1.5 MB slot, so unused IDF defaults
+  that still get linked are real cost. `sdkconfig.defaults` ("Flash diet")
+  disables IPv6 and the WPA3/SAE/OWE/Enterprise Wi-Fi family: measured **−78 KB**
+  on the receiver (84.6 % → 79.4 %) and **−90 KB** on the sender. Neither feature
+  is used (no IPv6 code; SoftAP is `WIFI_AUTH_WPA2_PSK`; ESP-NOW is a separate
+  CCMP link layer, not SAE).
+- **Do not disable `CONFIG_ESP_WIFI_MBEDTLS_CRYPTO`**: WPA2 needs it. The OWE
+  options `select` it, so turning the WPA3 family off would drop it - that is why
+  it is pinned `=y` in `sdkconfig.defaults`. Keep
+  `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` too (pull OTA trusts the public CA).
+- Delta OTA (`espressif/esp_delta_ota`, 7.3 KB flash, 0 B static RAM) builds
+  cleanly on IDF v6.1 and shrinks an update from 1.25 MB to ~88 KB (measured,
+  no compression beats heatshrink). It saves **transfer, not flash**: both OTA
+  slots still hold a full image. Not integrated yet - see TODO.md.
+- **The app was built with `-Og`, not `-Os`.** IDF's default
+  `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` was never overridden, so the receiver
+  image was 86 KB (sender 55 KB) larger than necessary. This is now fixed in
+  `sdkconfig.defaults` (`CONFIG_COMPILER_OPTIMIZATION_SIZE=y`), together with the
+  CMN certificate bundle and the mDNS/MQTT trims - all config, no source change.
+  Combined, the receiver went 1251280 -> 1095424 B (-152 KB, 79.4 % -> 69.6 %)
+  and the sender 851056 -> 792624 B (-57 KB). Rebuild with
+  `tools/build.sh <role> --clean`: an existing `sdkconfig.<role>` keeps the old
+  values, SDKCONFIG_DEFAULTS only seeds a fresh config. Trade-off: optimised code
+  is harder to single-step; flip back to DEBUG when chasing a bench bug.
+- The full CA bundle cost 68 KB (`..._CERTIFICATE_BUNDLE_DEFAULT_FULL=y`, 145
+  roots). The CMN bundle is 41 roots / 16.7 KB (measured in the ELF) and still
+  has both Let's Encrypt roots (ISRG X1/X2), which is all `main/ota_policy.c`
+  (any `https://`) and the sandbox frontend need. Assertion level 2->1 (~12 KB)
+  and `ESP_ERR_TO_NAME_LOOKUP=n` (~2 KB) were deliberately left alone - the
+  assert text is worth more than 14 KB on a device without USB.
+- **Two map traps:** a library listed only in the `LOAD` preamble of
+  `esp32-IR.map` (e.g. `libmesh.a`) is a *link candidate*, not linked - check
+  `idf.py size-components` instead. And a huge `.rodata.*.str1.4` entry in the
+  map is the merged string pool, not one object's data.
+
 ## Managed components (IDF v6)
 - ESP-IDF v6 moved ESP-MQTT and cJSON out of the core. They come from the ESP
   Component Registry (`espressif/mqtt`, `espressif/cjson`) via
@@ -677,7 +748,20 @@ alle host-getestet:
   **passiv**, bis der Selbst-Probe **einmal** geklappt hat (`probe_works`); ein
   Build ohne funktionierenden Loopback rebootet kein gesundes Gerät. Status im
   Console-Kommando `status` (`web health: guarded/passive, last activity … ms,
-  restarts …`). `max_open_sockets` auf 10 erhöht (Headroom für die Probe).
+  restarts …`). `max_open_sockets = CONFIG_LWIP_MAX_SOCKETS - 3` (httpd keeps 3
+  for itself); `CONFIG_LWIP_MAX_SOCKETS=16` gives 13 usable sockets (was 7 with
+  the IDF default of 10, which let the pool run dry under the dashboard's
+  parallel polls + the probe and produced `accept (23)` = ENFILE).
+
+### Socket-Erschöpfung `accept (23)` (2026-10-22)
+`httpd_accept_conn: error in accept (23)` ist **ENFILE**: der lwIP-Socket-Pool ist leer.
+`start_webserver()` setzt `max_open_sockets = CONFIG_LWIP_MAX_SOCKETS - 3` (httpd hält 3
+Sockets selbst) — bei `CONFIG_LWIP_MAX_SOCKETS=10` also nur **7** nutzbar, und das reichte
+unter den parallelen Dashboard-Polls + der Web-Probe nicht. `CONFIG_LWIP_MAX_SOCKETS=16`
+in `sdkconfig.defaults` → 13 nutzbar (Commit `51a0ee4`). Die `104` daneben ist
+**ECONNRESET** (Client gibt auf), die fehlgeschlagene Probe ist die Folge, nicht die Ursache.
+`MEMP_NUM_NETCONN` folgt `CONFIG_LWIP_MAX_SOCKETS` (`lwipopts.h`), Kosten nur ein paar
+hundert Byte statisches RAM.
 
 
 ## 🔨 BAUAUFTRAG (2026-10-14): History-Dubletten nach Backfill
@@ -790,3 +874,208 @@ dem Odroid, Key in KEY, Doku in README.md).
   esp32-channel, pollt alle 5 s). Skripte auch unter /files/odroid_agent.sh.
 - Damit ist der serielle Web-Monitor (/console, POST /api/console) und der
   OTA-Pull (POST /api/ota-pull) am echten Geraet aus dem Chat bedienbar.
+
+## ESP32-Fehlerdiagnose (Odroid, wiederkehrend)
+- Skript: `/usr/local/sbin/esp32_diag.py` (stdlib, kein USB). Fragt den Empfaenger
+  (`192.168.178.70`) per HTTP ab und zieht Sender-Daten ueber dessen Proxy
+  (`/api/sender`), weil der Sender keine eigene IP hat.
+- Units: `esp32-diag.timer` (alle 10 min, `OnBootSec=90s`) + `esp32-diag.service`
+  (oneshot, `SuccessExitStatus=0 2`). Exit 2 = CRITICAL-Befund, kein Dienstfehler.
+- Ausgabe: Journal (`journalctl -u esp32-diag`), State `/var/lib/esp32-diag/state.json`,
+  Verlauf `/var/lib/esp32-diag/history.jsonl`. Manuell: `esp32_diag.py --print`.
+- Befunde je Lauf: `receiver-unreachable` (CRIT), `sender-no-answer` (CRIT, /api/sender
+  504), `sender-uart-dead` (CRIT, `uart_rx_bytes=0`), `no-sml-frames` (WARN),
+  `version-skew` (WARN), `sender-rebooted`/`sender-queue-drops` (WARN, Zustandsvergleich).
+- Schwellen: `TH_SENDER_SILENT_S=120`, `TH_HEAP_LOW=20 KiB`, `TH_STORAGE_DROPS_DELTA=50`,
+  `TH_UPTIME_RESET_S=120`. Empfaenger-IP via `ESP32_RECEIVER` ueberschreibbar.
+- OFFENER BEFUND (2026-10-21): `sender-uart-dead` — der Sender liest 0 Bytes vom
+  SML-Zaehler; das ist der naechste zu behebende Bug (nicht der Reachability-Fix).
+
+## Bootlog (/bootlog) — SML-Chatter unterdrueckt
+- `main/boot_log.{c,h}` haelt die letzten ~6 kB Log in einem RAM-Ring; der Permalink
+  ist `/api/bootlog` (Header `X-OTA-Key`).
+- Pro CRC-gueltigem Telegramm loggt die Firmware `SML value: OBIS=... ` (main.c:2935).
+  Diese hohe Rate fuellte den Ring in Sekunden und verdraengte die Startmeldungen.
+- Loesung: `boot_log_suppress(marker)` (max. 4 Marker, Substring). `app_main` registriert
+  `"SML value:"`; betroffene Zeilen bleiben auf der **Konsole**, fehlen aber im Ring.
+- Nur genau dieser Praefix ist unterdrueckt — andere SML-Zeilen (Fehler, "batch ring
+  full") bleiben im Bootlog. Host-Test: `test/test_boot_log.c`.
+
+## BOOT-Taste: Config-Restore (3 s) / Firmware-Rollback (10 s) – **beide Rollen**
+- Eine gelötete Taste am **BOOT-Pin** (`CONFIG_RECOVERY_BUTTON_GPIO`, Default **0
+  für beide Rollen**; `-1` = aus) treibt zwei Aktionen, unterschieden nach
+  Haltedauer **nach** dem Boot (der ROM sampelt den Strap-Pin beim Download-Mode,
+  daher erst danach beobachten):
+  - **≥3 s, dann loslassen** (`RECOVERY_BUTTON_RESTORE_MS`) → **vorherige Config
+    zurückholen** und rebooten.
+  - **≥10 s gehalten** (`RECOVERY_BUTTON_ROLLBACK_MS`) → **Firmware-Rollback**
+    (`esp_ota_mark_app_invalid_rollback_and_reboot`), auch wenn das laufende Image
+    schon bestätigt war.
+- **Auch der Sender** honoriert die Taste: Er hat kein USB und ist sonst nur per
+  ESP-NOW erreichbar, also ist die Taste dort der lokale Rückweg für ein Image,
+  das nicht weit genug hochkommt, um das Relais-OTA (`/update-sender`) anzunehmen.
+  Die Verdrahtung in `app_main` ist rollen-agnostisch; `recovery_start.c` gatet
+  nur noch auf `CONFIG_RECOVERY_BUTTON_GPIO >= 0`, nicht mehr auf die Rolle.
+  Eine nicht bestückte Taste (Pin hochgezogen) liest sich als „nicht gedrückt".
+- **Restore feuert beim Loslassen**, nicht während des Haltens — sonst würde ein
+  3-s-Halt rebooten, bevor die 10-s-Rollback erreichbar ist. Reine Logik in
+  `main/recovery_button.{c,h}` (host-getestet, `test/test_recovery_button.c`);
+  GPIO/OTA/Callback-Glue in `main/recovery_start.{c,h}` (beide Rollen; `-1` =
+  Stub).
+- **Zwei NVS-Slots im Namespace `rtcfg`:** `cfg` (committed) und **`prev`** (der
+  zuletzt ersetzte committed Wert). Jedes committed `set` legt **vorher** `prev` ab
+  (`runtime_config_store_prev`); die Taste/`restore-config` holen `prev` zurück.
+  Das ist nötig, weil ein `set cpu-min 40` in NVS liegt und ein simpler Reboot es
+  nur erneut anwendet.
+- **Trial-Mode ist davon getrennt:** `trial/cand` hält den *Kandidaten* für
+  `set trial …` und verwirft ihn bei Reset selbst (`main/trial_mode.{c,h}`). `prev`
+  ist der Rückweg für ein *committed* `set` — die beiden nicht verwechseln.
+- **Reihenfolge in `app_main`:** `recovery_set_restore_fn(...)` +
+  `recovery_button_check()` laufen **nach `initialize_wifi_and_espnow()` und VOR
+  `apply_power_management()`** — ein schlechter DFS-Boden hängt genau im Apply, also
+  muss die Rettung vorher greifen. Nicht wieder hinter `boot_confirm_init()` schieben.
+- Konsolenbefehl `restore-config` ruft denselben Pfad (Test/Remote). Ohne `prev`-Slot
+  passiert **nichts** (kein Reboot, Gerät bleibt erreichbar).
+- Grenzfall-Hinweis: `sdkconfig.receiver*` ist **nicht getrackt** (gitignore); die
+  Schwellen kommen aus den Kconfig-Defaults.
+
+## GitHub-Token des Odroid (Agenten)
+- Secret-Datei: `/root/.config/github-bridge/token` (0600). Herkunft/Sinn unklar,
+  Inhalt ist ein fine-grained PAT, login `christiansiebe`.
+- Zugang fuer Agenten: `/etc/gitconfig` registriert den Credential-Helper
+  `/root/.config/github-bridge/git-credential.sh` (liest nur die Datei; kein Secret in
+  einer git-Config/URL). `/root/.bashrc` exportiert `GITHUB_TOKEN`/`GITHUB_WRITE_TOKEN`
+  aus derselben Datei (Agenten-Shells lesen `.bashrc`, HOME ist leer).
+- **Status (2026-10-21 23:xx):** Push **funktioniert wieder** (receive-pack 200,
+  Branch `feat/boot-button-config-restore` gepusht) — der PAT hat offenbar wieder
+  Schreibrechte bzw. wurde getauscht. Früher am selben Tag war er noch read-only
+  (`git push` → HTTP 403). Wenn ein Push mit **403** scheitert, fehlt dem PAT
+  unter *Contents: Read and write*; die Repo-`permissions` der API (`push:true`)
+  sind die *Nutzer*-Rechte, nicht die Token-Scopes.
+
+## Power-History: robust gegen kaputte Datenbank (2026-10-27, ungetaggt nach v0.1.1)
+Ziel: **Eine kaputte/vollgeschriebene SPIFFS-DB darf das Geraet nie mehr
+lahmlegen.** Boot, Web-UI, OTA, Telemetrie laufen immer; im DB-Fehlerfall sind
+nur die DB-Werte weg (leer bzw. nur die neuesten Minuten), der Backfill vom
+Sender fuellt nach. Ausloeser war ein echtes Hardware-Ereignis am Receiver:
+die SPIFFS-Partition war korrupt/voll, **ein einzelnes `fseek` haengte >120 s**
+und der Boot-Repair (`ring_heap_sort`, in-place auf SPIFFS) schickte das Geraet
+in einen TWDT-Boot-Loop.
+*(Diese Aenderung traegt noch keinen Tag; die geflashte Firmware meldet
+`v0.1.1-<N>-g<sha>-dirty`. Seit `v0.1.1` liegen **2 `feat(...)`-Commits**
+ungetaggt (BOOT-Button-Recovery) — nach `VERSIONING.md` ist das ein
+**MINOR-Bump, also `v0.2.0`**, nicht ein PATCH. Die Robustheits-Aenderung
+allein waere ein PATCH, aber ein Tag deckt den ganzen Baum ab.)*
+
+### Die zwei Wurzeln (beide beseitigt)
+1. **In-place-Disk-Heapsort beim Boot.** `ring_heap_sort`/`ring_sift_down`
+   machten tausende `fseek`/`fread`/`fwrite` auf SPIFFS, mit einem Pacer, der
+   nur bei Datentausch zaehlte - auf einem fast-sortierten grossen Ring kam der
+   Watchdog nie dazwischen. **Geloescht** (Funktionen entfernt).
+2. **Repair lief synchron im Boot (`power_history_init`).** Der HTTP-Server
+   startet erst nach `power_history_init` - ein haengender Repair blockierte
+   den ganzen Boot.
+
+### Design (main/power_history.c)
+- **`power_history_repair_ring()`** (public, nimmt den Store-Mutex): die einzige
+  Reparatur-Stelle. Kleine Ringe (<= `POWER_HISTORY_REPAIR_RAM_LIMIT` 4096)
+  werden in einem RAM-Buffer sortiert/dedupliziert (bestehender Pfad). **Zu
+  grosse Ringe werden NICHT in-place sortiert, sondern auf die neuesten 4096
+  Records gekuerzt** (RAM-Sort + Kompakt-Schreiben + `finish_repair`). Alte
+  Minuten gehen verloren, der Sender-Backfill importiert sie wieder - ein
+  laufendes Geraet mit kuerzerer Historie schlaegt einen keilenden.
+- **Der Boot ruft den Repair nicht mehr auf.** Ein Hintergrund-Task
+  `power_history_repair_worker` (Prio 1, Stack `POWER_HISTORY_REPAIR_STACK`
+  3072) startet nach dem Writer und verzögert sich um
+  `POWER_HISTORY_REPAIR_DELAY_MS` (10 s) - HTTP/OTA/Telemetrie sind laengst
+  oben. **Bewusst NICHT am Task-Watchdog subscribed**: friert der Repair in
+  einem haengenden SPIFFS-`lseek` ein, rebootet das Geraet nicht - es laeuft
+  mit kaputter DB weiter, der naechste Boot versucht es erneut.
+- Der Pacer (`repair_pacer_step`, Budget `POWER_HISTORY_REPAIR_BUDGET_MS`
+  15000, Yield `POWER_HISTORY_REPAIR_YIELD_STEPS` 2048) bleibt in allen
+  Repair-Schleifen.
+- Tests: `test_history_ring_repair.c` ruft nach `power_history_init()` jetzt
+  explizit `power_history_repair_ring()` (im Firmware-Lauf macht das der
+  Background-Task). `test_full_ring_repair` prueft die neue Semantik: volle
+  DB -> hoechstens `RAM_LIMIT` Records, sortiert, dedupliziert, neueste Minute
+  erreichbar. `run_host_tests.sh` gruen.
+
+### Erfahrungen aus dem echten Fall (Receiver, 2026-10-26/27)
+- **Diagnose eines haengenden Boots:** nicht nur `ping`/HTTP prüfen - die
+  serielle Konsole zeigt den TWDT-Abort (`task_wdt: Aborting.` + Backtrace).
+  `addr2line` (aarch64) auf die Backtrace-Adressen gegen die `.elf` nennt die
+  exakte Stelle (hier: `SPIFFS_lseek` -> `spiffs_obj_lu_find_id_and_span` ->
+  Endlossuche in der Objekt-Table).
+- **Rettungsweg fuer einen gebrickten Receiver (beide OTA-Slots booten nicht):**
+  USB-TTL-Adapter (CP2102) an den Receiver, `esptool --no-stub` (Stub startet
+  auf diesem Chip nicht), dann `erase_region 0x320000 0xE0000` (nur die
+  Storage-Partition!) und die App neu schreiben - die History-Partition ist
+  gemeinsam, die App-Slots sind getrennt. Der Backfill vom Sender fuellt die
+  geleerte DB wieder.
+- **Sender-Telemetrie nach DB-Fehler:** Der Receiver bekommt `caught_up:
+  True` mit dem Sender, sobald die DB leer/frisch ist; der Backfill laeuft nur
+  bei Luecken und ist der Grund fuer die frueheren API-Timeouts (splices).
+
+## History-Ring haengt an fester Schadzone: SPIFFS heilen statt nur umgehen (2026-10-29, v0.2.4)
+
+**Symptom:** Ring wuchs nach dem Start-Repair bis **6295** und blieb dort stehen,
+`write errors` kletterten, im Bootlog
+`History persist failed at shift: errno=2 (No such file or directory)`,
+`spiffs=ok used=178712/836081` (also nur **21 % voll**, kein Platzproblem).
+Vorher (v0.2.2) war es dieselbe Stelle mit **errno=5 (EIO)**.
+
+**Zwei Ursachen, beide behoben:**
+
+1. **Feste Schadzone im SPIFFS-Index.** Ein Hard-Reset mitten im Schreiben
+   (das normale Ausfallmuster dieses Boards) hinterlaesst einen inkonsistenten
+   SPIFFS-Index: Lesen/Schreiben scheitern mit ENOENT/EIO auf **festen**
+   Slots (Datei-Offset ~175 KB, Slots ~6269-6306), obwohl Platz frei ist.
+   Der Ring waechst immer wieder in dieselbe Region und blockiert dort.
+   `power_history_repair_ring()` ruft jetzt zuerst
+   `esp_spiffs_check(POWER_HISTORY_PARTITION)` - das heilt den Index
+   **in-place und behaelt die Daten** (ein `format` wuerde sie verwerfen).
+
+2. **Unlesbare Slots galten nicht als Schaden.** Der Damage-Scan uebersprang
+   sie (`continue`), also wurde ein Ring, dessen **lesbare** Records noch in
+   Ordnung waren, als "gesund" beurteilt - der Repair lief nie, der Ring wuchs
+   wieder in die kaputte Region. Jetzt setzt ein unlesbarer Slot `damaged=true`;
+   der Repair wirft ihn weg und kompaktiert den Rest.
+
+**Akut-Reparatur am Geraet (durchgefuehrt):**
+- Historie vorher per `GET /api/power-history.csv?hours=480` gesichert
+  (`/root/history-backup-20261029/`, 6296 Records).
+- `test storage format` -> leerer Ring, `write errors: 0`.
+- Sender-Backfill holte den Ring automatisch neu (chronologisch):
+  210 -> 8751 Records in ~25 min, **`write errors: 0`** durchgehend.
+  Der Ring durchbrach die alte Wand bei 6295 ohne Stocken.
+- **Der CSV-Upload-Weg (`POST /api/power-history-upload`) ist fuer 270-KB-
+  Backups unzuverlaessig:** er brach mit `{"error":"Could not read CSV body",
+  "parsed":64}` ab (Socket-Timeout). Der Sender-Backfill ist die robustere
+  Quelle - einfach laufen lassen (`pull` / `db-refresh`).
+
+**Verifikation (nachweislich):**
+- Ring waechst **1 Record/Minute** im Takt der Uhr, `write errors: 0`
+  (8751 -> 8764 ueber ~13 min gemessen).
+- 24h-Graph: **120 Punkte, `busy: false`, 12/12 Abfragen** (vorher zeitweise
+  `busy`/leer).
+- `db-refresh`: `caught_up: true`, `lag_seconds: 0`.
+- OTA v0.2.4 (`POST /update`, 8,8 s, HTTP 200): Ring **ueberlebte** den Reboot
+  (8751 Records, 0 Fehler).
+
+**Tests:** `test/run_host_tests.sh` -> **47 Suiten gruen** (vorher 46).
+Neu: `test_corrupt_slot_triggers_repair` (+16 Checks) - ein Ring mit **einem**
+korrupten Slot (CRC kaputt) muss repariert werden. **Negativprobe:** ohne den
+`damaged=true`-Fix faellt der Test (`FAIL: repair dropped the corrupt slot`).
+Aufruf im Runner: `test_history_ring_repair` (default), `full`, **`corrupt`**.
+
+**Merker fuer die Diagnose:**
+- `errno=2 (ENOENT)` **und** `errno=5 (EIO)` auf festen Slots bei niedrigem
+  `used` = SPIFFS-Index-Schaden -> `esp_spiffs_check()`, nicht `format`.
+- `spiffs=ok used=.../...` in der Fehlerzeile: `ok` heisst nur "mountbar",
+  **nicht** "konsistent". Der Index kann trotzdem kaputt sein.
+- `write errors` + `splices: 0` + stagnierender `records`-Wert = der Ring
+  steht, nicht der Backfill.
+- `build_version.h` ist **gitignored** (generiert) - der Versions-Bump wird
+  nicht committet, das ist normal (war bei v0.2.3 genauso).
+- v0.2.3 wurde nie committet/getaggt; seine Heap-Fix-Aenderungen sind in
+  `c431d2f` (Tag **v0.2.4**) mit drin.

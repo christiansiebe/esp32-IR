@@ -215,6 +215,42 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_link_fallback"
 
+# Sender home-WLAN RSSI log: the pure due/period bookkeeping and the sample ring
+# (no early sample, a backwards clock must not busy-loop, min/max/average over
+# valid samples only, the ring rolls instead of overflowing).
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/wifi_rssi_log.c" \
+    "$here/test_wifi_rssi_log.c" \
+    -o "$out/test_wifi_rssi_log"
+
+"$out/test_wifi_rssi_log"
+
+# Receiver Wi-Fi link watchdog: a lost association/IP must escalate to a
+# reconnect and then a reboot instead of leaving the device silently offline
+# (web_guard only probes the loopback and never notices a dead link). Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/net_watchdog.c" \
+    "$here/test_net_watchdog.c" \
+    -o "$out/test_net_watchdog"
+
+"$out/test_net_watchdog"
+
+# Trial mode: a risky runtime knob must commit only after a healthy window and
+# revert immediately on a health failure; a pending marker at boot always drops
+# the candidate. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/trial_mode.c" \
+    "$here/test_trial_mode.c" \
+    -o "$out/test_trial_mode"
+
+"$out/test_trial_mode"
+
 # Sender parser stall recovery: a wedged SML parser (bytes arriving, no telegram
 # finalised) must be reset by a timer armed by the first byte of the capture, not
 # by a telegram - the old rule left a wedge on the first telegram of a boot
@@ -355,6 +391,22 @@ trap 'rm -rf "$out"' EXIT
 "$out/test_history_ring_repair"
 # Full ring (29000) unsorted + duplicates -> forces the in-place disk sort.
 "$out/test_history_ring_repair" full
+
+# Remembered ESP-NOW channel: the record/checksum math plus the real NVS store
+# driven through a file-backed NVS shim. A forked "reboot" proves the sender
+# starts on the channel it worked on last time instead of re-running the boot
+# scan.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DESPNOW_CHANNEL_TEST_DIR="\"$out/espnowch\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/espnow_channel_store.c" \
+    "$here/test_espnow_channel_store.c" \
+    -o "$out/test_espnow_channel_store"
+
+"$out/test_espnow_channel_store"
 
 # Last known wall clock: the record/clock math plus the real NVS store driven
 # through a file-backed NVS shim. A forked "reboot" proves the clock is seeded

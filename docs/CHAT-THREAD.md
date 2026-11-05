@@ -26,6 +26,89 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-10-22 00:35 UTC · Bau-Chat (Branch feat/boot-button-config-restore, Commit 5106ab5)
+**Nachtrag: Taste gilt jetzt auch für den Sender.**
+Die Verdrahtung in `app_main` war bereits rollen-agnostisch (beide Rollen rufen
+`recovery_set_restore_fn()` + `recovery_button_check()`); nur `recovery_start.c`
+gatete die echte Implementierung hinter `!CONFIG_ESPNOW_ROLE_SENDER` → Sender
+kompilierte zu No-op-Stubs. Gate geöffnet. `RECOVERY_BUTTON_GPIO`-Default jetzt
+**0 für beide Rollen** (Onboard-BOOT-Taste); `-1` schaltet weiter auf Stubs.
+Begründung: Der Sender hat kein USB und ist sonst nur per ESP-NOW erreichbar —
+ohne Taste gibt es für ein Image, das nicht weit genug hochkommt, um das
+Relais-OTA (`/update-sender`) anzunehmen, **keinen** lokalen Rückweg. GPIO0 ist
+Strapping-Pin, wird aber erst nach der ROM-Download-Mode-Entscheidung
+beobachtet; eine nicht bestückte Taste (Pin hochgezogen) liest sich als „nicht
+gedrückt". Der `rtcfg/prev`-Slot und der Restore-Callback sind geteilter Code,
+der Sender erbt also dasselbe Ein-Schritt-zurück.
+- Sender-Build grün (940304 B, Button-Strings im Image), Receiver unverändert
+  1330080 B, Host-Suite grün.
+- CI-Syntaxcheck prüft jetzt **beide** Rollen (GPIO 0) **und** den Stub (GPIO -1).
+- **Noch nicht geflasht**: der Sender hängt am Messpunkt ohne USB → Flash über
+  `/update-sender`. Damit die Taste im Feld wirkt, muss der Sender das Image
+  bekommen. Physischer Tastentest (3 s / 10 s) weiterhin offen.
+
+**Frage des Nutzers zum SoftAP (Antwort, weil schon einmal schiefgegangen):**
+Der AP ist **standardmäßig AN** (`CONFIG_ESPNOW_RECEIVER_DISABLE_AP` default `n`,
+live bestätigt: „AP started: SSID=ESP32-IR-Meter, channel=1"). Ein **Laufzeit**-Aus
+des AP wurde am 2026-10-17 gebaut (`04add16`) und **zurückgenommen** (`71409c8`),
+weil er den ESP-NOW-Link killte: die Empfänger-Peers liegen auf `WIFI_IF_AP`
+(`ESPNOW_IF`), und `wifi_set_ap_enabled(false)` = `esp_wifi_set_mode(WIFI_MODE_STA)`
+reißt das AP-Interface ab → jeder Austausch (diag, Backfill, OTA, Broadcast) stoppt
+still nach `STA_GOT_IP` (am Gerät belegt). Ein AP-Aus geht nur **compile-time**
+(`CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y`), dann läuft ESP-NOW auf `WIFI_IF_STA` und
+es gibt gar kein AP-Interface zum Abreißen — aber dann muss der Router fest auf
+`CONFIG_ESPNOW_CHANNEL` (1) stehen. Siehe TODO-Abschnitt „Empfänger AP aus".
+
+## 2026-10-21 23:20 UTC · Bau-Chat (Branch feat/boot-button-config-restore, Commit 40538a9)
+**Auftrag:** BOOT-Taste am Empfänger – ≥3 s halten = **vorherige Laufzeit-Config
+zurückholen**, ≥10 s halten = **vorherige Firmware zurückrollen**; „zwei Werte in
+NVS" (aktuell + experimentell); zuerst nur der Empfänger; wenn nicht in GitHub
+baubar, **auf der Odroid bauen und flashen**; Version ab `0.1.1-2` fortsetzen.
+**Ergebnis: gebaut, OTA-geflasht und live verifiziert – `v0.1.1-4-g40538a9`.**
+
+**Basis-Entscheidung:** Die laufende Firmware (`v0.1.1-2-gcad898c`) stammt von
+**`fix/integration`**, nicht von `main` (die Branches sind divergiert; `main` hat
+den Tag `v0.1.1` gar nicht und würde Net-Watchdog + Link-Re-align verlieren).
+Branch daher von **`cad898c`** abgezweigt.
+
+**Wichtigster Befund (Dubletten-Regel):** Das „zwei Werte in NVS"-Konzept war auf
+dieser Basis **schon halb vorhanden** – der **Trial-Mode** (`main/trial_mode.{c,h}`,
+`set trial …`, NVS `trial/cand`) hält den *Kandidaten* neben der committed Config
+(`rtcfg/cfg`) und verwirft ihn bei Reset selbst. Es wurde deshalb **nicht** ein
+zweites Mal gebaut. Die echte Lücke war der **Rückweg für ein *committed* `set`**:
+ein `set cpu-min 40` liegt in NVS und wird nach jedem Reboot erneut angewandt – ein
+Reboot hilft also gerade nicht. Genau dafür ist die Taste da.
+
+**Gebaut (Empfänger):**
+- Neuer NVS-Slot **`rtcfg/prev`**: jedes committed `set` legt **vorher** den
+  ersetzten Wert ab (`runtime_config_store_prev`). Der Trial-Mode bleibt unberührt
+  (er deckt den *Kandidaten*-Slot, `prev` den *committed*-Rückweg).
+- `recovery_button.{c,h}`: zwei Schwellen, `RECOVERY_RESTORE` **beim Loslassen**
+  (≥3 s, <10 s), `RECOVERY_ROLLBACK` ab 10 s. Restore-on-release ist zwingend –
+  sonst würde ein 3-s-Halt neu starten, bevor die 10-s-Rollback erreichbar ist.
+- `recovery_start.{c,h}`: pollt beide Fenster, ruft einen registrierten
+  Restore-Callback (Glue bleibt NVS-frei); Sender-Zweig weiter Stub.
+- `app_main`: Prüfung **vor `apply_power_management()`** verschoben (der alte
+  Aufruf bei `boot_confirm_init()` kam zu spät – ein schlechter DFS-Boden hängt
+  genau im Apply). Neuer Konsolenbefehl `restore-config` (gleicher Pfad wie die
+  Taste).
+- Kconfig `RECOVERY_BUTTON_HOLD_MS` → `RECOVERY_BUTTON_RESTORE_MS` (3000) +
+  `RECOVERY_BUTTON_ROLLBACK_MS` (10000); CI-Syntaxcheck angepasst.
+- Host-Test `test/test_recovery_button.c` neu (22 Checks), volle Host-Suite grün.
+
+**Verifikation am Gerät (Odroid, 192.168.178.70):**
+`set retries 5` → committed; `restore-config` (= 3-s-Taste) → Reboot → `config`
+wieder **`retries=3`**. **SPIFFS-Historie unversehrt** (9390/29000, `write
+errors: 0`, Sequence weiter bei 10773). Grenzfall **ohne `prev`** (nach
+`reset-config`): kein Reboot, Gerät bleibt sofort erreichbar. Physischer
+3-s/10-s-Tastentest steht noch aus.
+
+**Push + CI:** Branch gepusht (Commit `fcff403`); CI **grün** (Run `39678171966`:
+Build receiver / receiver-apoff / sender + Host-Tests, alle `success`). Noch
+**kein PR** gestellt. Versionssprung ergibt wegen einer **separaten**
+WDT-Korrektur (`f475c01`) `v0.1.1-4` statt `-3`; beide Commits sind echte
+Änderungen. Sender bekommt die Taste später (kein USB → Relais-OTA-Rettung).
+
 ## 2026-10-18 21:20 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 57e010b)
 **Nachtrag 2 zu PR #32:** `main` ist erneut weitergelaufen (`#48` Sender-Link-Fix, `#27`
 Recovery-Button, u.a.), der Branch ist wieder **rebasd** auf `b2eaa51`. Konflikt nur in
@@ -621,3 +704,53 @@ CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender), PR `CLEAN`/`MERGE
 **Umsetzung (minimal, PR #55, base main):** read-only Diagnose fuer den Odroid: `print_health.py` (reiner Signal->Ursache-Klassifizierer), `diagnose_print.sh` (VERDICT/CAUSE/FIX), `BLANK-PAGES.md`, Host-Test `test_print_health.py` (24 Checks) in `run_host_tests.sh` eingehaengt.
 
 **Tests:** `./test/run_host_tests.sh` gruen; CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender + Hygiene). Nur `remote-shell/**` + `test/run_host_tests.sh` beruehrt; kein Firmware-Verhalten, kein Flash-Layout, kein Datenverlust.
+
+## 2026-10-20 23:10 UTC · Firmware-Sub-Agent (Branch fix/net-watchdog)
+
+**Punkt:** Nutzer-Meldung "die ESPs gehen still offline, ich kann den Zeitraum nicht festnageln" + Wunsch nach einem Watchdog. Vorhandene Diagnose/Test-Funktionen nicht duplizieren.
+
+**Ursache (belegt):** Kein Waechter beobachtet die **WLAN-Verbindung** des Empfaengers.
+- `web_guard` probt nur `127.0.0.1/healthz` (Loopback antwortet auch ohne WLAN).
+- `health_task` sieht nur SML-Stille + Heap.
+- `link_fallback` deckt nur den ESP-NOW-Peer (Sender-Seite) ab.
+- Der `WIFI_EVENT_STA_DISCONNECTED`-Handler machte **genau einen** `esp_wifi_connect()` und nie einen Retry; kein IP-/Connectivity-Monitor. Der letzte Reset des Empfaengers war ein Task-Watchdog.
+
+**Umsetzung (minimal):** Neues, reines und host-getestetes Modul `main/net_watchdog.{c,h}` + Kleber in `main.c`:
+- Link gesund nur wenn **assoziiert UND IP vorhanden** (neues Flag `g_sta_got_ip`, gesetzt bei `IP_EVENT_STA_GOT_IP`, geloescht bei `IP_EVENT_STA_LOST_IP` und Disconnect).
+- Stufen: `RECONNECT` (`esp_wifi_connect()`) nach `DOWN_MS` (Default 120 s), `REBOOT` ueber `boot_confirm_fail()` (Rollback bei unbest. Image, sonst Reboot) nach `DOWN_MS+REBOOT_MS` (Default +300 s), Grace `GRACE_MS` (120 s). Eine gesunde Meldung setzt alle Stufen zurueck (Flapping rebootet nicht).
+- Empfaenger-only, und nur wenn ein Heim-WLAN konfiguriert ist (AP-only bleibt unberuehrt). `Kconfig.projbuild` + `CMakeLists.txt` ergaenzt, `status`-Konsole um eine Zeile "network watchdog" erweitert.
+
+**Tests:** `test/test_net_watchdog.c` (229 Checks, 0 Failures) in `run_host_tests.sh` eingehaengt; gesamte Host-Suite gruen. Kein `idf.py` lokal -> Build-Nachweis ueber CI. Sender-Build unveraendert, `storage` unangetastet, kein Datenverlust.
+
+**OFFEN:** Commit liegt lokal auf `fix/net-watchdog` (f166d7b), **nicht gepusht** - in dieser Sandbox ist kein GitHub-Write-Token vorhanden (`GITHUB_TOKEN`/`GITHUB_WRITE_TOKEN` leer, kein Credential-Helper). Push + CI-Build + OTA-Flash stehen noch aus.
+
+## 2026-10-21 17:50 UTC · Kontroll-Chat (Branch fix/integration, Commit 4cd31ec)
+
+**Auftrag (Nutzer):** (1) SML-Werte aus dem Bootlog weglassen, damit die Essentials
+sichtbar bleiben; (2) GitHub-Schreib-Token auf dem Odroid fuer die Agenten zugaenglich
+machen; (3) Meldung "Receiver ist wieder weg" pruefen.
+
+**(1) Bootlog-Filter — umgesetzt.** `main/boot_log.{c,h}`: neue Suppress-Liste
+(`boot_log_suppress(marker)`, max. 4) + `boot_log_capture_line()`, das der Hook jetzt
+aufruft. Treffer werden **nur aus dem RAM-Ring** gehalten, bleiben auf der Konsole.
+`app_main` registriert `"SML value:"` — die pro-Telegramm-Zeile (`ESP_LOGI(TAG,
+"SML value: OBIS=... ")`, `main.c:2935`) fuellte den ~6 kB-Ring in Sekunden und
+verdraengte die Startmeldungen, genau woran `/bootlog` krankt. Andere SML-Zeilen
+(Fehler, "batch ring full") bleiben erhalten.
+
+**(2) Token — Mechanik gebaut, aber BLOCKER:** Der einzige gefundene Token
+(`/root/.config/github-bridge/token`, fine-grained PAT, login `christiansiebe`) ist
+**read-only**: `git-upload-pack` → HTTP 200, `git-receive-pack` → **HTTP 403**. Die
+API-`permissions` zeigen `push:true`, das sind aber nur die *Nutzer*-Rechte, nicht die
+Token-Scopes. Zugang eingerichtet via `/etc/gitconfig` (Credential-Helper
+`/root/.config/github-bridge/git-credential.sh`, liest die 0600-Datei; kein Secret in
+einer git-Config/URL) und `/root/.bashrc` (`GITHUB_TOKEN`/`GITHUB_WRITE_TOKEN` aus der
+Datei) — mehr geht nicht, solange der PAT kein `contents:write` hat. **Push bleibt offen**;
+Nutzer muss am PAT `Contents: Read and write` setzen.
+
+**(3) Receiver** war waehrend der ganzen Session erreichbar (`/healthz` 200,
+`uart_rx_bytes` steigend, zuletzt ~2,48 MB). Der Ausfall war **transient** — passt zum
+TODO-Befund (Router-Kanalwechsel, ~6 h Stillstand), kein neuer Reachability-Bug.
+
+**Tests:** Host-Suite gruen inkl. neuer `test/test_boot_log.c` (6 Checks); Builds
+`tools/build.sh receiver` (1329280 B) und `sender` (935312 B) mit IDF v6.1 ok.

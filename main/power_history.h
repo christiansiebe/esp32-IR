@@ -16,13 +16,26 @@
  * the partition size with components/spiffs/spiffsgen.py. */
 #define POWER_HISTORY_CAPACITY 29000u
 
-/* Largest store the startup repair sorts in one RAM buffer (count * 28 B). A
- * bigger store is sorted in place on disk with O(1) RAM, so a full ring is
- * repaired too. Kept low enough that the buffer fits the free heap next to the
- * Wi-Fi stack on a no-PSRAM ESP32. */
-#define POWER_HISTORY_REPAIR_RAM_LIMIT 4096u
+/* Largest store the startup repair sorts in one RAM buffer (count * 28 B). The
+ * buffer is additionally clamped to the free heap at run time (see
+ * repair_keep_limit()); this value is only the upper bound. Kept low enough
+ * that the buffer can fit next to the Wi-Fi stack on a no-PSRAM ESP32: a fixed
+ * 4096-record buffer is 114 KiB, which no longer fits the ~89 KiB free heap and
+ * made the repair give up (leaving a damaged ring that rejected every new
+ * minute). */
+#define POWER_HISTORY_REPAIR_RAM_LIMIT 2048u
 
 #define POWER_HISTORY_PAGE_SIZE 128u
+
+/* Largest in-ring splice a merge/restore may perform. Inserting a minute below
+ * the local tail rewrites every newer record (shift_up_renumber) while holding
+ * the history mutex, so an unbounded splice is O(ring): a backfill that keeps
+ * merging minutes deep below the tail held the mutex for seconds per session on
+ * a ~12k-record store, starved the writer queue and aborted mid-shift with EIO.
+ * A minute whose insert position is further than this below the tail is dropped
+ * instead (the gap stays, the ring stays sorted and the device stays live).
+ * 512 records is ~1000 SPIFFS reads+writes, well under the reader timeout. */
+#define POWER_HISTORY_MAX_SPLICE_RECORDS 512u
 
 /* SPIFFS mount point and history file. Overridable so the reboot-persistence
  * host test can point the store at a scratch directory instead of the
@@ -95,6 +108,23 @@ typedef struct {
     uint32_t record_count;
     uint32_t queue_drops;
     uint32_t write_errors;
+    /* Write-amplification diagnostic: how many records the ring had to shift
+     * (shift_up_renumber) because a merged minute fell before the local tail,
+     * and how many persist attempts performed such a splice. A backfill that
+     * pulls minutes older than the newest stored one rewrites every newer
+     * record on SPIFFS, so a large splice_records/splice_batches ratio next to
+     * a full partition is the signature of a GC-starved, thrashing store. */
+    uint32_t splice_batches;
+    uint32_t splice_records;
+    /* Minutes a merge/restore refused to insert because the splice would have
+     * exceeded POWER_HISTORY_MAX_SPLICE_RECORDS (too far below the tail). A
+     * non-zero value next to a stalled cursor names a backfill that is asking
+     * for minutes the ring can no longer take in order. */
+    uint32_t splice_skipped;
+    /* SPIFFS fill at init, so "is the partition nearly full" is visible in the
+     * status/diag without a separate query. */
+    uint32_t storage_used_bytes;
+    uint32_t storage_total_bytes;
 } power_history_status_t;
 
 typedef struct __attribute__((packed)) {
@@ -115,6 +145,15 @@ void power_history_make_fresh_header(power_history_header_t *header);
 bool power_history_header_is_valid(const power_history_header_t *header);
 
 esp_err_t power_history_init(void);
+
+/* Reformat the persistent storage partition and recreate the history file with
+ * fresh (empty) headers. Used to repair a ring whose file is physically
+ * damaged (unreadable slots); the sender backfill re-imports the minute
+ * history afterwards. The running writer and the queue are left intact, so
+ * fresh measurements keep being recorded during and after the format.
+ * Returns ESP_OK once the fresh headers are on disk. */
+esp_err_t power_history_format(void);
+
 bool power_history_enqueue(const power_history_record_t *record);
 
 /* Observer for records that were just persisted (newly placed, not a duplicate).
@@ -155,6 +194,24 @@ esp_err_t power_history_merge(const power_history_record_t *records, size_t coun
 esp_err_t power_history_import_sorted(const power_history_record_t *records,
                                       size_t count, size_t *imported_out,
                                       size_t *skipped_out);
+
+/* Repair the ring once (sort by minute, drop duplicate minutes, renumber
+ * sequences). Runs in its own low-priority background task shortly after
+ * boot; callers that want a synchronous pass (tests, the console) may call it
+ * directly. It never blocks the boot: a damaged/full SPIFFS store can make a
+ * single lseek hang for minutes, so this runs only when HTTP/OTA/telemetry
+ * are already up, yields to the scheduler regularly, and the too-large-store
+ * case keeps only the most recent records instead of sorting in place on
+ * disk. Returns ESP_OK when the ring is left sorted and duplicate-free, or
+ * when there was nothing to repair. */
+esp_err_t power_history_repair_ring(void);
+
+/* Records the startup repair may hold in one RAM buffer for a given largest
+ * free heap block: the compile-time upper bound (POWER_HISTORY_REPAIR_RAM_LIMIT)
+ * clamped to (block - POWER_HISTORY_REPAIR_HEAP_HEADROOM). Pure, so the host
+ * test can drive the shrink path with any heap size. */
+uint32_t power_history_repair_keep_limit_for(size_t largest_free_block,
+                                             uint32_t upper);
 
 #ifdef POWER_HISTORY_TEST_HOOKS
 /* Test-only: set the store metadata without SPIFFS so the merge decision can be

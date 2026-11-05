@@ -9,6 +9,12 @@
 #include "freertos/semphr.h"
 
 #define BOOT_LOG_CAPACITY 6144
+#define BOOT_LOG_MAX_SUPPRESS 4
+
+/* Substrings whose lines are kept out of the ring. Pointers have static
+ * lifetime (callers pass string literals). */
+static const char *s_suppress[BOOT_LOG_MAX_SUPPRESS];
+static size_t s_suppress_count;
 
 static char s_ring[BOOT_LOG_CAPACITY];
 static size_t s_head;   /* next write index */
@@ -41,6 +47,35 @@ static void boot_log_push(const char *data, size_t len)
     xSemaphoreGive(s_mutex);
 }
 
+void boot_log_suppress(const char *marker)
+{
+    if (marker == NULL || marker[0] == '\0') {
+        return;
+    }
+    if (s_suppress_count >= BOOT_LOG_MAX_SUPPRESS) {
+        return;
+    }
+    s_suppress[s_suppress_count++] = marker;
+}
+
+static bool boot_log_is_suppressed(const char *line)
+{
+    for (size_t i = 0; i < s_suppress_count; ++i) {
+        if (strstr(line, s_suppress[i]) != NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void boot_log_capture_line(const char *line, size_t len)
+{
+    if (line == NULL || len == 0 || boot_log_is_suppressed(line)) {
+        return;
+    }
+    boot_log_push(line, len);
+}
+
 static int boot_log_vprintf(const char *fmt, va_list args)
 {
     /* Always emit to the real console first: the hook must never swallow log
@@ -62,7 +97,7 @@ static int boot_log_vprintf(const char *fmt, va_list args)
         return written;
     }
     size_t take = (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1;
-    boot_log_push(line, take);
+    boot_log_capture_line(line, take);
     return written;
 }
 

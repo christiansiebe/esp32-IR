@@ -42,10 +42,13 @@
 #include "history_upload.h"
 #include "json_escape.h"
 #include "link_fallback.h"
+#include "net_watchdog.h"
 #include "power_history.h"
 #include "energy_totals.h"
+#include "espnow_channel_store.h"
 #include "runtime_config.h"
 #include "sml_selftest.h"
+#include "trial_mode.h"
 #include "version.h"
 #include "wall_clock.h"
 #include "web_console.h"
@@ -65,6 +68,7 @@
 #include "sml_adapter.h"
 #include "tx_batch.h"
 #include "uart_recovery.h"
+#include "wifi_rssi_log.h"
 #endif
 
 static const char *TAG = "espnow_meter";
@@ -243,6 +247,10 @@ static char g_wifi_ssid[WIFI_SSID_MAX_LEN + 1];
 static char g_wifi_password[WIFI_PASSWORD_MAX_LEN + 1];
 static bool g_wifi_configured;
 static bool g_wifi_connected;
+/* True once the station holds an IP. Association alone is not enough: without a
+ * DHCP lease the dashboard is unreachable even though the radio is "connected",
+ * which is exactly the silent-offline case the network watchdog has to catch. */
+static bool g_sta_got_ip;
 static bool g_sntp_started;
 static esp_netif_t *g_ap_netif;
 static esp_netif_t *g_sta_netif;
@@ -361,6 +369,18 @@ static volatile bool g_link_fallback_active;
 static volatile uint8_t g_link_fallback_stage;
 #endif
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Wi-Fi link watchdog: web_guard only probes the loopback and health_task only
+ * looks at the meter data, so a dropped association/DHCP lease leaves the
+ * receiver "online" internally but unreachable from the home LAN. This watches
+ * the actual link and escalates reconnect -> reboot. Receiver only: the sender
+ * has no home WLAN and its link is covered by link_fallback. */
+#if CONFIG_ESPNOW_NET_WATCHDOG
+static net_wd_t g_net_watchdog;
+static volatile bool g_net_watchdog_active;
+#endif
+#endif
+
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* sml_tx_item_t lives in tx_batch.h so the batching ring is host-testable. */
 #include "uart_sleep_window.h"
@@ -433,6 +453,13 @@ static uint32_t g_time_request_count;
 static uint8_t g_receiver_mac[ESP_NOW_ETH_ALEN];
 static bool g_receiver_mac_valid;
 static bool g_uart_silence_reported;
+#if CONFIG_ESPNOW_SENDER_WIFI_RSSI_LOG
+/* Periodic signal-strength log of the home WLAN. The sender is not associated
+ * with it; a scan limited to the current ESP-NOW channel records the RSSI of a
+ * matching beacon without leaving the link's channel. */
+static wifi_rssi_log_t g_wifi_rssi_log;
+static portMUX_TYPE g_wifi_rssi_log_lock = portMUX_INITIALIZER_UNLOCKED;
+#endif
 static espnow_diag_event_t g_diag_events[ESPNOW_DIAG_EVENT_RING];
 static size_t g_diag_event_count;
 static size_t g_diag_event_next;
@@ -464,6 +491,11 @@ static uint32_t g_rssi_latest_sequence;
 static bool g_rssi_capture_active;
 static portMUX_TYPE g_rssi_history_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t g_diag_response_queue;
+/* Serializes every ESP-NOW request/response exchange. The response queue is a
+ * single shared channel, so two concurrent exchanges (the HTTP proxy handlers,
+ * the history-sync worker) would steal each other's replies. One holder at a
+ * time keeps the request_id match meaningful. */
+static SemaphoreHandle_t g_sender_exchange_mutex;
 static uint8_t g_sender_mac[ESP_NOW_ETH_ALEN];
 static bool g_sender_mac_valid;
 static portMUX_TYPE g_sender_mac_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -592,8 +624,8 @@ static void time_sync_notification(struct timeval *tv)
 {
     (void)tv;
     ESP_LOGI(TAG, "System clock synchronized; minute history enabled");
-    /* Trusted source: persist the real time and, on the sender, mark the
-     * offline gap now that it can be bounded. */
+    /* Trusted source: only latch the flag here (SNTP callback context). The
+     * persistence and the boot-marker fill run in the wall-clock worker. */
     wall_clock_mark_trusted();
 }
 
@@ -639,6 +671,10 @@ static int64_t g_wall_clock_last_saved_utc;
  * seeded clock is valid but not trusted, so the offline gap is still marked
  * with the real time once a sync arrives. */
 static bool g_wall_clock_trusted;
+/* Set when the clock first becomes trusted. The wall-clock worker consumes it
+ * and does the flash I/O there: the setter runs inside the ESP-NOW/SNTP
+ * callbacks, where a flash read deadlocks with the Wi-Fi ISR. */
+static bool g_wall_clock_trusted_event;
 
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* Defined with the sender diagnostics / boot-marker block further down. */
@@ -732,16 +768,19 @@ static void wall_clock_mark_trusted(void)
     portENTER_CRITICAL(&g_wall_clock_lock);
     was_trusted = g_wall_clock_trusted;
     g_wall_clock_trusted = true;
-    portEXIT_CRITICAL(&g_wall_clock_lock);
-    if (was_trusted) {
-        return;
+    if (!was_trusted) {
+        g_wall_clock_trusted_event = true;
     }
-#if CONFIG_ESPNOW_ROLE_SENDER
-    /* The real time is in: the offline gap of this boot can now be bounded and
-     * marked (a seeded clock cannot do that - it is too close to "now"). */
-    boot_marker_on_clock_valid();
-#endif
-    wall_clock_persist_if_due();
+    portEXIT_CRITICAL(&g_wall_clock_lock);
+    /* Deliberately no flash I/O here: this runs inside the ESP-NOW receive
+     * callback (and the SNTP callback). A flash read from the Wi-Fi callback
+     * deadlocks with the Wi-Fi ISR and trips the interrupt watchdog - observed
+     * 2026-10-26, every ~66-89 s on the sender:
+     *   wall_clock_mark_trusted -> boot_marker_fill -> power_history_read ->
+     *   fread -> esp_flash_read, while wDev_ProcessFiq (Wi-Fi ISR) blocked in
+     *   vPortEnterCritical -> spinlock_acquire -> "Interrupt wdt timeout".
+     * The wall-clock worker does the marker fill and the persistence in task
+     * context instead. */
 }
 
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -756,14 +795,32 @@ static bool wall_clock_is_trusted(void)
 }
 #endif
 
-/* Low-rate persistence worker (both roles): refresh the stored clock every
- * WALL_CLOCK_PERSIST_INTERVAL_SECONDS while it is usable, so a power cut or
- * crash never loses more than that. */
+/* Clock persistence worker (both roles). Polls once a second: the persist
+ * itself is gated to WALL_CLOCK_PERSIST_INTERVAL_SECONDS by
+ * wall_clock_persist_if_due(), so the fast poll only exists to react quickly
+ * when the clock first becomes trusted. That transition is signalled by
+ * wall_clock_mark_trusted() from the ESP-NOW/SNTP callbacks, which must not
+ * touch flash; the marker fill happens here, in task context. */
 static void wall_clock_worker(void *arg)
 {
     (void)arg;
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(60000));
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        bool trusted_event;
+        portENTER_CRITICAL(&g_wall_clock_lock);
+        trusted_event = g_wall_clock_trusted_event;
+        g_wall_clock_trusted_event = false;
+        portEXIT_CRITICAL(&g_wall_clock_lock);
+#if CONFIG_ESPNOW_ROLE_SENDER
+        if (trusted_event) {
+            /* The real time is in: the offline gap of this boot can now be
+             * bounded and marked (a seeded clock cannot do that - it is too
+             * close to "now"). Idempotent, and safe here: task context. */
+            boot_marker_on_clock_valid();
+        }
+#else
+        (void)trusted_event;
+#endif
         wall_clock_persist_if_due();
     }
 }
@@ -910,6 +967,7 @@ static void wifi_event_handler(void *arg,
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *event = event_data;
         g_wifi_connected = false;
+        g_sta_got_ip = false;
         ESP_LOGW(TAG, "Wi-Fi station disconnected (reason %u)", event->reason);
 #if CONFIG_ESPNOW_ROLE_SENDER
 #if CONFIG_ESPNOW_SENDER_ASSOCIATE
@@ -935,8 +993,15 @@ static void wifi_event_handler(void *arg,
         ESP_LOGI(TAG, "Setup AP started: http://192.168.4.1/  ->  http://%s.local/",
                  MDNS_HOSTNAME);
         start_mdns();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_LOST_IP) {
+        /* The lease/address is gone even though the radio may still be
+         * associated: the dashboard is unreachable from the home LAN. Clearing
+         * the flag lets the network watchdog treat it as a down link. */
+        g_sta_got_ip = false;
+        ESP_LOGW(TAG, "Home network address lost");
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *event = event_data;
+        g_sta_got_ip = true;
         ESP_LOGI(TAG, "Home network address: " IPSTR "  ->  http://%s.local/",
                  IP2STR(&event->ip_info.ip), MDNS_HOSTNAME);
         start_mdns();
@@ -1001,6 +1066,12 @@ static uint8_t espnow_align_channel_from_receiver_ap(void)
     g_espnow_channel = detected;
     ESP_ERROR_CHECK(esp_wifi_set_channel(g_espnow_channel, WIFI_SECOND_CHAN_NONE));
     ESP_LOGI(TAG, "Using receiver AP channel %u for ESP-NOW", g_espnow_channel);
+    /* Remember it so the next boot starts on the right channel instead of
+     * re-running the 30 s discovery. Failure is harmless: the channel is still
+     * correct for this boot, only the next one would re-discover it. */
+    if (espnow_channel_store_save(g_espnow_channel) != ESP_OK) {
+        ESP_LOGW(TAG, "Could not persist ESP-NOW channel %u", g_espnow_channel);
+    }
     return detected;
 }
 #endif
@@ -1083,6 +1154,8 @@ static void initialize_wifi_and_espnow(void)
                                                wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP,
+                                               wifi_event_handler, NULL));
     ESP_ERROR_CHECK(load_wifi_credentials());
 #if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
     /* Station-only: no SoftAP. The dashboard is reachable over the home WLAN;
@@ -1125,12 +1198,26 @@ static void initialize_wifi_and_espnow(void)
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
+    /* Start on the channel that worked last time so the boot does not wait up to
+     * 30 s for the AP. The scan below still confirms it (and heals a router
+     * channel change); the periodic re-align covers later changes. Without a
+     * stored value the old, patient loop runs unchanged. */
+    uint8_t stored_channel = 0;
+    bool have_stored = false;
+    if (espnow_channel_store_load(&stored_channel, &have_stored) == ESP_OK && have_stored) {
+        g_espnow_channel = stored_channel;
+        ESP_ERROR_CHECK(esp_wifi_set_channel(g_espnow_channel, WIFI_SECOND_CHAN_NONE));
+        ESP_LOGI(TAG, "Starting on the stored ESP-NOW channel %u", g_espnow_channel);
+    }
+
     /* Learn the receiver's SoftAP channel before the first send. This is only a
      * best effort: the receiver may not have its AP up yet, and a stuck channel
      * is repaired later by the link watchdog, so a miss here is not fatal (the
-     * old code gave up permanently after this loop). */
+     * old code gave up permanently after this loop). With a stored channel one
+     * attempt is enough - the fallback below keeps that channel. */
     uint8_t detected_channel = 0;
-    for (unsigned int attempt = 0; attempt < 30 && detected_channel == 0; ++attempt) {
+    unsigned int attempts = have_stored ? 1u : 30u;
+    for (unsigned int attempt = 0; attempt < attempts && detected_channel == 0; ++attempt) {
         detected_channel = espnow_align_channel_from_receiver_ap();
         if (detected_channel == 0) {
             ESP_LOGI(TAG, "Waiting for receiver AP on channel %d", ESPNOW_CHANNEL);
@@ -1646,20 +1733,30 @@ static uint32_t boot_marker_fill(int64_t now_utc, uint8_t reason)
     if (now_utc < 1704067200) {
         return 0; /* clock not valid yet; retried after time sync */
     }
-    /* Newest measured minute currently stored. power_history_read() with a
-     * zero recent_count pages from the oldest record; the last one is the
-     * newest because the store is time ordered. */
-    power_history_record_t page[POWER_HISTORY_PAGE_SIZE];
+    /* Heap, not stack: the page holds POWER_HISTORY_PAGE_SIZE records
+     * (128 * 28 = 3584 bytes), which on its own exceeds the stack of some
+     * callers (the wall-clock worker and the main task). A stack overflow here
+     * would corrupt whatever sits below and is very hard to read from a
+     * backtrace. */
+    power_history_record_t *page =
+        (power_history_record_t *)malloc(sizeof(*page) * POWER_HISTORY_PAGE_SIZE);
+    if (page == NULL) {
+        return 0;
+    }
+    uint32_t written = 0;
     size_t count = 0;
     power_history_status_t status;
     bool overflow = false;
-    if (power_history_read(0, 0, page, POWER_HISTORY_PAGE_SIZE, &count,
-                           &status, &overflow) != ESP_OK) {
-        return 0;
-    }
-    /* Page forward to the newest record (a full store needs several pages). */
     int64_t newest_measured = 0;
     uint32_t last_sequence = 0;
+    /* Newest measured minute currently stored. power_history_read() with a
+     * zero recent_count pages from the oldest record; the last one is the
+     * newest because the store is time ordered. */
+    if (power_history_read(0, 0, page, POWER_HISTORY_PAGE_SIZE, &count,
+                           &status, &overflow) != ESP_OK) {
+        goto done;
+    }
+    /* Page forward to the newest record (a full store needs several pages). */
     while (count != 0) {
         for (size_t i = 0; i < count; ++i) {
             if (page[i].reason == POWER_HISTORY_REASON_NONE &&
@@ -1682,13 +1779,13 @@ static uint32_t boot_marker_fill(int64_t now_utc, uint8_t reason)
         count = next_count;
     }
     if (newest_measured == 0) {
-        return 0; /* cold boot: nothing was measured before, no gap to fill */
+        goto done; /* cold boot: nothing was measured before, no gap to fill */
     }
 
     int64_t boot_minute = now_utc - (now_utc % 60);
     int64_t first_missing = newest_measured + 60;
     if (boot_minute <= first_missing) {
-        return 0; /* no whole missing minute between the two boots */
+        goto done; /* no whole missing minute between the two boots */
     }
     uint32_t minutes = (uint32_t)((boot_minute - first_missing) / 60);
     if (minutes > BOOT_MARKER_MAX_MINUTES) {
@@ -1698,7 +1795,6 @@ static uint32_t boot_marker_fill(int64_t now_utc, uint8_t reason)
         minutes = BOOT_MARKER_MAX_MINUTES;
     }
 
-    uint32_t written = 0;
     for (uint32_t i = 0; i < minutes; ++i) {
         power_history_record_t marker = {0};
         marker.interval_start_utc = first_missing + (int64_t)i * 60;
@@ -1710,6 +1806,8 @@ static uint32_t boot_marker_fill(int64_t now_utc, uint8_t reason)
             ++written;
         }
     }
+done:
+    free(page);
     return written;
 }
 
@@ -2531,22 +2629,17 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
             if ((response.header.flags & ESPNOW_DIAG_SECTION_TIME_SYNC) &&
                 response.valid && response.utc_seconds > 0) {
                 int64_t uptime_us = (int64_t)response.uptime_ms * 1000;
-                bool was_trusted;
                 portENTER_CRITICAL(&g_time_sync_lock);
-                was_trusted = g_utc_trusted;
                 g_utc_offset_us = response.utc_seconds * 1000000 - uptime_us;
                 g_utc_valid = true;
                 g_utc_trusted = true;
                 ++g_time_sync_count;
                 portEXIT_CRITICAL(&g_time_sync_lock);
-                if (!was_trusted) {
-                    /* First *trusted* calibration this session: a boot without a
-                     * clock (e.g. battery change while the receiver was down) can
-                     * now bound its offline window and fill it with boot markers.
-                     * A boot that only had a seeded (approximate) clock has not
-                     * marked the gap yet, so this still runs. */
-                    boot_marker_on_clock_valid();
-                }
+                /* Only flag the transition; the flash work (boot-marker fill
+                 * and clock persistence) runs in the wall-clock worker. Doing
+                 * it here is what crashed the sender: this callback runs in the
+                 * Wi-Fi task/ISR context, where a flash read deadlocks with the
+                 * Wi-Fi ISR (interrupt-wdt panic, 2026-10-26). */
                 wall_clock_mark_trusted();
             }
         }
@@ -3700,7 +3793,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "byId('history-status').textContent=(d.clock_synced?'Netzwerkzeit synchronisiert':'Warte auf Netzwerkzeit')+"
         "' · gespeicherte Minutenwerte: '+d.record_count+' / '+d.capacity+' · letztes: '+latest+"
         "' · aktuelle Messwerte im Intervall: '+d.current_sample_count+"
-        "' · Speicher: '+(d.storage_ready?'bereit':'nicht bereit')+"
+        "' · Speicher: '+(d.busy?'kurz belegt, wird nachgeladen':(d.storage_ready?'bereit':'nicht bereit'))+"
         "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
         "if(typeof d.energy_day_wh==='number'){byId('history-day-info').textContent+=(' · heute '+fmt(d.energy_day_wh/1000,2)+' kWh · Monat '+fmt(d.energy_month_wh/1000,2)+' kWh');}"
         "}catch(e){byId('history-status').textContent='Verlauf nicht verfügbar: '+e;}"
@@ -4214,6 +4307,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     size_t record_count = 0;
     power_history_status_t status;
     bool overflow = false;
+    bool history_busy = false;
     esp_err_t err = power_history_read(after_sequence, recent_count, records,
                                        POWER_HISTORY_PAGE_SIZE, &record_count,
                                        &status, &overflow);
@@ -4228,9 +4322,13 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     } else if (err == ESP_ERR_TIMEOUT) {
         /* Writer/import holds the lock for a long in-place ring insert. Serve an
          * empty snapshot instead of blocking the HTTP task until the browser's
-         * request timeout fires; the dashboard retries on its next poll. */
+         * request timeout fires; the dashboard retries on its next poll. The
+         * `busy` flag tells the UI apart "store is empty" from "store is
+         * momentarily locked" - otherwise a full ring under backfill load looked
+         * like an empty store. */
         record_count = 0;
         status.ready = false;
+        history_busy = true;
         ESP_LOGW(TAG, "Power history busy; serving empty dataset");
     } else if (err != ESP_OK) {
         free(records);
@@ -4272,11 +4370,12 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         bool agg_busy = (agg_err == ESP_ERR_TIMEOUT);
         if (agg_busy) {
             /* Writer/import holds the lock: emit an empty (but valid) aggregated
-             * window instead of blocking the HTTP task. The dashboard retries. */
+             * window instead of blocking the HTTP task. The dashboard retries.
+             * The `busy` flag keeps that apart from a genuinely empty store. */
             status.ready = false;
             ESP_LOGW(TAG, "Power history busy; serving empty aggregation");
         }
-        char agg_header[512];
+        char agg_header[640];
         int agg_header_len = -1;
         double energy_day_wh = 0.0;
         double energy_month_wh = 0.0;
@@ -4290,15 +4389,18 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         if (agg_err == ESP_OK || agg_busy) {
             agg_header_len = snprintf(
                 agg_header, sizeof(agg_header),
-                "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
+                "{\"clock_synced\":%s,\"storage_ready\":%s,\"busy\":%s,\"current_sample_count\":%u,"
                 "\"oldest_sequence\":%lu,"
                 "\"latest_sequence\":%lu,\"record_count\":%lu,"
                 "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
+                "\"splice_batches\":%lu,\"splice_records\":%lu,\"splice_skipped\":%lu,"
+                "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
                 "\"aggregated\":true,\"window_hours\":%.2f,\"bucket_seconds\":%lld,"
                 "\"day_start_utc\":%lld,\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
                 "\"capacity\":%u,\"records\":[",
                 system_time_is_valid() ? "true" : "false",
                 status.persistent ? "true" : "false",
+                agg_busy ? "true" : "false",
                 (unsigned int)current_sample_count_agg,
                 (unsigned long)status.oldest_sequence,
                 (unsigned long)status.latest_sequence,
@@ -4306,6 +4408,11 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 (unsigned long)status.queue_drops,
                 (unsigned long)status.write_errors,
                 overflow ? "true" : "false",
+                (unsigned long)status.splice_batches,
+                (unsigned long)status.splice_records,
+                (unsigned long)status.splice_skipped,
+                (unsigned long)status.storage_used_bytes,
+                (unsigned long)status.storage_total_bytes,
                 window_hours_out,
                 (long long)bucket_seconds,
                 (long long)window_start_utc,
@@ -4369,7 +4476,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     current_sample_count = g_sml_power_sample_count;
     portEXIT_CRITICAL(&g_sml_history_lock);
 
-    char header[448];
+    char header[576];
     double energy_day_wh = 0.0;
     double energy_month_wh = 0.0;
     if (system_time_is_valid()) {
@@ -4381,14 +4488,17 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     }
     int header_len = snprintf(
         header, sizeof(header),
-        "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
+        "{\"clock_synced\":%s,\"storage_ready\":%s,\"busy\":%s,\"current_sample_count\":%u,"
         "\"oldest_sequence\":%lu,"
         "\"latest_sequence\":%lu,\"record_count\":%lu,"
         "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
+        "\"splice_batches\":%lu,\"splice_records\":%lu,\"splice_skipped\":%lu,"
+        "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
         "\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
         "\"capacity\":%u,\"records\":[",
         system_time_is_valid() ? "true" : "false",
         status.persistent ? "true" : "false",
+        history_busy ? "true" : "false",
         (unsigned int)current_sample_count,
         (unsigned long)status.oldest_sequence,
         (unsigned long)status.latest_sequence,
@@ -4396,6 +4506,11 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         (unsigned long)status.queue_drops,
         (unsigned long)status.write_errors,
         overflow ? "true" : "false",
+        (unsigned long)status.splice_batches,
+        (unsigned long)status.splice_records,
+        (unsigned long)status.splice_skipped,
+        (unsigned long)status.storage_used_bytes,
+        (unsigned long)status.storage_total_bytes,
         energy_day_wh,
         energy_month_wh,
         (unsigned int)POWER_HISTORY_CAPACITY);
@@ -5155,6 +5270,19 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
     }
     written += wdt;
 #if !CONFIG_ESPNOW_ROLE_SENDER
+#if CONFIG_ESPNOW_NET_WATCHDOG
+    int net = snprintf(out + written, out_size - (size_t)written,
+                       "network watchdog: %s, link %s\n",
+                       g_net_watchdog_active ? "waiting" : "idle",
+                       (g_wifi_connected && g_sta_got_ip) ? "up" : "down");
+    if (net < 0 || (size_t)net >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+        return;
+    }
+    written += net;
+#endif
+#endif
+#if !CONFIG_ESPNOW_ROLE_SENDER
     int extra = snprintf(
         out + written, out_size - (size_t)written,
         "web health: %s, last activity %u ms ago, restarts %u\n",
@@ -5197,7 +5325,9 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         "storage: %s\n"
         "records: %u / %u\n"
         "sequence: oldest %u, latest %u\n"
-        "write errors: %u, queue drops: %u\n",
+        "write errors: %u, queue drops: %u\n"
+        "splices: %u batch(es), %u record rewrite(s), %u skipped (too deep)\n"
+        "spiffs: %u / %u bytes used\n",
         !status.ready ? "unavailable"
                       : (status.persistent ? "ready (SPIFFS)"
                                            : "RAM fallback (not persistent)"),
@@ -5205,7 +5335,12 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         (unsigned int)status.oldest_sequence,
         (unsigned int)status.latest_sequence,
         (unsigned int)status.write_errors,
-        (unsigned int)status.queue_drops);
+        (unsigned int)status.queue_drops,
+        (unsigned int)status.splice_batches,
+        (unsigned int)status.splice_records,
+        (unsigned int)status.splice_skipped,
+        (unsigned int)status.storage_used_bytes,
+        (unsigned int)status.storage_total_bytes);
     if (written < 0 || (size_t)written >= out_size) {
         snprintf(out, out_size, "history: output truncated\n");
         return;
@@ -5285,6 +5420,35 @@ static void console_cmd_wifi(const char *args, char *out, size_t out_size)
                            "receiver ap: (association disabled)\n"
                            "esp-now channel: %u\n",
                            (unsigned int)g_espnow_channel);
+#endif
+#if CONFIG_ESPNOW_SENDER_WIFI_RSSI_LOG
+    if (written > 0 && (size_t)written < out_size) {
+        portENTER_CRITICAL(&g_wifi_rssi_log_lock);
+        int8_t latest = g_wifi_rssi_log.latest_dbm;
+        int8_t mn = g_wifi_rssi_log.min_dbm;
+        int8_t mx = g_wifi_rssi_log.max_dbm;
+        uint32_t valid = g_wifi_rssi_log.valid_count;
+        uint32_t miss = g_wifi_rssi_log.miss_count;
+        bool have = valid != 0;
+        portEXIT_CRITICAL(&g_wifi_rssi_log_lock);
+        int extra = snprintf(out + written, out_size - (size_t)written,
+                             "home wlan \"%s\": %s\n",
+                             CONFIG_ESPNOW_SENDER_WIFI_RSSI_SSID,
+                             have ? "seen" : "not seen yet");
+        if (extra > 0 && (size_t)extra < out_size - (size_t)written) {
+            written += extra;
+        }
+        if (have && (size_t)written < out_size) {
+            extra = snprintf(out + written, out_size - (size_t)written,
+                             "  rssi: %d dBm (min %d, max %d, avg %d; "
+                             "%lu ok / %lu miss)\n",
+                             latest, mn, mx, wifi_rssi_log_average_dbm(&g_wifi_rssi_log),
+                             (unsigned long)valid, (unsigned long)miss);
+            if (extra > 0 && (size_t)extra < out_size - (size_t)written) {
+                written += extra;
+            }
+        }
+    }
 #endif
 #else
     int written = snprintf(out, out_size,
@@ -5554,25 +5718,67 @@ static bool g_runtime_config_ready;
 
 #define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
 #define RUNTIME_CONFIG_NVS_KEY "cfg"
+/* The config a committed change replaced. Written before every committed store
+ * so the BOOT button (and 'restore-config') can go back one step, which a plain
+ * reboot cannot: the bad value lives in NVS and would just be re-applied. */
+#define RUNTIME_CONFIG_NVS_KEY_PREV "prev"
 #define RUNTIME_CONFIG_NVS_VERSION 1u
 
-static void runtime_config_store(const runtime_config_t *cfg)
+/* One wire layout for the persisted knobs, shared by the committed blob
+ * (rtcfg/cfg) and the trial candidate (trial/cand). */
+static void runtime_config_encode(const runtime_config_t *cfg, uint8_t blob[12])
 {
-    nvs_handle_t handle;
-    if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
-        return;
-    }
-    uint8_t blob[12];
     blob[0] = (uint8_t)RUNTIME_CONFIG_NVS_VERSION;
     blob[1] = cfg->light_sleep ? 1u : 0u;
     blob[2] = (uint8_t)cfg->cpu_mhz;
     blob[3] = (uint8_t)cfg->cpu_min_mhz;
     uint32_t retries = cfg->espnow_retries;
     memcpy(&blob[4], &retries, sizeof(retries));
-    if (nvs_set_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, sizeof(blob)) == ESP_OK) {
+}
+
+/* Returns true when blob is a well-formed, current-version config. */
+static bool runtime_config_decode(const uint8_t blob[12], size_t len,
+                                  runtime_config_t *cfg)
+{
+    if (len != 12 || blob[0] != RUNTIME_CONFIG_NVS_VERSION) {
+        return false;
+    }
+    runtime_config_t loaded = runtime_config_defaults();
+    loaded.light_sleep = blob[1] != 0;
+    loaded.cpu_mhz = blob[2];
+    loaded.cpu_min_mhz = blob[3];
+    uint32_t retries = 0;
+    memcpy(&retries, &blob[4], sizeof(retries));
+    loaded.espnow_retries = retries;
+    runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
+    *cfg = loaded;
+    return true;
+}
+
+static void runtime_config_store_key(const runtime_config_t *cfg, const char *key)
+{
+    nvs_handle_t handle;
+    if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    uint8_t blob[12];
+    runtime_config_encode(cfg, blob);
+    if (nvs_set_blob(handle, key, blob, sizeof(blob)) == ESP_OK) {
         (void)nvs_commit(handle);
     }
     nvs_close(handle);
+}
+
+/* Persist the knobs as the active config. */
+static void runtime_config_store(const runtime_config_t *cfg)
+{
+    runtime_config_store_key(cfg, RUNTIME_CONFIG_NVS_KEY);
+}
+
+/* Remember the config the next committed change replaces. */
+static void runtime_config_store_prev(const runtime_config_t *cfg)
+{
+    runtime_config_store_key(cfg, RUNTIME_CONFIG_NVS_KEY_PREV);
 }
 
 static void runtime_config_erase(void)
@@ -5586,30 +5792,46 @@ static void runtime_config_erase(void)
     nvs_close(handle);
 }
 
-/* Load the persisted knobs, clamped to what this build allows. A missing or
- * malformed blob leaves *cfg untouched (the caller keeps the defaults). */
-static void runtime_config_load(runtime_config_t *cfg)
+/* Load one persisted slot, clamped to what this build allows. Returns false and
+ * leaves *cfg untouched when the slot is missing or malformed. */
+static bool runtime_config_load_key(runtime_config_t *cfg, const char *key)
 {
     nvs_handle_t handle;
     if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
-        return;
+        return false;
     }
     uint8_t blob[12];
     size_t len = sizeof(blob);
-    esp_err_t err = nvs_get_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, &len);
+    esp_err_t err = nvs_get_blob(handle, key, blob, &len);
     nvs_close(handle);
-    if (err != ESP_OK || len != sizeof(blob) || blob[0] != RUNTIME_CONFIG_NVS_VERSION) {
-        return;
+    if (err != ESP_OK) {
+        return false;
     }
-    runtime_config_t loaded = runtime_config_defaults();
-    loaded.light_sleep = blob[1] != 0;
-    loaded.cpu_mhz = blob[2];
-    loaded.cpu_min_mhz = blob[3];
-    uint32_t retries = 0;
-    memcpy(&retries, &blob[4], sizeof(retries));
-    loaded.espnow_retries = retries;
-    runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
+    runtime_config_t loaded;
+    if (!runtime_config_decode(blob, len, &loaded)) {
+        return false;
+    }
     *cfg = loaded;
+    return true;
+}
+
+/* Load the active config. A missing or malformed blob leaves *cfg untouched
+ * (the caller keeps the defaults). */
+static void runtime_config_load(runtime_config_t *cfg)
+{
+    (void)runtime_config_load_key(cfg, RUNTIME_CONFIG_NVS_KEY);
+}
+
+/* Read back the previous committed config. Returns false when no previous slot
+ * exists, so a caller never overwrites the live config with nothing. */
+static bool runtime_config_restore_prev(runtime_config_t *out)
+{
+    runtime_config_t prev;
+    if (!runtime_config_load_key(&prev, RUNTIME_CONFIG_NVS_KEY_PREV)) {
+        return false;
+    }
+    *out = prev;
+    return true;
 }
 
 static runtime_config_t *active_runtime_config(void)
@@ -5620,6 +5842,214 @@ static runtime_config_t *active_runtime_config(void)
         g_runtime_config_ready = true;
     }
     return &g_runtime_config;
+}
+
+/* --- Trial mode -----------------------------------------------------------
+ * A risky knob is applied as a trial: the candidate lives under its own NVS
+ * key, a pending marker survives a reset, and the boot that finds the marker
+ * drops the candidate and keeps the committed config. So a value that bricks
+ * the radio (bad DFS ceiling, a wedged sleep state) reverts on its own - the
+ * reset that the failed trial triggers is exactly what rolls it back. The
+ * decision logic is pure (trial_mode.c, host-tested); this is the glue. */
+#define TRIAL_NVS_NAMESPACE "trial"
+#define TRIAL_NVS_CAND_KEY "cand"
+
+static trial_t g_trial;
+/* SML-loss count when the current trial was armed (see trial_sender_health_ok).
+ * Captured by trial_arm() so the sender's health signal is "did this trial cost
+ * any telegrams", not an association it never has. */
+static uint32_t g_trial_loss_at_arm;
+
+static bool trial_marker_load(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(TRIAL_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return false;
+    }
+    uint8_t blob[12];
+    size_t len = sizeof(blob);
+    esp_err_t err = nvs_get_blob(handle, TRIAL_NVS_CAND_KEY, blob, &len);
+    nvs_close(handle);
+    return err == ESP_OK && len == sizeof(blob);
+}
+
+static void trial_marker_erase(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(TRIAL_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    (void)nvs_erase_key(handle, TRIAL_NVS_CAND_KEY);
+    (void)nvs_commit(handle);
+    nvs_close(handle);
+}
+
+static void trial_marker_store(const runtime_config_t *cfg)
+{
+    nvs_handle_t handle;
+    if (nvs_open(TRIAL_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    uint8_t blob[12];
+    runtime_config_encode(cfg, blob);
+    if (nvs_set_blob(handle, TRIAL_NVS_CAND_KEY, blob, sizeof(blob)) == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+}
+
+/* At boot, a surviving marker means the previous trial did not complete: drop
+ * the candidate (it was only ever applied live, never committed) and keep the
+ * committed config that active_runtime_config() already loaded. */
+static void trial_boot_recover(void)
+{
+    if (trial_boot_should_revert(trial_marker_load())) {
+        ESP_LOGW(TAG, "Trial did not complete (reset during the window); "
+                      "discarding the candidate and keeping the committed config");
+        trial_marker_erase();
+    }
+}
+
+/* The "device still works" signal for a trial: the heap is not starved and the
+ * radio still does its job. The runtime knobs can only break the radio or the
+ * scheduler, so that is what the signal has to prove.
+ *
+ * The two roles prove the radio differently: the receiver must hold its station
+ * link (association + a DHCP lease), because that is how its dashboard stays
+ * reachable; with no home WLAN the dashboard lives on the SoftAP, which is up by
+ * construction. The sender has no IP of its own (its IP_EVENT handler is
+ * deliberately not registered) and, with CONFIG_ESPNOW_SENDER_ASSOCIATE off, no
+ * association either - so its proof is the SML data path: a trial that costs a
+ * telegram (or wedges the parser) is reverted. A false "unhealthy" only costs a
+ * revert to the committed config, so the signal errs toward the known-good
+ * value. */
+static uint32_t trial_sml_loss_now(void)
+{
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* The three ways a light-sleep window can silently break the sender:
+     * gap_loss (a gap that cost a received telegram), parser_resyncs (a wedge
+     * the stall recovery had to break) and sml_send_fail (the ESP-NOW send of a
+     * telegram failed or timed out - the radio slept through it). All monotonic,
+     * so a normal meter pause adds none of them. */
+    portENTER_CRITICAL(&g_uart_stats_lock);
+    uint32_t loss = g_uart_gap_loss + g_uart_parser_resyncs + g_sml_send_fail;
+    portEXIT_CRITICAL(&g_uart_stats_lock);
+    return loss;
+#else
+    return 0; /* the receiver has no SML path; its health is the station link */
+#endif
+}
+
+static bool trial_health_ok(void)
+{
+    if (esp_get_free_heap_size() <= 40960) {
+        return false;
+    }
+#if CONFIG_ESPNOW_ROLE_SENDER
+#if CONFIG_ESPNOW_SENDER_ASSOCIATE
+    if (!g_wifi_connected) {
+        return false;
+    }
+#endif
+    /* The sender's radio proof is the SML path itself (see above). */
+    return trial_sender_health_ok(g_trial_loss_at_arm, trial_sml_loss_now());
+#else
+    if (g_wifi_configured) {
+        return g_wifi_connected && g_sta_got_ip;
+    }
+    return true;
+#endif
+}
+
+static void trial_commit(void)
+{
+    runtime_config_t *cfg = active_runtime_config();
+    runtime_config_store(cfg);   /* candidate becomes the committed config */
+    trial_marker_erase();
+    ESP_LOGI(TAG, "Trial survived; config committed");
+}
+
+static void trial_revert_now(const char *reason)
+{
+    /* The reboot is the revert: the pending marker is deliberately left in NVS
+     * so the next boot keeps the committed config even if this reboot wedges.
+     * Routed through boot_confirm_fail() so an unconfirmed image rolls back to
+     * the previous firmware instead of boot-looping. */
+    ESP_LOGE(TAG, "Trial failed (%s); rebooting to discard the candidate",
+             reason != NULL ? reason : "?");
+    boot_confirm_fail("trial health check failed");
+    esp_restart();
+}
+
+static void trial_worker(void *arg)
+{
+    (void)arg;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        bool healthy = trial_health_ok();
+        trial_action_t action = trial_tick(&g_trial, now_ms, healthy);
+        if (action == TRIAL_ACT_COMMIT) {
+            trial_commit();
+        } else if (action == TRIAL_ACT_REVERT) {
+            trial_revert_now("health signal lost inside the window");
+        }
+    }
+}
+
+/* Arm a trial for the current (just-applied) candidate config. */
+static void trial_arm(const runtime_config_t *candidate)
+{
+    trial_policy_t policy;
+    trial_policy_defaults(&policy);
+    trial_marker_store(candidate);
+    /* Capture the SML-loss baseline before the worker can judge the trial, so
+     * the sender's health signal counts only loss this trial causes. */
+    g_trial_loss_at_arm = trial_sml_loss_now();
+    trial_begin(&g_trial, &policy, (uint64_t)(esp_timer_get_time() / 1000));
+    ESP_LOGW(TAG, "Trial armed for %u ms; a health failure reverts it",
+             (unsigned)policy.window_ms);
+}
+
+/* Start the trial worker once, on the first armed trial (keeps an idle task off
+ * the device during normal operation). */
+static void trial_worker_start_once(void)
+{
+    static bool started;
+    if (started) {
+        return;
+    }
+    started = true;
+    if (xTaskCreate(trial_worker, "trial_mode", 3072, NULL, 3, NULL) != pdPASS) {
+        started = false;
+        ESP_LOGW(TAG, "Could not start the trial worker");
+    }
+}
+
+/* Restore the config the last committed change replaced and reboot. Registered
+ * with recovery_start.c, which calls it on a BOOT-button restore gesture, and
+ * used by the 'restore-config' console command. Runs early in app_main, before
+ * the persisted knobs are applied, so a value that hangs the device (e.g. a
+ * 'set cpu-min 40' that wedges the radio) can be undone without a reflash.
+ * A pending trial marker is dropped too: whatever was being tried is abandoned. */
+static void runtime_config_restore_prev_and_reboot(void)
+{
+    runtime_config_t prev;
+    if (!runtime_config_restore_prev(&prev)) {
+        ESP_LOGW(TAG, "No previous config to restore; keeping the current one");
+        return;
+    }
+    trial_marker_erase();
+    runtime_config_store(&prev);
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* Only the sender keeps a crash journal, so only it has to label the reboot
+     * as deliberate (otherwise it would be read as a crash on the next boot). */
+    crash_journal_mark_clean_restart();
+#endif
+    ESP_LOGW(TAG, "Restored the previous config (cpu %u/%u MHz, sleep %s); rebooting",
+             (unsigned)prev.cpu_min_mhz, (unsigned)prev.cpu_mhz,
+             prev.light_sleep ? "on" : "off");
+    esp_restart();
 }
 
 /* Append NVS partition usage to out. Shared by the `test storage` console
@@ -5781,6 +6211,17 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
         return;
     }
     if (strcmp(what, "storage") == 0) {
+        if (strcmp(rest, "format") == 0) {
+            /* Repair an unreadable/damaged ring: reformat the partition and
+             * recreate the file with fresh headers. The sender backfill
+             * re-imports the minute history afterwards (run 'pull'). */
+            snprintf(out, out_size, "formatting persistent storage ...\n");
+            esp_err_t ferr = power_history_format();
+            snprintf(out + strlen(out), out_size - strlen(out),
+                     "format: %s\n", ferr == ESP_OK ? "ok (empty store, run 'pull')"
+                                                    : esp_err_to_name(ferr));
+            return;
+        }
         power_history_status_t s;
         power_history_get_status(&s);
         int64_t oldest = 0;
@@ -5790,7 +6231,8 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  "storage: %s\n"
                  "  records: %u  sequences: %u..%u\n"
                  "  range: %lld..%lld UTC\n"
-                 "  queue drops: %u  write errors: %u\n",
+                 "  queue drops: %u  write errors: %u\n"
+                 "usage: test storage | test storage format\n",
                  s.ready ? "ready" : "not ready", (unsigned)s.record_count,
                  (unsigned)s.oldest_sequence, (unsigned)s.latest_sequence,
                  (long long)oldest, (long long)latest,
@@ -5819,12 +6261,24 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
 {
     char key[24] = {0};
     char value[32] = {0};
-    if (sscanf(args, "%23s %31s", key, value) != 2) {
+    /* 'set trial <knob> <value>' applies the candidate and arms an auto-revert
+     * window instead of committing it outright. */
+    bool as_trial = false;
+    const char *rest = args;
+    char first[8] = {0};
+    if (sscanf(args, "%7s", first) == 1 && strcmp(first, "trial") == 0) {
+        as_trial = true;
+        rest = args + strlen(first);
+    }
+    if (sscanf(rest, "%23s %31s", key, value) != 2) {
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries> <value>\n");
+                 "usage: set [trial] <cpu|freq|cpu-min|sleep|retries> <value>\n");
         return;
     }
     runtime_config_t *cfg = active_runtime_config();
+    /* Capture the live values before the set mutates them, so a committed
+     * change can store them as the one-step-back restore point. */
+    runtime_config_t before = *cfg;
     char err[64] = {0};
     if (!runtime_config_set(cfg, key, value, CONFIG_ESPNOW_CPU_MAX_MHZ, err,
                             sizeof(err))) {
@@ -5832,15 +6286,35 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         return;
     }
     bool applied = runtime_config_apply(cfg);
-    /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only). */
-    runtime_config_store(cfg);
+    /* Turning light sleep ON is the risky direction: a window that is too long
+     * silently cuts SML telegrams, and the sender cannot prove it with an
+     * association (it has none). So that one change is always armed as a trial
+     * even without 'set trial': if it costs a telegram the trial reverts it by
+     * itself. Turning sleep OFF is the conservative direction (and the escape),
+     * so it commits at once and survives a reboot. Light sleep is sender-only. */
+    bool sleep_key = false;
+#if CONFIG_ESPNOW_ROLE_SENDER
+    sleep_key = (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0);
+#endif
+    bool trial_active = as_trial || (sleep_key && cfg->light_sleep);
+    if (trial_active) {
+        /* Keep the committed value in NVS; the candidate lives only in RAM and
+         * under the trial marker, so a reset drops it. */
+        trial_arm(cfg);
+        trial_worker_start_once();
+    } else {
+        /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only),
+         * and keep the replaced value as the restore point the BOOT button and
+         * 'restore-config' go back to. */
+        runtime_config_store_prev(&before);
+        runtime_config_store(cfg);
+    }
 
     /* Say so when the stored value differs from what was asked for (a value
      * below the Wi-Fi minimum or off the DFS grid is snapped, not rejected). */
     bool cpu_key = (strcmp(key, "cpu") == 0 || strcmp(key, "cpu-mhz") == 0 ||
                     strcmp(key, "freq") == 0 || strcmp(key, "freq-mhz") == 0 ||
                     strcmp(key, "cpu-min") == 0 || strcmp(key, "cpu-min-mhz") == 0);
-    bool sleep_key = (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0);
     char note[80] = {0};
     if (cpu_key) {
         char *end = NULL;
@@ -5867,7 +6341,8 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     }
 #endif
     int written = snprintf(out, out_size,
-                           "%s=%s%s%s\n", key, value, note,
+                           "%s=%s%s%s%s\n", key, value, note,
+                           trial_active ? " [trial: reverts unless it survives 60 s]" : "",
                            applied ? "" : " (hardware rejected the change)");
     if (written > 0 && (size_t)written < out_size) {
         runtime_config_render(cfg, out + written, out_size - (size_t)written);
@@ -5891,6 +6366,16 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
     }
 }
 
+static void console_cmd_restore_config(const char *args, char *out, size_t out_size)
+{
+    (void)args;
+    (void)out;
+    (void)out_size;
+    /* Same action as the BOOT-button restore: put the previous committed values
+     * back and reboot. Does not return when a previous slot exists. */
+    runtime_config_restore_prev_and_reboot();
+}
+
 static void console_cmd_config(const char *args, char *out, size_t out_size)
 {
     (void)args;
@@ -5907,12 +6392,15 @@ static void web_console_register_commands(void)
     web_console_register("help", "list available commands", console_cmd_help);
     web_console_register("test", "run a self-test: sleep|cpu|sml|espnow|storage|nvs",
                          console_cmd_test);
-    web_console_register("set", "change a runtime knob: cpu|freq|cpu-min|sleep|retries",
+    web_console_register("set", "change a runtime knob: [trial] cpu|freq|cpu-min|sleep|retries",
                          console_cmd_set);
     web_console_register("config", "show the current test knobs",
                          console_cmd_config);
     web_console_register("reset-config", "restore the default test knobs",
                          console_cmd_reset_config);
+    web_console_register("restore-config",
+                         "put the previous knobs back and reboot (BOOT button >= 3 s)",
+                         console_cmd_restore_config);
     web_console_register("status", "wifi, channel, clock and heap",
                          console_cmd_status);
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -6099,22 +6587,40 @@ static esp_err_t sender_diag_exchange_once(const void *payload, size_t payload_l
  * (status/history reads); a command must not run twice. */
 #define SENDER_DIAG_ATTEMPTS 4u
 
+/* Serializes an ESP-NOW exchange against every other caller. NULL (early boot
+ * or a failed create) degrades to "no serialization" rather than crashing. */
+static void sender_exchange_lock(void)
+{
+    if (g_sender_exchange_mutex != NULL) {
+        (void)xSemaphoreTake(g_sender_exchange_mutex, portMAX_DELAY);
+    }
+}
+
+static void sender_exchange_unlock(void)
+{
+    if (g_sender_exchange_mutex != NULL) {
+        (void)xSemaphoreGive(g_sender_exchange_mutex);
+    }
+}
+
 static esp_err_t sender_diag_exchange_raw(const void *payload, size_t payload_len,
                                           uint32_t request_id,
                                           uint8_t *response, size_t *response_len)
 {
     esp_err_t err = ESP_ERR_TIMEOUT;
+    sender_exchange_lock();
     for (unsigned int attempt = 0; attempt < SENDER_DIAG_ATTEMPTS; ++attempt) {
         err = sender_diag_exchange_once(payload, payload_len, request_id,
                                         response, response_len);
         if (err == ESP_OK) {
-            return ESP_OK;
+            break;
         }
         /* A MAC/send error will not fix itself by retrying; only timeouts do. */
         if (err != ESP_ERR_TIMEOUT) {
-            return err;
+            break;
         }
     }
+    sender_exchange_unlock();
     return err;
 }
 
@@ -6163,8 +6669,10 @@ static esp_err_t sender_cmd_exchange(const char *line, char *out, size_t out_siz
     uint8_t response[ESP_NOW_MAX_DATA_LEN];
     size_t response_len = 0;
     /* No retry here: the sender would run the command again on a lost response. */
+    sender_exchange_lock();
     esp_err_t err = sender_diag_exchange_once(&request, sizeof(request), request_id,
                                               response, &response_len);
+    sender_exchange_unlock();
     if (err != ESP_OK) {
         return err;
     }
@@ -6502,7 +7010,7 @@ static esp_err_t history_backfill_api_handler(httpd_req_t *req)
     return httpd_resp_send(req, payload, len);
 }
 
-static esp_err_t sender_diag_api_handler(httpd_req_t *req)
+static esp_err_t sender_diag_render(httpd_req_t *req)
 {
     char query[96];
     char section_text[16] = "counters";
@@ -6875,7 +7383,7 @@ static esp_err_t diag_page_handler(httpd_req_t *req)
  * from three ESP-NOW pulls (counters, crash, events). Kept as a single handler
  * so the page needs one round trip; each section is still fetched on demand, so
  * no diagnostics traffic flows during normal operation. */
-static esp_err_t sender_status_api_handler(httpd_req_t *req)
+static esp_err_t sender_status_render(httpd_req_t *req)
 {
     uint8_t response[ESP_NOW_MAX_DATA_LEN];
     size_t response_len = 0;
@@ -7061,7 +7569,7 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
 
 /* POST one command line to the sender (the tunnelled sender web console). The
  * key check matches the receiver's own console so a single key guards both. */
-static esp_err_t sender_console_api_handler(httpd_req_t *req)
+static esp_err_t sender_console_render(httpd_req_t *req)
 {
     if (!ota_key_is_valid(req)) {
         return send_http_error_status(req, "401 Unauthorized",
@@ -7095,6 +7603,93 @@ static esp_err_t sender_console_api_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_status(req, ok ? "200 OK" : "422 Unprocessable Entity");
     return httpd_resp_send(req, output, strlen(output));
+}
+
+/* The three proxy handlers above each perform a blocking ESP-NOW round trip
+ * (up to SENDER_DIAG_ATTEMPTS * ESPNOW_DIAG_TIMEOUT_MS = 6 s). esp_http_server
+ * runs every handler on ONE task, so while such a round trip is in flight the
+ * whole dashboard stops answering - the "receiver is often unreachable" report.
+ * Hand each request to its own short-lived task (the same trick the CSV upload
+ * uses) so the HTTP task returns immediately and keeps serving /healthz.
+ * A missing sender MAC fails fast (no round trip), so that case is answered
+ * inline and never pays for a task. */
+typedef enum {
+    SENDER_PROXY_DIAG = 0,
+    SENDER_PROXY_STATUS,
+    SENDER_PROXY_CONSOLE,
+} sender_proxy_kind_t;
+
+typedef struct {
+    httpd_req_t *req;
+    sender_proxy_kind_t kind;
+} sender_proxy_job_t;
+
+static void sender_proxy_task(void *arg)
+{
+    sender_proxy_job_t *job = (sender_proxy_job_t *)arg;
+    httpd_req_t *req = job->req;
+    liveness_note_alive();
+    switch (job->kind) {
+    case SENDER_PROXY_DIAG:
+        (void)sender_diag_render(req);
+        break;
+    case SENDER_PROXY_STATUS:
+        (void)sender_status_render(req);
+        break;
+    case SENDER_PROXY_CONSOLE:
+    default:
+        (void)sender_console_render(req);
+        break;
+    }
+    httpd_req_async_handler_complete(req);
+    free(job);
+    vTaskDelete(NULL);
+}
+
+/* Offload the current request; the worker renders and completes it. On any
+ * setup failure the request is answered inline (blocking) so the client still
+ * gets a definite result instead of a dropped connection. */
+static esp_err_t sender_proxy_dispatch(httpd_req_t *req, sender_proxy_kind_t kind,
+                                       esp_err_t (*render)(httpd_req_t *))
+{
+    httpd_req_t *copy = NULL;
+    esp_err_t err = httpd_req_async_handler_begin(req, &copy);
+    if (err != ESP_OK || copy == NULL) {
+        return render(req);
+    }
+    sender_proxy_job_t *job = calloc(1, sizeof(*job));
+    if (job == NULL) {
+        httpd_req_async_handler_complete(copy);
+        return send_http_error_status(req, "500 Internal Server Error",
+                                      "Out of memory for the sender request");
+    }
+    job->req = copy;
+    job->kind = kind;
+    /* 6144: the status render builds a 2048-byte payload plus a 768-byte crash
+     * snippet on the stack; the httpd task uses 8192 for the same work. */
+    if (xTaskCreate(sender_proxy_task, "sender_proxy", 6144, job, 3, NULL) != pdPASS) {
+        free(job);
+        httpd_req_async_handler_complete(copy);
+        return send_http_error_status(req, "500 Internal Server Error",
+                                      "Could not start the sender request task");
+    }
+    /* The worker owns the copy and sends the response. */
+    return ESP_OK;
+}
+
+static esp_err_t sender_diag_api_handler(httpd_req_t *req)
+{
+    return sender_proxy_dispatch(req, SENDER_PROXY_DIAG, sender_diag_render);
+}
+
+static esp_err_t sender_status_api_handler(httpd_req_t *req)
+{
+    return sender_proxy_dispatch(req, SENDER_PROXY_STATUS, sender_status_render);
+}
+
+static esp_err_t sender_console_api_handler(httpd_req_t *req)
+{
+    return sender_proxy_dispatch(req, SENDER_PROXY_CONSOLE, sender_console_render);
 }
 
 static esp_err_t sender_page_handler(httpd_req_t *req)
@@ -8151,6 +8746,155 @@ static void link_fallback_worker(void *arg)
 }
 #endif /* CONFIG_ESPNOW_LINK_FALLBACK */
 
+#if CONFIG_ESPNOW_SENDER_WIFI_RSSI_LOG
+/* Scan for the home WLAN's beacon and return its RSSI, without ever
+ * authenticating. The scan is pinned to the current ESP-NOW channel so the
+ * radio does not leave the link's channel (the home AP and the receiver's
+ * SoftAP share it), which keeps the minute log from costing SML telegrams or
+ * backfill pages. Returns false when the SSID was not seen this round. */
+static bool scan_home_ap_rssi(int8_t *rssi_dbm)
+{
+    wifi_scan_config_t scan_config = {
+        .ssid = (uint8_t *)CONFIG_ESPNOW_SENDER_WIFI_RSSI_SSID,
+        .channel = g_espnow_channel,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .show_hidden = false,
+    };
+    esp_err_t err = esp_wifi_scan_start(&scan_config, true);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Home WLAN RSSI scan failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    uint16_t count = 16;
+    wifi_ap_record_t records[16];
+    err = esp_wifi_scan_get_ap_records(&count, records);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not read home WLAN scan results: %s",
+                 esp_err_to_name(err));
+        return false;
+    }
+    for (uint16_t i = 0; i < count; ++i) {
+        if (strcmp((const char *)records[i].ssid,
+                   CONFIG_ESPNOW_SENDER_WIFI_RSSI_SSID) == 0) {
+            *rssi_dbm = records[i].rssi;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Once per period, record the home WLAN's signal strength. Sender only: the
+ * receiver is associated and reports its own link. Runs at the lowest priority
+ * so a minute's scan never competes with the UART/ESP-NOW workers. */
+static void wifi_rssi_log_worker(void *arg)
+{
+    (void)arg;
+    uint64_t started_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    portENTER_CRITICAL(&g_wifi_rssi_log_lock);
+    wifi_rssi_log_init(&g_wifi_rssi_log, CONFIG_ESPNOW_SENDER_WIFI_RSSI_PERIOD_MS,
+                       started_ms);
+    portEXIT_CRITICAL(&g_wifi_rssi_log_lock);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        portENTER_CRITICAL(&g_wifi_rssi_log_lock);
+        bool due = wifi_rssi_log_due(&g_wifi_rssi_log, now_ms);
+        portEXIT_CRITICAL(&g_wifi_rssi_log_lock);
+        if (!due) {
+            continue;
+        }
+
+        int8_t rssi = 0;
+        bool found = scan_home_ap_rssi(&rssi);
+        portENTER_CRITICAL(&g_wifi_rssi_log_lock);
+        wifi_rssi_log_add(&g_wifi_rssi_log, rssi, found, now_ms);
+        int8_t latest = g_wifi_rssi_log.latest_dbm;
+        int8_t mn = g_wifi_rssi_log.min_dbm;
+        int8_t mx = g_wifi_rssi_log.max_dbm;
+        uint32_t valid = g_wifi_rssi_log.valid_count;
+        uint32_t miss = g_wifi_rssi_log.miss_count;
+        portEXIT_CRITICAL(&g_wifi_rssi_log_lock);
+
+        if (found) {
+            ESP_LOGI(TAG, "WLAN \"%s\" RSSI %d dBm (min %d, max %d, avg %d; "
+                          "%lu ok / %lu miss)",
+                     CONFIG_ESPNOW_SENDER_WIFI_RSSI_SSID, latest, mn, mx,
+                     wifi_rssi_log_average_dbm(&g_wifi_rssi_log),
+                     (unsigned long)valid, (unsigned long)miss);
+        } else {
+            ESP_LOGW(TAG, "WLAN \"%s\" not seen on channel %u",
+                     CONFIG_ESPNOW_SENDER_WIFI_RSSI_SSID, g_espnow_channel);
+        }
+    }
+}
+#endif /* CONFIG_ESPNOW_SENDER_WIFI_RSSI_LOG */
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+#if CONFIG_ESPNOW_NET_WATCHDOG
+/* Receiver Wi-Fi link watchdog. Runs only when a home WLAN is configured: with
+ * no credentials the dashboard lives on the fallback SoftAP and there is no
+ * station link to lose. The link counts as healthy only when the station is
+ * associated *and* holds an IP. */
+static void net_watchdog_worker(void *arg)
+{
+    (void)arg;
+    const uint64_t started_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    net_wd_policy_t policy;
+    net_wd_default_policy(&policy);
+    policy.down_timeout_ms = CONFIG_ESPNOW_NET_WATCHDOG_DOWN_MS;
+    policy.reboot_timeout_ms = CONFIG_ESPNOW_NET_WATCHDOG_REBOOT_MS;
+    policy.min_uptime_ms = CONFIG_ESPNOW_NET_WATCHDOG_GRACE_MS;
+    net_wd_init(&g_net_watchdog, &policy, started_ms);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        if (!g_wifi_configured) {
+            continue; /* AP-only fallback: nothing to watch */
+        }
+        bool up = g_wifi_connected && g_sta_got_ip;
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        net_wd_action_t action = net_wd_tick(&g_net_watchdog, now_ms, up);
+        /* "waiting" while a reconnect is outstanding, not just on the tick that
+         * issues it, so the status line reflects the escalation window. */
+        g_net_watchdog_active = g_net_watchdog.reconnect_tried;
+        switch (action) {
+        case NET_WD_RECONNECT:
+            ESP_LOGW(TAG, "Network watchdog: Wi-Fi down for %u ms, reconnecting",
+                     (unsigned)CONFIG_ESPNOW_NET_WATCHDOG_DOWN_MS);
+            if (esp_wifi_connect() != ESP_OK) {
+                ESP_LOGE(TAG, "Network watchdog: reconnect attempt failed");
+            }
+            break;
+        case NET_WD_REBOOT:
+            /* A reconnect did not restore the link (wedged driver or a router
+             * that never re-admits us): reboot to a known-good state. Routed
+             * through boot_confirm_fail() so a still-unconfirmed image rolls
+             * back instead of boot-looping, exactly like health_task. */
+            ESP_LOGE(TAG, "Network watchdog: Wi-Fi still down, rebooting");
+            boot_confirm_fail("network watchdog: Wi-Fi link lost");
+            esp_restart();
+            break;
+        case NET_WD_OK:
+        default:
+            break;
+        }
+    }
+}
+
+static void net_watchdog_start(void)
+{
+    if (xTaskCreate(net_watchdog_worker, "net_watchdog", 3072, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the network watchdog");
+    }
+}
+#else
+static void net_watchdog_start(void)
+{
+}
+#endif /* CONFIG_ESPNOW_NET_WATCHDOG */
+#endif
+
 /* --- Global liveness watchdog --------------------------------------------
  * The per-subsystem guards (web_guard on the dashboard, link_fallback on the
  * ESP-NOW peer) each watch one path. This is the backstop for a *global* stall:
@@ -8201,8 +8945,10 @@ static void liveness_guard_worker(void *arg)
                      (unsigned)silence);
             break;
         case LIVENESS_PANIC:
-            /* Breadcrumb first, so the crash journal names the stall; then
-             * reboot to a known-good state. */
+            /* Breadcrumb first, so the crash journal names the stall; then hand
+             * over to the boot-confirm path (as health_task and net_watchdog
+             * do): a still-unconfirmed image rolls back to the previous slot, a
+             * confirmed one is a plain reboot. */
 #if CONFIG_ESPNOW_ROLE_SENDER
             diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
                            "liveness: stalled %ums, rebooting", (unsigned)silence);
@@ -8210,7 +8956,7 @@ static void liveness_guard_worker(void *arg)
             ESP_LOGE(TAG, "liveness watchdog: stalled %u ms, rebooting",
                      (unsigned)silence);
             vTaskDelay(pdMS_TO_TICKS(500));
-            esp_restart();
+            boot_confirm_fail("liveness watchdog: stalled");
             break;
         case LIVENESS_REBOOT:
             /* The panic reboot did not take: force it once more. */
@@ -8380,6 +9126,17 @@ static void run_sender(void)
     if (task_result != pdPASS) {
         ESP_LOGW(TAG, "Could not start the boot-confirm worker");
     }
+
+#if CONFIG_ESPNOW_SENDER_WIFI_RSSI_LOG
+    /* Own 16-entry wifi_ap_record_t array (~1.6 kB) on the stack, like the
+     * link-fallback scan. Lowest priority: a minute's scan must never compete
+     * with the UART/ESP-NOW workers. */
+    task_result = xTaskCreate(wifi_rssi_log_worker, "wifi_rssi_log",
+                              4096, NULL, 1, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the WLAN RSSI log worker");
+    }
+#endif
 }
 #endif
 
@@ -8428,8 +9185,24 @@ void app_main(void)
     /* Capture the boot log in RAM first, so the Wi-Fi dashboard can offer it
      * later even when no host is attached at boot. */
     boot_log_init();
+    /* One decoded SML value is logged per telegram; at the meter's rate that
+     * fills the ~6 kB ring within seconds and pushes the startup messages out,
+     * which is exactly what the boot log is for. Keep them on the console and
+     * off the /bootlog ring. */
+    boot_log_suppress("SML value:");
     initialize_wifi_and_espnow();
+    /* Watch the BOOT button BEFORE the persisted knobs are applied: a bad
+     * 'set cpu-min 40' wedges the device in apply_power_management(), so the
+     * escape hatch has to run first. A 3 s hold puts the previous config back
+     * and reboots; holding on to 10 s rolls back the firmware. A normal boot
+     * (button untouched) returns immediately. NVS is up by now, which the
+     * restore path needs. */
+    recovery_set_restore_fn(runtime_config_restore_prev_and_reboot);
+    (void)recovery_button_check();
     apply_power_management();
+    /* Drop a candidate left pending by a reset during a trial. The trial worker
+     * itself starts lazily when 'set trial' arms one. Runs on both roles. */
+    trial_boot_recover();
     /* Arm the task watchdog (generous timeout + panic) before any worker starts,
      * so the long-running workers can subscribe themselves and a wedged one
      * reboots the device instead of hanging. */
@@ -8463,6 +9236,11 @@ void app_main(void)
         ESP_LOGE(TAG, "Could not create receiver diagnostic response queue");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
+    g_sender_exchange_mutex = xSemaphoreCreateMutex();
+    if (g_sender_exchange_mutex == NULL) {
+        ESP_LOGE(TAG, "Could not create the sender exchange mutex");
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
 #endif
     /* Persistent minute history runs on BOTH roles: the receiver records the
      * telemetry it receives, the sender records the values it decodes. */
@@ -8481,7 +9259,7 @@ void app_main(void)
 
     /* Refresh the persisted wall clock on both roles so a reboot without a fresh
      * sync can always seed from it (a crash/power cut must not lose the time). */
-    if (xTaskCreate(wall_clock_worker, "wall_clock", 3072, NULL, 2, NULL) != pdPASS) {
+    if (xTaskCreate(wall_clock_worker, "wall_clock", 4096, NULL, 2, NULL) != pdPASS) {
         ESP_LOGW(TAG, "Could not start the wall-clock persistence worker");
     }
 
@@ -8504,30 +9282,27 @@ void app_main(void)
     (void)esp_pm_light_sleep_register_cbs(&sleep_cbs);
 #endif
 
-#if CONFIG_ESPNOW_ROLE_SENDER
-    /* Do not accept the running image right away. Instead it is confirmed only
-     * after the sender's core subsystems are up (note_ready) and the stability
-     * window passed; an image that never reports ready is rolled back to the
-     * previous OTA slot. This keeps the CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
-     * safety net intact on the sender too. */
+    /* Both roles start unconfirmed. The image is accepted only after the
+     * role's readiness signal appears and the stability window has passed; an
+     * image that never becomes usable is rolled back at the grace deadline.
+     * This keeps the CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE safety net intact.
+     * The BOOT-button recovery check already ran early in app_main (before the
+     * persisted knobs were applied), so the restore/rollback gesture is handled
+     * there for both roles. */
     ESP_ERROR_CHECK(boot_confirm_init());
-#else
-    /* Manual recovery: holding the BOOT button at startup forces a rollback to
-     * the previous firmware, even when this image was already confirmed. Runs
-     * before the OTA confirmation so it can always rescue a confirmed-but-broken
-     * build, which the automatic policy can no longer roll back. A normal boot
-     * (button not pressed) returns immediately. */
-    (void)recovery_button_check();
-    /* Receiver: do not accept the running image right away. It is confirmed
-     * only after the dashboard is up and a stability window has passed; an
-     * image that never comes up is rolled back to the previous OTA slot. This
-     * keeps the CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE safety net intact.
-     * Hardware verification of the confirm/rollback path is still open. */
-    ESP_ERROR_CHECK(boot_confirm_init());
-#endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
     run_sender();
+    /* Reaching here means every sender worker started, so the image is usable
+     * right now. That is only half the proof: the 2026-10-23 image got here on
+     * every attempt too and still reset ~74 s later. Marking readiness lets the
+     * policy confirm only after the image has *stayed* up for the whole sender
+     * window, so a boot loop never gets confirmed. */
+    boot_confirm_note_dashboard(true);
+    while (1) {
+        boot_confirm_poll();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 #else
     start_webserver();
     /* Backstop for a global stall: fed by every worker and by HTTP/console
@@ -8541,6 +9316,10 @@ void app_main(void)
         ESP_LOGW(TAG, "Receiver health watchdog is disabled");
     }
 #endif
+    /* Wi-Fi link watchdog: the guards above never look at the station link, so a
+     * dropped association/DHCP lease would leave the dashboard unreachable with
+     * no reboot. This closes that gap (reconnect, then reboot). */
+    net_watchdog_start();
     /* Same command set on the USB serial monitor (UART0), so the receiver can
      * be driven locally even if the dashboard is unreachable. */
     serial_console_start();

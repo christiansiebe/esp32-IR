@@ -1,5 +1,6 @@
 #include "power_history.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,10 @@
 #include "freertos/task.h"
 
 #include "task_wdt_guard.h"
+
+#ifdef ESP_PLATFORM
+#include "esp_timer.h"
+#endif
 
 #define POWER_HISTORY_MAGIC 0x50484C31u
 /* Format versions live in power_history.h so the host tests and the migration
@@ -39,7 +44,42 @@
  * writer (or a CSV import) holds it for a long in-place ring insert, the HTTP
  * task must be able to give up and answer quickly rather than stalling until
  * the browser's own request timeout fires (the reported "AbortError"). */
-#define POWER_HISTORY_READ_LOCK_TIMEOUT_MS 800u
+/* Wait for the store lock. A reader must outlast one writer round: the writer
+ * holds the mutex while it splices a backfill batch (shift_up_renumber moves up
+ * to POWER_HISTORY_MAX_SPLICE_RECORDS records, each a fseek+fwrite). At 800 ms
+ * every reader timed out under backfill load and the dashboard showed an empty
+ * graph even though the ring was full. The bound still keeps the HTTP task from
+ * blocking indefinitely. */
+#define POWER_HISTORY_READ_LOCK_TIMEOUT_MS 2500u
+/* The startup repair must never block the boot: a damaged/full SPIFFS store
+ * used to make a single lseek hang for minutes, wedging app_main before the
+ * web server started and boot-looping the device. Two independent safeguards:
+ *
+ *  1. The repair does NOT run inside power_history_init() anymore. It runs in
+ *     its own low-priority background task that starts only after a delay
+ *     (POWER_HISTORY_REPAIR_DELAY_MS) long enough for HTTP/OTA/telemetry to be
+ *     up. The device boots and serves regardless of the store's state.
+ *  2. The repair loops yield to the scheduler every
+ *     POWER_HISTORY_REPAIR_YIELD_STEPS steps and the whole repair is bounded
+ *     by a wall-clock budget. On budget expiry it is abandoned best-effort
+ *     (the ring is left as it was; a later boot retries). */
+#define POWER_HISTORY_REPAIR_YIELD_STEPS 2048u
+#define POWER_HISTORY_REPAIR_BUDGET_MS 15000u
+/* Heap slice the repair leaves untouched for the HTTP/OTA/Wi-Fi paths that
+ * allocate while it runs. The repair buffer is clamped to
+ * (largest free block - this), so it can never starve a concurrent allocation. */
+#define POWER_HISTORY_REPAIR_HEAP_HEADROOM 16384u
+/* Smallest repair buffer worth taking. Below this the repair gives up and keeps
+ * the ring as-is (a later boot retries), rather than looping on tiny sizes. */
+#define POWER_HISTORY_REPAIR_MIN_RECORDS 64u
+/* Delay before the background repair task touches the store, giving the boot
+ * (Wi-Fi, HTTP server, OTA) time to come up first. */
+#define POWER_HISTORY_REPAIR_DELAY_MS 10000u
+/* Matches the writer's stack: the repair does the same SPIFFS fseek/fread plus
+ * heap allocations and logging. The task deletes itself when done, so the
+ * larger stack costs nothing after boot; a too-small stack would abort on the
+ * canary check, which is the failure this task must never cause. */
+#define POWER_HISTORY_REPAIR_STACK 4096u
 
 static const char *TAG = "power_history";
 static FILE *g_history_file;
@@ -49,6 +89,14 @@ static QueueHandle_t g_history_queue;
 static SemaphoreHandle_t g_history_mutex;
 static uint32_t g_queue_drops;
 static uint32_t g_write_errors;
+/* Write-amplification counters (see power_history_status_t). Written by the
+ * history writer under g_history_mutex, read via get_status under the same
+ * mutex, so no separate lock is needed. */
+static uint32_t g_splice_batches;
+static uint32_t g_splice_records;
+static uint32_t g_splice_skipped;
+static uint32_t g_storage_used_bytes;
+static uint32_t g_storage_total_bytes;
 static bool g_history_ready;
 static bool g_history_ram_fallback;
 static power_history_record_t g_history_ram_records[POWER_HISTORY_PAGE_SIZE];
@@ -217,6 +265,59 @@ static bool write_record_idx(uint32_t oldest_slot, uint32_t index,
            fwrite(record, sizeof(*record), 1, g_history_file) == 1;
 }
 
+/* Batched ring I/O: read/write `count` consecutive records starting at ring
+ * index `start`. The slots of a contiguous index range are contiguous modulo
+ * POWER_HISTORY_CAPACITY, so this needs at most two stdio runs (one split at the
+ * wrap) instead of one fseek+fread/fwrite per record.
+ *
+ * This matters for the lock hold time: every fseek discards the stdio buffer,
+ * so a per-record loop turns each 32-byte record into its own SPIFFS page
+ * operation. A deep backfill splice of ~350 records then held g_history_mutex
+ * for ~4 s, which made every dashboard read time out (the graph showed an empty
+ * store). Reading a whole chunk in one call cuts the syscalls by the chunk
+ * factor, so the lock is free again between splices. */
+static bool read_range_idx(uint32_t oldest_slot, uint32_t start, uint32_t count,
+                           power_history_record_t *buf)
+{
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t slot = (oldest_slot + start + done) % POWER_HISTORY_CAPACITY;
+        uint32_t run = count - done;
+        if (slot + run > POWER_HISTORY_CAPACITY) {
+            run = POWER_HISTORY_CAPACITY - slot;
+        }
+        long offset = (long)(2u * sizeof(power_history_header_t) +
+                             slot * sizeof(power_history_record_t));
+        if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
+            fread(buf + done, sizeof(buf[0]), run, g_history_file) != run) {
+            return false;
+        }
+        done += run;
+    }
+    return true;
+}
+
+static bool write_range_idx(uint32_t oldest_slot, uint32_t start, uint32_t count,
+                            const power_history_record_t *buf)
+{
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t slot = (oldest_slot + start + done) % POWER_HISTORY_CAPACITY;
+        uint32_t run = count - done;
+        if (slot + run > POWER_HISTORY_CAPACITY) {
+            run = POWER_HISTORY_CAPACITY - slot;
+        }
+        long offset = (long)(2u * sizeof(power_history_header_t) +
+                             slot * sizeof(power_history_record_t));
+        if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
+            fwrite(buf + done, sizeof(buf[0]), run, g_history_file) != run) {
+            return false;
+        }
+        done += run;
+    }
+    return true;
+}
+
 /* First index in [0, count] whose minute is >= ts. The ring is time-sorted, so
  * this is the insertion point for a record of that minute. */
 static uint32_t find_first_at_or_after_time(uint32_t oldest_slot, uint32_t count,
@@ -286,10 +387,8 @@ static bool shift_up_renumber(uint32_t oldest_slot, uint32_t count, uint32_t at)
             chunk = POWER_HISTORY_SHIFT_CHUNK;
         }
         uint32_t start = index - chunk; /* move [start, index) -> [start+1, index+1) */
-        for (uint32_t i = 0; i < chunk; ++i) {
-            if (!read_record_idx(oldest_slot, start + i, &buf[i])) {
-                return false;
-            }
+        if (!read_range_idx(oldest_slot, start, chunk, buf)) {
+            return false;
         }
         for (uint32_t i = 0; i < chunk; ++i) {
             ++buf[i].sequence;
@@ -297,9 +396,9 @@ static bool shift_up_renumber(uint32_t oldest_slot, uint32_t count, uint32_t at)
                 buf[i].sequence = 1;
             }
             buf[i].checksum = record_checksum(&buf[i]);
-            if (!write_record_idx(oldest_slot, start + i + 1u, &buf[i])) {
-                return false;
-            }
+        }
+        if (!write_range_idx(oldest_slot, start + 1u, chunk, buf)) {
+            return false;
         }
         index = start;
         if (++chunks_done % POWER_HISTORY_SHIFT_YIELD_CHUNKS == 0) {
@@ -344,6 +443,29 @@ static bool minute_is_stored(const power_history_header_t *header, int64_t ts)
         }
     }
     return false;
+}
+
+/* Report *where* and *why* a persistence attempt failed. The VFS sets errno on
+ * the SPIFFS path, but the caller only ever saw "could not persist", so a
+ * GC-starved, nearly-full SPIFFS (writes fail with ENOSPC while reads still
+ * work) was indistinguishable from a plain I/O fault. Log the errno plus the
+ * partition fill so the two can be told apart from the device log alone. */
+static void log_persist_failure(const char *stage)
+{
+    int err = errno;
+#ifdef ESP_PLATFORM
+    size_t total = 0;
+    size_t used = 0;
+    esp_err_t info = esp_spiffs_info(POWER_HISTORY_PARTITION, &total, &used);
+    ESP_LOGE(TAG, "History persist failed at %s: errno=%d (%s), spiffs=%s used=%u/%u",
+             stage, err, strerror(err),
+             info == ESP_OK ? "ok" : esp_err_to_name(info),
+             (unsigned)used, (unsigned)total);
+#else
+    ESP_LOGE(TAG, "History persist failed at %s: errno=%d (%s)", stage, err,
+             strerror(err));
+    (void)stage; /* ESP_LOGE is a no-op on the host */
+#endif
 }
 
 /* Append/insert a batch of validated records into the ring, keeping it sorted by
@@ -396,13 +518,33 @@ static bool write_records(power_history_record_t *records, size_t record_count)
         records[i].checksum = record_checksum(&records[i]);
 
         if (at < updated.record_count) {
+            /* Bound the splice: shifting more than POWER_HISTORY_MAX_SPLICE_
+             * RECORDS newer records costs O(ring) SPIFFS I/O under the mutex and
+             * is what let the receiver's backfill livelock. A minute that far
+             * below the tail is a deep gap the ring cannot take in order; drop
+             * it so the store stays sorted and the writer keeps up. The record
+             * is counted as merged by the caller, so the sync cursor still moves
+             * past it and the session does not re-pull it forever. */
+            if (updated.record_count - at > POWER_HISTORY_MAX_SPLICE_RECORDS) {
+                ++g_splice_skipped;
+                continue;
+            }
             /* Splice in: shift the newer records up and renumber them, so the
              * ring stays sorted by minute AND by sequence (the after_sequence
              * cursor needs the latter). */
             if (!shift_up_renumber(oldest_slot, updated.record_count, at)) {
+                log_persist_failure("shift");
                 return false;
             }
+            /* Count the splice: (record_count - at) records were rewritten just
+             * to make room for one older minute. A backfill that keeps merging
+             * minutes below the local tail drives this to the full ring per
+             * minute - the write-amplification that starves SPIFFS garbage
+             * collection on an almost-full partition. */
+            ++g_splice_batches;
+            g_splice_records += updated.record_count - at;
             if (!write_record_idx(oldest_slot, at, &records[i])) {
+                log_persist_failure("splice-write");
                 return false;
             }
         } else {
@@ -410,6 +552,7 @@ static bool write_records(power_history_record_t *records, size_t record_count)
                                  updated.next_slot * sizeof(records[i]));
             if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
                 fwrite(&records[i], sizeof(records[i]), 1, g_history_file) != 1) {
+                log_persist_failure("append-write");
                 return false;
             }
         }
@@ -424,6 +567,7 @@ static bool write_records(power_history_record_t *records, size_t record_count)
         updated.next_slot = (updated.next_slot + 1u) % POWER_HISTORY_CAPACITY;
     }
     if (fflush(g_history_file) != 0 || fsync(fileno(g_history_file)) != 0) {
+        log_persist_failure("flush");
         return false;
     }
     ++updated.generation;
@@ -431,6 +575,7 @@ static bool write_records(power_history_record_t *records, size_t record_count)
 
     uint8_t next_copy = (uint8_t)(1u - g_active_header_copy);
     if (!write_header_copy(next_copy, &updated)) {
+        log_persist_failure("header");
         return false;
     }
     g_history_header = updated;
@@ -524,110 +669,111 @@ static bool record_precedes(const power_history_record_t *a,
     return a->sequence < b->sequence;
 }
 
-/* Sift the root of an implicit max-heap down to `end`. Reads/writes single
- * records, so it needs no buffer. */
-static bool ring_sift_down(uint32_t oldest_slot, uint32_t root, uint32_t end)
+/* Paces a long on-disk repair loop: yields to the scheduler every
+ * POWER_HISTORY_REPAIR_YIELD_STEPS steps so the IDLE task (and with it the task
+ * watchdog) keeps running, and reports when the wall-clock budget is spent so
+ * the caller can abandon the repair instead of blocking the boot forever. */
+typedef struct {
+    uint32_t steps;
+    uint32_t budget_ms;
+    int64_t deadline_us; /* 0 = no clock available (host build): no budget */
+    bool expired;
+} repair_pacer_t;
+
+static int64_t repair_now_us(void)
 {
-    while (2u * root + 1u <= end) {
-        uint32_t child = 2u * root + 1u;
-        power_history_record_t rv;
-        power_history_record_t best;
-        if (!read_record_idx(oldest_slot, root, &rv) ||
-            !read_record_idx(oldest_slot, child, &best)) {
-            return false;
-        }
-        if (child + 1u <= end) {
-            power_history_record_t sibling;
-            if (!read_record_idx(oldest_slot, child + 1u, &sibling)) {
-                return false;
-            }
-            if (record_precedes(&best, &sibling)) {
-                child += 1u;
-                best = sibling;
-            }
-        }
-        if (!record_precedes(&rv, &best)) {
-            return true; /* root is already the largest */
-        }
-        power_history_record_t other;
-        if (!read_record_idx(oldest_slot, child, &other) ||
-            !write_record_idx(oldest_slot, root, &other) ||
-            !write_record_idx(oldest_slot, child, &rv)) {
-            return false;
-        }
-        root = child;
-    }
-    return true;
+#ifdef ESP_PLATFORM
+    return esp_timer_get_time();
+#else
+    return 0; /* host build has no esp_timer; the pacer then never expires */
+#endif
 }
 
-/* In-place heap sort of the whole ring by (minute, sequence) using O(1) RAM
- * (two record buffers). Used only when the store is too large to sort in one
- * buffer; O(n log n) disk I/O instead of O(n) RAM. */
-static bool ring_heap_sort(uint32_t oldest_slot, uint32_t count)
+/* Records the repair may hold in one RAM buffer for a given largest free block:
+ * the compile-time upper bound, clamped to (largest block - headroom). A fixed
+ * buffer made the repair give up when the free heap had shrunk below it (the
+ * ring then stayed damaged and every new minute failed), so the size follows the
+ * actual heap instead of being assumed. Pure and overflow-safe, so the host test
+ * can drive it with any heap size. */
+uint32_t power_history_repair_keep_limit_for(size_t largest_free_block,
+                                             uint32_t upper)
 {
-    if (count < 2) {
-        return true;
+    if (largest_free_block <= POWER_HISTORY_REPAIR_HEAP_HEADROOM) {
+        return 0;
     }
-    for (uint32_t i = count / 2u; i > 0; --i) {
-        if (!ring_sift_down(oldest_slot, i - 1u, count - 1u)) {
-            return false;
-        }
+    size_t usable = largest_free_block - POWER_HISTORY_REPAIR_HEAP_HEADROOM;
+    size_t fits = usable / sizeof(power_history_record_t);
+    if (fits > 0xFFFFFFFFu) {
+        fits = 0xFFFFFFFFu; /* clamp before the narrowing cast */
     }
-    for (uint32_t end = count - 1u; end > 0; --end) {
-        power_history_record_t first;
-        power_history_record_t last;
-        if (!read_record_idx(oldest_slot, 0, &first) ||
-            !read_record_idx(oldest_slot, end, &last) ||
-            !write_record_idx(oldest_slot, 0, &last) ||
-            !write_record_idx(oldest_slot, end, &first) ||
-            !ring_sift_down(oldest_slot, 0, end - 1u)) {
-            return false;
-        }
-    }
-    return true;
+    uint32_t limit = (uint32_t)fits;
+    return limit < upper ? limit : upper;
 }
 
-/* Streaming pass over a sorted ring: drop duplicate minutes (adjacent after the
- * sort) and skip corrupt records, compacting survivors to the front. Writes to
- * a lower index than it reads, so it never clobbers unread data. */
-static bool ring_compact(uint32_t oldest_slot, uint32_t count, uint32_t *unique_out)
+static uint32_t repair_keep_limit(void)
 {
-    uint32_t write = 0;
-    int64_t prev = 0;
-    bool have_prev = false;
-    for (uint32_t i = 0; i < count; ++i) {
-        power_history_record_t record;
-        if (!read_record_idx(oldest_slot, i, &record) || !record_is_valid(&record)) {
-            continue;
-        }
-        (void)power_history_migrate_record(&record);
-        if (have_prev && record.interval_start_utc == prev) {
-            continue; /* duplicate minute */
-        }
-        prev = record.interval_start_utc;
-        have_prev = true;
-        if (write != i && !write_record_idx(oldest_slot, write, &record)) {
-            return false;
-        }
-        ++write;
-    }
-    *unique_out = write;
-    return true;
+    return power_history_repair_keep_limit_for(
+        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+        (uint32_t)POWER_HISTORY_REPAIR_RAM_LIMIT);
 }
 
-/* Renumber the first `unique` records contiguously so sequence == oldest + index
- * and recompute their checksums. */
-static bool ring_renumber(uint32_t oldest_slot, uint32_t unique,
-                          uint32_t oldest_sequence)
+/* Allocate the repair buffer for at most `*records_wanted` records, halving the
+ * request until the allocation fits (heap fragmentation can make a size fail
+ * that a smaller one accepts). On success the actually reserved record count is
+ * written back through `*records_wanted`. Returns NULL when even the minimum
+ * does not fit, so the caller keeps the ring as-is instead of aborting. */
+static power_history_record_t *repair_alloc(uint32_t *records_wanted)
 {
-    for (uint32_t i = 0; i < unique; ++i) {
-        power_history_record_t record;
-        if (!read_record_idx(oldest_slot, i, &record)) {
-            return false;
+    uint32_t want = *records_wanted;
+    uint32_t limit = repair_keep_limit();
+    if (want > limit) {
+        want = limit;
+    }
+    /* Halve only down to the caller's own size when that is already small (a
+     * short ring is legitimately small); otherwise down to the minimum worth
+     * allocating. */
+    uint32_t floor = want < POWER_HISTORY_REPAIR_MIN_RECORDS
+                         ? want
+                         : (uint32_t)POWER_HISTORY_REPAIR_MIN_RECORDS;
+    while (want >= floor && want != 0) {
+        power_history_record_t *buf =
+            heap_caps_malloc((size_t)want * sizeof(*buf), MALLOC_CAP_8BIT);
+        if (buf != NULL) {
+            *records_wanted = want;
+            return buf;
         }
-        record.sequence = oldest_sequence + i;
-        record.checksum = record_checksum(&record);
-        if (!write_record_idx(oldest_slot, i, &record)) {
+        if (want == floor) {
+            break;
+        }
+        want /= 2u;
+        if (want < floor) {
+            want = floor;
+        }
+    }
+    return NULL;
+}
+
+static void repair_pacer_begin(repair_pacer_t *pacer)
+{
+    pacer->steps = 0;
+    pacer->budget_ms = POWER_HISTORY_REPAIR_BUDGET_MS;
+    pacer->expired = false;
+    int64_t now = repair_now_us();
+    pacer->deadline_us = (now != 0)
+                             ? now + (int64_t)pacer->budget_ms * 1000
+                             : 0;
+}
+
+/* Account one unit of work. Returns false once the budget is spent; the caller
+ * must then stop and report the repair as incomplete. */
+static bool repair_pacer_step(repair_pacer_t *pacer)
+{
+    if (++pacer->steps % POWER_HISTORY_REPAIR_YIELD_STEPS == 0) {
+        /* Let the IDLE task feed the task watchdog. Delay(1) blocks this task
+         * for one tick (10 ms at 100 Hz), long enough for IDLE to run. */
+        vTaskDelay(1);
+        if (pacer->deadline_us != 0 && repair_now_us() >= pacer->deadline_us) {
+            pacer->expired = true;
             return false;
         }
     }
@@ -662,6 +808,26 @@ static bool finish_repair(uint32_t oldest_slot, uint32_t unique)
     return true;
 }
 
+static bool repair_ring_if_needed(void);
+
+/* Heal SPIFFS' own bookkeeping before touching the ring. A hard reset mid-write
+ * (this board's normal failure mode) can leave the file system's index
+ * inconsistent: reads then fail with ENOENT/EIO on a fixed set of slots even
+ * though the partition has plenty of free space. The ring keeps growing into
+ * that region and every write that reaches it fails, which is exactly the
+ * "write errors climb, ring stalls at the same record count" fault. The
+ * SPIFFS check repairs the index in place and keeps the data (unlike a format),
+ * so it is the right first step. Best-effort: a failure only means the ring
+ * repair below still runs, and a later boot retries. */
+static void heal_spiffs_consistency(void)
+{
+    esp_err_t err = esp_spiffs_check(POWER_HISTORY_PARTITION);
+    if (err == ESP_OK) {
+        return;
+    }
+    ESP_LOGW(TAG, "SPIFFS consistency check failed: %s", esp_err_to_name(err));
+}
+
 /* Repair a ring that an older firmware left time-unsorted and/or holding
  * duplicate minutes (backfill merges used to append out of order, and the
  * binary-search dedupe then failed to see the minutes already stored). The ring
@@ -671,10 +837,29 @@ static bool finish_repair(uint32_t oldest_slot, uint32_t unique)
  *
  * Two paths, so a full ring is repaired too:
  *  - a small store is sorted in one RAM buffer (fast, the common case);
- *  - a store too large for one buffer is sorted in place on disk with O(1) RAM
- *    (ring_heap_sort), because neither the heap (812 kB for 29000 records) nor
- *    the ~103 kB of free SPIFFS can hold a full copy on a no-PSRAM ESP32.
+ *  - a store too large for one buffer keeps only the most recent records that
+ *    fit one RAM buffer (the earlier in-place disk sort is gone: a damaged/full
+ *    SPIFFS store can make a single lseek hang for minutes, which used to wedge
+ *    the boot). The sender backfill re-imports the dropped minutes.
  * Returns true when the ring is sorted and duplicate-free afterwards. */
+esp_err_t power_history_repair_ring(void)
+{
+    if (g_history_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Could not lock history store for ring repair");
+        return ESP_ERR_TIMEOUT;
+    }
+    if (g_history_file != NULL) {
+        heal_spiffs_consistency();
+    }
+    bool ok = repair_ring_if_needed();
+    xSemaphoreGive(g_history_mutex);
+    (void)ok;
+    return ESP_OK;
+}
+
 static bool repair_ring_if_needed(void)
 {
     if (g_history_file == NULL || g_history_header.record_count < 2) {
@@ -682,6 +867,10 @@ static bool repair_ring_if_needed(void)
     }
     uint32_t count = g_history_header.record_count;
     uint32_t oldest_slot = oldest_slot_of(g_history_header.next_slot, count);
+    /* Paces every loop below (the damage scan is already O(count) SPIFFS
+     * reads) so the boot cannot be starved of the IDLE task. */
+    repair_pacer_t pacer;
+    repair_pacer_begin(&pacer);
 
     /* Streaming damage check: O(1) RAM, so it also covers a full ring. */
     bool damaged = false;
@@ -690,6 +879,12 @@ static bool repair_ring_if_needed(void)
     for (uint32_t i = 0; i < count && !damaged; ++i) {
         power_history_record_t record;
         if (!read_record_idx(oldest_slot, i, &record) || !record_is_valid(&record)) {
+            /* An unreadable slot is damage too, not something to skip over: a
+             * ring whose readable records happen to be in order must still be
+             * compacted, otherwise the repair never runs and the ring keeps
+             * growing back into the broken region (the "ring stalls at the
+             * same record count" fault). */
+            damaged = true;
             continue;
         }
         (void)power_history_migrate_record(&record);
@@ -698,16 +893,29 @@ static bool repair_ring_if_needed(void)
         }
         prev = record.interval_start_utc;
         have_prev = true;
+        if (!repair_pacer_step(&pacer)) {
+            ESP_LOGW(TAG, "History repair scan exceeded its time budget; "
+                          "leaving the ring for a later boot");
+            return true; /* best-effort: boot on, retry next time */
+        }
     }
     if (!damaged) {
         return true; /* already sorted and duplicate-free */
     }
 
-    if ((size_t)count <= (size_t)POWER_HISTORY_REPAIR_RAM_LIMIT) {
-        power_history_record_t *records =
-            heap_caps_malloc((size_t)count * sizeof(*records), MALLOC_CAP_8BIT);
+    if ((size_t)count <= (size_t)repair_keep_limit()) {
+        uint32_t want = count;
+        power_history_record_t *records = repair_alloc(&want);
+        if (records != NULL && want < count) {
+            /* The buffer was clamped below the ring; this path must hold all
+             * `count` records, so hand it to the "keep most recent" path
+             * instead of overflowing. */
+            heap_caps_free(records);
+            records = NULL;
+        }
         if (records != NULL) {
             size_t valid = 0;
+            bool scan_ok = true;
             for (uint32_t i = 0; i < count; ++i) {
                 power_history_record_t record = {0};
                 if (!read_record_idx(oldest_slot, i, &record) ||
@@ -716,6 +924,16 @@ static bool repair_ring_if_needed(void)
                 }
                 (void)power_history_migrate_record(&record);
                 records[valid++] = record;
+                if (!repair_pacer_step(&pacer)) {
+                    scan_ok = false;
+                    break;
+                }
+            }
+            if (!scan_ok) {
+                heap_caps_free(records);
+                ESP_LOGW(TAG, "History repair (RAM) exceeded its time budget; "
+                              "leaving the ring for a later boot");
+                return true;
             }
             /* Stable insertion sort: the store is "almost sorted" (live minutes
              * in order, a few backfill blocks), so this is fast. */
@@ -728,6 +946,12 @@ static bool repair_ring_if_needed(void)
                     --j;
                 }
                 records[j] = key;
+                if (!repair_pacer_step(&pacer)) {
+                    heap_caps_free(records);
+                    ESP_LOGW(TAG, "History repair (RAM sort) exceeded its time budget; "
+                                  "leaving the ring for a later boot");
+                    return true;
+                }
             }
             size_t unique = 0;
             for (size_t i = 0; i < valid; ++i) {
@@ -760,27 +984,123 @@ static bool repair_ring_if_needed(void)
         }
     }
 
-    /* Full store: sort in place on disk with O(1) RAM. */
-    if (!ring_heap_sort(oldest_slot, count)) {
-        return false;
+    /* Full store: keep the most recent records that fit one RAM buffer, sort
+     * them in RAM and write the compacted result back. The in-place disk sort
+     * (ring_heap_sort) is deliberately gone: a single SPIFFS lseek on a
+     * damaged/full store can hang for minutes and take the device down. A
+     * device that keeps running with a shorter history beats one that wedges;
+     * the sender backfill re-imports the dropped minutes anyway. */
+    uint32_t keep = repair_keep_limit();
+    if (keep > count) {
+        keep = count;
     }
-    uint32_t unique = 0;
-    if (!ring_compact(oldest_slot, count, &unique)) {
-        return false;
+    if (keep < POWER_HISTORY_REPAIR_MIN_RECORDS) {
+        ESP_LOGW(TAG, "History repair: only %u records fit the free heap; "
+                      "leaving the ring for a later boot",
+                 (unsigned)keep);
+        return true;
+    }
+    uint32_t first = count - keep;
+    ESP_LOGW(TAG,
+             "History ring too large for one RAM buffer (%u records); repairing "
+             "the most recent %u", (unsigned)count, (unsigned)keep);
+    uint32_t want = keep;
+    power_history_record_t *records = repair_alloc(&want);
+    if (records == NULL) {
+        ESP_LOGE(TAG, "Could not allocate repair buffer; leaving ring as-is");
+        return true;
+    }
+    /* The buffer may have been clamped below `keep`; scan the most recent
+     * `want` records (a smaller, still-consistent slice beats no repair). */
+    keep = want;
+    first = count - keep;
+    size_t valid = 0;
+    bool scan_ok = true;
+    for (uint32_t i = first; i < count; ++i) {
+        power_history_record_t record = {0};
+        if (!read_record_idx(oldest_slot, i, &record) ||
+            !record_is_valid(&record)) {
+            continue;
+        }
+        (void)power_history_migrate_record(&record);
+        records[valid++] = record;
+        if (!repair_pacer_step(&pacer)) {
+            scan_ok = false;
+            break;
+        }
+    }
+    if (!scan_ok) {
+        heap_caps_free(records);
+        ESP_LOGW(TAG, "History repair (keep) exceeded its time budget; "
+                      "leaving the ring for a later boot");
+        return true;
+    }
+    for (size_t i = 1; i < valid; ++i) {
+        power_history_record_t key = records[i];
+        size_t j = i;
+        while (j > 0 && record_precedes(&key, &records[j - 1])) {
+            records[j] = records[j - 1];
+            --j;
+        }
+        records[j] = key;
+        if (!repair_pacer_step(&pacer)) {
+            heap_caps_free(records);
+            ESP_LOGW(TAG, "History repair (keep sort) exceeded its time budget; "
+                          "leaving the ring for a later boot");
+            return true;
+        }
+    }
+    size_t unique = 0;
+    for (size_t i = 0; i < valid; ++i) {
+        if (unique != 0 &&
+            records[i].interval_start_utc ==
+                records[unique - 1].interval_start_utc) {
+            continue;
+        }
+        records[unique++] = records[i];
     }
     uint32_t next_sequence = g_history_header.next_sequence;
-    uint32_t oldest_sequence = next_sequence - unique;
+    uint32_t oldest_sequence = next_sequence - (uint32_t)unique;
     if (oldest_sequence == 0) {
         oldest_sequence = 1;
     }
-    if (!ring_renumber(oldest_slot, unique, oldest_sequence) ||
-        !finish_repair(oldest_slot, unique)) {
+    bool ok = true;
+    for (size_t i = 0; i < unique && ok; ++i) {
+        records[i].sequence = oldest_sequence + (uint32_t)i;
+        records[i].checksum = record_checksum(&records[i]);
+        ok = write_record_idx(oldest_slot, (uint32_t)i, &records[i]);
+    }
+    heap_caps_free(records);
+    if (!ok || !finish_repair(oldest_slot, (uint32_t)unique)) {
         return false;
     }
     ESP_LOGW(TAG,
-             "Repaired full history ring in place: %u records, %u duplicate(s) dropped",
-             (unsigned)unique, (unsigned)(count - unique));
+             "Repaired full history ring in RAM (kept most recent %u): "
+             "%u records, %u duplicate(s) dropped",
+             (unsigned)keep, (unsigned)unique, (unsigned)(valid - unique));
     return true;
+}
+
+/* Background repair task. The device must boot and serve (Wi-Fi, HTTP, OTA,
+ * telemetry) before the store is touched: a damaged/full SPIFFS store can make
+ * a single lseek hang for minutes, and the repair must never take the boot or
+ * the web server down with it. Runs once, shortly after boot, at low priority;
+ * if the store needs no repair it returns immediately. */
+static void power_history_repair_worker(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(POWER_HISTORY_REPAIR_DELAY_MS));
+    esp_err_t err = power_history_repair_ring();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "History repair deferred/failed (%s); retrying next boot",
+                 esp_err_to_name(err));
+    }
+    /* One-shot task: it must delete itself. A FreeRTOS task function that
+     * returns is undefined behaviour; in this IDF build the task wrapper that
+     * would turn it into a clear abort() is compiled out, so returning
+     * crashed the receiver on the first boot of this image and the bootloader
+     * rolled it back to the previous slot. */
+    vTaskDelete(NULL);
 }
 
 esp_err_t power_history_init(void)
@@ -882,10 +1202,13 @@ esp_err_t power_history_init(void)
     }
 
     /* An older firmware could leave the ring time-unsorted after backfill
-     * merges; sort it once at startup so dedupe and the CSV paging are correct
-     * from the first request. Best-effort (see repair_ring_if_needed). */
-    (void)repair_ring_if_needed();
-
+     * merges. The repair does NOT run here: a damaged/full SPIFFS store can
+     * make a single lseek hang for minutes, which used to wedge app_main
+     * before the web server started (TWDT boot-loop). It now runs in its own
+     * low-priority background task shortly after boot (see
+     * power_history_repair_worker below), so HTTP/OTA/telemetry are up first
+     * and the ring is healed -- or dropped to the most recent records --
+     * without ever taking the device down. */
     g_history_queue = xQueueCreate(POWER_HISTORY_QUEUE_LENGTH,
                                    sizeof(power_history_record_t));
     if (g_history_queue == NULL) {
@@ -904,20 +1227,106 @@ esp_err_t power_history_init(void)
         return ESP_FAIL;
     }
 
+    /* Record the partition fill once: a store that is ~88% full still reads
+     * fine but has little room for SPIFFS garbage collection, so writes start
+     * failing with ENOSPC while reads keep working. Having used/total in the
+     * status/diag makes that visible without a separate query. */
+    size_t spiffs_total = 0;
+    size_t spiffs_used = 0;
+    if (esp_spiffs_info(POWER_HISTORY_PARTITION, &spiffs_total, &spiffs_used) == ESP_OK) {
+        g_storage_total_bytes = (uint32_t)spiffs_total;
+        g_storage_used_bytes = (uint32_t)spiffs_used;
+    }
+
+    /* Start the background repair AFTER the writer, so the store is fully
+     * usable from the first moment and the repair (which takes the same
+     * mutex) can never race init. It self-delays again, so HTTP/OTA are up
+     * well before any SPIFFS repair loop runs. */
+    BaseType_t repair_result = xTaskCreate(
+        power_history_repair_worker, "ph_repair", POWER_HISTORY_REPAIR_STACK,
+        NULL, 1, NULL);
+    if (repair_result != pdPASS) {
+        ESP_LOGW(TAG, "Could not start background history repair task");
+    }
+
     ESP_LOGI(TAG, "Persistent history ready: %lu of %u minute records",
              (unsigned long)g_history_header.record_count,
              POWER_HISTORY_CAPACITY);
     return ESP_OK;
 }
 
+esp_err_t power_history_format(void)
+{
+    if (g_history_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Could not lock history store for formatting");
+        return ESP_ERR_TIMEOUT;
+    }
+    if (g_history_file != NULL) {
+        fclose(g_history_file);
+        g_history_file = NULL;
+    }
+    /* Format the whole partition, then recreate the history file with fresh
+     * headers. The sender backfill re-imports the minute history afterwards, so
+     * a damaged ring is replaced cleanly instead of being read around forever. */
+    esp_err_t err = esp_spiffs_format(POWER_HISTORY_PARTITION);
+    if (err != ESP_OK) {
+        xSemaphoreGive(g_history_mutex);
+        ESP_LOGE(TAG, "Could not format persistent SPIFFS partition: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+    g_history_file = fopen(POWER_HISTORY_FILE, "w+b");
+    if (g_history_file == NULL) {
+        xSemaphoreGive(g_history_mutex);
+        ESP_LOGE(TAG, "Could not recreate persistent history file after format");
+        return ESP_FAIL;
+    }
+    power_history_make_fresh_header(&g_history_header);
+    power_history_header_t previous = g_history_header;
+    previous.generation = 0;
+    previous.checksum = header_checksum(&previous);
+    bool headers_ok = write_header_copy(0, &previous) &&
+                      write_header_copy(1, &g_history_header);
+    if (!headers_ok) {
+        ESP_LOGE(TAG, "Could not write fresh headers after format");
+    }
+    g_active_header_copy = 1;
+    g_history_ram_fallback = false;
+    g_history_ram_count = 0;
+    g_splice_batches = 0;
+    g_splice_records = 0;
+    g_splice_skipped = 0;
+    g_write_errors = 0;
+    g_queue_drops = 0;
+    g_storage_used_bytes = 0;
+    g_storage_total_bytes = 0;
+    xSemaphoreGive(g_history_mutex);
+    ESP_LOGW(TAG, "Persistent history partition reformatted; waiting for sender backfill");
+    return headers_ok ? ESP_OK : ESP_FAIL;
+}
+
 bool power_history_enqueue(const power_history_record_t *record)
 {
-    if (!g_history_ready || record == NULL ||
-        xQueueSend(g_history_queue, record, 0) != pdTRUE) {
+    if (!g_history_ready || record == NULL) {
         portENTER_CRITICAL(&g_stats_lock);
         ++g_queue_drops;
         portEXIT_CRITICAL(&g_stats_lock);
-        ESP_LOGE(TAG, "Completed interval could not be queued for persistence");
+        ESP_LOGE(TAG, "History enqueue rejected: %s",
+                 record == NULL ? "null record" : "store not ready");
+        return false;
+    }
+    if (xQueueSend(g_history_queue, record, 0) != pdTRUE) {
+        /* A full queue means the writer is slower than the producers (a stalled
+         * or GC-thrashing SPIFFS). That is a different fault from an invalid
+         * call, so name it instead of lumping both into one message. */
+        portENTER_CRITICAL(&g_stats_lock);
+        ++g_queue_drops;
+        portEXIT_CRITICAL(&g_stats_lock);
+        ESP_LOGE(TAG, "History queue full (%u slots); dropping minute",
+                 (unsigned)POWER_HISTORY_QUEUE_LENGTH);
         return false;
     }
     return true;
@@ -1050,6 +1459,14 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
         record.reserved = 0;
         record.checksum = record_checksum(&record);
         if (at < updated.record_count) {
+            /* Same splice bound as the live/merge path: a restore that asks to
+             * insert a minute deep below the tail is dropped instead of
+             * rewriting the whole newer ring under the mutex. */
+            if (updated.record_count - at > POWER_HISTORY_MAX_SPLICE_RECORDS) {
+                ++g_splice_skipped;
+                ++skipped;
+                continue;
+            }
             if (!shift_up_renumber(oldest_slot, updated.record_count, at)) {
                 xSemaphoreGive(g_history_mutex);
                 if (imported_out != NULL) {
@@ -1121,32 +1538,58 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
     return ESP_OK;
 }
 
-void power_history_get_status(power_history_status_t *status)
+/* Fill the status fields that need no store lock: readiness, the stats counters
+ * and the SPIFFS fill. The header-derived fields (record_count/latest/oldest)
+ * stay zero here; the caller fills them while it holds g_history_mutex. A read
+ * path uses this so it can take the lock exactly once, instead of get_status()
+ * taking it and the read taking it again - under backfill load that second wait
+ * alone pushed every read past the timeout and the dashboard showed an empty
+ * graph even though the ring was full. */
+static void status_fill_unlocked(power_history_status_t *status)
 {
-    if (status == NULL) {
-        return;
-    }
     memset(status, 0, sizeof(*status));
     status->ready = g_history_ready;
     /* `ready` is also true in the RAM-only fallback, so report the real
      * persistence separately: only an open SPIFFS file survives a reboot. */
     status->persistent = g_history_ready && g_history_file != NULL;
-    if (g_history_ready && xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) == pdTRUE) {
-        status->record_count = g_history_header.record_count;
-        status->latest_sequence = g_history_header.next_sequence - 1u;
-        if (status->record_count != 0) {
-            status->oldest_sequence =
-                g_history_header.next_sequence - status->record_count;
-            if (status->oldest_sequence == 0) {
-                status->oldest_sequence = 1;
-            }
-        }
-        xSemaphoreGive(g_history_mutex);
-    }
     portENTER_CRITICAL(&g_stats_lock);
     status->queue_drops = g_queue_drops;
     status->write_errors = g_write_errors;
     portEXIT_CRITICAL(&g_stats_lock);
+    /* Splice counters and the SPIFFS fill are written by the writer under
+     * g_history_mutex; read them without it (single-word reads, the exact value
+     * is not critical for a diagnostic). */
+    status->splice_batches = g_splice_batches;
+    status->splice_records = g_splice_records;
+    status->splice_skipped = g_splice_skipped;
+    status->storage_used_bytes = g_storage_used_bytes;
+    status->storage_total_bytes = g_storage_total_bytes;
+}
+
+/* Fill the header-derived status fields. The caller must hold g_history_mutex. */
+static void status_fill_header_locked(power_history_status_t *status)
+{
+    status->record_count = g_history_header.record_count;
+    status->latest_sequence = g_history_header.next_sequence - 1u;
+    if (status->record_count != 0) {
+        status->oldest_sequence =
+            g_history_header.next_sequence - status->record_count;
+        if (status->oldest_sequence == 0) {
+            status->oldest_sequence = 1;
+        }
+    }
+}
+
+void power_history_get_status(power_history_status_t *status)
+{
+    if (status == NULL) {
+        return;
+    }
+    status_fill_unlocked(status);
+    if (g_history_ready && xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(POWER_HISTORY_READ_LOCK_TIMEOUT_MS)) == pdTRUE) {
+        status_fill_header_locked(status);
+        xSemaphoreGive(g_history_mutex);
+    }
 }
 
 esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
@@ -1160,7 +1603,7 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
     }
     *record_count = 0;
     *overflow = false;
-    power_history_get_status(status);
+    status_fill_unlocked(status);
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1168,13 +1611,7 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
         return ESP_ERR_TIMEOUT;
     }
 
-    status->record_count = g_history_header.record_count;
-    status->latest_sequence = g_history_header.next_sequence - 1u;
-    status->oldest_sequence = status->record_count == 0 ? 0 :
-                              g_history_header.next_sequence - status->record_count;
-    if (status->oldest_sequence == 0 && status->record_count != 0) {
-        status->oldest_sequence = 1;
-    }
+    status_fill_header_locked(status);
 
     uint32_t oldest_sequence = status->oldest_sequence;
     uint32_t latest_sequence = status->latest_sequence;
@@ -1232,10 +1669,14 @@ esp_err_t power_history_read(uint32_t after_sequence, uint32_t recent_count,
         power_history_record_t record;
         if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
             fread(&record, sizeof(record), 1, g_history_file) != 1) {
-            xSemaphoreGive(g_history_mutex);
-            ESP_LOGE(TAG, "Could not read persistent history record at slot %lu",
+            /* A physically unreadable slot (EIO from a damaged SPIFFS file,
+             * e.g. leftovers of an interrupted splice) must not take the whole
+             * history down with a 500. Skip it; a later format + sender
+             * backfill will restore the minute. Reading on keeps the dashboard
+             * graph usable even while the store is partially damaged. */
+            ESP_LOGW(TAG, "Skipping unreadable history record at slot %lu",
                      (unsigned long)slot);
-            return ESP_FAIL;
+            continue;
         }
         if (!record_is_valid(&record)) {
             ESP_LOGW(TAG, "Ignoring corrupt history record at slot %lu",
@@ -1337,7 +1778,7 @@ esp_err_t power_history_read_window(int64_t from_utc, int64_t to_utc,
     if (max_records == 0 || max_records > capacity) {
         max_records = (uint32_t)capacity;
     }
-    power_history_get_status(status);
+    status_fill_unlocked(status);
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1345,13 +1786,7 @@ esp_err_t power_history_read_window(int64_t from_utc, int64_t to_utc,
         return ESP_ERR_TIMEOUT;
     }
 
-    status->record_count = g_history_header.record_count;
-    status->latest_sequence = g_history_header.next_sequence - 1u;
-    status->oldest_sequence = status->record_count == 0 ? 0 :
-                              g_history_header.next_sequence - status->record_count;
-    if (status->oldest_sequence == 0 && status->record_count != 0) {
-        status->oldest_sequence = 1;
-    }
+    status_fill_header_locked(status);
 
     esp_err_t result = ESP_OK;
     if (g_history_file == NULL) {
@@ -1386,10 +1821,22 @@ esp_err_t power_history_read_window(int64_t from_utc, int64_t to_utc,
                              slot * sizeof(power_history_record_t));
         if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
             fread(block, sizeof(block[0]), chunk, g_history_file) != chunk) {
-            xSemaphoreGive(g_history_mutex);
-            ESP_LOGE(TAG, "Could not read history window at slot %lu",
-                     (unsigned long)slot);
-            return ESP_FAIL;
+            /* Block read hit a physically unreadable slot; recover by reading
+             * the block record-by-record and keeping the readable ones, so one
+             * damaged slot cannot blank the whole window. */
+            size_t got = 0;
+            ESP_LOGW(TAG, "History window block read failed at slot %lu; "
+                          "recovering per-record", (unsigned long)slot);
+            while (got < chunk) {
+                uint32_t rslot = (slot + got) % POWER_HISTORY_CAPACITY;
+                long roffset = (long)(2u * sizeof(power_history_header_t) +
+                                      rslot * sizeof(power_history_record_t));
+                if (fseek(g_history_file, roffset, SEEK_SET) != 0 ||
+                    fread(&block[got], sizeof(block[0]), 1, g_history_file) != 1) {
+                    memset(&block[got], 0, sizeof(block[0]));
+                }
+                ++got;
+            }
         }
         for (uint32_t i = 0; i < chunk; ++i) {
             if (!record_is_valid(&block[i])) {
@@ -1432,7 +1879,7 @@ esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
     if (max_records == 0 || max_records > capacity) {
         max_records = (uint32_t)capacity;
     }
-    power_history_get_status(status);
+    status_fill_unlocked(status);
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1440,13 +1887,7 @@ esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
         return ESP_ERR_TIMEOUT;
     }
 
-    status->record_count = g_history_header.record_count;
-    status->latest_sequence = g_history_header.next_sequence - 1u;
-    status->oldest_sequence = status->record_count == 0 ? 0 :
-                              g_history_header.next_sequence - status->record_count;
-    if (status->oldest_sequence == 0 && status->record_count != 0) {
-        status->oldest_sequence = 1;
-    }
+    status_fill_header_locked(status);
 
     esp_err_t result = ESP_OK;
     if (g_history_file == NULL) {
@@ -1492,10 +1933,21 @@ esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
                              slot * sizeof(power_history_record_t));
         if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
             fread(block, sizeof(block[0]), chunk, g_history_file) != chunk) {
-            xSemaphoreGive(g_history_mutex);
-            ESP_LOGE(TAG, "Could not read history page at slot %lu",
-                     (unsigned long)slot);
-            return ESP_FAIL;
+            /* Block read hit a physically unreadable slot; recover per-record so
+             * one damaged slot cannot blank the whole page. */
+            size_t got = 0;
+            ESP_LOGW(TAG, "History page block read failed at slot %lu; "
+                          "recovering per-record", (unsigned long)slot);
+            while (got < chunk) {
+                uint32_t rslot = (slot + got) % POWER_HISTORY_CAPACITY;
+                long roffset = (long)(2u * sizeof(power_history_header_t) +
+                                      rslot * sizeof(power_history_record_t));
+                if (fseek(g_history_file, roffset, SEEK_SET) != 0 ||
+                    fread(&block[got], sizeof(block[0]), 1, g_history_file) != 1) {
+                    memset(&block[got], 0, sizeof(block[0]));
+                }
+                ++got;
+            }
         }
         for (uint32_t i = 0; i < chunk; ++i) {
             if (!record_is_valid(&block[i])) {
@@ -1749,7 +2201,7 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
     }
     power_history_aggregate_init(window_start_utc, bucket_seconds, sum_w, count,
                                  bucket_start_ms, bucket_count);
-    power_history_get_status(status);
+    status_fill_unlocked(status);
     if (!status->ready) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1757,13 +2209,7 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
         return ESP_ERR_TIMEOUT;
     }
 
-    status->record_count = g_history_header.record_count;
-    status->latest_sequence = g_history_header.next_sequence - 1u;
-    status->oldest_sequence = status->record_count == 0 ? 0 :
-                              g_history_header.next_sequence - status->record_count;
-    if (status->oldest_sequence == 0 && status->record_count != 0) {
-        status->oldest_sequence = 1;
-    }
+    status_fill_header_locked(status);
 
     if (g_history_file == NULL) {
         esp_err_t core_err = power_history_aggregate_core(
@@ -1776,13 +2222,37 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
     uint32_t oldest_slot =
         (g_history_header.next_slot + POWER_HISTORY_CAPACITY -
          g_history_header.record_count) % POWER_HISTORY_CAPACITY;
+    /* The ring is time-sorted, so only the slice that overlaps the requested
+     * window has to be read: a full 12k-record walk under the mutex took
+     * seconds of SPIFFS fseek+fread per dashboard poll and made the HTTP task
+     * time out (>8 s) whenever the store grew. Binary-search the first index
+     * at/after the window start and the first index past the window end, then
+     * walk only that slice. */
+    uint32_t start_index = 0;
+    uint32_t end_index = g_history_header.record_count;
+    if (g_history_header.record_count != 0) {
+        /* Same walk order as the loop below: index 0 = oldest_slot. */
+        start_index = find_first_at_or_after_time(
+            oldest_slot, g_history_header.record_count, window_start_utc);
+        if (window_start_utc > INT64_MIN &&
+            bucket_seconds <= (INT64_MAX - window_start_utc) / (int64_t)bucket_count) {
+            int64_t window_end_utc =
+                window_start_utc + bucket_seconds * (int64_t)bucket_count;
+            end_index = find_first_at_or_after_time(
+                oldest_slot, g_history_header.record_count, window_end_utc);
+        }
+        if (start_index > end_index) {
+            start_index = 0;
+            end_index = 0;
+        }
+    }
     /* Walk the ring once but read in blocks: a large log made the per-record
      * fseek+fread dominate (tens of thousands of syscalls) and blocked the HTTP
      * task. A small block buffer keeps RAM flat and stays correct across the
      * ring wrap. */
     power_history_record_t block[64];
-    uint32_t remaining = g_history_header.record_count;
-    uint32_t index = 0;
+    uint32_t remaining = end_index - start_index;
+    uint32_t index = start_index;
     while (remaining != 0) {
         uint32_t slot = (oldest_slot + index) % POWER_HISTORY_CAPACITY;
         uint32_t chunk = remaining < 64 ? remaining : 64;
@@ -1793,10 +2263,21 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
                              slot * sizeof(power_history_record_t));
         if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
             fread(block, sizeof(block[0]), chunk, g_history_file) != chunk) {
-            xSemaphoreGive(g_history_mutex);
-            ESP_LOGE(TAG, "Could not read persistent history records at slot %lu",
-                     (unsigned long)slot);
-            return ESP_FAIL;
+            /* Block read hit a physically unreadable slot; recover per-record so
+             * one damaged slot cannot blank the whole aggregation. */
+            size_t got = 0;
+            ESP_LOGW(TAG, "History aggregate block read failed at slot %lu; "
+                          "recovering per-record", (unsigned long)slot);
+            while (got < chunk) {
+                uint32_t rslot = (slot + got) % POWER_HISTORY_CAPACITY;
+                long roffset = (long)(2u * sizeof(power_history_header_t) +
+                                      rslot * sizeof(power_history_record_t));
+                if (fseek(g_history_file, roffset, SEEK_SET) != 0 ||
+                    fread(&block[got], sizeof(block[0]), 1, g_history_file) != 1) {
+                    memset(&block[got], 0, sizeof(block[0]));
+                }
+                ++got;
+            }
         }
         if (power_history_aggregate_core(window_start_utc, bucket_seconds, block,
                                          chunk, sum_w, count, bucket_count) != ESP_OK) {
