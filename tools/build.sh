@@ -13,6 +13,28 @@ if [[ "$role" != "receiver" && "$role" != "sender" ]]; then
 fi
 clean="${2:-}"
 
+# --- Board guard: never compile on the Odroid (AGENTS.md "REGEL Nr. 1") ---
+# A local ESP-IDF build on this 3.7 GB board has hard-reset it repeatedly,
+# killing running agent chats, HA and the heating control. Builds belong in the
+# GitHub CI (.github/workflows/esp-idf-build.yml). Flashing and the serial
+# monitor do NOT need this image, so blocking the build costs nothing.
+if [[ "${ALLOW_LOCAL_BUILD:-0}" != "1" ]] && [[ "$(cat /etc/hostname 2>/dev/null)" == "odroidn2" ]]; then
+    cat >&2 <<'EOF'
+FEHLER: Das ist der Odroid (odroidn2) - hier wird NICHT kompiliert.
+
+ESP-IDF-Builds laufen in der GitHub-CI:
+    git push            # CI baut sender + receiver (+ receiver-apoff)
+Logs/Artefakt im GitHub-Actions-Lauf. Siehe AGENTS.md, "REGEL Nr. 1".
+
+Flashen und der serielle Monitor brauchen das NICHT (esptool + pyserial
+liegen als uv-Tools auf dem Host).
+
+Nur mit ausdruecklicher Nutzer-Freigabe (und dann -j1 + nice -n 19):
+    ALLOW_LOCAL_BUILD=1 tools/build.sh receiver
+EOF
+    exit 3
+fi
+
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 role_upper="$(printf '%s' "$role" | tr '[:lower:]' '[:upper:]')"
 
