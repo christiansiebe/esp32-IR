@@ -273,4 +273,14 @@ static inline esp_err_t esp_spiffs_check(const char *label)
     return ESP_OK;
 }
 
+/* esp_vfs_spiffs_register() above always reports success on the host (the
+ * driver then does plain fopen()), so the VFS is always "mounted". The
+ * automatic recovery path therefore never needs to format-and-remount here; it
+ * only has to recreate the file when it could not be opened. */
+static inline bool esp_spiffs_mounted(const char *label)
+{
+    (void)label;
+    return true;
+}
+
 #endif /* HOST_ESP_SHIM_H */

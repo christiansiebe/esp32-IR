@@ -809,6 +809,9 @@ static bool finish_repair(uint32_t oldest_slot, uint32_t unique)
 }
 
 static bool repair_ring_if_needed(void);
+/* Defined with the store-recovery helpers below; called by the background
+ * repair task to bring a RAM-only store back to a persistent one. */
+static bool recover_store_locked(void);
 
 /* Heal SPIFFS' own bookkeeping before touching the ring. A hard reset mid-write
  * (this board's normal failure mode) can leave the file system's index
@@ -851,7 +854,12 @@ esp_err_t power_history_repair_ring(void)
         ESP_LOGE(TAG, "Could not lock history store for ring repair");
         return ESP_ERR_TIMEOUT;
     }
-    if (g_history_file != NULL) {
+    if (g_history_file == NULL) {
+        /* The partition/file never opened, so the store is RAM-only. Bring it
+         * back to a persistent one first (format as the last resort); the ring
+         * repair below then runs against the fresh file. */
+        (void)recover_store_locked();
+    } else {
         heal_spiffs_consistency();
     }
     bool ok = repair_ring_if_needed();
@@ -1101,6 +1109,137 @@ static void power_history_repair_worker(void *arg)
      * crashed the receiver on the first boot of this image and the bootloader
      * rolled it back to the previous slot. */
     vTaskDelete(NULL);
+}
+
+/* Reformat the storage partition and recreate the history file with fresh
+ * headers. The caller must hold the store lock (or run before the writer starts,
+ * as in power_history_init). Returns true when a usable, freshly headed file is
+ * open. This is the last-resort automatic recovery: the stored minutes are
+ * regenerable (the sender backfill re-imports them), so an empty persistent
+ * store beats a permanent RAM-only one. */
+static bool reformat_store_locked(void)
+{
+    if (g_history_file != NULL) {
+        fclose(g_history_file);
+        g_history_file = NULL;
+    }
+    esp_err_t err = esp_spiffs_format(POWER_HISTORY_PARTITION);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not format persistent SPIFFS partition: %s",
+                 esp_err_to_name(err));
+        return false;
+    }
+    g_history_file = fopen(POWER_HISTORY_FILE, "w+b");
+    if (g_history_file == NULL) {
+        ESP_LOGE(TAG, "Could not recreate persistent history file after format");
+        return false;
+    }
+    power_history_make_fresh_header(&g_history_header);
+    power_history_header_t previous = g_history_header;
+    previous.generation = 0;
+    previous.checksum = header_checksum(&previous);
+    if (!write_header_copy(0, &previous) ||
+        !write_header_copy(1, &g_history_header)) {
+        ESP_LOGE(TAG, "Could not write fresh headers after format");
+        fclose(g_history_file);
+        g_history_file = NULL;
+        return false;
+    }
+    g_active_header_copy = 1;
+    ESP_LOGW(TAG, "Persistent history partition reformatted (fresh store)");
+    return true;
+}
+
+/* Adopt the on-disk header from an already-open store file (newest valid copy).
+ * Returns false when neither copy is valid, so the caller treats the store as
+ * fresh. Caller holds the lock and g_history_file is open. */
+static bool adopt_existing_header_locked(void)
+{
+    power_history_header_t headers[2] = {0};
+    bool valid[2] = {false, false};
+    for (uint8_t i = 0; i < 2; ++i) {
+        if (fseek(g_history_file, (long)(i * sizeof(headers[i])), SEEK_SET) == 0 &&
+            fread(&headers[i], sizeof(headers[i]), 1, g_history_file) == 1) {
+            valid[i] = header_is_valid(&headers[i]);
+        }
+    }
+    if (!valid[0] && !valid[1]) {
+        return false;
+    }
+    if (valid[0] && valid[1]) {
+        g_active_header_copy =
+            (int32_t)(headers[1].generation - headers[0].generation) > 0 ? 1 : 0;
+    } else {
+        g_active_header_copy = valid[1] ? 1 : 0;
+    }
+    g_history_header = headers[g_active_header_copy];
+    return true;
+}
+
+/* Last-resort automatic recovery, run from the background repair task (never
+ * from app_main: a format can block for seconds). It covers both ways the store
+ * ends up RAM-only, trying the data-preserving fix first:
+ *   1. heal SPIFFS' index in place and retry the open (keeps the minutes);
+ *   2. only if that fails: format the partition and recreate the file with fresh
+ *      headers (an empty persistent store still beats a permanent RAM-only one,
+ *      because the sender backfill re-imports the minutes).
+ * The caller must hold g_history_mutex. Returns true once g_history_file is
+ * open. */
+static bool recover_store_locked(void)
+{
+    if (g_history_file != NULL) {
+        return true;
+    }
+
+    /* 1) Gentle: heal the index in place, then retry the open. */
+    if (esp_spiffs_mounted(POWER_HISTORY_PARTITION)) {
+        (void)esp_spiffs_check(POWER_HISTORY_PARTITION);
+        g_history_file = fopen(POWER_HISTORY_FILE, "r+b");
+        if (g_history_file != NULL && adopt_existing_header_locked()) {
+            g_history_ram_fallback = false;
+            g_history_ram_count = 0;
+            ESP_LOGW(TAG, "Persistent history recovered in place (index healed, "
+                          "stored minutes kept)");
+            return true;
+        }
+        if (g_history_file != NULL) {
+            fclose(g_history_file);
+            g_history_file = NULL;
+        }
+    }
+
+    /* 2) Last resort: format the partition and recreate the file. */
+    if (!esp_spiffs_mounted(POWER_HISTORY_PARTITION)) {
+        esp_err_t err = esp_spiffs_format(POWER_HISTORY_PARTITION);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Explicit SPIFFS format failed: %s",
+                     esp_err_to_name(err));
+            return false;
+        }
+        esp_vfs_spiffs_conf_t retry = {
+            .base_path = POWER_HISTORY_MOUNT_PATH,
+            .partition_label = POWER_HISTORY_PARTITION,
+            .max_files = 1,
+            .format_if_mount_failed = true,
+        };
+        err = esp_vfs_spiffs_register(&retry);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "SPIFFS still unmountable after format: %s",
+                     esp_err_to_name(err));
+            return false;
+        }
+        ESP_LOGW(TAG, "SPIFFS partition reformatted and remounted");
+    }
+    if (!reformat_store_locked()) {
+        return false;
+    }
+    g_history_ram_fallback = false;
+    g_history_ram_count = 0;
+    g_write_errors = 0;
+    g_queue_drops = 0;
+    ESP_LOGW(TAG, "Persistent history recovered automatically (fresh store; "
+                  "run 'pull' to refill from the sender)");
+    return true;
 }
 
 esp_err_t power_history_init(void)

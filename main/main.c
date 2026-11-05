@@ -5611,7 +5611,10 @@ static size_t simulate_render(char *out, size_t out_size)
 
     power_history_status_t st;
     power_history_get_status(&st);
-    sim_line(&cur, &rem, "history ready     : %s\n", st.ready ? "yes" : "no");
+    sim_line(&cur, &rem, "history ready     : %s\n",
+             !st.ready ? "no"
+                       : (st.persistent ? "yes (SPIFFS)"
+                                        : "yes (RAM fallback, not persistent)"));
     sim_line(&cur, &rem, "history records   : %u (written %u, dropped %u)\n",
              (unsigned)st.record_count, (unsigned)st.write_errors,
              (unsigned)st.queue_drops);
@@ -6233,7 +6236,10 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  "  range: %lld..%lld UTC\n"
                  "  queue drops: %u  write errors: %u\n"
                  "usage: test storage | test storage format\n",
-                 s.ready ? "ready" : "not ready", (unsigned)s.record_count,
+                 !s.ready ? "not ready"
+                          : (s.persistent ? "ready (SPIFFS)"
+                                          : "RAM fallback (not persistent)"),
+                 (unsigned)s.record_count,
                  (unsigned)s.oldest_sequence, (unsigned)s.latest_sequence,
                  (long long)oldest, (long long)latest,
                  (unsigned)s.queue_drops, (unsigned)s.write_errors);
