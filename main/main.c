@@ -1802,7 +1802,12 @@ static uint32_t boot_marker_fill(int64_t now_utc, uint8_t reason)
         marker.sample_count = 0;
         marker.format_version = POWER_HISTORY_VERSION;
         marker.reason = reason;
-        if (power_history_enqueue(&marker)) {
+        /* Bounded wait, not the non-blocking enqueue: this runs in task context
+         * and queues a whole offline window at once, while the writer drains in
+         * 5-record batches. A non-blocking send dropped every marker past the
+         * first 16 ("History queue full"), leaving the rest of the outage
+         * unmarked and indistinguishable from real data loss. */
+        if (power_history_enqueue_wait(&marker, 2000)) {
             ++written;
         }
     }
