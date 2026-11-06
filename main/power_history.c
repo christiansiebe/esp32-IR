@@ -1948,11 +1948,11 @@ esp_err_t power_history_read_window(int64_t from_utc, int64_t to_utc,
     /* Block-read forward from the first in-window record. Stop as soon as the
      * window's end is reached (records are time-ordered, so nothing later can
      * match) or one extra match proves further pages exist. */
-    power_history_record_t block[64];
+    power_history_record_t block[16];
     uint32_t remaining = g_history_header.record_count - index;
     while (remaining != 0) {
         uint32_t slot = (oldest_slot + index) % POWER_HISTORY_CAPACITY;
-        uint32_t chunk = remaining < 64 ? remaining : 64;
+        uint32_t chunk = remaining < (uint32_t)(sizeof(block)/sizeof(block[0])) ? remaining : (uint32_t)(sizeof(block)/sizeof(block[0]));
         if (slot + chunk > POWER_HISTORY_CAPACITY) {
             chunk = POWER_HISTORY_CAPACITY - slot;
         }
@@ -2060,11 +2060,11 @@ esp_err_t power_history_read_after(int64_t after_utc, uint32_t max_records,
     uint32_t index = find_first_index_at_or_after(oldest_slot,
                                                   g_history_header.record_count,
                                                   after_utc + 1);
-    power_history_record_t block[64];
+    power_history_record_t block[16];
     uint32_t remaining = g_history_header.record_count - index;
     while (remaining != 0) {
         uint32_t slot = (oldest_slot + index) % POWER_HISTORY_CAPACITY;
-        uint32_t chunk = remaining < 64 ? remaining : 64;
+        uint32_t chunk = remaining < (uint32_t)(sizeof(block)/sizeof(block[0])) ? remaining : (uint32_t)(sizeof(block)/sizeof(block[0]));
         if (slot + chunk > POWER_HISTORY_CAPACITY) {
             chunk = POWER_HISTORY_CAPACITY - slot;
         }
@@ -2389,12 +2389,12 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
      * fseek+fread dominate (tens of thousands of syscalls) and blocked the HTTP
      * task. A small block buffer keeps RAM flat and stays correct across the
      * ring wrap. */
-    power_history_record_t block[64];
+    power_history_record_t block[16];
     uint32_t remaining = end_index - start_index;
     uint32_t index = start_index;
     while (remaining != 0) {
         uint32_t slot = (oldest_slot + index) % POWER_HISTORY_CAPACITY;
-        uint32_t chunk = remaining < 64 ? remaining : 64;
+        uint32_t chunk = remaining < (uint32_t)(sizeof(block)/sizeof(block[0])) ? remaining : (uint32_t)(sizeof(block)/sizeof(block[0]));
         if (slot + chunk > POWER_HISTORY_CAPACITY) {
             chunk = POWER_HISTORY_CAPACITY - slot;
         }

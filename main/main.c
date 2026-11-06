@@ -9097,8 +9097,13 @@ static void run_sender(void)
         ESP_LOGE(TAG, "Could not start UART capture worker");
         ESP_ERROR_CHECK(ESP_FAIL);
     }
+    /* 8 kB: the diagnostic path runs power_history_read_after/read_window,
+     * whose staging buffers plus the event snapshot already exceed 4 kB. A
+     * 4 kB stack overflowed and panicked the sender roughly every 70 s
+     * whenever the receiver's history backfill (or the board's diag timer)
+     * polled it (seen as "stack overflow in task espnow_diag" + boot loop). */
     task_result = xTaskCreate(espnow_diag_worker, "espnow_diag",
-                              4096, NULL, 4, NULL);
+                              8192, NULL, 4, NULL);
     if (task_result != pdPASS) {
         ESP_LOGE(TAG, "Could not start sender diagnostic worker");
         ESP_ERROR_CHECK(ESP_FAIL);
@@ -9114,7 +9119,7 @@ static void run_sender(void)
      * (espnow_align_channel_from_receiver_ap -> a 16-entry wifi_ap_record_t
      * array, ~1.6 kB) on the sender. */
     task_result = xTaskCreate(link_fallback_worker, "link_fallback",
-                              4096, NULL, 2, NULL);
+                              8192, NULL, 2, NULL);
     if (task_result != pdPASS) {
         ESP_LOGW(TAG, "Could not start the link-fallback worker");
     }
