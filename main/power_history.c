@@ -1447,7 +1447,7 @@ esp_err_t power_history_format(void)
     return headers_ok ? ESP_OK : ESP_FAIL;
 }
 
-static bool history_enqueue_impl(const power_history_record_t *record, TickType_t wait)
+static bool history_enqueue_impl(const power_history_record_t *record, uint32_t wait_ticks)
 {
     if (!g_history_ready || record == NULL) {
         portENTER_CRITICAL(&g_stats_lock);
@@ -1457,7 +1457,7 @@ static bool history_enqueue_impl(const power_history_record_t *record, TickType_
                  record == NULL ? "null record" : "store not ready");
         return false;
     }
-    if (xQueueSend(g_history_queue, record, wait) != pdTRUE) {
+    if (xQueueSend(g_history_queue, record, wait_ticks) != pdTRUE) {
         /* A full queue means the writer is slower than the producers (a stalled
          * or GC-thrashing SPIFFS). That is a different fault from an invalid
          * call, so name it instead of lumping both into one message. */
