@@ -1447,7 +1447,7 @@ esp_err_t power_history_format(void)
     return headers_ok ? ESP_OK : ESP_FAIL;
 }
 
-static bool history_enqueue_impl(const power_history_record_t *record, uint32_t wait_ticks)
+bool power_history_enqueue(const power_history_record_t *record)
 {
     if (!g_history_ready || record == NULL) {
         portENTER_CRITICAL(&g_stats_lock);
@@ -1457,7 +1457,7 @@ static bool history_enqueue_impl(const power_history_record_t *record, uint32_t 
                  record == NULL ? "null record" : "store not ready");
         return false;
     }
-    if (xQueueSend(g_history_queue, record, wait_ticks) != pdTRUE) {
+    if (xQueueSend(g_history_queue, record, 0) != pdTRUE) {
         /* A full queue means the writer is slower than the producers (a stalled
          * or GC-thrashing SPIFFS). That is a different fault from an invalid
          * call, so name it instead of lumping both into one message. */
@@ -1469,23 +1469,6 @@ static bool history_enqueue_impl(const power_history_record_t *record, uint32_t 
         return false;
     }
     return true;
-}
-
-bool power_history_enqueue(const power_history_record_t *record)
-{
-    /* Non-blocking: this runs from the 1 Hz sample timer, which must not stall
-     * waiting for SPIFFS. A single lost minute is recovered by the backfill. */
-    return history_enqueue_impl(record, 0);
-}
-
-bool power_history_enqueue_wait(const power_history_record_t *record, uint32_t timeout_ms)
-{
-    /* Bounded wait for burst producers that run in task context (the boot-marker
-     * fill queues up to BOOT_MARKER_MAX_MINUTES records in one go). The writer
-     * drains in small batches, so a non-blocking send dropped the tail of the
-     * burst right after a boot ("History queue full (16 slots)"). Never call
-     * this from an ISR or a timer callback. */
-    return history_enqueue_impl(record, pdMS_TO_TICKS(timeout_ms));
 }
 
 esp_err_t power_history_merge(const power_history_record_t *records, size_t count,

@@ -1795,21 +1795,35 @@ static uint32_t boot_marker_fill(int64_t now_utc, uint8_t reason)
         minutes = BOOT_MARKER_MAX_MINUTES;
     }
 
-    for (uint32_t i = 0; i < minutes; ++i) {
-        power_history_record_t marker = {0};
-        marker.interval_start_utc = first_missing + (int64_t)i * 60;
-        marker.average_milliwatts = 0;
-        marker.sample_count = 0;
-        marker.format_version = POWER_HISTORY_VERSION;
-        marker.reason = reason;
-        /* Bounded wait, not the non-blocking enqueue: this runs in task context
-         * and queues a whole offline window at once, while the writer drains in
-         * 5-record batches. A non-blocking send dropped every marker past the
-         * first 16 ("History queue full"), leaving the rest of the outage
-         * unmarked and indistinguishable from real data loss. */
-        if (power_history_enqueue_wait(&marker, 2000)) {
-            ++written;
+    /* Store the markers with the synchronous batch import, not the store queue:
+     * the writer drains in 5-record batches and flushes+fsyncs each one, so
+     * pushing a whole offline window (up to BOOT_MARKER_MAX_MINUTES = 1440) one
+     * record at a time through the 16-slot queue either dropped the tail
+     * (non-blocking enqueue) or kept the queue full for minutes and risked
+     * losing real live minutes (bounded wait). The import appends the whole
+     * window under the store lock and fsyncs once per chunk. The markers ascend
+     * and all lie after the newest measured minute, so each one is an append
+     * (no splice). */
+    for (uint32_t done = 0; done < minutes; done += POWER_HISTORY_PAGE_SIZE) {
+        size_t chunk = minutes - done;
+        if (chunk > POWER_HISTORY_PAGE_SIZE) {
+            chunk = POWER_HISTORY_PAGE_SIZE;
         }
+        for (size_t i = 0; i < chunk; ++i) {
+            power_history_record_t marker = {0};
+            marker.interval_start_utc = first_missing + (int64_t)(done + i) * 60;
+            marker.average_milliwatts = 0;
+            marker.sample_count = 0;
+            marker.format_version = POWER_HISTORY_VERSION;
+            marker.reason = reason;
+            page[i] = marker;
+        }
+        size_t imported = 0;
+        size_t skipped = 0;
+        if (power_history_import_sorted(page, chunk, &imported, &skipped) != ESP_OK) {
+            break;
+        }
+        written += (uint32_t)imported;
     }
 done:
     free(page);

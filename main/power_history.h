@@ -156,11 +156,6 @@ esp_err_t power_history_format(void);
 
 bool power_history_enqueue(const power_history_record_t *record);
 
-/* Same as power_history_enqueue(), but waits up to timeout_ms for a free queue
- * slot. Use only from task context for burst producers (the boot-marker fill
- * queues a whole offline window at once); never from an ISR or a timer. */
-bool power_history_enqueue_wait(const power_history_record_t *record, uint32_t timeout_ms);
-
 /* Observer for records that were just persisted (newly placed, not a duplicate).
  * Called from the history writer while it holds the store lock, once per record
  * a committed batch actually stored. The running energy totals use it to fold
