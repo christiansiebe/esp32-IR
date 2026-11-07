@@ -886,6 +886,12 @@ static void energy_totals_start(void)
     }
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Defined near apply_power_management() below; the Wi-Fi event handler and the
+ * console 'set txpower|beacon|radio-save|wake-*' commands call it. */
+static void apply_radio_power_config(void);
+#endif
+
 static void wifi_event_handler(void *arg,
                                esp_event_base_t event_base,
                                int32_t event_id,
@@ -5119,12 +5125,6 @@ static void console_cmd_help(const char *args, char *out, size_t out_size)
     (void)args;
     web_console_help(out, out_size);
 }
-
-#if !CONFIG_ESPNOW_ROLE_SENDER
-/* Defined near apply_power_management() below; 'set txpower|beacon|radio-save'
- * calls it. */
-static void apply_radio_power_config(void);
-#endif
 
 static void console_cmd_status(const char *args, char *out, size_t out_size)
 {
