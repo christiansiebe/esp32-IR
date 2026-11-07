@@ -114,6 +114,12 @@ subagents/
 # Agent-Memory der Sandbox (wird ueber remote-shell/memory/SHARED.md geteilt).
 .openhands/memory/
 
+# Sandbox-Agent-Skills: .agents ist ein Symlink auf /root/.agents (ausserhalb
+# des Repos, per Themen-Split erzeugt). Nie committen.
+.agents
+# Lokale Sicherung des vollen AGENTS.md vor dem Themen-Split.
+AGENTS.md.vor-themen-split
+
 # The Firmware/ tree is a deliberately committed release bundle (see AGENTS.md
 # "Flash bundles"), so re-include it even though *.bin / flasher_args.json match
 # the build-output rules above. Keep this re-include last.
