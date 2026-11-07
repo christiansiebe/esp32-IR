@@ -345,6 +345,29 @@ def next_namespace_index(image):
     return index
 
 
+def erase_stale_entries(page, ns_index, key):
+    """Mark every written entry of ns_index/key on `page` as ERASED (spans too).
+
+    NVS resolves a key to the entry with the highest slot index in the active
+    page, so a value written into a lower slot loses against a stale one. Erasing
+    the old entries first is what makes `set` take effect. Returns the count.
+    """
+    erased = 0
+    i = 0
+    while i < MAX_ENTRIES:
+        if slot_state(page.buf, i) != ENTRY_WRITTEN:
+            i += 1
+            continue
+        entry = parse_entry(page.buf, page.number, i)
+        step = max(1, entry.span)
+        if entry.namespace == ns_index and entry.key == key:
+            for k in range(step):
+                set_slot_state(page.buf, i + k, ENTRY_ERASED)
+            erased += 1
+        i += step
+    return erased
+
+
 def set_string(image, namespace, key, value):
     """Write one string key, preserving everything else. Returns a message."""
     if len(key) > MAX_KEY_LEN:
@@ -365,6 +388,9 @@ def set_string(image, namespace, key, value):
     total = span + (1 if ns_header else 0)
 
     page = image.active_page()
+    # Erase the old value(s) first: their slots free up (so no needless page
+    # rotation) and the stale entry can no longer win over the new one.
+    erase_stale_entries(page, ns_index, key)
     start = page.free_run(total)
     if start is None:
         page = allocate_page(image)

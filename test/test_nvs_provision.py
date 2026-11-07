@@ -96,6 +96,18 @@ def make_image(pages):
     return bytes(b"".join(pages))
 
 
+def make_page_at_slots(number, seq, placed, state=0xFFFFFFFE, version=0xFE):
+    """Like make_page, but places entries at explicit slot indices."""
+    buf = bytearray(b"\xff" * PAGE)
+    struct.pack_into("<I", buf, 0, state)
+    struct.pack_into("<I", buf, 4, seq)
+    buf[8] = version
+    struct.pack_into("<I", buf, 28, _crc(bytes(buf[4:28])))
+    for idx, (raw, data, span) in placed:
+        _place(buf, idx, raw, span, data)
+    return buf
+
+
 def sample_image():
     """2 pages: ACTIVE page 0 with one ns + two strings, page 1 EMPTY."""
     e0 = enc_nsdef("testns", 1)
@@ -179,8 +191,45 @@ def test_reuse_existing_namespace():
     active = out.active_page()
     greetings = [e for e in active.entries()
                  if e.namespace == 1 and e.key == "greeting"]
-    check(len(greetings) == 2, f"new + old greeting {len(greetings)}")
-    check(greetings[-1].value.text == "world", "new value wins (later slot)")
+    check(len(greetings) == 1, f"stale greeting erased {len(greetings)}")
+    check(greetings[0].value.text == "world", "new value present")
+
+
+def test_set_erases_stale_entry():
+    """Regression for the device-verified bug: ``set`` writes the new value into
+    a free slot but must first erase the old entry of the same key. If the new
+    entry lands on a lower slot, NVS otherwise keeps resolving the stale one."""
+    print("test_set_erases_stale_entry")
+    ns1 = enc_nsdef("metercfg", 1)
+    ns2 = enc_nsdef("other", 2)
+    ssid = enc_str(1, "wifi_ssid", "Wohnzimmer")   # sibling key, same namespace
+    keep = enc_str(2, "wifi_pass", "keep")         # same key, other namespace
+    old = enc_str(1, "wifi_pass", "")              # stale value on a high slot
+    p0 = make_page_at_slots(0, 7, [(0, (ns1, b"", 1)),
+                                   (1, (ns2, b"", 1)),
+                                   (2, (ssid[0], ssid[1], ssid[2])),
+                                   (4, (keep[0], keep[1], keep[2])),
+                                   (109, (old[0], old[1], old[2]))])
+    p1 = make_page(1, 0xFFFFFFFF, [], state=0xFFFFFFFF, version=0xFF)
+    img = nv.NvsImage(make_image([p0, p1]))
+    nv.set_string(img, "metercfg", "wifi_pass", "demo-pass-42")
+    out = nv.NvsImage(bytes(img.data))
+    active = out.active_page()
+    hits = [e for e in active.entries()
+            if e.namespace == 1 and e.key == "wifi_pass"]
+    check(len(hits) == 1, f"exactly one written wifi_pass {len(hits)}")
+    check(hits[0].value.text == "demo-pass-42", f"new value {hits[0].value.text!r}")
+    check(hits[0].index < 109, f"new slot {hits[0].index} below the stale 109")
+    check(nv.slot_state(active.buf, 109) == nv.ENTRY_ERASED, "stale slot erased")
+    check(nv.slot_state(active.buf, 110) == nv.ENTRY_ERASED,
+          "stale span slot erased")
+    # Isolation: the sibling key and the same key in another namespace survive.
+    survivors = {(e.namespace, e.key): e for e in active.entries()}
+    check(survivors[(1, "wifi_ssid")].value.text == "Wohnzimmer",
+          "sibling key untouched")
+    check(survivors[(2, "wifi_pass")].value.text == "keep",
+          "same key in other namespace untouched")
+    check(out.pages[1].is_empty, "no page rotation needed")
 
 
 def test_page_rotation():
@@ -279,6 +328,7 @@ def test_backup_readonly():
 def main():
     for fn in (test_crc_helpers, test_parse_synthetic,
                test_set_preserves_and_roundtrips, test_reuse_existing_namespace,
+               test_set_erases_stale_entry,
                test_page_rotation, test_dedup_in_cmd_set,
                test_golden_entry_bytes, test_backup_readonly):
         fn()
