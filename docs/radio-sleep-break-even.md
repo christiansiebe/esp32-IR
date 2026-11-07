@@ -334,17 +334,45 @@ ueberlebt.
 
 ### 8.3 Messwerte (FNB-48 USB-Leistungsmesser)
 
-Gemessen mit dem FNB-48-USB-Leistungsmesser, **5,2 V**, Mittelwerte:
+> ⚠️ **KORREKTUR (2026-11-07, nachpruefbar): Die folgende Tabelle ist NICHT
+> belastbar und darf nicht als C6-Verbrauch gelesen werden.**
+>
+> 1. **Das Messskript fror ein.** `fnb48_read.py` sendete nur Start (`0x82`) +
+>    Keep-alive (`0x83`), aber **nie Stop (`0x84`)**. Der interne
+>    Stream/Logger des FNB-48 lief weiter, sein Puffer lief voll und die
+>    Anzeige lieferte **Standbilder** statt Live-Werte. Das Stop-Kommando
+>    `STOP_STREAM = 0x84` (CRC `a6`) ist im Referenz-CLI `fnb48s-cli`
+>    dokumentiert; `fnb48_read.py` sendet es jetzt vor dem Start (haengenden
+>    Stream loeschen) und nach dem Lesen (Geraet freigeben). Danach kamen
+>    wieder frische, wechselnde Werte (208 Samples/Lauf, CRC ok).
+> 2. **Der FNB-48 liegt nicht im C6-Strompfad.** Topologie (`lsusb -t`): der
+>    C6 (`303a:1001`) haengt als **Geschwister** am Hub-Port `1-1.3`, der
+>    FNB-48 (`0483:003a`) an `1-1.1` und hat **keine Kinder**. Der C6-Strom
+>    fliesst also gar nicht durch den Messgeraet-Pfad.
+> 3. **Gegenprobe mit frischen Werten:** Schaltet man den C6 per
+>    `uhubctl -l 1-1 -p 3 -a off` ab (lsusb `303a` -> 0, `/dev/ttyACM0`
+>    verschwindet, Port `0000 off`), bleibt die Anzeige bei **~0,065 W** —
+>    sie folgt dem C6 **nicht**. Der Wert ist der Ruheverbrauch von
+>    Messgeraet/Hub.
+>
+> **Konsequenz:** Die alten Zahlen (0,432 / 0,298 / 0,068 / 0,024 / 0,028 W)
+> sind mit dem eingefrorenen Skript entstanden und **nicht** als C6-Verbrauch
+> zu verwerten. Fuer eine belastbare Messung muss der FNB-48 **in Reihe** in
+> die C6-VBUS-Leitung (USB-C-Messadapter/-Durchschleifer) gesteckt und mit
+> dem gepatchten Skript gelesen werden. Die qualitative Aussage (Light Sleep
+> killt die USB-Konsole) bleibt aus dem Fix-Code korrekt; die Watt-Zahlen
+> gelten bis zu einer sauberen Reihenmessung als **offen**.
 
 | Konfiguration | Leistung | Anmerkung |
 |---|---|---|
-| klassischer AP-Build (Basis) | 0,432 W | Referenz |
-| station-only (kein SoftAP) | 0,298 W | |
-| station-only + radio-save 5000/30 | **0,068 W** | sicherer Hebel |
+| klassischer AP-Build (Basis) | 0,432 W | ⚠️ unbelastbar (s. o.) |
+| station-only (kein SoftAP) | 0,298 W | ⚠️ unbelastbar (s. o.) |
+| station-only + radio-save 5000/30 | **0,068 W** | ⚠️ unbelastbar (s. o.) |
 | station-only + light sleep (radio aus) | 0,024 W | **USB-Konsole starb** |
 | station-only + light sleep + radio-save 5000/30 | 0,028 W | **USB-Konsole starb** |
 
-**Kernaussage:** Die Light-Sleep-Ersparnis ist **real** (0,024–0,028 W gegenueber
-0,298 W), aber **unbrauchbar**, weil sie die USB-Konsole killt (Abschnitt 8.1).
-**Radio-Sleep allein (0,068 W) ist der sichere Hebel** — er bleibt aktiv, waerend
-Light Sleep auf USB-Konsolen-Builds abgelehnt wird (Abschnitt 8.2).
+**Kernaussage (qualitativ, weiterhin gueltig):** Light Sleep schaltet die
+USB-Serial-JTAG-Konsole des C6 ab und ist deshalb auf diesem Ziel unbrauchbar
+(Abschnitt 8.1); Radio-Sleep bleibt als sicherer Hebel erhalten. Die
+**Quantifizierung** der Einsparung ist mit der oben beschriebenen
+Reihenmessung noch zu erbringen.

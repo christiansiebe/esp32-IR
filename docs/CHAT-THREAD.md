@@ -49,18 +49,20 @@ naechsten Boot verworfen wird (Selbstheilung). Recovery: die BOOT-Taste (3 s)
 loescht zusaetzlich den NVS-Namespace `rtcfg`, damit ein schlechtes
 persistiertes Config-Set den Rollback nicht ueberlebt.
 
-**Messwerte** (FNB-48 USB-Leistungsmesser, 5,2 V, Mittelwerte; Details in
-`docs/radio-sleep-break-even.md` § 8): klassischer AP-Build 0,432 W ·
-station-only 0,298 W · station-only + radio-save 5000/30 **0,068 W** ·
-station-only + light sleep 0,024 W (USB-Konsole starb) · station-only + light
-sleep + radio-save 5000/30 0,028 W (USB-Konsole starb). **Kernaussage:** Die
-Light-Sleep-Ersparnis ist real, aber unbrauchbar, weil sie die USB-Konsole killt;
-Radio-Sleep allein (0,068 W) ist der sichere Hebel.
+**Messwerte** (FNB-48 USB-Leistungsmesser): ⚠️ **Die frueheren Zahlen sind
+unbelastbar** (Details/Korrektur in `docs/radio-sleep-break-even.md` § 8.3).
+Zwei Gruende: (1) `fnb48_read.py` sendete nie das **Stop-Kommando `0x84`**, der
+interne Logger des FNB-48 lief voll und lieferte Standbilder; (2) der FNB-48
+liegt **nicht** im C6-Strompfad — der C6 haengt als Geschwister am Hub, nicht
+hinter dem Messgeraet. Gegenprobe: C6 per `uhubctl -l 1-1 -p 3 -a off` abschalten
+`lsusb 303a` -> 0, Port `0000 off`) aendert die Anzeige **nicht** (~0,065 W
+= Ruheverbrauch Messgeraet/Hub). Fuer belastbare Watt-Werte muss der FNB-48
+**in Reihe** in die C6-VBUS-Leitung. **Qualitativ bleibt korrekt:** Light Sleep
+killt die USB-Konsole des C6; Radio-Sleep bleibt der sichere Hebel.
 
-**Empfohlene Bestueckung des C6-Empfaengers:** station-only (kein SoftAP, das
-kostet ~0,13 W Beacons) + `set radio-save on` mit `wake-interval 5000` /
-`wake-window 70` → **~0,069 W** im Leerlauf (gegenueber 0,432 W des klassischen
-AP-Builds, ~−84 %). Light Sleep bleibt auf dem C6 aus (USB-Konsole).
+**Empfohlene Bestueckung des C6-Empfaengers:** station-only (kein SoftAP) +
+`set radio-save on` mit `wake-interval 5000` / `wake-window 70`. Light Sleep
+bleibt auf dem C6 aus (USB-Konsole). Die Watt-Ersparnis ist noch zu messen.
 
 **Bergung eines bereits gebrickten C6 (ohne BOOT-Taste, erprobt):** Haengt das
 Geraet schon im USB-Bootloop (`error -71/-32`, kein `/dev/ttyACM0`), hilft kein
