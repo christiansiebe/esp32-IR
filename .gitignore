@@ -41,6 +41,9 @@ sdkconfig.*
 
 # The shipped defaults file is a source file, not a generated sdkconfig.
 !sdkconfig.defaults
+# Target-specific defaults (sdkconfig.defaults.<target>) are source files too;
+# IDF loads them automatically after sdkconfig.defaults (see tools/cmake/kconfig.cmake).
+!sdkconfig.defaults.*
 
 # ESP-IDF dependencies
 # For older versions or manual component management

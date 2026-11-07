@@ -4,12 +4,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Host builds compile this file without the IDF-injected sdkconfig.h. */
+/* Host builds compile this file without the IDF-injected sdkconfig.h. The
+ * fallback mirrors the SoC top clock: the host test exercises the ESP32 classic
+ * (240 MHz), the target is selected by CONFIG_IDF_TARGET_ESP32C6 in a real build. */
 #ifndef CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
 #define CONFIG_ESPNOW_SENDER_LIGHT_SLEEP 0
 #endif
 #ifndef CONFIG_ESPNOW_CPU_MAX_MHZ
-#define CONFIG_ESPNOW_CPU_MAX_MHZ 240
+#define CONFIG_ESPNOW_CPU_MAX_MHZ RUNTIME_CONFIG_CPU_MAX_MHZ
 #endif
 
 /* Snap a value to the nearest of the DFS steps the ESP32 supports; defined
@@ -74,13 +76,23 @@ bool runtime_config_parse_cpu_mhz_min(const char *text, uint32_t ceiling_mhz,
     return true;
 }
 
-/* Snap a value to the nearest of the four DFS steps the ESP32 supports. Values
- * in between are silently rounded by esp_pm_configure() (a request for 200 MHz
- * becomes 240), which made 'set cpu' look like it did nothing. 40 is a legal
- * DFS step but not a legal ceiling, so anything at or below 80 snaps to 80. */
+/* Snap a value to the nearest of the DFS steps the SoC supports. Values in
+ * between are silently rounded by esp_pm_configure() (a request for 200 MHz
+ * becomes 240 on the ESP32), which made 'set cpu' look like it did nothing. 40
+ * is a legal DFS step but not a legal ceiling, so anything at or below 80 snaps
+ * to 80.
+ *
+ * The step set is SoC-specific: the ESP32 classic offers 80/160/240 MHz, the
+ * ESP32-C6 (single-core RISC-V) offers 80/120/160 MHz. A value above the top
+ * step is clamped to it by the caller's ceiling, so the snap only has to cover
+ * the reachable range. */
 static uint32_t snap_cpu_mhz(uint32_t mhz)
 {
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+    static const uint32_t steps[] = {80u, 120u, 160u};
+#else
     static const uint32_t steps[] = {80u, 160u, 240u};
+#endif
     if (mhz <= steps[0]) {
         return steps[0];
     }

@@ -3,6 +3,12 @@ set(main_requires
     esp_partition
     esp_driver_gpio
     esp_driver_uart
+    # Serial console transport. The ESP32 classic uses UART0 (esp_driver_uart);
+    # the ESP32-C6 uses the USB Serial/JTAG peripheral, so its driver is needed
+    # there (serial_console.c picks the transport via CONFIG_ESP_CONSOLE_*). The
+    # component registers with no sources on targets without the peripheral, so
+    # listing it unconditionally is harmless.
+    esp_driver_usb_serial_jtag
     esp_event
     esp_http_client
     esp_https_ota

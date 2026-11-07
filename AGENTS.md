@@ -42,7 +42,16 @@ Two firmware roles are built from one source tree.
 - `SDKCONFIG` is a **CMake cache variable, not an environment variable**.
   `idf.py build` invoked as a CLI ignores an exported `SDKCONFIG`; the effective
   config is written to the project `sdkconfig` file. Assert against that file.
-- Build image: `espressif/idf:v6.1`, target `esp32`, flash 4 MB.
+- Build image: `espressif/idf:v6.1`, flash 4 MB. Default target `esp32`; the
+  **ESP32-C6** is built by adding a matrix entry with `target: esp32c6` (see
+  "Target port (ESP32-C6)" below).
+- **Target-specific defaults.** IDF appends `.<target>` to every entry in
+  `SDKCONFIG_DEFAULTS` (`tools/cmake/kconfig.cmake`), so
+  `sdkconfig.defaults.esp32c6` is loaded automatically after
+  `sdkconfig.defaults` for a C6 build (and ignored for esp32). Keep the shared
+  knobs in `sdkconfig.defaults` and only the per-target deltas in the
+  `.<target>` file, so the esp32 build stays byte-for-byte unchanged. Both
+  files are tracked (`.gitignore` re-includes `sdkconfig.defaults.*`).
 - Local builds: `tools/build.sh receiver|sender [--clean]` wraps the IDF
   container (host only needs Docker; works with `docker` or `sudo docker`).
 - **Firmware version (2026-10-14).** Root `CMakeLists.txt` resolves the version
@@ -122,9 +131,11 @@ Two firmware roles are built from one source tree.
 
 ## CPU clock / power
 - The DFS ceiling is **single-sourced** in `CONFIG_ESPNOW_CPU_MAX_MHZ`
-  (`main/Kconfig.projbuild`, range 40..240) and is **role-specific**: the
-  receiver defaults to **240 MHz** (the dashboard and the minute-history
-  backfill are CPU/SPIFFS bound), the sender defaults to **80 MHz**. The sender's
+  (`main/Kconfig.projbuild`, range 40..240 on the ESP32, 40..160 on the
+  ESP32-C6 — see "Target port") and is **role-specific**: the
+  receiver defaults to the SoC top clock — **240 MHz** on the ESP32, **160 MHz**
+  on the ESP32-C6 (the dashboard and the minute-history backfill are CPU/SPIFFS
+  bound) — the sender defaults to **80 MHz**. The sender's
   radio is held awake for a reliable ESP-NOW link (see the power-save note
   below), so the Wi-Fi driver holds `ESP_PM_APB_FREQ_MAX` and DFS can never step
   below the ceiling anyway; a low ceiling is the effective "DFS off, run at
@@ -167,7 +178,8 @@ Two firmware roles are built from one source tree.
   air is pulled from the sender's own SPIFFS history afterwards. If ESP-NOW ever
   proves unreliable on the bench, drop `CONFIG_PM_ENABLE` to get the old fixed
   behaviour; the CI job "Verify the variable CPU clock is in effect" checks the
-  four PM options and the role-specific ceiling (sender 80, receiver 240).
+  four PM options and the role-specific ceiling (sender 80; receiver 240 on the
+  ESP32, 160 on the ESP32-C6).
 - Wi-Fi power save stays at the default `WIFI_PS_MIN_MODEM`; `WIFI_PS_NONE`
   would burn power and power save beyond the default hurts ESP-NOW reliability.
 - **ESP-NOW connectionless power save (`CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE`,
@@ -300,6 +312,43 @@ Two firmware roles are built from one source tree.
   confirmed to exist for the target. The CI grep must match a string that lives
   in the real branch only (e.g. `adaptive sleep path compiled in`), never one in
   `main.c`, or it passes even when the stub is compiled.
+
+## Target port (ESP32-C6, receiver)
+The receiver role also builds for the **ESP32-C6** (single-core RISC-V, 4 MB
+flash, 160 MHz top clock, USB Serial/JTAG). The sender role stays esp32-only.
+Same source tree; only the deltas below are target-gated. Build it with the CI
+matrix entry `role: receiver-c6` (`target: esp32c6`), or locally
+`idf.py set-target esp32c6 && idf.py build` in an IDF shell.
+- **CPU clock.** The C6 tops out at **160 MHz**; its CPU-frequency choice only
+  offers 40/80/120/160 MHz. `CONFIG_ESPNOW_CPU_MAX_MHZ` (`main/Kconfig.projbuild`)
+  narrows its range to `40..160` and defaults to `160` on the C6 (240 on the
+  classic). `RUNTIME_CONFIG_CPU_MAX_MHZ` (`main/runtime_config.h`) is the same
+  bound at runtime and `snap_cpu_mhz()` uses the C6 DFS step set `80/120/160`
+  (vs `80/160/240`). A ceiling above the SoC top clock is rejected by
+  `esp_pm_configure()` and would abort the Wi-Fi task, so never let it exceed
+  160 on this target. `sdkconfig.defaults.esp32c6` selects
+  `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160` (the shared 240 MHz option is an unknown
+  symbol on the C6 and is ignored).
+- **Console.** The C6 has no USB-UART bridge; its console is the **USB
+  Serial/JTAG** peripheral (`/dev/ttyACM*`). `sdkconfig.defaults.esp32c6` selects
+  it as the primary console (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`), and
+  `main/serial_console.c` picks the transport via `#if
+  CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG` (USB Serial/JTAG driver vs UART0). The
+  driver component `esp_driver_usb_serial_jtag` is in `main/CMakeLists.txt`
+  unconditionally; it registers with no sources on targets without the
+  peripheral.
+- **Single core.** The C6 is unicore, so `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1`
+  is off and `idle_core_mask()` in `main/task_wdt_guard.c` already guards it with
+  `!CONFIG_FREERTOS_UNICORE` — no change needed.
+- **Dashboard.** The CPU/power note and the `cpuval` `<select>` in `main/main.c`
+  are target-gated so the C6 offers `80/120/160` (no 240).
+- **CI.** The workflow matrix carries a `target` per entry and sets
+  `IDF_TARGET`/`CONFIG_IDF_TARGET` from it; the CPU-clock assert checks the
+  target's boot clock and receiver ceiling (160 on the C6). The ccache key
+  includes the target so esp32 and esp32c6 objects never mix.
+- **Bootloader offset.** On the C6 the second-stage bootloader sits at **0x0**
+  (not 0x1000); the partition table stays at 0x8000 and the app at 0x20000, so
+  `partitions.csv` is unchanged.
 
 ## Tests
 - Host tests: `./test/run_host_tests.sh` plus
