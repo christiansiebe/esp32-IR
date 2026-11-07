@@ -32,11 +32,25 @@
 #define RUNTIME_CONFIG_CPU_MIN_MHZ 40u
 #define RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ 80u
 
+/* Radio-side power knobs (receiver SoftAP). The receiver's idle draw is set by
+ * the always-on Wi-Fi radio, not the CPU, so the useful levers are the transmit
+ * power and how often the AP beacons. 0 means "leave the chip/IDF default
+ * alone"; a positive value is clamped into the ranges below. TX power is in dBm
+ * (esp_wifi_set_max_tx_power takes 0.25 dBm steps, so it is scaled on apply);
+ * the beacon interval is in IDF time units (1 TU = 1024 us) and must be a
+ * multiple of 100. */
+#define RUNTIME_CONFIG_TXPOWER_MIN_DBM 2u
+#define RUNTIME_CONFIG_TXPOWER_MAX_DBM 20u
+#define RUNTIME_CONFIG_BEACON_MIN_TU 100u
+#define RUNTIME_CONFIG_BEACON_MAX_TU 6000u
+
 typedef struct {
     uint32_t cpu_mhz;      /* DFS ceiling (max_freq) */
     uint32_t cpu_min_mhz;  /* DFS floor (min_freq); == cpu_mhz pins the clock */
     bool light_sleep;      /* allow the adaptive light sleep */
     uint32_t espnow_retries; /* per-frame ESP-NOW send attempts */
+    uint8_t wifi_txpower_dbm; /* Wi-Fi max TX power in dBm; 0 = chip default */
+    uint16_t ap_beacon_tu;    /* SoftAP beacon interval in TU; 0 = IDF default */
 } runtime_config_t;
 
 /* Compile-time defaults (light sleep mirrors CONFIG_ESPNOW_SENDER_LIGHT_SLEEP). */

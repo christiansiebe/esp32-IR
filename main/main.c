@@ -5115,6 +5115,11 @@ static void console_cmd_help(const char *args, char *out, size_t out_size)
     web_console_help(out, out_size);
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Defined near apply_power_management() below; 'set txpower|beacon' calls it. */
+static void apply_radio_power_config(void);
+#endif
+
 static void console_cmd_status(const char *args, char *out, size_t out_size)
 {
     (void)args;
@@ -5554,7 +5559,7 @@ static bool g_runtime_config_ready;
 
 #define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
 #define RUNTIME_CONFIG_NVS_KEY "cfg"
-#define RUNTIME_CONFIG_NVS_VERSION 1u
+#define RUNTIME_CONFIG_NVS_VERSION 2u
 
 static void runtime_config_store(const runtime_config_t *cfg)
 {
@@ -5562,13 +5567,16 @@ static void runtime_config_store(const runtime_config_t *cfg)
     if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
         return;
     }
-    uint8_t blob[12];
+    uint8_t blob[16];
     blob[0] = (uint8_t)RUNTIME_CONFIG_NVS_VERSION;
     blob[1] = cfg->light_sleep ? 1u : 0u;
     blob[2] = (uint8_t)cfg->cpu_mhz;
     blob[3] = (uint8_t)cfg->cpu_min_mhz;
     uint32_t retries = cfg->espnow_retries;
     memcpy(&blob[4], &retries, sizeof(retries));
+    blob[8] = cfg->wifi_txpower_dbm;
+    uint16_t beacon = cfg->ap_beacon_tu;
+    memcpy(&blob[9], &beacon, sizeof(beacon));
     if (nvs_set_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, sizeof(blob)) == ESP_OK) {
         (void)nvs_commit(handle);
     }
@@ -5594,7 +5602,7 @@ static void runtime_config_load(runtime_config_t *cfg)
     if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
         return;
     }
-    uint8_t blob[12];
+    uint8_t blob[16];
     size_t len = sizeof(blob);
     esp_err_t err = nvs_get_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, &len);
     nvs_close(handle);
@@ -5608,6 +5616,10 @@ static void runtime_config_load(runtime_config_t *cfg)
     uint32_t retries = 0;
     memcpy(&retries, &blob[4], sizeof(retries));
     loaded.espnow_retries = retries;
+    loaded.wifi_txpower_dbm = blob[8];
+    uint16_t beacon = 0;
+    memcpy(&beacon, &blob[9], sizeof(beacon));
+    loaded.ap_beacon_tu = beacon;
     runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
     *cfg = loaded;
 }
@@ -5869,6 +5881,13 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         uart_sleep_set_enabled(uart_sleep_is_enabled());
     } else if (sleep_key) {
         uart_sleep_set_enabled(cfg->light_sleep);
+    }
+#else
+    /* The radio-side knobs need the Wi-Fi driver up; the CPU knobs are already
+     * applied by runtime_config_apply() above. */
+    if (strcmp(key, "txpower") == 0 || strcmp(key, "wifi-txpower") == 0 ||
+        strcmp(key, "beacon") == 0 || strcmp(key, "beacon-tu") == 0) {
+        apply_radio_power_config();
     }
 #endif
     int written = snprintf(out, out_size,
@@ -8446,6 +8465,42 @@ static void apply_power_management(void)
 #endif
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Push the persisted radio-side power knobs into the running Wi-Fi driver. These
+ * are the levers that actually move the receiver's idle draw (the CPU clock does
+ * not): the transmit power and how often the SoftAP beacons. 0 means "leave the
+ * IDF default". The AP config is fetched first so only the beacon field changes;
+ * a txpower change alone does not touch the AP. */
+static void apply_radio_power_config(void)
+{
+    runtime_config_t *cfg = active_runtime_config();
+    if (cfg->wifi_txpower_dbm != 0u) {
+        /* esp_wifi_set_max_tx_power takes 0.25 dBm steps. */
+        esp_err_t err = esp_wifi_set_max_tx_power((int8_t)(cfg->wifi_txpower_dbm * 4));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Could not set Wi-Fi TX power to %u dBm: %s",
+                     (unsigned)cfg->wifi_txpower_dbm, esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "Wi-Fi TX power set to %u dBm",
+                     (unsigned)cfg->wifi_txpower_dbm);
+        }
+    }
+    if (cfg->ap_beacon_tu != 0u) {
+        wifi_config_t ap_config = {0};
+        if (esp_wifi_get_config(WIFI_IF_AP, &ap_config) == ESP_OK) {
+            ap_config.ap.beacon_interval = cfg->ap_beacon_tu;
+            esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Could not set AP beacon interval to %u TU: %s",
+                         (unsigned)cfg->ap_beacon_tu, esp_err_to_name(err));
+            } else {
+                ESP_LOGI(TAG, "AP beacon interval set to %u TU", (unsigned)cfg->ap_beacon_tu);
+            }
+        }
+    }
+}
+#endif
+
 void app_main(void)
 {
     /* Capture the boot log in RAM first, so the Wi-Fi dashboard can offer it
@@ -8453,6 +8508,11 @@ void app_main(void)
     boot_log_init();
     initialize_wifi_and_espnow();
     apply_power_management();
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* The radio-side knobs need the Wi-Fi driver started, which
+     * initialize_wifi_and_espnow() has done by now. */
+    apply_radio_power_config();
+#endif
     /* Arm the task watchdog (generous timeout + panic) before any worker starts,
      * so the long-running workers can subscribe themselves and a wedged one
      * reboots the device instead of hanging. */

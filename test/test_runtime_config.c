@@ -113,11 +113,46 @@ int main(void)
     CHECK(!runtime_config_set(&cfg, "retries", "99", 240, err, sizeof(err)),
           "out-of-range retries rejected");
 
+    /* Radio-side power knobs. Default 0 means "leave the chip/IDF default". */
+    cfg = runtime_config_defaults();
+    CHECK(cfg.wifi_txpower_dbm == 0 && cfg.ap_beacon_tu == 0,
+          "radio power knobs default to the chip/IDF default");
+    CHECK(runtime_config_set(&cfg, "txpower", "8", 240, err, sizeof(err)) &&
+              cfg.wifi_txpower_dbm == 8,
+          "set txpower=8 dBm");
+    CHECK(runtime_config_set(&cfg, "txpower", "0", 240, err, sizeof(err)) &&
+              cfg.wifi_txpower_dbm == 0,
+          "txpower 0 restores the chip default");
+    CHECK(!runtime_config_set(&cfg, "txpower", "1", 240, err, sizeof(err)),
+          "txpower below 2 dBm is rejected (chip minimum)");
+    CHECK(!runtime_config_set(&cfg, "txpower", "21", 240, err, sizeof(err)),
+          "txpower above 20 dBm is rejected");
+    CHECK(runtime_config_set(&cfg, "beacon", "1000", 240, err, sizeof(err)) &&
+              cfg.ap_beacon_tu == 1000,
+          "set beacon=1000 TU");
+    CHECK(runtime_config_set(&cfg, "beacon", "0", 240, err, sizeof(err)) &&
+              cfg.ap_beacon_tu == 0,
+          "beacon 0 restores the IDF default");
+    CHECK(!runtime_config_set(&cfg, "beacon", "150", 240, err, sizeof(err)),
+          "a beacon interval not a multiple of 100 TU is rejected");
+    CHECK(!runtime_config_set(&cfg, "beacon", "50", 240, err, sizeof(err)),
+          "a beacon interval below 100 TU is rejected");
+    /* clamp() drops an out-of-range radio knob back to the default. */
+    runtime_config_t stored = {.cpu_mhz = 240, .cpu_min_mhz = 40,
+                               .light_sleep = false, .espnow_retries = 3};
+    stored.wifi_txpower_dbm = 99;
+    stored.ap_beacon_tu = 150;
+    runtime_config_clamp(&stored, 240);
+    CHECK(stored.wifi_txpower_dbm == RUNTIME_CONFIG_TXPOWER_MAX_DBM,
+          "txpower above the max clamps to the max");
+    CHECK(stored.ap_beacon_tu == 0,
+          "an off-grid beacon interval resets to the IDF default");
+
     /* clamp(): a value restored from NVS is forced into what this build allows.
      * This is the guard that lets a persisted 'set' survive an OTA into an image
      * with a different ceiling. */
-    runtime_config_t stored = {.cpu_mhz = 240, .cpu_min_mhz = 40,
-                               .light_sleep = false, .espnow_retries = 3};
+    stored.cpu_mhz = 240;
+    stored.cpu_min_mhz = 40;
     runtime_config_clamp(&stored, 80);
     CHECK(stored.cpu_mhz == 80 && stored.cpu_min_mhz == 40,
           "a 240 MHz value restored into an 80 MHz build clamps to 80");

@@ -29,6 +29,10 @@ runtime_config_t runtime_config_defaults(void)
         .cpu_mhz = snap_cpu_mhz(CONFIG_ESPNOW_CPU_MAX_MHZ),
         .cpu_min_mhz = 40u,
         .espnow_retries = 3u,
+        /* 0 keeps the chip/IDF default so the classic-ESP32 receiver build is
+         * byte-for-byte unchanged; only an explicit 'set' opts into a value. */
+        .wifi_txpower_dbm = 0u,
+        .ap_beacon_tu = 0u,
     };
     return cfg;
 }
@@ -179,9 +183,34 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             return false;
         }
         next.espnow_retries = (uint32_t)v;
+    } else if (strcmp(key, "txpower") == 0 || strcmp(key, "wifi-txpower") == 0) {
+        char *end = NULL;
+        unsigned long v = strtoul(value, &end, 10);
+        if (end == value || *end != '\0' || v > RUNTIME_CONFIG_TXPOWER_MAX_DBM ||
+            (v != 0 && v < RUNTIME_CONFIG_TXPOWER_MIN_DBM)) {
+            snprintf(err, err_size,
+                     "txpower: expected 0 (default) or %u..%u dBm\n",
+                     (unsigned)RUNTIME_CONFIG_TXPOWER_MIN_DBM,
+                     (unsigned)RUNTIME_CONFIG_TXPOWER_MAX_DBM);
+            return false;
+        }
+        next.wifi_txpower_dbm = (uint8_t)v;
+    } else if (strcmp(key, "beacon") == 0 || strcmp(key, "beacon-tu") == 0) {
+        char *end = NULL;
+        unsigned long v = strtoul(value, &end, 10);
+        if (end == value || *end != '\0' || v > RUNTIME_CONFIG_BEACON_MAX_TU ||
+            (v != 0 && (v < RUNTIME_CONFIG_BEACON_MIN_TU || v % 100u != 0u))) {
+            snprintf(err, err_size,
+                     "beacon: expected 0 (default) or %u..%u TU (multiple of 100)\n",
+                     (unsigned)RUNTIME_CONFIG_BEACON_MIN_TU,
+                     (unsigned)RUNTIME_CONFIG_BEACON_MAX_TU);
+            return false;
+        }
+        next.ap_beacon_tu = (uint16_t)v;
     } else {
         snprintf(err, err_size,
-                 "unknown key '%s' (cpu, freq, cpu-min, sleep, retries)\n", key);
+                 "unknown key '%s' (cpu, freq, cpu-min, sleep, retries, txpower, beacon)\n",
+                 key);
         return false;
     }
     *cfg = next;
@@ -223,6 +252,15 @@ void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz)
     if (cfg->espnow_retries > 10u) {
         cfg->espnow_retries = 10u;
     }
+    if (cfg->wifi_txpower_dbm > RUNTIME_CONFIG_TXPOWER_MAX_DBM) {
+        cfg->wifi_txpower_dbm = RUNTIME_CONFIG_TXPOWER_MAX_DBM;
+    }
+    if (cfg->ap_beacon_tu != 0u &&
+        (cfg->ap_beacon_tu < RUNTIME_CONFIG_BEACON_MIN_TU ||
+         cfg->ap_beacon_tu > RUNTIME_CONFIG_BEACON_MAX_TU ||
+         cfg->ap_beacon_tu % 100u != 0u)) {
+        cfg->ap_beacon_tu = 0u;
+    }
 }
 
 void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_size)
@@ -230,14 +268,28 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
     if (cfg == NULL || out == NULL || out_size == 0) {
         return;
     }
+    char tx[24];
+    char beacon[24];
+    if (cfg->wifi_txpower_dbm == 0u) {
+        snprintf(tx, sizeof(tx), "chip default");
+    } else {
+        snprintf(tx, sizeof(tx), "%u dBm", (unsigned)cfg->wifi_txpower_dbm);
+    }
+    if (cfg->ap_beacon_tu == 0u) {
+        snprintf(beacon, sizeof(beacon), "idf default");
+    } else {
+        snprintf(beacon, sizeof(beacon), "%u TU", (unsigned)cfg->ap_beacon_tu);
+    }
     snprintf(out, out_size,
              "cpu ceiling: %u MHz\n"
              "cpu floor: %u MHz\n"
              "light sleep: %s\n"
-             "espnow retries: %u\n",
+             "espnow retries: %u\n"
+             "wifi txpower: %s\n"
+             "ap beacon: %s\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on" : "off",
-             (unsigned)cfg->espnow_retries);
+             (unsigned)cfg->espnow_retries, tx, beacon);
 }
 
 #ifdef ESP_PLATFORM
