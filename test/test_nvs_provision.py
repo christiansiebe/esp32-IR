@@ -148,7 +148,7 @@ def test_set_preserves_and_roundtrips():
     before_p0 = bytes(img.pages[0].buf)
     before_p1 = bytes(img.pages[1].buf)
     nv.set_string(img, "wifi", "ssid", "Wohnzimmer")
-    nv.set_string(img, "wifi", "pass", "Cholbe123")
+    nv.set_string(img, "wifi", "pass", "demo-pass-42")
     out = nv.NvsImage(bytes(img.data))
 
     idx2name, name2idx = out.namespaces()
@@ -159,7 +159,7 @@ def test_set_preserves_and_roundtrips():
     entries = {(e.namespace, e.key): e for e in active.entries()}
     check((2, "ssid") in entries and (2, "pass") in entries, "new keys present")
     check(entries[(2, "ssid")].value.text == "Wohnzimmer", "ssid value")
-    check(entries[(2, "pass")].value.text == "Cholbe123", "pass value")
+    check(entries[(2, "pass")].value.text == "demo-pass-42", "pass value")
     check(entries[(2, "ssid")].value.crc_ok, "ssid data crc")
     check(entries[(1, "greeting")].value.text == "hello", "old string intact")
     check(all(e.crc_ok for e in active.entries()), "all crcs ok after set")
