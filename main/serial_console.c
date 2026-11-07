@@ -24,6 +24,12 @@
 #endif
 
 #define SERIAL_CONSOLE_RX_BUF 1024
+/* The USB Serial/JTAG TX ring must hold a whole reply: xRingbufferSend() drops a
+ * write that does not fit entirely, so the default 256 B silently swallowed the
+ * output of every command longer than that (help, status). The UART path is
+ * unaffected (it blocks until the bytes are out). */
+#define SERIAL_CONSOLE_TX_BUF 1024
+#define SERIAL_CONSOLE_TX_CHUNK 128
 #define SERIAL_CONSOLE_LINE_MAX 192
 #define SERIAL_CONSOLE_STACK 4096
 #define SERIAL_CONSOLE_PRIO 3
@@ -33,7 +39,18 @@ static const char *TAG = "serial_console";
 #if SERIAL_CONSOLE_USE_USB_JTAG
 static void console_write(const char *data, size_t len)
 {
-    usb_serial_jtag_write_bytes(data, len, portMAX_DELAY);
+    /* Send in chunks that always fit the TX ring: a single oversized write is
+     * dropped by xRingbufferSend(), which is what made long replies empty. Each
+     * blocking write drains as the ISR empties the ring. */
+    while (len > 0) {
+        size_t chunk = len > SERIAL_CONSOLE_TX_CHUNK ? SERIAL_CONSOLE_TX_CHUNK : len;
+        int written = usb_serial_jtag_write_bytes(data, chunk, portMAX_DELAY);
+        if (written <= 0) {
+            break;
+        }
+        data += written;
+        len -= (size_t)written;
+    }
 }
 
 static int console_read_byte(uint8_t *ch)
@@ -47,6 +64,7 @@ static bool console_install(void)
      * writes through the ROM directly), so this owns the RX ring. */
     usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     cfg.rx_buffer_size = SERIAL_CONSOLE_RX_BUF;
+    cfg.tx_buffer_size = SERIAL_CONSOLE_TX_BUF;
     esp_err_t err = usb_serial_jtag_driver_install(&cfg);
     return err == ESP_OK || err == ESP_ERR_INVALID_STATE;
 }
