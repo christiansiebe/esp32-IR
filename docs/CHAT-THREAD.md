@@ -57,6 +57,22 @@ sleep + radio-save 5000/30 0,028 W (USB-Konsole starb). **Kernaussage:** Die
 Light-Sleep-Ersparnis ist real, aber unbrauchbar, weil sie die USB-Konsole killt;
 Radio-Sleep allein (0,068 W) ist der sichere Hebel.
 
+**Empfohlene Bestueckung des C6-Empfaengers:** station-only (kein SoftAP, das
+kostet ~0,13 W Beacons) + `set radio-save on` mit `wake-interval 5000` /
+`wake-window 70` → **~0,069 W** im Leerlauf (gegenueber 0,432 W des klassischen
+AP-Builds, ~−84 %). Light Sleep bleibt auf dem C6 aus (USB-Konsole).
+
+**Bergung eines bereits gebrickten C6 (ohne BOOT-Taste, erprobt):** Haengt das
+Geraet schon im USB-Bootloop (`error -71/-32`, kein `/dev/ttyACM0`), hilft kein
+Reset allein — die App startet in Light Sleep und die Peripherie stirbt vor dem
+ersten Kontakt. Rezept: Port-Power-Cycle (`uhubctl -l 1-1 -p 3 -a off` / `-a on`;
+**NICHT Port 2 = WLAN-Uplink**) und in einer engen Poll-Schleife (~1,5 ms)
+**sofort** `serial.Serial()` oeffnen, sobald `/dev/ttyACM0` erscheint, und
+`set sleep off` + `reset-config` schicken. Das tty lebt nur in einem kurzen
+Fenster bei manchen Boots (~10-20 %); sobald die Konsole einmal antwortet, ist
+der Port stabil und `esptool` synct. Danach die v4-Firmware flashen (ohne
+`storage`, damit die Historie bleibt). Skript: `/root/c6_console.py`.
+
 ## 2026-10-18 21:20 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 57e010b)
 **Nachtrag 2 zu PR #32:** `main` ist erneut weitergelaufen (`#48` Sender-Link-Fix, `#27`
 Recovery-Button, u.a.), der Branch ist wieder **rebasd** auf `b2eaa51`. Konflikt nur in
