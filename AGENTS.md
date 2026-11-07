@@ -280,17 +280,18 @@ Two firmware roles are built from one source tree.
   roles built with the same `CONFIG_ESPNOW_CHANNEL` (now configurable); the
   sender falls back to it when the scan finds nothing, and a station-connected
   receiver cannot leave its home AP's channel, so pick that channel.
-- **Do NOT drop the SoftAP at runtime while ESP-NOW is on the AP interface.**
-  The receiver's ESP-NOW peers use `ESPNOW_IF = WIFI_IF_AP` in the default
-  APSTA build (see `2ec4d36`), so calling `esp_wifi_set_mode(WIFI_MODE_STA)` to
-  save power tears the AP interface down and silently kills the whole ESP-NOW
-  link (diag, history backfill, OTA target, broadcast). Symptom: after
-  `STA_GOT_IP`, `/api/rssi` reports `active:false`, `/api/sender-diag` answers
-  "Sender did not answer", and `/api/history-pull` shows `errors` climbing.
-  A runtime "AP off once the station is up" feature was tried (`04add16`) and
-  reverted (`71409c8`) for exactly this reason. The SoftAP stays on; only the
-  compile-time `CONFIG_ESPNOW_RECEIVER_DISABLE_AP` path (which uses
-  `WIFI_IF_STA` and never has an AP to drop) is safe.
+- **Runtime SoftAP switch (`ap_enabled`, `set ap on|off`, `/config`).** A bare
+  `esp_wifi_set_mode(WIFI_MODE_STA)` while ESP-NOW is on the AP interface tears
+  the AP down and silently kills the whole ESP-NOW link (diag, history backfill,
+  OTA target, broadcast) - the failure that made the first attempt (`04add16`)
+  a no-go (reverted in `71409c8`). It is safe only because `ESPNOW_IF` now
+  follows the AP state (`g_ap_enabled ? WIFI_IF_AP : WIFI_IF_STA`) **and**
+  `apply_ap_mode()` calls `espnow_migrate_peers()`, which deletes and re-adds
+  every receiver-side peer (broadcast, sender, OTA target) on the interface that
+  is now live. The switch is refused while the station is not connected
+  (`g_wifi_connected`) - otherwise the AP would be the only way back to the
+  dashboard and the device would be stranded. Keep both invariants together: a
+  mode change without the peer migration reintroduces the old bug.
   **Deployed and verified (2026-10-17, `feat/receiver-ap-off`, PR #13):** the
   CI matrix now builds a `receiver-apoff` image; flashed to the receiver
   (`db228f9`) the dashboard came up over the WLAN (`192.168.178.70`, `/healthz`

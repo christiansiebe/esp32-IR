@@ -214,12 +214,86 @@ int main(void)
     runtime_config_clamp(&stored, 240);
     CHECK(stored.espnow_retries == 10, "retries above 10 clamp to 10");
 
+    /* Setup-AP knob. The host build has no CONFIG_ESPNOW_RECEIVER_DISABLE_AP,
+     * so the default mirrors the AP build (on). */
+    cfg = runtime_config_defaults();
+    CHECK(cfg.ap_enabled, "setup AP defaults to on in the AP build");
+    CHECK(runtime_config_set(&cfg, "ap", "off", 240, err, sizeof(err)) &&
+              !cfg.ap_enabled,
+          "set ap=off");
+    CHECK(runtime_config_set(&cfg, "ap", "on", 240, err, sizeof(err)) &&
+              cfg.ap_enabled,
+          "set ap=on");
+    CHECK(runtime_config_set(&cfg, "ap-enabled", "0", 240, err, sizeof(err)) &&
+              !cfg.ap_enabled,
+          "set ap-enabled=0 alias");
+    CHECK(!runtime_config_set(&cfg, "ap", "maybe", 240, err, sizeof(err)),
+          "an invalid ap value is rejected");
+
+    /* render() reports the setup-AP state. */
+    cfg = runtime_config_defaults();
+    char rendered[512];
+    runtime_config_render(&cfg, rendered, sizeof(rendered));
+    CHECK(strstr(rendered, "setup ap: on") != NULL,
+          "render shows the setup AP as on");
+    cfg.ap_enabled = false;
+    runtime_config_render(&cfg, rendered, sizeof(rendered));
+    CHECK(strstr(rendered, "setup ap: off") != NULL,
+          "render shows the setup AP as off");
+
+    /* Blob codec (v5, 18 bytes): a full round-trip must preserve every field. */
+    runtime_config_t src = runtime_config_defaults();
+    src.cpu_mhz = 160;
+    src.cpu_min_mhz = 80;
+    src.light_sleep = false;
+    src.espnow_retries = 7;
+    src.wifi_txpower_dbm = 8;
+    src.ap_beacon_tu = 1000;
+    src.radio_save = true;
+    src.wake_interval_ms = 500;
+    src.wake_window_ms = 200;
+    src.ap_enabled = false;
+    uint8_t blob[RUNTIME_CONFIG_BLOB_SIZE];
+    runtime_config_encode(&src, blob, sizeof(blob));
+    CHECK(blob[0] == RUNTIME_CONFIG_BLOB_VERSION && sizeof(blob) == 18,
+          "blob carries the v5 version and is 18 bytes");
+    runtime_config_t back = runtime_config_defaults();
+    CHECK(runtime_config_decode(blob, sizeof(blob), &back),
+          "a v5 blob decodes");
+    CHECK(back.cpu_mhz == 160 && back.cpu_min_mhz == 80 &&
+              back.espnow_retries == 7 && back.wifi_txpower_dbm == 8 &&
+              back.ap_beacon_tu == 1000 && back.radio_save &&
+              back.wake_interval_ms == 500 && back.wake_window_ms == 200 &&
+              !back.ap_enabled,
+          "the v5 round-trip preserves every field including ap_enabled");
+    src.ap_enabled = true;
+    runtime_config_encode(&src, blob, sizeof(blob));
+    CHECK(runtime_config_decode(blob, sizeof(blob), &back) && back.ap_enabled,
+          "ap_enabled=on also survives the round-trip");
+
+    /* An old v4 blob (16 bytes / version 4) is ignored, so the caller keeps the
+     * defaults - the same self-heal that protected v3 -> v4. */
+    uint8_t old_blob[16] = {0};
+    old_blob[0] = 4;
+    runtime_config_t untouched = runtime_config_defaults();
+    untouched.ap_enabled = false;
+    CHECK(!runtime_config_decode(old_blob, sizeof(old_blob), &untouched),
+          "an old v4 blob is rejected by size");
+    CHECK(!untouched.ap_enabled,
+          "a rejected blob leaves the target untouched");
+    /* A right-sized blob with the wrong version byte is rejected too. */
+    uint8_t wrong_version[18] = {0};
+    wrong_version[0] = 4;
+    CHECK(!runtime_config_decode(wrong_version, sizeof(wrong_version), &untouched),
+          "a wrong version byte is rejected even at the right size");
+
     /* reset restores the defaults. */
     cfg = runtime_config_reset(&cfg);
     runtime_config_t defaults = runtime_config_defaults();
     CHECK(cfg.cpu_mhz == defaults.cpu_mhz &&
               cfg.cpu_min_mhz == defaults.cpu_min_mhz &&
-              cfg.light_sleep == defaults.light_sleep,
+              cfg.light_sleep == defaults.light_sleep &&
+              cfg.ap_enabled == defaults.ap_enabled,
           "reset restores the defaults");
 
     printf("runtime config: %d checks, %d failures\n", g_checks, g_failures);

@@ -311,6 +311,25 @@ jobs:
             "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image runs the health watchdog"
 
+      - name: Verify the runtime SoftAP switch (receiver)
+        if: startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The receiver ships a runtime SoftAP switch (ap_enabled, `set ap`,
+          # /config). The strings below live in the receiver-only code paths:
+          # apply_ap_mode()'s log line, the /api/ap form action and the
+          # peer-migration helper it must call. Grepping the built app proves the
+          # switch (and the ESP-NOW peer migration that keeps the link alive
+          # across the AP->STA transition) is compiled in for this role. The
+          # sender image has no SoftAP and must NOT carry it.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'SoftAP switched %s at runtime' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'name="ap"' "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'action="/api/ap"' "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image carries the runtime SoftAP switch"
+
       - name: Verify the USB Serial/JTAG light-sleep guard (ESP32-C6)
         if: matrix.target == 'esp32c6' && startsWith(matrix.role, 'receiver')
         shell: bash
