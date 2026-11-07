@@ -26,6 +26,32 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-11-07 21:35 UTC · Odroid-Agent (Branch feat/nvs-usb-provision, PR #63)
+**`tools/nvs_provision.py` gebaut (Weg B aus der Notiz oben) — WLAN-Credentials
+per USB in die NVS, ohne Firmware-Flash.** Reines Python (stdlib, kein pyusb/
+hidapi/rich_click), CLI: `dump <img>` und `set <img> <ns> key=value ...`
+(erhaltend in freie Slots der aktiven Page, neue Page nur wenn nötig,
+`--out <img>`, Default in-place). Host-Tests `test/test_nvs_provision.py`
+(49 Checks, 0 Fehler) — in `test/run_host_tests.sh` und der CI-Python-Liste
+(`.github/workflows/esp-idf-build.yml`) eingehängt; Roundtrip, CRC-Prüfung,
+Byte-Erhalt der Bestands-Pages, Page-Rotation, Golden-Bytes einer echten
+IDF-geschriebenen String-Entry.
+
+Format gegen das reale Backup **und** gegen eine echte IDF-geschriebene NVS
+verifiziert (`backup-nvs-original.bin` enthält bereits `metercfg`/`wifi_ssid`+
+`wifi_pass`): Page-Header-CRC und String-Daten-CRC sind `zlib.crc32(data,
+0xFFFFFFFF)` (NICHT Init 0), Key-Feld ist NUL-gepolstert, String-Daten
+NUL-terminiert + 0xFF- gepolstert, Entry-Bitmap 2 Bit/Slot (0b10 = geschrieben).
+Nächster freier Namespace-Index im C6-Backup: 6. `metercfg` wird bei Bedarf
+angelegt, sonst wiederverwendet; `set` auf einen bereits vorhandenen Wert wird
+übersprungen.
+
+**Setzen per USB:** `esptool --chip esp32c6 -p /dev/ttyACM0 read-flash 0x9000
+0x6000 nvs.bin` → `python3 tools/nvs_provision.py set nvs.bin metercfg
+wifi_ssid=<SSID> wifi_pass=<PW> --out nvs-new.bin` → `esptool ... write-flash
+0x9000 nvs-new.bin` → reboot. Nur die NVS wird angefasst (Bootloader/App
+unberührt), der sparsame `apoff`-Build bleibt. Kein Secret im Repo.
+
 ## 2026-11-07 20:26 UTC · Odroid-Agent (Branch feat/esp32c6-receiver, Commit 72ca006)
 **WLAN-Provisioning des C6-Empfängers: Zugangsdaten per USB in die NVS schreiben —
 ohne Firmware-Flash (empfohlen) bzw. per Setup-AP (bequemer).**

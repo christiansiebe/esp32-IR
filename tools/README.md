@@ -75,6 +75,38 @@ sometimes fails to bind after a hub/plug event:
 echo 1-1.1:1.0 > /sys/bus/usb/drivers/usbhid/bind
 ```
 
+## Provisioning Wi-Fi credentials over USB (NVS)
+
+`nvs_provision.py` reads, modifies (preserving) and writes back the ESP32 `nvs`
+partition image, so you can put the C6 receiver's Wi-Fi credentials straight
+into the `nvs` partition over USB instead of re-flashing the firmware or
+bringing up the power-hungry setup AP. Stdlib only (`argparse`/`struct`/`zlib`).
+
+```bash
+# 1. read the current NVS (0x9000, 0x6000) off the device
+esptool --chip esp32c6 -p /dev/ttyACM0 read-flash 0x9000 0x6000 nvs.bin
+
+# 2. show namespaces and keys
+python3 tools/nvs_provision.py dump nvs.bin
+
+# 3. set the credentials (preserving every other namespace), new image
+python3 tools/nvs_provision.py set nvs.bin metercfg \
+    wifi_ssid=Wohnzimmer wifi_pass=secret --out nvs-new.bin
+
+# 4. write only the NVS back (bootloader/app untouched), then reboot
+esptool --chip esp32c6 -p /dev/ttyACM0 write-flash 0x9000 nvs-new.bin
+```
+
+`set` writes into free slots of the **active** page and only rotates to a fresh
+page when the entries do not fit; existing namespaces (`misc`, `nvs.net80211`,
+`phy`, `energy`, `rtcfg`, ...) and their CRCs stay byte-identical. The namespace
+`metercfg` (keys `wifi_ssid`, `wifi_pass`) is exactly what the firmware loads at
+boot (`load_wifi_credentials()`), so the device connects automatically.
+
+The format is verified against a real IDF-written image; page-header and string
+CRCs are `zlib.crc32(data, 0xFFFFFFFF)` and the golden test pins the exact bytes
+of a real string entry.
+
 ## Analysing a power-history CSV
 
 `analyze_power_csv.py` checks a downloaded `/api/power-history.csv` for missing
