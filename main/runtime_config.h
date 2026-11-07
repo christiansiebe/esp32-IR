@@ -66,7 +66,25 @@ typedef struct {
     bool radio_save;          /* receiver: park the Wi-Fi modem between wakes */
     uint16_t wake_interval_ms;/* ESP-NOW connectionless wake interval; 0 = off */
     uint16_t wake_window_ms;  /* radio-awake time per wake interval; 0 = off */
+    bool ap_enabled;          /* receiver: run the "ESP32-IR-Meter" setup SoftAP */
 } runtime_config_t;
+
+/* Persisted blob wire format. v5 appended ap_enabled (16 -> 18 bytes); the
+ * reserved byte at [17] keeps the layout 16-bit aligned for a future field. An
+ * old v4 (or earlier) blob is the wrong size/version and is ignored by
+ * runtime_config_decode(), so the caller falls back to the defaults. */
+#define RUNTIME_CONFIG_BLOB_VERSION 5u
+#define RUNTIME_CONFIG_BLOB_SIZE 18u
+
+/* Encode cfg into a RUNTIME_CONFIG_BLOB_SIZE-byte blob (NVS glue in main.c does
+ * the nvs_set_blob/nvs_get_blob around it; kept pure C so it is host-tested).
+ * No-op when the buffer is NULL or too small. */
+void runtime_config_encode(const runtime_config_t *cfg, uint8_t *blob, size_t blob_size);
+
+/* Decode a blob into *cfg. Returns false (leaving *cfg untouched) when the blob
+ * is NULL, the wrong size, or carries a different version, so an old blob is
+ * ignored and the caller keeps its defaults. */
+bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config_t *cfg);
 
 /* Compile-time defaults (light sleep mirrors CONFIG_ESPNOW_SENDER_LIGHT_SLEEP). */
 runtime_config_t runtime_config_defaults(void);

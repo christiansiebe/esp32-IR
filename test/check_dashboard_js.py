@@ -310,7 +310,16 @@ def main() -> int:
     if 'name="password"' not in config_page:
         print("config page: missing password input")
         return 1
-    print("config page has SSID + password inputs")
+    # The setup-AP switch: the page must carry the ap field (posted to /api/ap)
+    # so the SoftAP can be turned off at runtime. A <select> keeps it a sent
+    # field (an unchecked checkbox would be omitted entirely).
+    if 'name="ap"' not in config_page:
+        print("config page: missing setup-AP switch")
+        return 1
+    if '/api/ap' not in config_page:
+        print("config page: setup-AP switch is not wired to /api/ap")
+        return 1
+    print("config page has SSID + password inputs and the setup-AP switch")
 
     workdir = tempfile.mkdtemp()
     try:

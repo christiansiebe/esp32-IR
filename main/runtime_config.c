@@ -18,6 +18,11 @@
 #ifndef CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 #define CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG 0
 #endif
+/* Host builds default to the AP build (SoftAP on), matching the plain receiver
+ * image; the apoff build sets it to 1 so the persisted default flips off. */
+#ifndef CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+#define CONFIG_ESPNOW_RECEIVER_DISABLE_AP 0
+#endif
 
 bool runtime_config_light_sleep_allowed(void)
 {
@@ -52,8 +57,68 @@ runtime_config_t runtime_config_defaults(void)
         .radio_save = false,
         .wake_interval_ms = 100u,
         .wake_window_ms = 70u,
+        /* The SoftAP build ships it on; the apoff build flips the default off
+         * so a fresh device stays station-only until the operator opts in. */
+#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+        .ap_enabled = false,
+#else
+        .ap_enabled = true,
+#endif
     };
     return cfg;
+}
+
+void runtime_config_encode(const runtime_config_t *cfg, uint8_t *blob, size_t blob_size)
+{
+    if (cfg == NULL || blob == NULL || blob_size < RUNTIME_CONFIG_BLOB_SIZE) {
+        return;
+    }
+    memset(blob, 0, blob_size);
+    blob[0] = (uint8_t)RUNTIME_CONFIG_BLOB_VERSION;
+    blob[1] = cfg->light_sleep ? 1u : 0u;
+    blob[2] = (uint8_t)cfg->cpu_mhz;
+    blob[3] = (uint8_t)cfg->cpu_min_mhz;
+    uint32_t retries = cfg->espnow_retries;
+    memcpy(&blob[4], &retries, sizeof(retries));
+    blob[8] = cfg->wifi_txpower_dbm;
+    uint16_t beacon = cfg->ap_beacon_tu;
+    memcpy(&blob[9], &beacon, sizeof(beacon));
+    blob[11] = cfg->radio_save ? 1u : 0u;
+    uint16_t interval = cfg->wake_interval_ms;
+    memcpy(&blob[12], &interval, sizeof(interval));
+    uint16_t window = cfg->wake_window_ms;
+    memcpy(&blob[14], &window, sizeof(window));
+    blob[16] = cfg->ap_enabled ? 1u : 0u;
+    /* blob[17] is reserved (keeps the 16-bit fields aligned). */
+}
+
+bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config_t *cfg)
+{
+    if (blob == NULL || cfg == NULL || blob_size != RUNTIME_CONFIG_BLOB_SIZE ||
+        blob[0] != RUNTIME_CONFIG_BLOB_VERSION) {
+        return false;
+    }
+    runtime_config_t loaded = runtime_config_defaults();
+    loaded.light_sleep = blob[1] != 0;
+    loaded.cpu_mhz = blob[2];
+    loaded.cpu_min_mhz = blob[3];
+    uint32_t retries = 0;
+    memcpy(&retries, &blob[4], sizeof(retries));
+    loaded.espnow_retries = retries;
+    loaded.wifi_txpower_dbm = blob[8];
+    uint16_t beacon = 0;
+    memcpy(&beacon, &blob[9], sizeof(beacon));
+    loaded.ap_beacon_tu = beacon;
+    loaded.radio_save = blob[11] != 0;
+    uint16_t interval = 0;
+    memcpy(&interval, &blob[12], sizeof(interval));
+    loaded.wake_interval_ms = interval;
+    uint16_t window = 0;
+    memcpy(&window, &blob[14], sizeof(window));
+    loaded.wake_window_ms = window;
+    loaded.ap_enabled = blob[16] != 0;
+    *cfg = loaded;
+    return true;
 }
 
 runtime_config_t runtime_config_reset(runtime_config_t *cfg)
@@ -267,10 +332,18 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             return false;
         }
         next.wake_window_ms = (uint16_t)v;
+    } else if (strcmp(key, "ap") == 0 || strcmp(key, "ap-enabled") == 0) {
+        /* The "AP only off while the station is connected" safety rule is
+         * enforced where the mode is actually switched (main.c apply_ap_mode()),
+         * not here: this parser is pure C with no view of the link state. */
+        if (!runtime_config_parse_bool(value, &next.ap_enabled)) {
+            snprintf(err, err_size, "ap: expected on or off\n");
+            return false;
+        }
     } else {
         snprintf(err, err_size,
                  "unknown key '%s' (cpu, freq, cpu-min, sleep, retries, txpower, "
-                 "beacon, radio-save, wake-interval, wake-window)\n",
+                 "beacon, radio-save, wake-interval, wake-window, ap)\n",
                  key);
         return false;
     }
@@ -377,13 +450,15 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              "espnow retries: %u\n"
              "wifi txpower: %s\n"
              "ap beacon: %s\n"
-             "radio save: %s\n",
+             "radio save: %s\n"
+             "setup ap: %s\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on"
                               : (runtime_config_light_sleep_allowed()
                                      ? "off"
                                      : "off (unavailable: USB Serial/JTAG console)"),
-             (unsigned)cfg->espnow_retries, tx, beacon, wake);
+             (unsigned)cfg->espnow_retries, tx, beacon, wake,
+             cfg->ap_enabled ? "on" : "off");
 }
 
 #ifdef ESP_PLATFORM

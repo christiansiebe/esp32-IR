@@ -444,8 +444,18 @@ Reihenfolge nach Wirkung/Aufwand. „besser gemacht" = konkrete Lehre aus AMS.
       Telegramm, 319 B, aus dem öffentlichen libsml-testing-Korpus) + Decode-Golden-Test
       `test/test_sml_parser_golden.cpp` (8 Checks; 1-0:1.8.0/1.8.1 Wh, 1-0:15.7.0 W exakt;
       gekipptes Byte → `SML_CHECKSUM_ERROR`). Im Host-Runner aktiv, ASan+UBSan.
-- [ ] **AP abschalten, wenn STA verbunden** (größter einzelner Spareffekt): Empfänger fährt
+- [x] **AP abschalten, wenn STA verbunden** (größter einzelner Spareffekt): Empfänger fährt
       dauerhaft `WIFI_MODE_APSTA` (`main.c`); nach `GOT_IP` auf `WIFI_MODE_STA` wechseln.
+      **Erledigt** (Branch `feat/c6-ap-switch`): persistierter Knopf `ap_enabled`
+      (`runtime_config`, NVS-Blob v5/18 B), `apply_ap_mode()` schaltet den SoftAP zur
+      Laufzeit um — **nur ab wenn die Station verbunden ist** (`g_wifi_connected`), sonst
+      HTTP 400 / Konsolenfehler. Entscheidend gegenüber dem früheren Fehlversuch
+      (`04add16`/`71409c8`): `ESPNOW_IF` folgt jetzt dem AP-Zustand und
+      `espnow_migrate_peers()` hängt die ESP-NOW-Peers von `WIFI_IF_AP` auf `WIFI_IF_STA`
+      um, sodass der Link den Wechsel überlebt. Seite `/config` (Select `ap=on|off`,
+      POST `/api/ap`) und Konsole (`set ap on|off`, in `help`/`config`) bedienen den Knopf.
+      **⚠️ Hardware-Verifikation offen:** der AP-Aus-Pfad (Peers-Umzug, Reichweite) ist am
+      Gerät noch zu prüfen.
 - [x] **Tages-/Monats-Summen im Flash** (`hImport[24]`/`dImport[31]` wie AMS): aus
       Minutenwerten ableiten, platzsparend + schnellere Langzeitgrafik.
       **Erledigt** (Branch `feat/energy-day-month-totals`): reines Modul
