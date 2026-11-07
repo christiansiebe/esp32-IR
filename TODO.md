@@ -18,7 +18,9 @@ definiert (IDF-6395 offen).
   (Selbstheilung), Layout unveraendert (16 B).
 - **Recovery:** BOOT-Taste (3 s) loescht vor dem Rollback den ganzen NVS-Namespace
   `rtcfg` (Hook `recovery_set_pre_rollback_fn`), damit ein schlechtes persistiertes
-  Config-Set den Rollback nicht ueberlebt.
+  Config-Set den Rollback nicht ueberlebt. Beim C6 ist die BOOT-Taste **GPIO9**
+  (nicht GPIO0) — der `RECOVERY_BUTTON_GPIO`-Default ist dafuer jetzt
+  zielabhaengig (C6 9, klassischer ESP32 0).
 - Host-Test `test/test_runtime_config_usb_console.c` (mit
   `-DCONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=1`) + CI-Schritt + CI-Grep im C6-Image.
 
