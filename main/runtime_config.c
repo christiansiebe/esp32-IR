@@ -33,6 +33,11 @@ runtime_config_t runtime_config_defaults(void)
          * byte-for-byte unchanged; only an explicit 'set' opts into a value. */
         .wifi_txpower_dbm = 0u,
         .ap_beacon_tu = 0u,
+        /* Inert until radio_save is switched on; 100/70 mirrors the sender's
+         * proven wake-interval/window defaults. */
+        .radio_save = false,
+        .wake_interval_ms = 100u,
+        .wake_window_ms = 70u,
     };
     return cfg;
 }
@@ -207,9 +212,43 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             return false;
         }
         next.ap_beacon_tu = (uint16_t)v;
+    } else if (strcmp(key, "radio-save") == 0 || strcmp(key, "radio-ps") == 0) {
+        if (!runtime_config_parse_bool(value, &next.radio_save)) {
+            snprintf(err, err_size, "radio-save: expected on or off\n");
+            return false;
+        }
+    } else if (strcmp(key, "wake-interval") == 0 || strcmp(key, "wake") == 0) {
+        char *end = NULL;
+        unsigned long v = strtoul(value, &end, 10);
+        if (end == value || *end != '\0' ||
+            v < RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS ||
+            v > RUNTIME_CONFIG_WAKE_INTERVAL_MAX_MS) {
+            snprintf(err, err_size, "wake-interval: expected %u..%u ms\n",
+                     (unsigned)RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS,
+                     (unsigned)RUNTIME_CONFIG_WAKE_INTERVAL_MAX_MS);
+            return false;
+        }
+        next.wake_interval_ms = (uint16_t)v;
+        /* Keep the window inside the interval so the radio really sleeps. */
+        if (next.wake_window_ms > next.wake_interval_ms) {
+            next.wake_window_ms = next.wake_interval_ms;
+        }
+    } else if (strcmp(key, "wake-window") == 0 || strcmp(key, "window") == 0) {
+        char *end = NULL;
+        unsigned long v = strtoul(value, &end, 10);
+        if (end == value || *end != '\0' ||
+            v < RUNTIME_CONFIG_WAKE_WINDOW_MIN_MS ||
+            v > RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS) {
+            snprintf(err, err_size, "wake-window: expected %u..%u ms\n",
+                     (unsigned)RUNTIME_CONFIG_WAKE_WINDOW_MIN_MS,
+                     (unsigned)RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS);
+            return false;
+        }
+        next.wake_window_ms = (uint16_t)v;
     } else {
         snprintf(err, err_size,
-                 "unknown key '%s' (cpu, freq, cpu-min, sleep, retries, txpower, beacon)\n",
+                 "unknown key '%s' (cpu, freq, cpu-min, sleep, retries, txpower, "
+                 "beacon, radio-save, wake-interval, wake-window)\n",
                  key);
         return false;
     }
@@ -261,6 +300,22 @@ void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz)
          cfg->ap_beacon_tu % 100u != 0u)) {
         cfg->ap_beacon_tu = 0u;
     }
+    /* The wake interval is the master: clamp it first, then pull the window
+     * inside it so the radio really sleeps (a window >= interval keeps it on). */
+    if (cfg->wake_interval_ms != 0u &&
+        (cfg->wake_interval_ms < RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS ||
+         cfg->wake_interval_ms > RUNTIME_CONFIG_WAKE_INTERVAL_MAX_MS)) {
+        cfg->wake_interval_ms = RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS;
+    }
+    if (cfg->wake_window_ms < RUNTIME_CONFIG_WAKE_WINDOW_MIN_MS) {
+        cfg->wake_window_ms = RUNTIME_CONFIG_WAKE_WINDOW_MIN_MS;
+    }
+    if (cfg->wake_window_ms > RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS) {
+        cfg->wake_window_ms = RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS;
+    }
+    if (cfg->wake_interval_ms != 0u && cfg->wake_window_ms > cfg->wake_interval_ms) {
+        cfg->wake_window_ms = cfg->wake_interval_ms;
+    }
 }
 
 void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_size)
@@ -280,16 +335,24 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
     } else {
         snprintf(beacon, sizeof(beacon), "%u TU", (unsigned)cfg->ap_beacon_tu);
     }
+    char wake[32];
+    if (!cfg->radio_save) {
+        snprintf(wake, sizeof(wake), "off");
+    } else {
+        snprintf(wake, sizeof(wake), "on (%u ms / %u ms window)",
+                 (unsigned)cfg->wake_interval_ms, (unsigned)cfg->wake_window_ms);
+    }
     snprintf(out, out_size,
              "cpu ceiling: %u MHz\n"
              "cpu floor: %u MHz\n"
              "light sleep: %s\n"
              "espnow retries: %u\n"
              "wifi txpower: %s\n"
-             "ap beacon: %s\n",
+             "ap beacon: %s\n"
+             "radio save: %s\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on" : "off",
-             (unsigned)cfg->espnow_retries, tx, beacon);
+             (unsigned)cfg->espnow_retries, tx, beacon, wake);
 }
 
 #ifdef ESP_PLATFORM

@@ -148,6 +148,44 @@ int main(void)
     CHECK(stored.ap_beacon_tu == 0,
           "an off-grid beacon interval resets to the IDF default");
 
+    /* Receiver radio-sleep knobs. radio_save is a bool; wake interval/window
+     * are in ms and the window is pulled inside the interval. */
+    cfg = runtime_config_defaults();
+    CHECK(!cfg.radio_save, "radio-save is off by default");
+    CHECK(runtime_config_set(&cfg, "radio-save", "on", 240, err, sizeof(err)) &&
+              cfg.radio_save,
+          "set radio-save=on");
+    CHECK(runtime_config_set(&cfg, "wake-interval", "500", 240, err, sizeof(err)) &&
+              cfg.wake_interval_ms == 500,
+          "set wake-interval=500 ms");
+    CHECK(runtime_config_set(&cfg, "wake-window", "200", 240, err, sizeof(err)) &&
+              cfg.wake_window_ms == 200,
+          "set wake-window=200 ms");
+    /* Raising the window above the interval would keep the radio awake; the
+     * interval wins and the window is pulled down to it. */
+    CHECK(runtime_config_set(&cfg, "wake-window", "900", 240, err, sizeof(err)) &&
+              cfg.wake_window_ms == 900,
+          "a window below the interval is accepted");
+    CHECK(runtime_config_set(&cfg, "wake-interval", "300", 240, err, sizeof(err)) &&
+              cfg.wake_interval_ms == 300 && cfg.wake_window_ms == 300,
+          "lowering the interval below the window pulls the window down");
+    CHECK(!runtime_config_set(&cfg, "wake-interval", "5", 240, err, sizeof(err)),
+          "wake-interval below the minimum is rejected");
+    CHECK(!runtime_config_set(&cfg, "wake-window", "0", 240, err, sizeof(err)),
+          "wake-window 0 is rejected");
+    /* clamp() pulls an over-interval window back inside a persisted value. */
+    runtime_config_t rs = runtime_config_defaults();
+    rs.radio_save = true;
+    rs.wake_interval_ms = 100;
+    rs.wake_window_ms = 5000;
+    runtime_config_clamp(&rs, 240);
+    CHECK(rs.wake_window_ms == 100,
+          "clamp pulls a persisted window inside the interval");
+    rs.wake_interval_ms = 3;
+    runtime_config_clamp(&rs, 240);
+    CHECK(rs.wake_interval_ms == RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS,
+          "clamp raises a too-small wake interval to the minimum");
+
     /* clamp(): a value restored from NVS is forced into what this build allows.
      * This is the guard that lets a persisted 'set' survive an OTA into an image
      * with a different ceiling. */

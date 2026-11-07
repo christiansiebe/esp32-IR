@@ -44,6 +44,18 @@
 #define RUNTIME_CONFIG_BEACON_MIN_TU 100u
 #define RUNTIME_CONFIG_BEACON_MAX_TU 6000u
 
+/* Receiver radio sleep (opt-in). The Wi-Fi modem parks between wake windows and
+ * the ESP-NOW connectionless module is told how often to wake and for how long
+ * it stays awake. 0 = leave the chip/IDF default (radio always on). The interval
+ * is the "wake every N ms" lever; the window must be <= the interval or the
+ * radio never sleeps. Only the ESP32-C6 (and C2/C3/S2/S3) actually honours the
+ * ESP-NOW wake window - on the classic ESP32 the API is accepted but breaks the
+ * link, which is why this is receiver-only and off by default. */
+#define RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS 10u
+#define RUNTIME_CONFIG_WAKE_INTERVAL_MAX_MS 10000u
+#define RUNTIME_CONFIG_WAKE_WINDOW_MIN_MS 1u
+#define RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS 10000u
+
 typedef struct {
     uint32_t cpu_mhz;      /* DFS ceiling (max_freq) */
     uint32_t cpu_min_mhz;  /* DFS floor (min_freq); == cpu_mhz pins the clock */
@@ -51,6 +63,9 @@ typedef struct {
     uint32_t espnow_retries; /* per-frame ESP-NOW send attempts */
     uint8_t wifi_txpower_dbm; /* Wi-Fi max TX power in dBm; 0 = chip default */
     uint16_t ap_beacon_tu;    /* SoftAP beacon interval in TU; 0 = IDF default */
+    bool radio_save;          /* receiver: park the Wi-Fi modem between wakes */
+    uint16_t wake_interval_ms;/* ESP-NOW connectionless wake interval; 0 = off */
+    uint16_t wake_window_ms;  /* radio-awake time per wake interval; 0 = off */
 } runtime_config_t;
 
 /* Compile-time defaults (light sleep mirrors CONFIG_ESPNOW_SENDER_LIGHT_SLEEP). */

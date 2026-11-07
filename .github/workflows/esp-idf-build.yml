@@ -126,6 +126,15 @@ jobs:
             kconfig_role: RECEIVER
             target: esp32c6
             extra_kconfig: ""
+          # ESP32-C6 receiver without the SoftAP (station-only). Only here can
+          # Wi-Fi modem sleep actually release the radio: a running SoftAP must
+          # keep beaconing, so the AP interface holds the radio awake regardless
+          # of esp_wifi_set_ps(). ESP-NOW runs on WIFI_IF_STA and both roles must
+          # share CONFIG_ESPNOW_CHANNEL (the sender can no longer scan the AP).
+          - role: receiver-c6-apoff
+            kconfig_role: RECEIVER
+            target: esp32c6
+            extra_kconfig: "CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y"
     env:
       IDF_CCACHE_ENABLE: "1"
       CCACHE_DIR: /root/.cache/ccache

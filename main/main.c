@@ -906,6 +906,11 @@ static void wifi_event_handler(void *arg,
         diag_log_event(ESPNOW_DIAG_LEVEL_INFO,
                        "wake window applied on connect err=%d",
                        uart_sleep_espnow_last_err());
+#else
+        /* Re-apply the radio-sleep knobs on (re)association: esp_now_set_wake_window()
+         * is most reliable at connected status (the C6 family honours it). A
+         * no-op when radio-save is off. */
+        apply_radio_power_config();
 #endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *event = event_data;
@@ -5116,7 +5121,8 @@ static void console_cmd_help(const char *args, char *out, size_t out_size)
 }
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
-/* Defined near apply_power_management() below; 'set txpower|beacon' calls it. */
+/* Defined near apply_power_management() below; 'set txpower|beacon|radio-save'
+ * calls it. */
 static void apply_radio_power_config(void);
 #endif
 
@@ -5559,7 +5565,7 @@ static bool g_runtime_config_ready;
 
 #define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
 #define RUNTIME_CONFIG_NVS_KEY "cfg"
-#define RUNTIME_CONFIG_NVS_VERSION 2u
+#define RUNTIME_CONFIG_NVS_VERSION 3u
 
 static void runtime_config_store(const runtime_config_t *cfg)
 {
@@ -5577,6 +5583,11 @@ static void runtime_config_store(const runtime_config_t *cfg)
     blob[8] = cfg->wifi_txpower_dbm;
     uint16_t beacon = cfg->ap_beacon_tu;
     memcpy(&blob[9], &beacon, sizeof(beacon));
+    blob[11] = cfg->radio_save ? 1u : 0u;
+    uint16_t interval = cfg->wake_interval_ms;
+    memcpy(&blob[12], &interval, sizeof(interval));
+    uint16_t window = cfg->wake_window_ms;
+    memcpy(&blob[14], &window, sizeof(window));
     if (nvs_set_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, sizeof(blob)) == ESP_OK) {
         (void)nvs_commit(handle);
     }
@@ -5620,6 +5631,13 @@ static void runtime_config_load(runtime_config_t *cfg)
     uint16_t beacon = 0;
     memcpy(&beacon, &blob[9], sizeof(beacon));
     loaded.ap_beacon_tu = beacon;
+    loaded.radio_save = blob[11] != 0;
+    uint16_t interval = 0;
+    memcpy(&interval, &blob[12], sizeof(interval));
+    loaded.wake_interval_ms = interval;
+    uint16_t window = 0;
+    memcpy(&window, &blob[14], sizeof(window));
+    loaded.wake_window_ms = window;
     runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
     *cfg = loaded;
 }
@@ -5838,7 +5856,7 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     char value[32] = {0};
     if (sscanf(args, "%23s %31s", key, value) != 2) {
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window> <value>\n");
         return;
     }
     runtime_config_t *cfg = active_runtime_config();
@@ -5886,7 +5904,10 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     /* The radio-side knobs need the Wi-Fi driver up; the CPU knobs are already
      * applied by runtime_config_apply() above. */
     if (strcmp(key, "txpower") == 0 || strcmp(key, "wifi-txpower") == 0 ||
-        strcmp(key, "beacon") == 0 || strcmp(key, "beacon-tu") == 0) {
+        strcmp(key, "beacon") == 0 || strcmp(key, "beacon-tu") == 0 ||
+        strcmp(key, "radio-save") == 0 || strcmp(key, "radio-ps") == 0 ||
+        strcmp(key, "wake-interval") == 0 || strcmp(key, "wake") == 0 ||
+        strcmp(key, "wake-window") == 0 || strcmp(key, "window") == 0) {
         apply_radio_power_config();
     }
 #endif
@@ -5922,15 +5943,20 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
     /* One short line: the sender tunnel truncates the reply at 192 bytes. The
      * radio knobs are only appended when set (non-default), so the common case
      * stays as short as before. */
-    char radio[40] = "";
+    char radio[72] = "";
     if (cfg->wifi_txpower_dbm != 0u || cfg->ap_beacon_tu != 0u) {
         snprintf(radio, sizeof(radio), " txpwr=%u beacon=%u",
                  (unsigned)cfg->wifi_txpower_dbm, (unsigned)cfg->ap_beacon_tu);
     }
-    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u%s\n",
+    char wake[32] = "";
+    if (cfg->radio_save) {
+        snprintf(wake, sizeof(wake), " radio-save=%u/%u",
+                 (unsigned)cfg->wake_interval_ms, (unsigned)cfg->wake_window_ms);
+    }
+    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u%s%s\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on" : "off",
-             (unsigned)cfg->espnow_retries, radio);
+             (unsigned)cfg->espnow_retries, radio, wake);
 }
 
 static void web_console_register_commands(void)
@@ -5942,7 +5968,7 @@ static void web_console_register_commands(void)
     /* txpower/beacon only apply on the receiver (the sender has no SoftAP and
      * drives its own radio), so only advertise them there. */
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window",
                          console_cmd_set);
 #else
     web_console_register("set", "change a runtime knob: cpu|freq|cpu-min|sleep|retries",
@@ -8512,6 +8538,34 @@ static void apply_radio_power_config(void)
                 ESP_LOGI(TAG, "AP beacon interval set to %u TU", (unsigned)cfg->ap_beacon_tu);
             }
         }
+    }
+
+    /* Radio sleep: park the Wi-Fi modem between ESP-NOW wake windows so the
+     * radio (and the ESP_PM_APB_FREQ_MAX lock it holds) is released, which is
+     * what lets the idle current drop and light sleep engage. Order matters
+     * (Espressif's examples set the window first, then the interval). Only the
+     * ESP32-C6 family honours the ESP-NOW wake window; on the classic ESP32 the
+     * call is accepted but breaks the link, so this is opt-in (radio-save off by
+     * default). Turning it off restores the always-awake radio (WIFI_PS_MIN_MODEM
+     * + a zeroed wake window), i.e. exactly the pre-knob behaviour. */
+    if (cfg->radio_save) {
+        esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+        esp_err_t err = esp_now_set_wake_window(cfg->wake_window_ms);
+        if (err == ESP_OK) {
+            err = esp_wifi_connectionless_module_set_wake_interval(cfg->wake_interval_ms);
+        }
+        if (ps_err != ESP_OK || err != ESP_OK) {
+            ESP_LOGW(TAG, "Could not enable radio sleep (ps=%s, window=%s)",
+                     esp_err_to_name(ps_err), esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "Radio sleep on: modem sleeps, ESP-NOW wakes every %u ms "
+                          "for %u ms",
+                     (unsigned)cfg->wake_interval_ms, (unsigned)cfg->wake_window_ms);
+        }
+    } else {
+        esp_err_t err = esp_now_set_wake_window(0);
+        (void)esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+        ESP_LOGI(TAG, "Radio sleep off: radio always awake (%s)", esp_err_to_name(err));
     }
 }
 #endif
