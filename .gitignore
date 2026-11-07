@@ -120,6 +120,13 @@ subagents/
 # Lokale Sicherung des vollen AGENTS.md vor dem Themen-Split.
 AGENTS.md.vor-themen-split
 
+# Bench power-measurement logs written by tools/fnb48_read.py (-o file.csv).
+# Measurement data, never source. The committed partition tables are
+# re-included below; Firmware/** keeps its own re-include at the very end.
+*.csv
+*.cfn
+!partitions.csv
+
 # The Firmware/ tree is a deliberately committed release bundle (see AGENTS.md
 # "Flash bundles"), so re-include it even though *.bin / flasher_args.json match
 # the build-output rules above. Keep this re-include last.

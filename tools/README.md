@@ -49,6 +49,32 @@ python3 test/test_ws_min.py
 python3 test/test_ws_client.py   # runs ws_min.Client against a real local server
 ```
 
+## Measuring the board's own power draw (FNIRSI FNB-48)
+
+`fnb48_read.py` reads a FNIRSI FNB-48 USB power meter through `/dev/hidrawN`
+so you can measure what an ESP32 board really draws on the bench (e.g. the C6
+receiver). Stdlib only - no `pyusb`, no `hidapi`, no udev rules.
+
+```bash
+# 60 s average, plus a per-sample CSV log
+python3 tools/fnb48_read.py -n 60 -o c6.csv
+
+# show the load bursts (spikes) above 0.15 W and their spacing
+python3 tools/fnb48_read.py -n 30 --burst 0.15
+```
+
+The meter samples at a fixed 100 S/s. Averaging over a short window hides
+short spikes, so log every sample (`-o`) and let `--burst` group them. This is
+how the C6's periodic radio wake shows up: ~65 mW idle, a ~130 ms burst to
+~240 mW every 5 s (the receiver's radio-save window), ~70 mW average.
+
+If `/dev/hidraw0` is missing although the meter is plugged in, `usbhid`
+sometimes fails to bind after a hub/plug event:
+
+```bash
+echo 1-1.1:1.0 > /sys/bus/usb/drivers/usbhid/bind
+```
+
 ## Analysing a power-history CSV
 
 `analyze_power_csv.py` checks a downloaded `/api/power-history.csv` for missing

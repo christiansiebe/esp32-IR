@@ -670,3 +670,28 @@ CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender), PR `CLEAN`/`MERGE
 **Umsetzung (minimal, PR #55, base main):** read-only Diagnose fuer den Odroid: `print_health.py` (reiner Signal->Ursache-Klassifizierer), `diagnose_print.sh` (VERDICT/CAUSE/FIX), `BLANK-PAGES.md`, Host-Test `test_print_health.py` (24 Checks) in `run_host_tests.sh` eingehaengt.
 
 **Tests:** `./test/run_host_tests.sh` gruen; CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender + Hygiene). Nur `remote-shell/**` + `test/run_host_tests.sh` beruehrt; kein Firmware-Verhalten, kein Flash-Layout, kein Datenverlust.
+
+## 2026-11-07 12:30 UTC · Odroid-Agent (Branch feat/esp32c6-receiver)
+
+**Punkt:** Nutzer stellte einen neuen ESP32-C6 an USB (Port 3, `303a:1001`) und
+wollte den Empfaenger darauf portieren/flashen; danach die Frage "laeuft er
+optimal?" und zuletzt das Werkzeug fuer die Messung.
+
+**Befund C6:** Bootet sauber (App `b39fac7`, ESP-IDF v6.1, SoftAP disabled,
+free heap ~201 KB, Watchdogs armed, `radio-save on 5000/70`). Liefert aber noch
+**nicht ueber WLAN**: `configured ssid: (none)`, `fritzbox: not connected` -
+Zugangsdaten fehlen und dieser `apoff`-Build hat den Setup-AP absichtlich aus.
+Der Empfaenger laeuft (ESP-NOW-Kanal 1, Historie bereit), nur die Dashboard-
+Zustellung braucht noch die WLAN-Zugangsdaten.
+
+**Werkzeug (Repo, PR-Stil):** `tools/fnb48_read.py` - FNIRSI FNB-48 live ueber
+`/dev/hidrawN`, **nur stdlib** (kein pyusb/hidapi/udev). Kann min/max/avg fuer
+V/A/W, Energie (Wh) + Kapazitaet (Ah), Per-Sample-CSV (`-o`) und Burst-
+Erkennung (`--burst`). Host-Test `test/test_fnb48_read.py` (20 Checks, gruen),
+in die CI einghaengt. `.gitignore`: Mess-`*.csv`/`*.cfn` ignoriert, die
+committeten `partitions.csv` re-included.
+
+**Messung C6 (60 s, 100 S/s):** Ø **69,6 mW** bei 5,195 V / 13,4 mA; Idle
+62,8 mW, alle 5,00 s ein ~130 ms Burst auf ~240 mW (radio-save-Fenster);
+Hochrechnung 1,67 Wh/Tag. Das Windows-Tool-Prinzip (jeden Sample loggen statt
+mitteln) ist damit in einem stdlib-Skript verfuegbar.
