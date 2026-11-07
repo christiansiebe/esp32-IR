@@ -976,38 +976,29 @@ static void wifi_event_handler(void *arg,
 #if SOC_WIFI_HE_SUPPORT
         const wifi_event_sta_itwt_setup_t *event = event_data;
         /* status is an esp_err_t: ESP_OK on success (the AP accepted), anything
-         * else is the failure reason. */
+         * else is the failure reason. The diag-event ring is sender-only, so the
+         * receiver surfaces this through the log instead. */
         ESP_LOGI(TAG, "TWT setup: status=%s flow_id=%u wake_interval=%u*2^%u",
                  esp_err_to_name(event->status), (unsigned)event->config.flow_id,
                  (unsigned)event->config.wake_invl_mant,
                  (unsigned)event->config.wake_invl_expn);
-        diag_log_event(event->status == ESP_OK ? ESPNOW_DIAG_LEVEL_INFO
-                                               : ESPNOW_DIAG_LEVEL_WARN,
-                       "twt setup status=%d flow=%u", (int)event->status,
-                       (unsigned)event->config.flow_id);
 #endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_ITWT_TEARDOWN) {
 #if SOC_WIFI_HE_SUPPORT
         const wifi_event_sta_itwt_teardown_t *event = event_data;
         ESP_LOGI(TAG, "TWT teardown: flow_id=%u status=%d", (unsigned)event->flow_id,
                  (int)event->status);
-        diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "twt teardown flow=%u status=%d",
-                       (unsigned)event->flow_id, (int)event->status);
 #endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_TWT_WAKEUP) {
 #if SOC_WIFI_HE_SUPPORT
         const wifi_event_sta_twt_wakeup_t *event = event_data;
         ESP_LOGD(TAG, "TWT wakeup: flow_id=%u", (unsigned)event->flow_id);
-        diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "twt wakeup flow=%u",
-                       (unsigned)event->flow_id);
 #endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_ITWT_SUSPEND) {
 #if SOC_WIFI_HE_SUPPORT
         const wifi_event_sta_itwt_suspend_t *event = event_data;
         ESP_LOGI(TAG, "TWT suspend: status=%d bitmap=0x%02x", (int)event->status,
                  (unsigned)event->flow_id_bitmap);
-        diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "twt suspend status=%d bitmap=0x%02x",
-                       (int)event->status, (unsigned)event->flow_id_bitmap);
 #endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
         /* AP-only fallback (no home WLAN configured): the dashboard is reachable
@@ -5922,8 +5913,14 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     char key[24] = {0};
     char value[32] = {0};
     if (sscanf(args, "%23s %31s", key, value) != 2) {
+        /* Keep the classic-ESP32 (non-HE) build's text unchanged. */
+#if SOC_WIFI_HE_SUPPORT
         snprintf(out, out_size,
                  "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake> <value>\n");
+#else
+        snprintf(out, out_size,
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window> <value>\n");
+#endif
         return;
     }
     runtime_config_t *cfg = active_runtime_config();
@@ -8719,7 +8716,6 @@ static void twt_teardown(void)
     esp_err_t err = esp_wifi_sta_itwt_teardown(FLOW_ID_ALL);
     g_twt_active = false;
     ESP_LOGI(TAG, "TWT teardown (all flows): %s", esp_err_to_name(err));
-    diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "twt teardown all err=%d", (int)err);
 }
 
 static void apply_twt_config(void)
@@ -8737,7 +8733,6 @@ static void apply_twt_config(void)
     esp_err_t err = esp_wifi_sta_twt_config(&twt_config);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "TWT config failed: %s", esp_err_to_name(err));
-        diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "twt config err=%d", (int)err);
         return;
     }
 
@@ -8766,15 +8761,12 @@ static void apply_twt_config(void)
     err = esp_wifi_sta_itwt_setup(&setup);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "TWT setup request failed: %s", esp_err_to_name(err));
-        diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "twt setup err=%d", (int)err);
     } else {
         /* The request is sent; the AP's answer arrives as WIFI_EVENT_ITWT_SETUP.
          * Mark active so a later disconnect/teardown still runs. */
         g_twt_active = true;
         ESP_LOGI(TAG, "TWT setup requested: wake every %u ms (mant %u * 2^%u)",
                  (unsigned)cfg->twt_wake_ms, (unsigned)mant, (unsigned)expn);
-        diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "twt setup %ums %u*2^%u",
-                       (unsigned)cfg->twt_wake_ms, (unsigned)mant, (unsigned)expn);
     }
 }
 #endif
