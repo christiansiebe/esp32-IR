@@ -7779,12 +7779,15 @@ static esp_err_t config_handler(httpd_req_t *req)
         "<style>body{font-family:Arial;margin:24px;background:#10151f;color:#e5edf7}"
         "input{display:block;margin:8px 0 16px;padding:8px;width:280px}"
         ".note{color:#9fb4c8;font-size:0.85rem;max-width:420px}</style></head>"
-        "<body><h1>FRITZ!Box WLAN</h1><p class=\"note\">Hier wird nur die SSID "
-        "geändert; das gespeicherte WLAN-Passwort bleibt erhalten. Leer lassen, um "
-        "die Station-Verbindung zu trennen — der ESP32 bleibt über sein Setup-"
-        "Access-Point erreichbar.</p>"
+        "<body><h1>FRITZ!Box WLAN</h1><p class=\"note\">SSID und Passwort des "
+        "2,4-GHz-WLANs eintragen. Passwort leer lassen, um ein bereits "
+        "gespeichertes zu behalten. SSID leer lassen trennt die "
+        "Station-Verbindung — der ESP32 bleibt über seinen Setup-Access-Point "
+        "erreichbar.</p>"
         "<form method=\"post\" action=\"/save\">"
         "<label>2.4 GHz WLAN-SSID</label><input name=\"ssid\" maxlength=\"32\" required>"
+        "<label>WLAN-Passwort</label><input name=\"password\" type=\"password\" "
+        "maxlength=\"64\" autocomplete=\"off\">"
         "<button type=\"submit\">Speichern und verbinden</button></form>"
         "<p><a href=\"/\">Zurück zum Zähler</a></p></body></html>";
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
@@ -7845,9 +7848,11 @@ static esp_err_t save_wifi_handler(httpd_req_t *req)
         field = next;
     }
 
-    /* The Wi-Fi form no longer asks for the password (it is useless to retype
-     * it to change the SSID). When the field is absent, keep the stored one. */
-    if (!have_password) {
+    /* Keep the stored password when the field is empty or absent, so an
+     * SSID-only change (or a browser that omits an empty password input) does
+     * not silently wipe it. On a fresh device the stored password is empty, so
+     * an open network still works. */
+    if (!have_password || password[0] == '\0') {
         strlcpy(password, g_wifi_password, sizeof(password));
     }
 
