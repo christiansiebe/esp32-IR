@@ -26,6 +26,42 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-11-07 20:26 UTC · Odroid-Agent (Branch feat/esp32c6-receiver, Commit 72ca006)
+**WLAN-Provisioning des C6-Empfängers: Zugangsdaten per USB in die NVS schreiben —
+ohne Firmware-Flash (empfohlen) bzw. per Setup-AP (bequemer).**
+
+Ausgangslage: Der geflashte `receiver-c6-apoff`-Build liefert nicht über WLAN
+(`configured ssid: (none)`, `fritzbox: not connected`). Ursache: `metercfg` ist
+noch **leer** — `save_wifi_credentials()` wird nur vom HTTP-Formular aufgerufen,
+die Konsole kann kein WLAN setzen. Sobald die Credentials in der NVS stehen,
+verbindet sich die Firmware beim Boot automatisch (`main/main.c:1190`:
+`if (g_wifi_configured) esp_wifi_connect();`).
+
+**Weg A — per Setup-AP (bereits geflasht, verifiziert):** Der CI-Lauf zu `72ca006`
+baut beide C6-Varianten. `receiver-c6-sml-flash-files-c3dc117` (**mit** AP) wurde
+geflasht (`esptool write-flash 0x0/0x8000/0xf000/0x20000`; `nvs` @0x9000 und
+`storage` @0x320000 bewusst **nicht** angefasst → `rtcfg radio-save=5000/70`
+blieb erhalten). Bootlog belegt den Setup-AP:
+`AP started: SSID=ESP32-IR-Meter, channel=1, IP=192.168.4.1` (WPA2, PW
+`12345678`). Ablauf: mit Handy/Laptop in `ESP32-IR-Meter` einwählen →
+`http://192.168.4.1/config` → 2,4-GHz-SSID + Passwort → `/save`.
+**Achtung Energie:** Der AP-Build läuft dauerhaft `WIFI_MODE_APSTA` und schaltet
+den SoftAP nie ab → **~433 mW** (TODO.md: „AP abschalten, wenn STA verbunden"
+ist offen). Für den Dauerbetrieb ist deshalb der `apoff`-Build (~**70 mW**,
+gemessen) die sparsame Wahl — er verbindet sich nach dem Setzen automatisch.
+
+**Weg B — per USB direkt in die NVS (kein Flash nötig, sparsamster Build bleibt):**
+`metercfg`/`wifi_ssid`+`wifi_pass` liegen in der `nvs`-Partition @0x9000 (0x6000).
+Mit einem NVS-Image (`nvs_partition_gen`) + `esptool write-flash 0x9000 <img>`
+setzbar; danach nur `reboot`. **Wichtig:** die vorhandenen Namespaces (`rtcfg`,
+`energy`, `phy`, `nvs.net80211`) müssen erhalten bleiben (sonst fällt
+`radio-save` auf Default zurück). Backup der NVS gezogen:
+`/mnt/ssd/c6-nvs/nvs_backup.bin`. Ein erhaltendes Lese-/Schreib-Werkzeug
+`tools/nvs_provision.py` (+ Host-Tests) ist in Arbeit (Sub-Agent, eigener PR).
+
+Kanal: Heim-2,4-GHz-AP „Wohnzimmer" läuft auf **Kanal 1** → passt exakt zum
+`CONFIG_ESPNOW_CHANNEL=1` des C6 (kein Kanal-Mismatch wie in der Notiz vom 21.10.).
+
 ## 2026-11-07 16:59 UTC · Bau-Chat (Branch feat/esp32c6-receiver, Commit 7e34996)
 **BEHOBEN & CI-gruen (7e34996). Befund: Der Laufzeit-Knopf `set sleep on`
 (automatic light sleep) killt beim C6-Receiver die USB-Konsole — dauerhaft.**

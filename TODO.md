@@ -61,6 +61,17 @@ Der große Hebel (Funk-Modem-Sleep) ist link-riskant und derzeit nicht verifizie
 (der C6 ist außer ESP-NOW-Reichweite). Offen: am realen Messpunkt verifizieren, ob
 sich die kleinen Knöpfe lohnen und ob Modem-Sleep den Link überlebt.
 
+**Nachtrag (2026-11-07): WLAN-Provisioning ohne Flash.** Der C6-Empfänger liefert
+erst Daten über WLAN, wenn `metercfg`/`wifi_ssid`+`wifi_pass` in der `nvs`-Partition
+stehen (`save_wifi_credentials()` rief bisher nur das HTTP-Formular auf). Zwei Wege:
+(a) `receiver-c6`-Build (**mit** Setup-AP `ESP32-IR-Meter` @192.168.4.1, PW
+`12345678`) flashen und `http://192.168.4.1/config` ausfüllen — **aber** der
+APSTA-Build bleibt dauerhaft bei **~433 mW** (SoftAP wird nie gestoppt; vgl. die
+offene Aufgabe „AP abschalten, wenn STA verbunden" oben). (b) Credentials per USB
+direkt in die NVS schreiben (`esptool write-flash 0x9000 <img>`), dann bleibt der
+sparsame `apoff`-Build (**~70 mW**) und verbindet beim Boot automatisch. Werkzeug
+`tools/nvs_provision.py` (erhaltendes NVS-Lesen/-Schreiben, Host-Tests) in Arbeit.
+
 ## NEU (2026-11-07): C6-Konsole – lange Antworten waren leer (BEHOBEN, `ec78d75`)
 Auf dem C6 lieferten Kommandos mit **>256 B** Ausgabe (`help`, `status`) leer zurück,
 kurze (`config`) funktionierten. Ursache: der **256-B-TX-Ringpuffer** des
