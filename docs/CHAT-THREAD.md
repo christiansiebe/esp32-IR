@@ -26,6 +26,30 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-11-07 21:30 UTC · Odroid-Agent (Branch feat/esp32c6-receiver, Commit cd5dece)
+**ERFOLG: C6-Empfänger ist per USB-NVS in „Wohnzimmer" eingebucht (IP 192.168.178.105).**
+
+Der Setup-AP liess sich nicht mehr erreichen, also Credentials direkt in die NVS
+geschrieben (Weg B). Ablauf: `nvs` @0x9000 gelesen → mit `tools/nvs_provision.py`
+`metercfg/wifi_ssid`+`wifi_pass` gesetzt → `esptool write-flash 0x9000`. Ergebnis:
+`Connected to configured Wi-Fi on channel 1` + `Home network address: 192.168.178.105`,
+Ping 0 % Verlust, Dashboard HTTP 200, SNTP synchron.
+
+**Zwei Bugs dabei gefunden:**
+1. **NVS-Dublette:** Der C6 hatte schon `wifi_ssid='Wohnzimmer'`, aber `wifi_pass`
+   war **leer** (vom fehlenden Passwortfeld) — Grund fuer den urspruenglichen
+   `reason 210`. Nach dem Setzen lag der neue `wifi_pass` auf **slot 1**, der alte
+   leere auf **slot 109**; NVS liest den **letzten** Eintrag → weiter leer → 210.
+   Erst das Erasen der Alt-Dublette brachte die Verbindung.
+2. **Tool-Bug in `tools/nvs_provision.py` (PR #63):** `set_string()` schreibt den
+   neuen Wert in einen **neuen** Slot, **ohne den alten Eintrag zu erasen**. Bei
+   einem Update liegt der neue Wert damit *vor* dem alten → NVS liest weiter den
+   alten Wert. Reproduzierbar: `set` auf einen bereits gesetzten Key wirkt nicht.
+   **Fix noetig:** beim Setzen alle bestehenden Eintraege desselben Keys im
+   Namespace als ERASED (0b11) markieren, bevor der neue geschrieben wird.
+
+Erreichte Werte: `radio-save=5000/70` unveraendert, `nvs`/`storage` sonst intakt.
+
 ## 2026-11-07 22:15 UTC · Odroid-Agent (Branch feat/esp32c6-receiver, Commit d02c331)
 **BEHOBEN & CI-gruen (d02c331): Die Setup-Config-Seite hatte KEIN WLAN-Passwortfeld.**
 
