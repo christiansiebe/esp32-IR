@@ -23,6 +23,10 @@ store (see `AGENTS.md`, section "History backfill").
 ## Hardware
 
 - ESP32 (classic), 4 MB flash, **no PSRAM** required.
+- ESP32-C6 (single-core RISC-V, 4 MB flash) for the **receiver** role. Its top
+  clock is 160 MHz (vs 240 on the classic) and its console is the on-chip **USB
+  Serial/JTAG** (`/dev/ttyACM*`), not a UART bridge. The same source tree builds
+  it; the target-specific knobs live in `sdkconfig.defaults.esp32c6`.
 - Meter IR head on UART1 RX (GPIO16), 9600 baud 8N1.
 
 ## Build
@@ -45,8 +49,13 @@ Use the standard IDF flow (the flash bundle includes bootloader, partition
 table and app):
 
 ```bash
-idf.py -p /dev/ttyUSB0 flash monitor      # inside an IDF shell / container
+idf.py -p /dev/ttyUSB0 flash monitor      # ESP32 classic
+idf.py -p /dev/ttyACM0 flash monitor      # ESP32-C6 (USB Serial/JTAG)
 ```
+
+On the ESP32-C6 the bootloader offset is **0x0** (not 0x1000) and esptool talks
+over the USB Serial/JTAG port, so the port is `/dev/ttyACM*` and no `--before`
+reset trick is needed.
 
 **Never erase the `storage` partition.** It holds the measured minute history
 (`/powerlog/quarters.bin`, up to 29000 minutes). A full chip erase or a

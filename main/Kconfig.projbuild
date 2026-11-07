@@ -34,16 +34,28 @@ config RECOVERY_BUTTON_HOLD_MS
         How long the recovery button must be held at startup to force a
         rollback.
 
+config ESPNOW_CPU_MAX_MHZ_CEILING
+    # Upper bound for the DFS ceiling: the SoC's own top clock. The ESP32 classic
+    # tops out at 240 MHz, the ESP32-C6 (single-core RISC-V) at 160 MHz. A
+    # ceiling above the SoC maximum is rejected by esp_pm_configure() and would
+    # abort the Wi-Fi task. Kept as its own symbol so the range below has a
+    # single, unambiguous bound.
+    int
+    default 160 if IDF_TARGET_ESP32C6
+    default 240
+
 config ESPNOW_CPU_MAX_MHZ
     int "Maximum CPU frequency (MHz) for the DFS ceiling"
-    range 40 240
+    range 40 ESPNOW_CPU_MAX_MHZ_CEILING
     default 80 if ESPNOW_ROLE_SENDER
+    default 160 if IDF_TARGET_ESP32C6
     default 240
     help
         Upper clock for dynamic frequency scaling. The receiver is mains-powered
         and both the Wi-Fi dashboard and the minute-history backfill are
-        CPU/SPIFFS bound, so its default stays at 240 MHz to keep the web UI
-        responsive during a full re-sync.
+        CPU/SPIFFS bound, so its default stays at the SoC's top clock to keep
+        the web UI responsive during a full re-sync: 240 MHz on the ESP32
+        classic, 160 MHz on the ESP32-C6.
 
         The sender defaults to 80 MHz: its Wi-Fi radio is held awake for a
         reliable ESP-NOW link (CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE is off by

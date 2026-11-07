@@ -104,22 +104,32 @@ jobs:
         include:
           - role: receiver
             kconfig_role: RECEIVER
+            target: esp32
             extra_kconfig: ""
           # Station-only receiver: no SoftAP. ESP-NOW then runs on WIFI_IF_STA
           # (the #if in main.c flips ESPNOW_IF) and the dashboard is served over
           # the home WLAN. ESPNOW_CHANNEL must match the home AP's channel.
           - role: receiver-apoff
             kconfig_role: RECEIVER
+            target: esp32
             extra_kconfig: "CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y"
           # The sender ships as a single image with the adaptive light sleep
           # enabled by default (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y in Kconfig).
           - role: sender
             kconfig_role: SENDER
+            target: esp32
+            extra_kconfig: ""
+          # ESP32-C6 receiver (single-core RISC-V, 160 MHz top clock, USB
+          # Serial/JTAG console). Same source tree; the target-specific knobs
+          # live in sdkconfig.defaults.esp32c6 and the per-target Kconfig ranges.
+          - role: receiver-c6
+            kconfig_role: RECEIVER
+            target: esp32c6
             extra_kconfig: ""
     env:
       IDF_CCACHE_ENABLE: "1"
       CCACHE_DIR: /root/.cache/ccache
-      IDF_TARGET: esp32
+      IDF_TARGET: ${{ matrix.target }}
 
     steps:
       - name: Check out source
@@ -134,9 +144,11 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /root/.cache/ccache
-          key: ${{ runner.os }}-idf-6.1-${{ matrix.role }}-${{ hashFiles('main/main.c', 'main/CMakeLists.txt', 'components/sml_parser/**', 'components/sml_transport/**', 'CMakeLists.txt', 'partitions.csv') }}
+          # The target is part of the key: esp32 and esp32c6 objects are not
+          # interchangeable and must not share a cache entry.
+          key: ${{ runner.os }}-idf-6.1-${{ matrix.target }}-${{ matrix.role }}-${{ hashFiles('main/main.c', 'main/CMakeLists.txt', 'components/sml_parser/**', 'components/sml_transport/**', 'CMakeLists.txt', 'partitions.csv') }}
           restore-keys: |
-            ${{ runner.os }}-idf-6.1-${{ matrix.role }}-
+            ${{ runner.os }}-idf-6.1-${{ matrix.target }}-${{ matrix.role }}-
 
       - name: Configure firmware role
         shell: bash
@@ -150,7 +162,7 @@ jobs:
           echo "FIRMWARE_VERSION=$fw_ver" >> "$GITHUB_ENV"
           echo "Firmware version: $fw_ver"
           cat > "$RUNNER_TEMP/sdkconfig.defaults" <<EOF
-          CONFIG_IDF_TARGET="esp32"
+          CONFIG_IDF_TARGET="${{ matrix.target }}"
           CONFIG_PARTITION_TABLE_CUSTOM=y
           CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
           CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
@@ -187,17 +199,26 @@ jobs:
               fail=1
             fi
           }
-          assert 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240'
+          # The SoC top clock differs: the ESP32 classic reaches 240 MHz, the
+          # ESP32-C6 only 160 MHz. The boot clock and the receiver ceiling track
+          # the target; the sender stays at 80 MHz on both.
+          if [ "${{ matrix.target }}" = "esp32c6" ]; then
+            assert 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160'
+          else
+            assert 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240'
+          fi
           assert 'CONFIG_PM_ENABLE=y'
           assert 'CONFIG_PM_DFS_INIT_AUTO=y'
           assert 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y'
           if [ "${{ matrix.role }}" = "sender" ]; then
             assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=80'
+          elif [ "${{ matrix.target }}" = "esp32c6" ]; then
+            assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=160'
           else
             assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=240'
           fi
           [ "$fail" -eq 0 ]
-          echo "CPU clock: role ceiling with DFS (sender 80, receiver 240), 40 MHz floor"
+          echo "CPU clock: role ceiling with DFS (${{ matrix.role }}), 40 MHz floor"
 
       - name: Verify adaptive sleep config (sender)
         if: matrix.role == 'sender'

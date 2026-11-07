@@ -13,16 +13,24 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* CPU frequency range the ESP32-WROOM-32D supports; the compile-time ceiling is
- * the upper bound and is enforced by the caller when applying.
+/* CPU frequency range the SoC supports; the compile-time ceiling is the upper
+ * bound and is enforced by the caller when applying.
  *
  * The DFS *floor* may go down to 40 MHz, but the DFS *ceiling* must stay at or
  * above 80 MHz: the Wi-Fi/ESP-NOW driver asserts ESP_PM_APB_FREQ_MAX, and a
  * max_freq below 80 makes esp_pm_configure()/the Wi-Fi task abort (the sender
- * crashed when 40 was pinned as the ceiling). */
+ * crashed when 40 was pinned as the ceiling).
+ *
+ * The top clock is SoC-specific: the ESP32 classic reaches 240 MHz, the
+ * ESP32-C6 (single-core RISC-V) only 160 MHz. A ceiling above the SoC maximum
+ * makes esp_pm_configure() reject the config, so the bound tracks the target. */
+#ifdef CONFIG_IDF_TARGET_ESP32C6
+#define RUNTIME_CONFIG_CPU_MAX_MHZ 160u
+#else
+#define RUNTIME_CONFIG_CPU_MAX_MHZ 240u
+#endif
 #define RUNTIME_CONFIG_CPU_MIN_MHZ 40u
 #define RUNTIME_CONFIG_CPU_CEILING_MIN_MHZ 80u
-#define RUNTIME_CONFIG_CPU_MAX_MHZ 240u
 
 typedef struct {
     uint32_t cpu_mhz;      /* DFS ceiling (max_freq) */
@@ -55,7 +63,7 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
                         uint32_t ceiling_mhz, char *err, size_t err_size);
 
 /* Clamp every field into the range the current build allows: the CPU ceiling to
- * [80, min(240, ceiling_mhz)] snapped to a real DFS step, the floor to
+ * [80, min(CPU_MAX_MHZ, ceiling_mhz)] snapped to a real DFS step, the floor to
  * [40, ceiling], and the retries to 0..10. Used when a persisted config is
  * loaded back, so an image built with a different ceiling cannot restore an
  * out-of-range clock. */
