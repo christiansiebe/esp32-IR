@@ -97,6 +97,7 @@ jobs:
           python3 test/test_ws_min.py
           python3 test/test_ws_client.py
           python3 test/test_fnb48_read.py
+          python3 test/test_nvs_provision.py
           python3 test/check_dashboard_js.py
 
   build:
