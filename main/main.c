@@ -5838,7 +5838,7 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     char value[32] = {0};
     if (sscanf(args, "%23s %31s", key, value) != 2) {
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon> <value>\n");
         return;
     }
     runtime_config_t *cfg = active_runtime_config();
@@ -5919,11 +5919,18 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
 {
     (void)args;
     runtime_config_t *cfg = active_runtime_config();
-    /* One short line: the sender tunnel truncates the reply at 192 bytes. */
-    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u\n",
+    /* One short line: the sender tunnel truncates the reply at 192 bytes. The
+     * radio knobs are only appended when set (non-default), so the common case
+     * stays as short as before. */
+    char radio[40] = "";
+    if (cfg->wifi_txpower_dbm != 0u || cfg->ap_beacon_tu != 0u) {
+        snprintf(radio, sizeof(radio), " txpwr=%u beacon=%u",
+                 (unsigned)cfg->wifi_txpower_dbm, (unsigned)cfg->ap_beacon_tu);
+    }
+    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u%s\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on" : "off",
-             (unsigned)cfg->espnow_retries);
+             (unsigned)cfg->espnow_retries, radio);
 }
 
 static void web_console_register_commands(void)
@@ -5931,8 +5938,16 @@ static void web_console_register_commands(void)
     web_console_register("help", "list available commands", console_cmd_help);
     web_console_register("test", "run a self-test: sleep|cpu|sml|espnow|storage|nvs",
                          console_cmd_test);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* txpower/beacon only apply on the receiver (the sender has no SoftAP and
+     * drives its own radio), so only advertise them there. */
+    web_console_register("set",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon",
+                         console_cmd_set);
+#else
     web_console_register("set", "change a runtime knob: cpu|freq|cpu-min|sleep|retries",
                          console_cmd_set);
+#endif
     web_console_register("config", "show the current test knobs",
                          console_cmd_config);
     web_console_register("reset-config", "restore the default test knobs",
