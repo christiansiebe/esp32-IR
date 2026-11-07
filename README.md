@@ -106,6 +106,15 @@ Kconfig (`main/Kconfig.projbuild`) selects the role
 (`CONFIG_ESPNOW_ROLE_SENDER` / `_RECEIVER`) and the ESP-NOW channel. Defaults
 live in `sdkconfig.defaults` plus the per-role overrides in `tools/build.sh`.
 
+At runtime the console `set` command persists its values in NVS, so they survive
+a reboot and an OTA (no reflash). For the **receiver** two radio-side knobs are
+available in addition to the CPU/sleep ones: `set txpower <0|2..20>` (Wi-Fi TX
+power in dBm) and `set beacon <0|100..6000>` (SoftAP beacon interval in TU,
+1 TU = 1024 us). `0` keeps the chip/IDF default, so the classic-ESP32 receiver
+build is unchanged until you opt in. Bench note (ESP32-C6): the idle draw is set
+by the always-on Wi-Fi radio, not the CPU — the defaults measure ~0.433 W and
+stacking every knob only reaches ~0.420 W (~3 %); see `AGENTS.md`.
+
 ## Repository notes
 
 `AGENTS.md` holds the working notes: build gotchas, the flash layout, the

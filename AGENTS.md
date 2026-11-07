@@ -157,6 +157,33 @@ Two firmware roles are built from one source tree.
   the running build's ceiling, so an image with a lower `CONFIG_ESPNOW_CPU_MAX_MHZ`
   can never restore an out-of-range clock. `reset-config` erases the blob and
   returns to the compile-time defaults. Host-tested (`test/test_runtime_config.c`).
+- **Receiver-only radio knobs (`set txpower`, `set beacon`) — the levers that
+  actually move the C6's idle draw.** The receiver's standby current is set by the
+  *always-on Wi-Fi radio* (SoftAP RX), **not** by the CPU (see the bench table
+  below), so two radio-side knobs were added to the same persisted `rtcfg` blob
+  (now **version 2**; an old v1 blob is ignored, not misread). Both default to
+  `0` = "leave the chip/IDF default alone", so the classic-ESP32 receiver build is
+  byte-for-byte unchanged until someone opts in, and they are compiled only for
+  the receiver (`#if !CONFIG_ESPNOW_ROLE_SENDER`; the sender has no SoftAP):
+  - `set txpower <0|2..20>` — Wi-Fi max TX power in dBm. Applied with
+    `esp_wifi_set_max_tx_power()` (which takes **0.25 dBm steps**, so the value is
+    scaled ×4 on apply).
+  - `set beacon <0|100..6000>` — SoftAP beacon interval in TU (**1 TU = 1024 us**),
+    a multiple of 100. Applied with `esp_wifi_get_config()` plus
+    `esp_wifi_set_config(WIFI_IF_AP)` so only the beacon field changes (a txpower
+    change alone never touches the AP).
+  Both are applied live (`apply_radio_power_config()` in `main.c`, also called
+  from the `set` handler) and at boot right after `initialize_wifi_and_espnow()`.
+  Host-tested in `test/test_runtime_config.c`.
+- **Bench measurement (ESP32-C6 receiver, FNB-48 USB power meter @ 5.19 V) — the
+  radio, not the CPU, is the floor.** Baseline (all defaults) **0.433 W (83 mA)**;
+  CPU 80 vs 160 MHz and light-sleep on/off each changed **nothing**; `txpower 8`
+  + `beacon 1000` gave **0.420 W**; stacking *every* knob (`txpower 2`, `beacon
+  6000`, `cpu 80`, `sleep on`) also gave only **0.420 W**. So CPU clock, light
+  sleep, beacon rate and TX power together buy **~3 %** — the idle current is
+  dominated by the permanently awake Wi-Fi modem (SoftAP RX). The big lever
+  (Wi-Fi modem sleep) is link-risky and currently unverifiable (the C6 is out of
+  ESP-NOW range), so the knobs are documented as available but small.
 - **Generated `sdkconfig*` files are git-ignored** (only `sdkconfig.defaults` is
   tracked). `sdkconfig`, `sdkconfig.receiver`, `sdkconfig.sender` are local
   artefacts; an old local `sdkconfig.*` pins `CONFIG_ESPNOW_CPU_MAX_MHZ` and
@@ -337,6 +364,13 @@ matrix entry `role: receiver-c6` (`target: esp32c6`), or locally
   driver component `esp_driver_usb_serial_jtag` is in `main/CMakeLists.txt`
   unconditionally; it registers with no sources on targets without the
   peripheral.
+  - *Fixed (C6 only, commit `ec78d75`): long console replies were empty.* The
+    USB Serial/JTAG TX ring is a FreeRTOS byte ring and `xRingbufferSend()`
+    **drops** a write that does not fit entirely; with the default **256 B** ring
+    a reply longer than that was discarded, so `help` and `status` printed
+    nothing while short commands (`config`) worked. `main/serial_console.c` now
+    writes in ≤128 B chunks (which always fit) and sizes the ring up to **1024 B**
+    when it owns the install.
 - **Single core.** The C6 is unicore, so `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1`
   is off and `idle_core_mask()` in `main/task_wdt_guard.c` already guards it with
   `!CONFIG_FREERTOS_UNICORE` — no change needed.

@@ -1,5 +1,42 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-07): ESP32-C6-Empfänger – Standby-/Sparsamkeits-Optimierung (`feat/esp32c6-receiver`)
+**Ergebnis: Der Ruhestrom des C6 wird vom dauerhaft wachen WLAN-Funkmodul
+(SoftAP-RX) dominiert, NICHT von der CPU.** Deshalb wurden zwei persistierte
+**Empfänger-only**-Funkknöpfe ergänzt (Konsole `set`), die in denselben `rtcfg`-NVS-Blob
+gehen (jetzt **Blob-Version 2**; ein alter v1-Blob wird ignoriert, nicht fehlgelesen):
+- `set txpower <0|2..20>` – WLAN-Sendeleistung in dBm (0 = Chip-Default), angewendet
+  über `esp_wifi_set_max_tx_power()` in **0,25-dBm-Schritten** (Wert ×4).
+- `set beacon <0|100..6000>` – SoftAP-Beacon-Intervall in TU (**1 TU = 1024 us**),
+  Vielfaches von 100 (0 = IDF-Default), angewendet über
+  `esp_wifi_get_config()`/`esp_wifi_set_config(WIFI_IF_AP)` (nur das Beacon-Feld).
+- Beide Default **0** = Chip-/IDF-Default → der klassische ESP32-Empfänger-Build
+  bleibt unverändert; nur Empfänger (`#if !CONFIG_ESPNOW_ROLE_SENDER`, der Sender hat
+  kein SoftAP). Live (`apply_radio_power_config()`) **und** beim Boot angewendet.
+  Host-Test: `test/test_runtime_config.c`. Commit `11a09dd`.
+
+**Bench-Messung (ESP32-C6-Empfänger, USB-Leistungsmesser FNB-48 @ 5,19 V):**
+
+| Konfiguration | Leistung |
+|---|---|
+| Baseline (Defaults) | **0,433 W (83 mA)** |
+| CPU 80 vs 160 MHz | kein Unterschied |
+| Light-Sleep an/aus | kein Unterschied |
+| `txpower 8` + `beacon 1000` | 0,420 W |
+| alle Knöpfe gestapelt (`txpower 2`, `beacon 6000`, `cpu 80`, `sleep on`) | 0,420 W |
+
+**Fazit:** CPU-Takt/Light-Sleep/Beacon/Sendeleistung bringen zusammen nur **~3 %**.
+Der große Hebel (Funk-Modem-Sleep) ist link-riskant und derzeit nicht verifizierbar
+(der C6 ist außer ESP-NOW-Reichweite). Offen: am realen Messpunkt verifizieren, ob
+sich die kleinen Knöpfe lohnen und ob Modem-Sleep den Link überlebt.
+
+## NEU (2026-11-07): C6-Konsole – lange Antworten waren leer (BEHOBEN, `ec78d75`)
+Auf dem C6 lieferten Kommandos mit **>256 B** Ausgabe (`help`, `status`) leer zurück,
+kurze (`config`) funktionierten. Ursache: der **256-B-TX-Ringpuffer** des
+USB-Serial-JTAG; `xRingbufferSend()` **verwirft** einen Schreibvorgang, der nicht ganz
+hineinpasst. Fix in `main/serial_console.c`: Ausgabe in **≤128-B-Chunks** (passen
+immer) und Ring auf **1024 B** vergrößern, wenn der Treiber selbst installiert wird.
+
 ## OFFEN (2026-10-21): ESP-NOW-Link bleibt nach Kanalwechsel des Routers tot
 **Nutzer:** „trotz Empfänger- und Sender-Neustart kam die Verbindung nicht
 wieder." **Am Gerät belegt (Odroid, 21.10.):** Die FRITZ!Box „Wohnzimmer" hat
