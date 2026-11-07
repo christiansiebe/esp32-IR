@@ -12,6 +12,7 @@ endchoice
 
 config RECOVERY_BUTTON_GPIO
     int "Recovery button GPIO (BOOT button; -1 disables)"
+    default 9 if IDF_TARGET_ESP32C6 && ESPNOW_ROLE_RECEIVER
     default 0 if ESPNOW_ROLE_RECEIVER
     default -1
     range -1 39
@@ -19,8 +20,9 @@ config RECOVERY_BUTTON_GPIO
         Holding this pin low for RECOVERY_BUTTON_HOLD_MS at startup forces a
         rollback to the previous firmware (esp_ota_mark_app_invalid_rollback_and_reboot),
         even when the running image was already confirmed -- the manual escape
-        hatch for a "confirmed but broken" image. The default 0 is the on-board
-        BOOT button on most ESP32 devkits. Set to -1 to disable.
+        hatch for a "confirmed but broken" image. The default is the on-board
+        BOOT button: GPIO9 on the ESP32-C6 (GPIO0 is not the boot strap there),
+        GPIO0 on most ESP32 classic devkits. Set to -1 to disable.
 
         Only the receiver honours this: the sender has no USB and is reachable
         only over ESP-NOW, so its recovery is the relayed OTA path instead.
