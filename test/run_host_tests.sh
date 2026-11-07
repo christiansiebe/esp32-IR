@@ -482,6 +482,18 @@ python3 "$repo/remote-shell/ha/test_print_health.py"
 
 "$out/test_runtime_config"
 
+# Same knobs, but built as the USB Serial/JTAG-console target (ESP32-C6):
+# light sleep must be refused so the /dev/ttyACM* console can never be lost.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DCONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=1 \
+    -I"$repo/main" \
+    "$repo/main/runtime_config.c" \
+    "$here/test_runtime_config_usb_console.c" \
+    -o "$out/test_runtime_config_usb_console"
+
+"$out/test_runtime_config_usb_console"
+
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.
 cxx="${CXX:-g++}"

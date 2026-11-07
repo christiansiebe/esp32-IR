@@ -65,6 +65,11 @@ jobs:
           # The UART0 console reads lines and feeds them to the shared command
           # dispatcher; IDF headers are stubbed, so this checks C syntax only.
           gcc -std=c11 -fsyntax-only -I test/host/include main/serial_console.c
+          # The ESP32-C6 uses the USB Serial/JTAG peripheral instead of UART0;
+          # that branch (the one the light-sleep bug killed) must not rot either.
+          gcc -std=c11 -fsyntax-only \
+            -DCONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=1 \
+            -I test/host/include main/serial_console.c
 
       - name: Compile the recovery-button glue
         shell: bash
@@ -304,6 +309,25 @@ jobs:
           grep -a -q 'Health failure: %s; rebooting' \
             "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image runs the health watchdog"
+
+      - name: Verify the USB Serial/JTAG light-sleep guard (ESP32-C6)
+        if: matrix.target == 'esp32c6' && startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The C6 console is the USB Serial/JTAG peripheral, which light sleep
+          # powers down: the port then never re-enumerates and the device is
+          # unreachable over USB. The guard refuses light sleep on such a build.
+          # The strings below live in runtime_config.c (USB-console branch) and
+          # the receiver power path only, so grepping the built app proves the
+          # guard is compiled in and not just the config flag.
+          grep -q '^CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y$' sdkconfig
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'off (unavailable: USB Serial/JTAG console)' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Light sleep disabled: the USB Serial/JTAG console' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image refuses light sleep (USB console guarded)"
 
       - name: Stage firmware and flash files
         shell: bash

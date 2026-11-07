@@ -13,6 +13,20 @@
 #ifndef CONFIG_ESPNOW_CPU_MAX_MHZ
 #define CONFIG_ESPNOW_CPU_MAX_MHZ RUNTIME_CONFIG_CPU_MAX_MHZ
 #endif
+/* Host builds and the classic ESP32 leave this unset; the ESP32-C6 selects the
+ * USB Serial/JTAG peripheral as its console (sdkconfig.defaults.esp32c6). */
+#ifndef CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#define CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG 0
+#endif
+
+bool runtime_config_light_sleep_allowed(void)
+{
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    return false;
+#else
+    return true;
+#endif
+}
 
 /* Snap a value to the nearest of the DFS steps the ESP32 supports; defined
  * below, declared here so the defaults can use it too. */
@@ -176,10 +190,18 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             next.cpu_min_mhz = next.cpu_mhz;
         }
     } else if (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0) {
-        if (!runtime_config_parse_bool(value, &next.light_sleep)) {
+        bool want = false;
+        if (!runtime_config_parse_bool(value, &want)) {
             snprintf(err, err_size, "sleep: expected on or off\n");
             return false;
         }
+        if (want && !runtime_config_light_sleep_allowed()) {
+            snprintf(err, err_size,
+                     "sleep: unavailable on this build (the USB Serial/JTAG "
+                     "console would be lost)\n");
+            return false;
+        }
+        next.light_sleep = want;
     } else if (strcmp(key, "retries") == 0 || strcmp(key, "espnow-retries") == 0) {
         char *end = NULL;
         unsigned long v = strtoul(value, &end, 10);
@@ -288,6 +310,12 @@ void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz)
         min_mhz = max_mhz;
     }
     cfg->cpu_min_mhz = min_mhz;
+    /* A build whose console is the USB Serial/JTAG peripheral must never enter
+     * light sleep (it would kill the port for good); force the persisted value
+     * off so a blob written by an earlier build cannot brick the USB port. */
+    if (!runtime_config_light_sleep_allowed()) {
+        cfg->light_sleep = false;
+    }
     if (cfg->espnow_retries > 10u) {
         cfg->espnow_retries = 10u;
     }
@@ -351,7 +379,10 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              "ap beacon: %s\n"
              "radio save: %s\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
-             cfg->light_sleep ? "on" : "off",
+             cfg->light_sleep ? "on"
+                              : (runtime_config_light_sleep_allowed()
+                                     ? "off"
+                                     : "off (unavailable: USB Serial/JTAG console)"),
              (unsigned)cfg->espnow_retries, tx, beacon, wake);
 }
 
@@ -384,7 +415,10 @@ bool runtime_config_apply(const runtime_config_t *cfg)
     esp_pm_config_t pm = {
         .max_freq_mhz = max_mhz,
         .min_freq_mhz = min_mhz,
-        .light_sleep_enable = cfg->light_sleep,
+        /* Never hand light sleep to a build whose console is the USB
+         * Serial/JTAG peripheral: the PHY is powered down in light sleep and the
+         * port would never come back (IDF-6395). */
+        .light_sleep_enable = cfg->light_sleep && runtime_config_light_sleep_allowed(),
     };
     return esp_pm_configure(&pm) == ESP_OK;
 }

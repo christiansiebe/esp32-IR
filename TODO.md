@@ -1,5 +1,34 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-07): C6-Receiver – `sleep on` killt die USB-Konsole (BEHOBEN)
+**Befund (reproduziert):** `set sleep on` (automatic light sleep) schaltet auf dem
+C6 die USB-Serial/JTAG-Peripherie ab → `/dev/ttyACM0` verschwindet. Weil der Wert in
+NVS persistiert (`rtcfg/cfg`, Blob-Version 3), bootet das Geraet danach im Light Sleep
+und der USB-Port enumiert nie wieder → ueber USB unerreichbar (Flashen **und** Konsole
+tot). Ursache: `SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP` ist fuer den C6 nicht
+definiert (IDF-6395 offen).
+
+**Fix:**
+- Auf Builds mit `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG` wird Light Sleep **abgelehnt**:
+  `set sleep on` verworfen, ein restauriertes `light_sleep=1` per `clamp` auf `0`
+  gezwungen, `esp_pm_configure()` bekommt nie `light_sleep_enable=1`, zusaetzlich
+  `ESP_PM_NO_LIGHT_SLEEP`-Lock im Empfaenger. Radio-Sleep (`radio-save`) bleibt.
+  Pruefbar ueber `runtime_config_light_sleep_allowed()`.
+- **NVS-Blob-Version 3 → 4**: ein v3-Blob mit kaputtem `light_sleep` wird ignoriert
+  (Selbstheilung), Layout unveraendert (16 B).
+- **Recovery:** BOOT-Taste (3 s) loescht vor dem Rollback den ganzen NVS-Namespace
+  `rtcfg` (Hook `recovery_set_pre_rollback_fn`), damit ein schlechtes persistiertes
+  Config-Set den Rollback nicht ueberlebt.
+- Host-Test `test/test_runtime_config_usb_console.c` (mit
+  `-DCONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=1`) + CI-Schritt + CI-Grep im C6-Image.
+
+**Messwerte (FNB-48, 5,2 V, Mittelwerte):** klassischer AP-Build 0,432 W ·
+station-only 0,298 W · station-only + radio-save 5000/30 **0,068 W** · station-only +
+light sleep 0,024 W (USB-Konsole starb) · station-only + light sleep + radio-save
+5000/30 0,028 W (USB-Konsole starb). → Radio-Sleep ist der sichere Hebel, Light Sleep
+ist auf USB-Konsolen-Builds tabu. (Ergaenzt die aeltere Messung unten, die bei anderem
+Setup „Light-Sleep an/aus: kein Unterschied" zeigte.)
+
 ## NEU (2026-11-07): ESP32-C6-Empfänger – Standby-/Sparsamkeits-Optimierung (`feat/esp32c6-receiver`)
 **Ergebnis: Der Ruhestrom des C6 wird vom dauerhaft wachen WLAN-Funkmodul
 (SoftAP-RX) dominiert, NICHT von der CPU.** Deshalb wurden zwei persistierte

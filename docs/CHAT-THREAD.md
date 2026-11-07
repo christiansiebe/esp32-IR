@@ -26,6 +26,37 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-11-07 16:59 UTC · Bau-Chat (Branch feat/esp32c6-receiver, Commit 95606f9)
+**Befund: Der Laufzeit-Knopf `set sleep on` (automatic light sleep) killt beim
+C6-Receiver die USB-Konsole — dauerhaft.**
+
+`sleep on` schaltet die USB-Serial/JTAG-Peripherie ab, sobald der Chip in Light
+Sleep geht. Die Konsole auf `/dev/ttyACM0` verschwindet. Weil die Einstellung in
+NVS persistiert wird (Namespace `rtcfg`, Key `cfg`, Blob-Version 3), bootet das
+Geraet anschliessend **im Light Sleep** und der USB-Port enumiert nie wieder —
+das Geraet ist ueber USB unerreichbar (Flashen **und** Konsole tot). Ursache:
+`SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP` ist fuer den C6 **nicht definiert**
+(IDF-6395 offen); die USB-Serial-JTAG-Peripherie ueberlebt Light Sleep also nicht.
+
+**Fix (in Arbeit):** Auf Builds mit USB-Serial-JTAG-Konsole
+(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`) wird Light Sleep komplett abgelehnt:
+`set sleep on` wird verworfen, ein aus NVS restauriertes `light_sleep=1` auf `0`
+gezwungen (clamp), und `esp_pm_configure()` bekommt nie `light_sleep_enable=1`.
+Zusaetzlich haelt der Empfaenger einen `ESP_PM_NO_LIGHT_SLEEP`-Lock.
+Modem-/Radio-Sleep (`radio-save`) bleibt erhalten. NVS-Blob-Version steigt
+**3 → 4**, damit ein bereits persistierter kaputter `light_sleep`-Wert beim
+naechsten Boot verworfen wird (Selbstheilung). Recovery: die BOOT-Taste (3 s)
+loescht zusaetzlich den NVS-Namespace `rtcfg`, damit ein schlechtes
+persistiertes Config-Set den Rollback nicht ueberlebt.
+
+**Messwerte** (FNB-48 USB-Leistungsmesser, 5,2 V, Mittelwerte; Details in
+`docs/radio-sleep-break-even.md` § 8): klassischer AP-Build 0,432 W ·
+station-only 0,298 W · station-only + radio-save 5000/30 **0,068 W** ·
+station-only + light sleep 0,024 W (USB-Konsole starb) · station-only + light
+sleep + radio-save 5000/30 0,028 W (USB-Konsole starb). **Kernaussage:** Die
+Light-Sleep-Ersparnis ist real, aber unbrauchbar, weil sie die USB-Konsole killt;
+Radio-Sleep allein (0,068 W) ist der sichere Hebel.
+
 ## 2026-10-18 21:20 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 57e010b)
 **Nachtrag 2 zu PR #32:** `main` ist erneut weitergelaufen (`#48` Sender-Link-Fix, `#27`
 Recovery-Button, u.a.), der Branch ist wieder **rebasd** auf `b2eaa51`. Konflikt nur in

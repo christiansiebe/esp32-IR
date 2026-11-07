@@ -106,6 +106,10 @@ remote-shell/run/
 # agent-server Conversation-/Event-Daten (dieses Repo ist auf dem Odroid der
 # agent-workspace-Bind-Mount). Kein Quellcode -- wird lokal live beschrieben.
 workspace/
+# Sandbox-/Sub-Agent-Laufzeitdaten, die im Repo-Verzeichnis landen, wenn die SSD
+# als Workspace-Fallback dient (Conversations, Logs). Nie Quellcode.
+workspace-sd-fallback/
+subagents/
 
 # Agent-Memory der Sandbox (wird ueber remote-shell/memory/SHARED.md geteilt).
 .openhands/memory/

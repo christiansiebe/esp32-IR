@@ -86,6 +86,16 @@ bool runtime_config_parse_cpu_mhz_min(const char *text, uint32_t ceiling_mhz,
 /* Parse "on"/"off" (also 1/0, true/false) for a boolean knob. */
 bool runtime_config_parse_bool(const char *text, bool *out);
 
+/* False when the USB Serial/JTAG peripheral is the primary console (the
+ * ESP32-C6, which has no USB-UART bridge). Light sleep powers that PHY down:
+ * the /dev/ttyACM* console disappears and, because the light-sleep flag is
+ * persisted, the next boot never re-enumerates the port -- the device becomes
+ * unreachable over USB (no console, no flash). IDF offers no light-sleep
+ * keep-alive for this peripheral (SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP is
+ * not defined on the C6, IDF-6395), so light sleep is refused whenever this is
+ * false. Modem/radio sleep (the radio-save knob) is unaffected. */
+bool runtime_config_light_sleep_allowed(void);
+
 /* Set one knob by name. Returns true when the name is known and the value was
  * valid. *cfg is only modified on success. */
 bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *value,

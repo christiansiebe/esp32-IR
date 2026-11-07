@@ -5565,7 +5565,13 @@ static bool g_runtime_config_ready;
 
 #define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
 #define RUNTIME_CONFIG_NVS_KEY "cfg"
-#define RUNTIME_CONFIG_NVS_VERSION 3u
+/* v4 invalidates any v3 blob written by a build that allowed light sleep on a
+ * USB Serial/JTAG-console target (the C6). A device that had booted into that
+ * state carries light_sleep=1 in NVS; bumping the version makes runtime_config_load()
+ * ignore the blob, so the new image falls back to the defaults (light sleep off)
+ * and the USB port comes back instead of staying dead. The wire layout itself is
+ * unchanged (16 bytes). */
+#define RUNTIME_CONFIG_NVS_VERSION 4u
 
 static void runtime_config_store(const runtime_config_t *cfg)
 {
@@ -5604,6 +5610,24 @@ static void runtime_config_erase(void)
     (void)nvs_commit(handle);
     nvs_close(handle);
 }
+
+/* Erase the whole persisted-knob namespace. Registered as the BOOT-button
+ * pre-rollback hook: a value that survives a plain reboot (a bad DFS ceiling,
+ * or the light_sleep=1 that killed the C6 USB console) must not survive the
+ * rollback either, otherwise the older image re-applies it and bricks the
+ * device again. Receiver-only (the recovery button lives there). */
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static void runtime_config_erase_namespace(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    (void)nvs_erase_all(handle);
+    (void)nvs_commit(handle);
+    nvs_close(handle);
+}
+#endif
 
 /* Load the persisted knobs, clamped to what this build allows. A missing or
  * malformed blob leaves *cfg untouched (the caller keeps the defaults). */
@@ -8474,7 +8498,12 @@ static void run_sender(void)
  * The receiver must stay responsive for HTTP and ESP-NOW and never enters
  * light sleep by default; the sender enables its adaptive light sleep inside
  * the verified quiet window (uart_sleep_window.c re-applies its own config with
- * light sleep on, so the sender is driven through that module). */
+ * light sleep on, so the sender is driven through that module).
+ *
+ * A receiver whose console is the USB Serial/JTAG peripheral (ESP32-C6) must
+ * never light-sleep: the PHY is powered down and the /dev/ttyACM* port is lost
+ * for good. runtime_config_apply()/clamp() already force the flag off; the
+ * NO_LIGHT_SLEEP lock below is a second, unconditional guard. */
 static void apply_power_management(void)
 {
     runtime_config_t *cfg = active_runtime_config();
@@ -8488,10 +8517,16 @@ static void apply_power_management(void)
              (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
              cfg->light_sleep ? "on" : "off");
 #else
+    /* A USB Serial/JTAG-console receiver (ESP32-C6) must never light-sleep: the
+     * PHY is powered down and the /dev/ttyACM* port is lost for good. Force the
+     * flag off here as well (runtime_config_apply()/clamp() already do) and hold
+     * a NO_LIGHT_SLEEP lock for the lifetime of the device as a hard backstop,
+     * so no later esp_pm_configure() can ever re-enable the park. */
+    bool allow_sleep = runtime_config_light_sleep_allowed();
     esp_pm_config_t pm = {
         .max_freq_mhz = (int)cfg->cpu_mhz,
         .min_freq_mhz = (int)cfg->cpu_min_mhz,
-        .light_sleep_enable = cfg->light_sleep,
+        .light_sleep_enable = cfg->light_sleep && allow_sleep,
     };
     esp_err_t err = esp_pm_configure(&pm);
     if (err != ESP_OK) {
@@ -8500,9 +8535,19 @@ static void apply_power_management(void)
                  esp_err_to_name(err));
         return;
     }
+    if (!allow_sleep) {
+        static esp_pm_lock_handle_t s_no_light_sleep;
+        if (s_no_light_sleep == NULL &&
+            esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb_console",
+                               &s_no_light_sleep) == ESP_OK) {
+            (void)esp_pm_lock_acquire(s_no_light_sleep);
+        }
+        ESP_LOGW(TAG, "Light sleep disabled: the USB Serial/JTAG console would "
+                      "be lost (radio-save is still available)");
+    }
     ESP_LOGI(TAG, "CPU config: %u-%u MHz, light sleep %s",
              (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
-             cfg->light_sleep ? "on" : "off");
+             allow_sleep ? (cfg->light_sleep ? "on" : "off") : "off (USB console)");
 #endif
 }
 
@@ -8668,7 +8713,10 @@ void app_main(void)
      * the previous firmware, even when this image was already confirmed. Runs
      * before the OTA confirmation so it can always rescue a confirmed-but-broken
      * build, which the automatic policy can no longer roll back. A normal boot
-     * (button not pressed) returns immediately. */
+     * (button not pressed) returns immediately. The pre-rollback hook clears the
+     * persisted knobs so a bad 'set sleep on' (which left the C6 USB console
+     * dead) cannot be re-applied by the older image. */
+    recovery_set_pre_rollback_fn(runtime_config_erase_namespace);
     (void)recovery_button_check();
     /* Receiver: do not accept the running image right away. It is confirmed
      * only after the dashboard is up and a stability window has passed; an

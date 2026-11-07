@@ -16,6 +16,14 @@
  * decision (the ROM samples the pin while it is held for the download mode).
  */
 
+/* Called immediately before a forced rollback (the BOOT-button gesture), so the
+ * caller can drop state the older image would otherwise re-apply. main.c uses it
+ * to erase the `rtcfg` NVS namespace: a persisted light_sleep=1 (which killed the
+ * USB Serial/JTAG console on the ESP32-C6) or a bad DFS ceiling must not survive
+ * the rollback and brick the device again. */
+typedef void (*recovery_pre_rollback_fn)(void);
+void recovery_set_pre_rollback_fn(recovery_pre_rollback_fn fn);
+
 /* Returns ESP_OK when the boot continues normally. On a forced rollback this
  * does not return; it returns an error only when no rollback was possible
  * (e.g. no valid image in the other slot). */
