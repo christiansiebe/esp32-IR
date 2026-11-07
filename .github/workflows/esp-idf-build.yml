@@ -330,6 +330,40 @@ jobs:
             "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image refuses light sleep (USB console guarded)"
 
+      - name: Verify Wi-Fi 6 TWT is compiled in (ESP32-C6)
+        if: matrix.target == 'esp32c6' && startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Target Wake Time (iTWT) needs Wi-Fi 6 (HE); SOC_WIFI_HE_SUPPORT is 1
+          # on the C6 and 0 on the classic ESP32, so the TWT path is compiled in
+          # only here. The strings below live in main.c's HE-guarded TWT branch
+          # and runtime_config.c, so grepping the built app proves the code (and
+          # the esp_wifi_he.h API calls) is actually linked in, not just the
+          # config flag. The classic-ESP32 receiver image must NOT contain them.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'TWT setup requested: wake every' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'TWT teardown (all flows)' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image contains the Wi-Fi 6 TWT path"
+
+      - name: Verify Wi-Fi 6 TWT is absent (classic ESP32 receiver)
+        if: matrix.target == 'esp32' && startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The classic ESP32 is not Wi-Fi 6, so the TWT branch must be compiled
+          # out; a leaked string would mean the HE-only API is referenced on a
+          # target that has no esp_wifi_he.h.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          if grep -a -q 'TWT setup requested: wake every' \
+            "build/${{ matrix.role }}/esp32-IR.bin"; then
+            echo "::error::classic ESP32 receiver image unexpectedly contains TWT"
+            exit 1
+          fi
+          echo "${{ matrix.role }} image correctly omits the Wi-Fi 6 TWT path"
+
       - name: Stage firmware and flash files
         shell: bash
         run: |

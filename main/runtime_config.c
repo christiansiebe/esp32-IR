@@ -52,6 +52,9 @@ runtime_config_t runtime_config_defaults(void)
         .radio_save = false,
         .wake_interval_ms = 100u,
         .wake_window_ms = 70u,
+        /* Wi-Fi 6 TWT is opt-in; the wake cadence is only used once enabled. */
+        .twt_enabled = false,
+        .twt_wake_ms = RUNTIME_CONFIG_TWT_WAKE_DEFAULT_MS,
     };
     return cfg;
 }
@@ -128,6 +131,64 @@ static uint32_t snap_cpu_mhz(uint32_t mhz)
     return best;
 }
 
+void runtime_config_encode(const runtime_config_t *cfg, uint8_t *blob, size_t blob_size)
+{
+    if (cfg == NULL || blob == NULL || blob_size < RUNTIME_CONFIG_BLOB_SIZE) {
+        return;
+    }
+    memset(blob, 0, blob_size);
+    blob[0] = (uint8_t)RUNTIME_CONFIG_BLOB_VERSION;
+    blob[1] = cfg->light_sleep ? 1u : 0u;
+    blob[2] = (uint8_t)cfg->cpu_mhz;
+    blob[3] = (uint8_t)cfg->cpu_min_mhz;
+    uint32_t retries = cfg->espnow_retries;
+    memcpy(&blob[4], &retries, sizeof(retries));
+    blob[8] = cfg->wifi_txpower_dbm;
+    uint16_t beacon = cfg->ap_beacon_tu;
+    memcpy(&blob[9], &beacon, sizeof(beacon));
+    blob[11] = cfg->radio_save ? 1u : 0u;
+    uint16_t interval = cfg->wake_interval_ms;
+    memcpy(&blob[12], &interval, sizeof(interval));
+    uint16_t window = cfg->wake_window_ms;
+    memcpy(&blob[14], &window, sizeof(window));
+    blob[16] = cfg->twt_enabled ? 1u : 0u;
+    uint16_t twt_wake = cfg->twt_wake_ms;
+    memcpy(&blob[17], &twt_wake, sizeof(twt_wake));
+    /* blob[19] is reserved (keeps the 16-bit fields aligned). */
+}
+
+bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config_t *cfg)
+{
+    if (blob == NULL || cfg == NULL || blob_size != RUNTIME_CONFIG_BLOB_SIZE ||
+        blob[0] != RUNTIME_CONFIG_BLOB_VERSION) {
+        return false;
+    }
+    runtime_config_t loaded = runtime_config_defaults();
+    loaded.light_sleep = blob[1] != 0;
+    loaded.cpu_mhz = blob[2];
+    loaded.cpu_min_mhz = blob[3];
+    uint32_t retries = 0;
+    memcpy(&retries, &blob[4], sizeof(retries));
+    loaded.espnow_retries = retries;
+    loaded.wifi_txpower_dbm = blob[8];
+    uint16_t beacon = 0;
+    memcpy(&beacon, &blob[9], sizeof(beacon));
+    loaded.ap_beacon_tu = beacon;
+    loaded.radio_save = blob[11] != 0;
+    uint16_t interval = 0;
+    memcpy(&interval, &blob[12], sizeof(interval));
+    loaded.wake_interval_ms = interval;
+    uint16_t window = 0;
+    memcpy(&window, &blob[14], sizeof(window));
+    loaded.wake_window_ms = window;
+    loaded.twt_enabled = blob[16] != 0;
+    uint16_t twt_wake = 0;
+    memcpy(&twt_wake, &blob[17], sizeof(twt_wake));
+    loaded.twt_wake_ms = twt_wake;
+    *cfg = loaded;
+    return true;
+}
+
 bool runtime_config_parse_bool(const char *text, bool *out)
 {
     if (text == NULL || out == NULL) {
@@ -144,6 +205,32 @@ bool runtime_config_parse_bool(const char *text, bool *out)
         return true;
     }
     return false;
+}
+
+bool runtime_config_twt_split(uint32_t wake_us, uint8_t *expn, uint16_t *mant)
+{
+    if (expn == NULL || mant == NULL || wake_us == 0u) {
+        return false;
+    }
+    /* interval = mant * 2^expn [us]. Prefer the largest mantissa that fits (so
+     * the exponent, and therefore the rounding error, stays small): start with
+     * the exact 16-bit mantissa and shift right while it overflows, rounding up
+     * so the negotiated interval is never shorter than requested. */
+    uint32_t e = 0u;
+    uint32_t m = wake_us;
+    while (m > 0xFFFFu) {
+        m = (m + 1u) >> 1; /* round up on the shift */
+        ++e;
+        if (e > 31u) {
+            return false; /* beyond the 5-bit exponent field */
+        }
+    }
+    if (m == 0u) {
+        m = 1u;
+    }
+    *expn = (uint8_t)e;
+    *mant = (uint16_t)m;
+    return true;
 }
 
 bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *value,
@@ -267,10 +354,27 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             return false;
         }
         next.wake_window_ms = (uint16_t)v;
+    } else if (strcmp(key, "twt") == 0 || strcmp(key, "twt-enabled") == 0) {
+        if (!runtime_config_parse_bool(value, &next.twt_enabled)) {
+            snprintf(err, err_size, "twt: expected on or off\n");
+            return false;
+        }
+    } else if (strcmp(key, "twt-wake") == 0 || strcmp(key, "twt-wake-ms") == 0) {
+        char *end = NULL;
+        unsigned long v = strtoul(value, &end, 10);
+        if (end == value || *end != '\0' ||
+            v < RUNTIME_CONFIG_TWT_WAKE_MIN_MS ||
+            v > RUNTIME_CONFIG_TWT_WAKE_MAX_MS) {
+            snprintf(err, err_size, "twt-wake: expected %u..%u ms\n",
+                     (unsigned)RUNTIME_CONFIG_TWT_WAKE_MIN_MS,
+                     (unsigned)RUNTIME_CONFIG_TWT_WAKE_MAX_MS);
+            return false;
+        }
+        next.twt_wake_ms = (uint16_t)v;
     } else {
         snprintf(err, err_size,
                  "unknown key '%s' (cpu, freq, cpu-min, sleep, retries, txpower, "
-                 "beacon, radio-save, wake-interval, wake-window)\n",
+                 "beacon, radio-save, wake-interval, wake-window, twt, twt-wake)\n",
                  key);
         return false;
     }
@@ -344,6 +448,15 @@ void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz)
     if (cfg->wake_interval_ms != 0u && cfg->wake_window_ms > cfg->wake_interval_ms) {
         cfg->wake_window_ms = cfg->wake_interval_ms;
     }
+    /* The TWT wake interval is clamped to the supported range; a value below the
+     * minimum is raised (a shorter cadence than the AP/DTIM allows is pointless),
+     * an out-of-range one reset to the default. */
+    if (cfg->twt_wake_ms < RUNTIME_CONFIG_TWT_WAKE_MIN_MS) {
+        cfg->twt_wake_ms = RUNTIME_CONFIG_TWT_WAKE_MIN_MS;
+    }
+    if (cfg->twt_wake_ms > RUNTIME_CONFIG_TWT_WAKE_MAX_MS) {
+        cfg->twt_wake_ms = RUNTIME_CONFIG_TWT_WAKE_MAX_MS;
+    }
 }
 
 void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_size)
@@ -370,6 +483,19 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
         snprintf(wake, sizeof(wake), "on (%u ms / %u ms window)",
                  (unsigned)cfg->wake_interval_ms, (unsigned)cfg->wake_window_ms);
     }
+    char twt[40];
+    if (!cfg->twt_enabled) {
+        snprintf(twt, sizeof(twt), "off");
+    } else {
+        uint8_t expn = 0;
+        uint16_t mant = 0;
+        if (runtime_config_twt_split((uint32_t)cfg->twt_wake_ms * 1000u, &expn, &mant)) {
+            snprintf(twt, sizeof(twt), "on (%u ms = mant %u * 2^%u)",
+                     (unsigned)cfg->twt_wake_ms, (unsigned)mant, (unsigned)expn);
+        } else {
+            snprintf(twt, sizeof(twt), "on (%u ms)", (unsigned)cfg->twt_wake_ms);
+        }
+    }
     snprintf(out, out_size,
              "cpu ceiling: %u MHz\n"
              "cpu floor: %u MHz\n"
@@ -377,13 +503,14 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              "espnow retries: %u\n"
              "wifi txpower: %s\n"
              "ap beacon: %s\n"
-             "radio save: %s\n",
+             "radio save: %s\n"
+             "twt: %s\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on"
                               : (runtime_config_light_sleep_allowed()
                                      ? "off"
                                      : "off (unavailable: USB Serial/JTAG console)"),
-             (unsigned)cfg->espnow_retries, tx, beacon, wake);
+             (unsigned)cfg->espnow_retries, tx, beacon, wake, twt);
 }
 
 #ifdef ESP_PLATFORM

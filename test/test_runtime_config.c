@@ -214,12 +214,97 @@ int main(void)
     runtime_config_clamp(&stored, 240);
     CHECK(stored.espnow_retries == 10, "retries above 10 clamp to 10");
 
+    /* Wi-Fi 6 TWT knobs. Off by default; the wake interval is the negotiated
+     * cadence in ms. */
+    cfg = runtime_config_defaults();
+    CHECK(!cfg.twt_enabled, "twt is off by default");
+    CHECK(cfg.twt_wake_ms == RUNTIME_CONFIG_TWT_WAKE_DEFAULT_MS,
+          "twt-wake defaults to 5000 ms");
+    CHECK(runtime_config_set(&cfg, "twt", "on", 240, err, sizeof(err)) &&
+              cfg.twt_enabled,
+          "set twt=on");
+    CHECK(runtime_config_set(&cfg, "twt-wake", "1000", 240, err, sizeof(err)) &&
+              cfg.twt_wake_ms == 1000,
+          "set twt-wake=1000 ms");
+    CHECK(runtime_config_set(&cfg, "twt", "off", 240, err, sizeof(err)) &&
+              !cfg.twt_enabled,
+          "set twt=off");
+    CHECK(!runtime_config_set(&cfg, "twt", "maybe", 240, err, sizeof(err)),
+          "a non-bool twt value is rejected");
+    CHECK(!runtime_config_set(&cfg, "twt-wake", "100", 240, err, sizeof(err)),
+          "twt-wake below the minimum is rejected");
+    CHECK(!runtime_config_set(&cfg, "twt-wake", "20000", 240, err, sizeof(err)),
+          "twt-wake above the maximum is rejected");
+
+    /* twt_split: interval = mant * 2^expn [us]. 5 s = 5,000,000 us needs
+     * expn 7 (5e6 / 2^7 = 39062.5 -> rounds up to 39063); 1 s = 1,000,000 us
+     * needs expn 4 (1e6 / 16 = 62500, exact). */
+    uint8_t expn = 0;
+    uint16_t mant = 0;
+    CHECK(runtime_config_twt_split(5000000u, &expn, &mant) && expn == 7 && mant == 39063,
+          "5 s splits to mant 39063 * 2^7");
+    CHECK(runtime_config_twt_split(1000000u, &expn, &mant) && expn == 4 && mant == 62500,
+          "1 s splits to mant 62500 * 2^4");
+    CHECK(!runtime_config_twt_split(0u, &expn, &mant), "a zero interval is rejected");
+    /* The mantissa must stay in the 16-bit field and the exponent in 5 bits. */
+    CHECK(runtime_config_twt_split(10000u, &expn, &mant) && expn <= 31,
+          "a small interval stays in range");
+    CHECK((uint32_t)mant * (1u << expn) >= 10000u,
+          "the split never shortens the requested interval");
+
+    /* clamp() forces a persisted TWT wake interval into range. */
+    runtime_config_t tw = runtime_config_defaults();
+    tw.twt_wake_ms = 100;
+    runtime_config_clamp(&tw, 240);
+    CHECK(tw.twt_wake_ms == RUNTIME_CONFIG_TWT_WAKE_MIN_MS,
+          "clamp raises a too-small twt wake interval");
+    tw.twt_wake_ms = 60000;
+    runtime_config_clamp(&tw, 240);
+    CHECK(tw.twt_wake_ms == RUNTIME_CONFIG_TWT_WAKE_MAX_MS,
+          "clamp lowers a too-large twt wake interval");
+
+    /* Blob roundtrip: encode then decode restores every knob, including TWT. */
+    runtime_config_t rt = runtime_config_defaults();
+    rt.cpu_mhz = 160;
+    rt.cpu_min_mhz = 80;
+    rt.light_sleep = false;
+    rt.espnow_retries = 7;
+    rt.wifi_txpower_dbm = 8;
+    rt.ap_beacon_tu = 200;
+    rt.radio_save = true;
+    rt.wake_interval_ms = 300;
+    rt.wake_window_ms = 250;
+    rt.twt_enabled = true;
+    rt.twt_wake_ms = 1000;
+    uint8_t blob[RUNTIME_CONFIG_BLOB_SIZE];
+    runtime_config_encode(&rt, blob, sizeof(blob));
+    CHECK(blob[0] == RUNTIME_CONFIG_BLOB_VERSION, "blob carries the current version");
+    runtime_config_t back;
+    CHECK(runtime_config_decode(blob, sizeof(blob), &back), "blob decodes");
+    CHECK(back.cpu_mhz == rt.cpu_mhz && back.cpu_min_mhz == rt.cpu_min_mhz &&
+              back.espnow_retries == rt.espnow_retries &&
+              back.wifi_txpower_dbm == rt.wifi_txpower_dbm &&
+              back.ap_beacon_tu == rt.ap_beacon_tu &&
+              back.radio_save == rt.radio_save &&
+              back.wake_interval_ms == rt.wake_interval_ms &&
+              back.wake_window_ms == rt.wake_window_ms &&
+              back.twt_enabled == rt.twt_enabled &&
+              back.twt_wake_ms == rt.twt_wake_ms,
+          "the blob roundtrip restores every knob");
+    /* A wrong version or size is rejected so an old blob is ignored. */
+    blob[0] = (uint8_t)(RUNTIME_CONFIG_BLOB_VERSION - 1);
+    CHECK(!runtime_config_decode(blob, sizeof(blob), &back),
+          "a blob with the wrong version is rejected");
+    CHECK(!runtime_config_decode(blob, sizeof(blob) - 1, &back),
+          "a blob with the wrong size is rejected");
+
     /* reset restores the defaults. */
     cfg = runtime_config_reset(&cfg);
     runtime_config_t defaults = runtime_config_defaults();
     CHECK(cfg.cpu_mhz == defaults.cpu_mhz &&
               cfg.cpu_min_mhz == defaults.cpu_min_mhz &&
-              cfg.light_sleep == defaults.light_sleep,
+              cfg.light_sleep == defaults.light_sleep &&
+              cfg.twt_enabled == defaults.twt_enabled,
           "reset restores the defaults");
 
     printf("runtime config: %d checks, %d failures\n", g_checks, g_failures);
