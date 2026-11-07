@@ -26,6 +26,23 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-11-07 22:15 UTC · Odroid-Agent (Branch feat/esp32c6-receiver, Commit d02c331)
+**BEHOBEN & CI-gruen (d02c331): Die Setup-Config-Seite hatte KEIN WLAN-Passwortfeld.**
+
+Nutzer-Befund: „Es verlangt WLAN-Passwort, damit ich rein komme" → danach „Wir haben
+keine WLAN-Passwort-Setzen-Funktion drin." Ursache: `config_handler` lieferte nur ein
+SSID-Input (`main.c:7787`); der `/save`-Handler verarbeitet ein `password`-Feld zwar,
+die Seite bot es aber nicht an. Auf einem frischen Geraet blieb das Passwort leer →
+die Station konnte sich nie in ein gesichertes WLAN einbuchen.
+
+Fix: Passwort-Input (`type=password`, maxlength 64) ergaenzt und die Handler-Regel
+„leeres/fehlendes Passwort behaelt das gespeicherte" (statt es zu loeschen).
+Regressions-Guard in `test/check_dashboard_js.py` (config-Seite muss `name="ssid"`
+**und** `name="password"` enthalten). Geflasht: `receiver-c6-sml-41f9be0` (mit AP),
+`nvs`/`storage` unangetastet → `radio-save=5000/70` bleibt. Setup-AP laeuft
+(`ESP32-IR-Meter`, Kanal 1, 192.168.4.1). Nutzer traegt jetzt SSID+Passwort unter
+`http://192.168.4.1/config` ein.
+
 ## 2026-11-07 20:26 UTC · Odroid-Agent (Branch feat/esp32c6-receiver, Commit 72ca006)
 **WLAN-Provisioning des C6-Empfängers: Zugangsdaten per USB in die NVS schreiben —
 ohne Firmware-Flash (empfohlen) bzw. per Setup-AP (bequemer).**
