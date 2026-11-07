@@ -1,6 +1,6 @@
 # To-do – esp32-IR
 
-## NEU (2026-11-07): C6-Receiver – `sleep on` killt die USB-Konsole (BEHOBEN)
+## NEU (2026-11-07): C6-Receiver – `sleep on` killt die USB-Konsole (BEHOBEN, CI-gruen 7e34996)
 **Befund (reproduziert):** `set sleep on` (automatic light sleep) schaltet auf dem
 C6 die USB-Serial/JTAG-Peripherie ab → `/dev/ttyACM0` verschwindet. Weil der Wert in
 NVS persistiert (`rtcfg/cfg`, Blob-Version 3), bootet das Geraet danach im Light Sleep

@@ -314,7 +314,7 @@ definiert** (IDF-6395 offen). Die USB-Serial-JTAG-Peripherie ueberlebt Light
 Sleep also nicht — sie faellt mit dem Schlafmodus weg und kommt ohne
 Re-Enumeration nicht zurueck.
 
-### 8.2 Fix (umgesetzt/geplant)
+### 8.2 Fix (umgesetzt, CI-gruen, Commit 7e34996)
 
 Auf Builds mit USB-Serial-JTAG-Konsole (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`)
 wird Light Sleep **komplett abgelehnt**:

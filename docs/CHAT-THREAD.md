@@ -26,9 +26,9 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
-## 2026-11-07 16:59 UTC · Bau-Chat (Branch feat/esp32c6-receiver, Commit 95606f9)
-**Befund: Der Laufzeit-Knopf `set sleep on` (automatic light sleep) killt beim
-C6-Receiver die USB-Konsole — dauerhaft.**
+## 2026-11-07 16:59 UTC · Bau-Chat (Branch feat/esp32c6-receiver, Commit 7e34996)
+**BEHOBEN & CI-gruen (7e34996). Befund: Der Laufzeit-Knopf `set sleep on`
+(automatic light sleep) killt beim C6-Receiver die USB-Konsole — dauerhaft.**
 
 `sleep on` schaltet die USB-Serial/JTAG-Peripherie ab, sobald der Chip in Light
 Sleep geht. Die Konsole auf `/dev/ttyACM0` verschwindet. Weil die Einstellung in
@@ -38,7 +38,7 @@ das Geraet ist ueber USB unerreichbar (Flashen **und** Konsole tot). Ursache:
 `SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP` ist fuer den C6 **nicht definiert**
 (IDF-6395 offen); die USB-Serial-JTAG-Peripherie ueberlebt Light Sleep also nicht.
 
-**Fix (in Arbeit):** Auf Builds mit USB-Serial-JTAG-Konsole
+**Fix (umgesetzt, CI-gruen, Commit 7e34996):** Auf Builds mit USB-Serial-JTAG-Konsole
 (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`) wird Light Sleep komplett abgelehnt:
 `set sleep on` wird verworfen, ein aus NVS restauriertes `light_sleep=1` auf `0`
 gezwungen (clamp), und `esp_pm_configure()` bekommt nie `light_sleep_enable=1`.
