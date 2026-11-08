@@ -225,6 +225,26 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_sleep_misbehavior"
 
+# Sender sleep-state announcement: drives the real uart_sleep_maybe_sleep_idf()
+# glue against stubbed IDF calls. Pins the fix that the awake announcement
+# (state=0) must follow every announced sleep, even when the CPU never actually
+# parked (slept_ms == 0) - otherwise the receiver stays on "sleeping" forever.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DCONFIG_ESPNOW_SENDER_LIGHT_SLEEP=1 \
+    -DCONFIG_ESPNOW_CPU_MAX_MHZ=240 \
+    -DCONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=1 \
+    -DCONFIG_ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS=100 \
+    -DCONFIG_ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS=70 \
+    -DSOC_LIGHT_SLEEP_SUPPORTED=1 \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/uart_sleep_window.c" \
+    "$here/test_sleep_announce.c" \
+    -o "$out/test_sleep_announce"
+
+"$out/test_sleep_announce"
+
 # Link fallback: the peer-silence decision that returns a device to its proven
 # mode. Pure C; the transition must be sticky (no flapping) and grace-bounded.
 "$cc" -std=c11 -Wall -Wextra -O2 \
