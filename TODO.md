@@ -1,5 +1,47 @@
 # To-do – esp32-IR
 
+
+## MESSUNG (2026-11-08, .105): Modem-Sleep-Kombinationen ohne Telegramm-Verluste
+**Aufbau:** `.105` = C6-Empfänger (USB-JTAG-Konsole), Sender = **klassischer ESP32**
+(`v0.3.0-17-g9aec836`), ~60 SML-Telegramme/min. Verlust = Δ`sender.sml_sent_ok` −
+Δ`receiver.crc_valid` über 120–200-s-Fenster; Konsole per `set …` + `config`-Rücklesung.
+`average_power_w` ist der **Hauszähler (SML)**, NICHT der C6-Verbrauch — taugt hier nicht
+als Leistungsmaß.
+
+**Ergebnis (4 Läufe, je Kombi 120–200 s; 5. Lauf verschränkt A/B):**
+
+| Kombination | Verlust | Bewertung |
+|---|---|---|
+| `ps=off` + `radio-save off` (Baseline) | 2,5–13 % | Grundrauschen (WLAN) |
+| `ps=min` + `radio-save off` (**Auslieferungs-Default!**) | **90,8 %** | ✗ unbrauchbar |
+| `ps=max listen=10` + `rs off` | 91,7 % | ✗ |
+| `ps=max listen=10` + `rs 100/70` | 31–35 % | ✗ |
+| `ps=max listen=10` + `rs 50/40` | 24,2 % | ✗ |
+| `ps=max listen=10` + `rs 30/25` | 11,7 % | ~ |
+| **`ps=max listen=10` + `rs 20/15`** | **8,5–14 %** | ✓ = Baseline (5. Lauf verschränkt) |
+| `ps=off` + `rs 20/15` | **0,8 %** | ✓✓ praktisch verlustfrei |
+| `ps=off` + `rs 100/70` | 3,4 % | ✓ |
+
+**Kernbefund:** Der **ESP-NOW-Wake-Window (`radio-save`) ist der eigentliche Hebel** —
+`ps=min`/`ps=max` **ohne** `radio-save` vernichtet den Empfang fast vollständig (der
+C6 parkt das Modem, ESP-NOW-Frames fallen ins Leere). Mit `radio-save on` **und kurzem
+Fenster (20/15 ms)** verschwindet der Verlust; `ps=max`+`rs 20/15` ist im verschränkten
+Lauf **nicht** schlechter als `ps=off`. Große Fenster (100/70) kosten ~⅓.
+
+**Empfehlung (stromsparend UND verlustfrei):**
+- Sicherste Kombi: **`set ps off` + `set radio-save on` + `wake-interval 20` +
+  `wake-window 15`** (0,8 % ≈ Baseline, Modem schläft trotzdem im Fenster).
+- Wenn Modem-Sleep zwingend: **`set ps max` + `set listen 10` + `radio-save on`
+  20/15** (≈ Baseline).
+- **Nie** `ps=min`/`ps=max` **ohne** `radio-save on` — das ist der 91-%-Fehler.
+- **Default ändern:** `RUNTIME_CONFIG_PS_DEFAULT` ist `min` + `radio_save=false` →
+  genau die 91-%-Kombi. Default auf `ps=off` (oder `radio_save=true` + 20/15) ziehen.
+
+**Offen/verwirrend:** `set sleep on` wird **abgelehnt** — `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`
+ist aktiv, darum `runtime_config_light_sleep_allowed()==false`. Light-Sleep ist auf diesem
+Build also gar nicht schaltbar (`light_sleep_enabled` bleibt 0). Für die Messung egal,
+aber die Konsole kostet CPU-Wachhaltung (USB-JTAG), siehe frühere 0,12–0,15-W-Notiz.
+
 ## NEU (2026-11-08): C6-Empfänger – Laufzeit-Knopf `set ps` / `set listen` (WIFI_PS_MAX_MODEM) – CI-gruen `6a05b95`, PR #64
 **Warum:** Die FRITZ!Box 5530 Fiber **lehnt TWT ab** (`Connected AP does not support
 setup individual TWT agreement` / `ESP_ERR_NOT_SUPPORTED`, Assoc-Response
