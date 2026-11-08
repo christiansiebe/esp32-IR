@@ -6080,7 +6080,7 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
 #endif
 
     runtime_config_t *cfg = active_runtime_config();
-    char err[64] = {0};
+    char err[128] = {0};
     if (!runtime_config_set(cfg, key, value, CONFIG_ESPNOW_CPU_MAX_MHZ, err,
                             sizeof(err))) {
         snprintf(out, out_size, "%s", err);
