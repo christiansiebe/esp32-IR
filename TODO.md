@@ -1,5 +1,40 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-08): C6-Empfänger – Laufzeit-Knopf `set ps` / `set listen` (WIFI_PS_MAX_MODEM) – CI-gruen `6a05b95`, PR #64
+**Warum:** Die FRITZ!Box 5530 Fiber **lehnt TWT ab** (`Connected AP does not support
+setup individual TWT agreement` / `ESP_ERR_NOT_SUPPORTED`, Assoc-Response
+`TWT Responder:0`). Der Messauftrag „Power-Save ohne TWT" braucht deshalb die zwei
+IDF-Modem-Sleep-Schrauben. **Ohne USB-Kabel** zieht der assoziierte C6 mit
+`WIFI_PS_MIN_MODEM` bereits ~70 mW; die frueheren 0,12–0,15 W waren das
+USB-Serial/JTAG-Kabel (CPU-Wachhaltung), nicht die Assoziation.
+
+**Knopf (Branch `feat/c6-twt`, Blob v5 → v6 / 22 Byte):**
+- `set ps off|min|max` (`wifi_ps_mode` 0/1/2, Default **1=min** = wie vorher);
+  `set listen <n>` (`wifi_sta_config_t.listen_interval`, 1..255, Default 3).
+  Alias `set wifi-ps`/`set listen-interval`. `config` zeigt jetzt immer
+  `ps=… listen=…`; `help`/Usage ergaenzt.
+- **Anwenden:** `listen_interval` wird nur **beim Association-Request** und **nur
+  mit `WIFI_PS_MAX_MODEM`** gelesen → `set ps`/`set listen` macht automatisch
+  `esp_wifi_disconnect()` → `esp_wifi_set_config` → `esp_wifi_connect()` (Reconnect).
+  PS-Modus per `esp_wifi_set_ps()` nach `esp_wifi_start()`, aus
+  `apply_radio_power_config()` re-asserted. `reset-config` → Default + Reconnect.
+- **Koexistenz `radio-save`/ESP-NOW:** zwei unabhaengige Hebel. `WIFI_PS_MAX_MODEM`
+  parkt die *Station*; ESP-NOW-RX haengt am `esp_now_set_wake_window()`. Ein grosses
+  `listen_interval` bricht ESP-NOW nicht per se, kann die ~5-s-Frames aber
+  verspaeten/verlieren. **Nur der Knopf**, keine Zwangsschaltung.
+- **Tests:** `test/test_runtime_config.c` (parse_ps, set ps/listen, clamp, render,
+  v6-Blob-Roundtrip); `runtime config: 96 Checks, 0 Fehler`, uebrige Host-Tests gruen.
+  Neuer CI-Schritt „Verify the Wi-Fi PS / listen-interval knob (receiver)".
+
+**Auftrag an den Auftraggeber (Messung am Geraet):** `set ps max`, dann
+`set listen 5/10/20/30/50` — jeweils Reconnect abwarten, Leistung messen und pruefen,
+ob (a) die FRITZ!Box trennt, (b) die Leistung sinkt, (c) der Empfaenger weiter
+ESP-NOW-Frames sieht. Rueckweg: `set ps min` bzw. `reset-config`.
+
+**Merge-Hinweis:** `feat/c6-ap-switch` bumpt denselben `rtcfg`-Blob ebenfalls (auf v5,
+18 B, `ap_enabled`); dieser Stand ist v6 (22 B). Beim Merge die Layouts in EINE
+Version falten (Offsets bis [15] identisch).
+
 ## NEU (2026-11-07): C6-Receiver – `sleep on` killt die USB-Konsole (BEHOBEN, CI-gruen 7e34996)
 **Befund (reproduziert):** `set sleep on` (automatic light sleep) schaltet auf dem
 C6 die USB-Serial/JTAG-Peripherie ab → `/dev/ttyACM0` verschwindet. Weil der Wert in
