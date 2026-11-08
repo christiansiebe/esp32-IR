@@ -398,7 +398,15 @@ static bool write_records(power_history_record_t *records, size_t record_count)
         if (at < updated.record_count) {
             /* Splice in: shift the newer records up and renumber them, so the
              * ring stays sorted by minute AND by sequence (the after_sequence
-             * cursor needs the latter). */
+             * cursor needs the latter). A full ring cannot grow, so the shifted
+             * topmost record would be evicted; when the insert is not at the
+             * tail that evicted record is the NEWEST minute. Dropping the
+             * incoming OLDER minute instead keeps both the newest data and the
+             * time-sorted ring (the binary-search dedupe depends on the sort).
+             * power_history_import_sorted() skips the same way. */
+            if (updated.record_count >= POWER_HISTORY_CAPACITY) {
+                continue;
+            }
             if (!shift_up_renumber(oldest_slot, updated.record_count, at)) {
                 return false;
             }

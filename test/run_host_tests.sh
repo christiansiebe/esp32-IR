@@ -356,6 +356,20 @@ trap 'rm -rf "$out"' EXIT
 # Full ring (29000) unsorted + duplicates -> forces the in-place disk sort.
 "$out/test_history_ring_repair" full
 
+# Full ring (29000) + an OLDER backfill merge: the older minute must not evict
+# the newest one and must not unsort the ring. Own binary (init runs once).
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog-fullbackfill\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_history_full_ring_backfill.c" \
+    -lm -o "$out/test_history_full_ring_backfill"
+
+"$out/test_history_full_ring_backfill"
+
 # Last known wall clock: the record/clock math plus the real NVS store driven
 # through a file-backed NVS shim. A forked "reboot" proves the clock is seeded
 # from the store and keeps advancing, so bucket_start is never 0 after a boot
