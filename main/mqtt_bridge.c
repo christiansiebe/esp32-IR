@@ -176,9 +176,9 @@ void mqtt_bridge_start(void)
                       journal_found;
 
     nvs_handle_t handle;
-    char uri[160] = {0};
-    char user[64] = {0};
-    char pass[96] = {0};
+    char uri[NET_CONFIG_MQTT_URI_MAX] = {0};
+    char user[NET_CONFIG_MQTT_USER_MAX + 1] = {0};
+    char pass[NET_CONFIG_MQTT_PASS_MAX + 1] = {0};
     if (nvs_open(MQTT_CONFIG_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
         size_t len = sizeof(uri);
         (void)nvs_get_str(handle, MQTT_KEY_URI, uri, &len);
