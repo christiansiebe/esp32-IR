@@ -6047,7 +6047,16 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
 {
     char key[24] = {0};
     char value[NET_CONFIG_MQTT_URI_MAX + 1] = {0};
-    if (sscanf(args, "%23s %160s", key, value) != 2) {
+    int parsed = sscanf(args, "%23s %160s", key, value);
+    /* A missing value is only meaningful for the "keep/clear" keys: an empty
+     * wifi-pass keeps the stored one, an empty mqtt-user/mqtt-pass clears it.
+     * Everything else needs an explicit value. */
+    bool value_missing = parsed < 2;
+    bool value_optional = value_missing &&
+                          (strcmp(key, "wifi-pass") == 0 ||
+                           strcmp(key, "mqtt-user") == 0 ||
+                           strcmp(key, "mqtt-pass") == 0);
+    if (parsed < 1 || (value_missing && !value_optional)) {
         /* TWT is HE-only, so it is advertised only on the C6; the ps/listen
          * knobs apply to every receiver (modem sleep is not HE-specific). */
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -6319,7 +6328,7 @@ static esp_err_t console_api_handler(httpd_req_t *req)
     }
     line[total] = '\0';
 
-    char result[768];
+    char result[WEB_CONSOLE_OUT_MAX];
     web_console_run(line, result, sizeof(result));
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");

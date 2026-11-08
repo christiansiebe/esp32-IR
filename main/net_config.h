@@ -32,6 +32,13 @@ bool net_config_validate_mqtt_uri(const char *uri, char *err, size_t err_size);
  * (mirrors the rule in mqtt_topics.c prefix_valid). */
 bool net_config_validate_mqtt_prefix(const char *prefix, char *err, size_t err_size);
 
+/* Like net_config_validate_mqtt_prefix, but also copies the trimmed prefix into
+ * out (NUL-terminated within out_size). Use this before persisting: the stored
+ * value must already be the trimmed one, otherwise a prefix that only fits after
+ * trimming would be rejected by the loader. out may be NULL. */
+bool net_config_normalize_mqtt_prefix(const char *prefix, char *out, size_t out_size,
+                                      char *err, size_t err_size);
+
 /* Generic MQTT credential (user/pass): empty allowed, else length <= max_len,
  * no control chars. label is only used in the error text. */
 bool net_config_validate_mqtt_credential(const char *value, size_t max_len,

@@ -321,16 +321,23 @@ bool mqtt_bridge_set_config(const char *key, const char *value, char *err,
     }
 
     const char *nvs_key = NULL;
+    const char *nvs_value = value;
+    char prefix_buf[NET_CONFIG_MQTT_PREFIX_MAX] = {0};
     if (strcmp(key, "mqtt-uri") == 0) {
         if (!net_config_validate_mqtt_uri(value, err, err_size)) {
             return false;
         }
         nvs_key = MQTT_KEY_URI;
     } else if (strcmp(key, "mqtt-prefix") == 0) {
-        if (!net_config_validate_mqtt_prefix(value, err, err_size)) {
+        /* Persist the trimmed form: the loader stores it in an 80-byte buffer
+         * and mqtt_topics_build trims again, so a raw value that only fits after
+         * trimming would otherwise be silently dropped on the next boot. */
+        if (!net_config_normalize_mqtt_prefix(value, prefix_buf, sizeof(prefix_buf),
+                                              err, err_size)) {
             return false;
         }
         nvs_key = MQTT_KEY_PREFIX;
+        nvs_value = prefix_buf;
     } else if (strcmp(key, "mqtt-user") == 0) {
         if (!net_config_validate_mqtt_credential(value, NET_CONFIG_MQTT_USER_MAX,
                                                  "mqtt-user", err, err_size)) {
@@ -353,7 +360,7 @@ bool mqtt_bridge_set_config(const char *key, const char *value, char *err,
         snprintf(err, err_size, "mqtt: could not open NVS\n");
         return false;
     }
-    esp_err_t nvs_err = nvs_set_str(handle, nvs_key, value);
+    esp_err_t nvs_err = nvs_set_str(handle, nvs_key, nvs_value);
     if (nvs_err == ESP_OK) {
         nvs_err = nvs_commit(handle);
     }

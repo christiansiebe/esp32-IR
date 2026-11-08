@@ -98,6 +98,10 @@ int main(void)
           "scheme-less host rejected");
     CHECK(!net_config_validate_mqtt_uri("mqtt://ho st", err, sizeof(err)),
           "uri with a space rejected");
+    CHECK(!net_config_validate_mqtt_uri("mqtt://:1883", err, sizeof(err)),
+          "port-only host rejected");
+    CHECK(net_config_validate_mqtt_uri("mqtt://h:1883", err, sizeof(err)),
+          "host with a port ok");
     CHECK(!net_config_validate_mqtt_uri("", err, sizeof(err)), "empty uri rejected");
     CHECK(!net_config_validate_mqtt_uri(NULL, err, sizeof(err)), "NULL uri rejected");
     CHECK(!net_config_validate_mqtt_uri("mqtt://h\t", err, sizeof(err)),
@@ -138,6 +142,32 @@ int main(void)
     fill(prefix80, NET_CONFIG_MQTT_PREFIX_MAX, 'a');
     CHECK(!net_config_validate_mqtt_prefix(prefix80, err, sizeof(err)),
           "prefix of length 80 rejected");
+
+    /* --- MQTT prefix normalization ------------------------------------- */
+    /* Surrounding '/' are stripped before the value is persisted, so a prefix
+     * that only fits after trimming is stored in its trimmed form (the loader
+     * would otherwise reject the raw value on the next boot). */
+    char norm[NET_CONFIG_MQTT_PREFIX_MAX] = {0};
+    CHECK(net_config_normalize_mqtt_prefix("/a/b/", norm, sizeof(norm), err,
+                                           sizeof(err)) &&
+              strcmp(norm, "a/b") == 0,
+          "normalize trims surrounding slashes");
+    CHECK(!net_config_normalize_mqtt_prefix("/", norm, sizeof(norm), err,
+                                            sizeof(err)),
+          "normalize rejects an all-slash prefix");
+    CHECK(!net_config_normalize_mqtt_prefix("a b", norm, sizeof(norm), err,
+                                            sizeof(err)),
+          "normalize rejects an embedded space");
+    /* 40 leading '/' + 40 chars: raw length 80 but the trimmed 40 are valid, so
+     * normalize accepts and returns the 40-char form. */
+    char raw80[82];
+    memset(raw80, '/', 40);
+    memset(raw80 + 40, 'b', 40);
+    raw80[80] = '\0';
+    CHECK(net_config_normalize_mqtt_prefix(raw80, norm, sizeof(norm), err,
+                                           sizeof(err)) &&
+              strcmp(norm, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") == 0,
+          "normalize keeps a trimmed 40-char prefix that was 80 raw");
 
     /* --- MQTT credential ----------------------------------------------- */
     char cred64[NET_CONFIG_MQTT_USER_MAX + 1];

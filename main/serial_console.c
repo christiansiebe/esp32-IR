@@ -31,7 +31,9 @@
 #define SERIAL_CONSOLE_TX_BUF 1024
 #define SERIAL_CONSOLE_TX_CHUNK 128
 #define SERIAL_CONSOLE_LINE_MAX 192
-#define SERIAL_CONSOLE_STACK 4096
+/* Holds a WEB_CONSOLE_OUT_MAX result buffer on the stack; keep some headroom for
+ * the command handlers on top of it. */
+#define SERIAL_CONSOLE_STACK 5120
 #define SERIAL_CONSOLE_PRIO 3
 
 static const char *TAG = "serial_console";
@@ -115,7 +117,7 @@ static void serial_console_task(void *arg)
             }
             line[used] = '\0';
             used = 0;
-            char out[768];
+            char out[WEB_CONSOLE_OUT_MAX];
             web_console_run(line, out, sizeof(out));
             /* \r\n so a plain terminal shows the result on its own line. */
             console_write("\r\n", 2);

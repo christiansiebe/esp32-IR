@@ -1,5 +1,26 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-08): Laufzeit-NVS-Knoepfe ueber die Web-Konsole – Branch `feat/nvs-web-knobs`, PR #67
+**Ziel:** Jeder nutzerseitige NVS-Wert ist zur Laufzeit aenderbar (Safe-Fallback),
+und die kuenstlichen Wertebereiche reichen bis an die harte IDF-/SoC-Grenze, damit
+spaetere Aenderungen **kein Neukompilieren** brauchen.
+
+- **Bereiche geweitet** (`main/runtime_config.h`, Blob bleibt v6 / 22 B):
+  `retries` 0..255, `txpower` 0=Default sonst 1..20 dBm, `beacon` 0/100..60000 TU
+  (Vielfaches von 100), `wake-interval` 10..65535 ms, `wake-window` 1..65535 ms,
+  `twt-wake` 500..65535 ms, `listen` 1..65535; `cpu` bleibt 40..160 (SoC-Grenze).
+  Defaults: `listen`=**10** (war 3), `ps`=**min** (unveraendert).
+- **Neue Konsolen-Setter** (`set`): `wifi-ssid`, `wifi-pass` (-> `metercfg` +
+  Reconnect; leeres Passwort behaelt das alte) und `mqtt-uri`, `mqtt-prefix`,
+  `mqtt-user`, `mqtt-pass` (-> `mqttcfg` + Bridge-Neustart ueber
+  `mqtt_bridge_set_config`). Bei Fehler bleibt der alte Wert erhalten.
+  `mqtt-prefix` wird getrimmt persistiert.
+- **Validierung** in `main/net_config.{c,h}` (host-getestet), **Safe-Fallback**:
+  ein von der PM-/WLAN-API abgelehnter Wert faellt auf den Default zurueck und
+  wird persistiert (sichtbar in `config`).
+- **Tests:** `test/test_runtime_config.c`, `test/test_net_config.c` (neu),
+  `test/test_web_console.c` (Help-Puffer-Regression); alle Host-Suiten gruen.
+
 ## NEU (2026-11-08): C6-Empfänger – Laufzeit-Knopf `set ps` / `set listen` (WIFI_PS_MAX_MODEM) – CI-gruen `6a05b95`, PR #64
 **Warum:** Die FRITZ!Box 5530 Fiber **lehnt TWT ab** (`Connected AP does not support
 setup individual TWT agreement` / `ESP_ERR_NOT_SUPPORTED`, Assoc-Response

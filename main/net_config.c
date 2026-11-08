@@ -126,41 +126,76 @@ bool net_config_validate_mqtt_uri(const char *uri, char *err, size_t err_size)
         return false;
     }
     /* Host is everything after "://" up to the first '/'; it must be non-empty,
-     * so "mqtt://" and "mqtt:///path" are rejected. */
-    if (*host == '\0' || *host == '/') {
+     * so "mqtt://", "mqtt:///path" and a port-only "mqtt://:1883" are rejected. */
+    if (*host == '\0' || *host == '/' || *host == ':') {
         set_err(err, err_size, "uri host missing");
         return false;
     }
     return true;
 }
 
-bool net_config_validate_mqtt_prefix(const char *prefix, char *err, size_t err_size)
+/* Trim leading and trailing '/' and return the trimmed span via the start and
+ * len out-parameters. The caller must still check that the result is non-empty
+ * and within range. */
+static void trim_prefix(const char *prefix, const char **start, size_t *len)
+{
+    while (*prefix == '/') {
+        ++prefix;
+    }
+    size_t n = strlen(prefix);
+    while (n > 0 && prefix[n - 1] == '/') {
+        --n;
+    }
+    *start = prefix;
+    *len = n;
+}
+
+/* Shared validation of the trimmed prefix; on success also reports the span. */
+static bool check_prefix(const char *prefix, const char **start, size_t *len,
+                         char *err, size_t err_size)
 {
     if (prefix == NULL) {
         set_err(err, err_size, "prefix missing");
         return false;
     }
-    while (*prefix == '/') {
-        ++prefix;
-    }
-    size_t len = strlen(prefix);
-    while (len > 0 && prefix[len - 1] == '/') {
-        --len;
-    }
-    if (len == 0) {
+    trim_prefix(prefix, start, len);
+    if (*len == 0) {
         set_err(err, err_size, "prefix empty");
         return false;
     }
-    if (len >= NET_CONFIG_MQTT_PREFIX_MAX) {
+    if (*len >= NET_CONFIG_MQTT_PREFIX_MAX) {
         set_err(err, err_size, "prefix too long");
         return false;
     }
-    for (size_t i = 0; i < len; ++i) {
-        unsigned char c = (unsigned char)prefix[i];
+    for (size_t i = 0; i < *len; ++i) {
+        unsigned char c = (unsigned char)(*start)[i];
         if (c <= 0x20 || c == 0x7f) {
             set_err(err, err_size, "prefix has space/control char");
             return false;
         }
+    }
+    return true;
+}
+
+bool net_config_validate_mqtt_prefix(const char *prefix, char *err, size_t err_size)
+{
+    const char *start = NULL;
+    size_t len = 0;
+    return check_prefix(prefix, &start, &len, err, err_size);
+}
+
+bool net_config_normalize_mqtt_prefix(const char *prefix, char *out, size_t out_size,
+                                      char *err, size_t err_size)
+{
+    const char *start = NULL;
+    size_t len = 0;
+    if (!check_prefix(prefix, &start, &len, err, err_size)) {
+        return false;
+    }
+    if (out != NULL && out_size > 0) {
+        size_t copy = len < out_size - 1 ? len : out_size - 1;
+        memcpy(out, start, copy);
+        out[copy] = '\0';
     }
     return true;
 }
