@@ -742,6 +742,13 @@ UART-Puffer lag — auch wenn der `vTaskDelay` wegen des Holds gar nicht geschla
       History-Pull) `HELD AWAKE` verschwinden; `parser_resyncs`/`gap_loss` bleiben 0.
 
 ### Versionierung + Commit-Konvention
+- [x] **REGEL (verbindlich, wiederhergestellt 2026-11-08): jede geflashte/veröffentlichte
+      Firmware bekommt einen SemVer-Tag `vX.Y.Z` auf den gebauten Commit, und der Tag wird
+      gepusht.** Der Tag MUSS Vorfahre des Build-Commits sein: `git describe --tags` liefert
+      `vX.Y.Z…`, **nie einen nackten SHA**. Ein Tag auf einem Seitenzweig ist für den Build
+      unsichtbar (C6-Fehler: `v0.3.x` lag auf `fix/sender-diag-stack` → Gerät meldete nur
+      `5c57283`). Die CI gibt eine `::warning::` aus, wenn kein Tag aufgelöst wird.
+      Details/Prüfbefehle: `VERSIONING.md` → „REGEL (verbindlich): Versionierung ist Pflicht".
 - [x] `VERSIONING.md`: SemVer-Tag `vMAJOR.MINOR.PATCH` ist die Wahrheit (erste Baseline
       `v0.1.0`); `git describe` schreibt sie in `main/build_version.h` → `fw_version()`.
       MAJOR steigt bei Wire-/Speicher-Bruch, MINOR bei neuer Funktion, PATCH bei Bugfix.
