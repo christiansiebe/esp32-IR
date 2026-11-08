@@ -14,8 +14,8 @@ Ein Wächter, der **jeden** Disconnect zählt, würde den Sleep grundlos abschal
   1. **Compile-Bug:** `ps_fallback_worker` rief `diag_log_event()` (sender-only)
      → **alle Empfänger-/C6-Builds scheiterten** (`'diag_log_event' used but
      never defined`). Aufruf in `#if CONFIG_ESPNOW_ROLE_SENDER` gekapselt.
-  2. **Falsch-Positiv:** zählte auch ohne aktiven Hebel → jetzt nur bei
-     `ps != off` **oder** `radio-save`, und nur auf dem Empfänger.
+  2. **Falsch-Positiv:** zählte auch ohne aktiven Modem-PS-Modus → jetzt nur bei
+     `ps != off` (der Wake-Window allein zählt nicht) und nur auf dem Empfänger.
   3. **Test war immer grün:** `CHECK`-Makro in `test/test_ps_fallback.c` erhöhte
      `g_failures` nie → gefixt.
 - **Sicherer Modem-Light-Sleep (gemessen, s. Messauftrag oben):** `ps off` +

@@ -42,25 +42,32 @@ Sticky, damit es nicht flappt (PS aus → Link heilt → PS an → wieder Discon
 Ein **absichtlicher** Reconnect (`set ps`/`set wifi-*`/`reset-config`) zählt
 nicht; `set ps` **re-armt** den Wächter (der Nutzer darf es erneut versuchen).
 
-**Präzisierung (2026-11-08):** Der Wächter zählt nur, wenn überhaupt ein Hebel
-scharf ist (`ps != off` **oder** `radio-save` an) und nur auf dem **Empfänger**.
-So löst ein umgebungsbedingter Flap bei `ps off` + `radio-save off` keinen
-Falsch-Abbau aus.
+**Präzisierung (2026-11-08):** Der Wächter zählt nur, wenn der Modem-PS-Modus
+aktiv ist (`ps != off`) und nur auf dem **Empfänger**. Der ESP-NOW-Wake-Window
+allein löst ihn nicht aus (er lässt keine Assoziation fallen, und der gemessene
+verlustfreie C6-Default ist genau `ps off` + `radio-save on`). So löst ein
+umgebungsbedingter Flap im verlustfreien Default keinen Falsch-Abbau aus.
 
 ### 3. Der sichere Modem-Light-Sleep je Betriebsart
 
+Am realen Gerät (.105, C6-Empfänger, klassischer Sender, ~60 Tele./min) gemessen
+(s. Messauftrag in `TODO.md`): der **ESP-NOW-Wake-Window (`radio-save`) ist der
+eigentliche Hebel**; `ps min/max` **ohne** `radio-save` verliert ~90 % der
+Telegramme. Der gemessene Sweet Spot ist ein **kurzes Fenster 20/15 ms**.
+
 | Betriebsart | Light Sleep | Modem-Sleep | `radio-save` | Ergebnis |
 |---|---|---|---|---|
-| C6, **assoziiert** (Regelfall) | **aus** (USB) | `ps off` (oder `min` mit Wächter) | **off** | stabil, ~0,12–0,15 W (DTIM) |
-| C6, **unassoziiert** (nur ESP-NOW) | aus | `off` | **on** 5000/70 | stabil, ~70 mW |
-| klassischer ESP32-Empfänger | aus (Default) | `off` | off | unverändert |
+| C6, **assoziiert** (Regelfall) | **aus** (USB) | `ps off` | **on** 20/15 | **0,8 % ≈ Baseline (verlustfrei)** |
+| C6, wenn Modem-Sleep zwingend | aus | `ps max` + `listen 10` | on 20/15 | ≈ Baseline (verschränkt gemessen) |
+| C6, **unassoziiert** (nur ESP-NOW) | aus | `off` | on 20/15 | stabil |
+| klassischer ESP32-Empfänger | aus (Default) | `off` | off | unverändert (Wake-Window bricht dort den Link) |
 
-Kernaussage: **Ein „für alle Fälle" sicherer Modem-Light-Sleep ist
-`radio-save on` (5000/70) im unassoziierten Betrieb** — er ist am realen Gerät
-stabil gemessen (~70 mW, Bursts alle 5 s) und kollidiert mit keinem Beacon.
-Im assoziierten Betrieb bringt Modem-Sleep ohnehin kaum etwas (die DTIM-Beacons
-dominieren) und ist der link-riskante Fall; dort bleibt `ps off` der Default,
-und wer `ps min/max` wagt, wird vom Wächter aufgefangen.
+**Nie** `ps min/max` **ohne** `radio-save on` — das ist der 90-%-Fehler. Genau
+diesen Default setzt der Messauftrag/Fix (`f12a0e7`) ziel- und rollenabhängig
+(`#if defined(CONFIG_IDF_TARGET_ESP32C6) && !CONFIG_ESPNOW_ROLE_SENDER`). Der
+`ps_fallback`-Wächter ist das **Sicherheitsnetz**, falls doch ein PS-Modus
+erzwungen wird: er greift **nur** bei aktivem `ps != off` (der Wake-Window allein
+zerstört die Assoziation nicht) und fällt sticky auf `ps off` zurück.
 
 ## Behobene Fehler (in diesem Commit)
 
@@ -70,10 +77,21 @@ und wer `ps min/max` wagt, wird vom Wächter aufgefangen.
    `error: 'diag_log_event' used but never defined [-Werror]`. → Aufruf in
    `#if CONFIG_ESPNOW_ROLE_SENDER` gekapselt (der Receiver meldet über
    `ESP_LOGW` + `runtime_config_health_note`).
-2. **Falsch-Positiv:** Wächter zählte auch ohne aktiven Hebel. → zählt nur bei
-   scharfem Hebel und nur auf dem Empfänger.
+2. **Falsch-Positiv:** Wächter zählte auch ohne aktiven Modem-PS-Modus. → zählt
+   nur bei `ps != off` (der Wake-Window allein zählt nicht) und nur auf dem
+   Empfänger.
 3. **Test war immer grün:** die `CHECK`-Makro in `test/test_ps_fallback.c`
    erhöhte `g_failures` nie → Suite konnte nie fehlschlagen. → gefixt.
+
+## Merge mit `feat/c6-twt`
+
+Der Wächter steht auf `feat/nvs-web-knobs` (PR #67). Dessen Basis `feat/c6-twt`
+enthielt den **gemessenen** Fix (`f12a0e7`) für denselben Themenkomplex
+(Default auf die verlustfreie Kombi). Der Merge wurde aufgelöst:
+`runtime_config.c` automatisch (beide Seiten behalten), `TODO.md` und
+`test/run_host_tests.sh` manuell (beide Testblöcke bzw. Abschnitte behalten).
+Der Wächter ist komplementär zum gemessenen Default — er greift nur, wenn ein
+PS-Modus erzwungen wird.
 
 ## Verifikation
 

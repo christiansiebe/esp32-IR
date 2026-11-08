@@ -8633,17 +8633,19 @@ static void ps_fallback_worker(void *arg)
         if (g_ps_fallback_active) {
             continue; /* already fell back */
         }
-        /* Only a modem-sleep lever that is actually in force can storm the link.
-         * The sender has no runtime modem-sleep knob (its ESP-NOW power save is
-         * compile-time and the link fallback already covers it), so it never
-         * counts. On the receiver, PS off + radio-save off means no lever is to
-         * blame, so an environment-caused flap (roaming mesh AP) must not trip
-         * the fallback and disable a mode the user will just re-enable. */
+        /* Only a modem-sleep lever that can actually storm the *link* arms the
+         * watchdog. The disconnect storm comes from the station PS mode: it
+         * parks the modem so beacons/ESP-NOW frames are missed and the AP drops
+         * the association (reason 34). The ESP-NOW wake window (radio-save) only
+         * delays ESP-NOW frames - it does not drop the association, so it must
+         * not arm the watchdog (the measured loss-free C6 default is ps off +
+         * radio-save on). The sender has no runtime modem-sleep knob, so it
+         * never counts. */
         bool lever_active = false;
 #if !CONFIG_ESPNOW_ROLE_SENDER
         {
             const runtime_config_t *cfg = active_runtime_config();
-            lever_active = (cfg->wifi_ps_mode != RUNTIME_CONFIG_PS_OFF) || cfg->radio_save;
+            lever_active = cfg->wifi_ps_mode != RUNTIME_CONFIG_PS_OFF;
         }
 #endif
         if (!lever_active) {
