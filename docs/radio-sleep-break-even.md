@@ -314,10 +314,10 @@ definiert** (IDF-6395 offen). Die USB-Serial-JTAG-Peripherie ueberlebt Light
 Sleep also nicht — sie faellt mit dem Schlafmodus weg und kommt ohne
 Re-Enumeration nicht zurueck.
 
-### 8.2 Fix (umgesetzt, CI-gruen, Commit 7e34996)
+### 8.2 Fix, Stufe 1 (umgesetzt, CI-gruen, Commit 7e34996)
 
 Auf Builds mit USB-Serial-JTAG-Konsole (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`)
-wird Light Sleep **komplett abgelehnt**:
+wurde Light Sleep zunaechst **komplett abgelehnt**:
 
 - `set sleep on` wird **verworfen**.
 - Ein aus NVS restauriertes `light_sleep=1` wird auf `0` **gezwungen** (clamp).
@@ -331,6 +331,45 @@ persistierter kaputter `light_sleep`-Wert beim naechsten Boot verworfen wird.
 **Recovery:** Die **BOOT-Taste (3 s)** loescht zusaetzlich den NVS-Namespace
 `rtcfg`, damit ein schlechtes persistiertes Config-Set den Rollback nicht
 ueberlebt.
+
+### 8.2b Fix, Stufe 2: Light Sleep hinter dem USB-Host-Guard (NEU)
+
+Die Komplett-Ablehnung ist die sichere, aber konservative Loesung. IDF v6.1
+bringt genau die fehlende Mechanik mit: **`CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION`**
+(`components/esp_driver_usb_serial_jtag/Kconfig`). Der USB-Serial/JTAG-Treiber
+ueberwacht dann die SOF-Pakete des Hosts und haelt fuer die Dauer einer echten
+Host-Verbindung einen **`ESP_PM_NO_LIGHT_SLEEP`-Lock**. Ein reines
+Ladegeraet/Powerbank zaehlt **nicht** als verbunden (es sendet keine SOF-Pakete),
+der Chip parkt also im normalen, nur per WLAN erreichbaren Betrieb weiter.
+
+Umgesetzt:
+
+- `sdkconfig.defaults.esp32c6`: **`CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y`**
+  (Abhaengigkeiten `PM_ENABLE` + `ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED` +
+  `!SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP` + `USJ_ENABLE_USB_SERIAL_JTAG` sind
+  am C6 alle erfuellt).
+- `runtime_config_light_sleep_allowed()` liefert jetzt **true**, wenn der Guard
+  kompiliert ist (C6-Image), und weiterhin **false** ohne ihn (alte sdkconfig,
+  Sicherheitsnetz).
+- Der C6-Empfaenger **defaultet light sleep auf an** (`runtime_config_defaults()`),
+  `set sleep on|off` ist wieder wirksam, `clamp` zwingt einen persistierten Wert
+  **nicht mehr** auf 0.
+- Der lebenslange `ESP_PM_NO_LIGHT_SLEEP`-Lock in `main.c` faellt weg, wenn der
+  Guard greift; ohne Guard bleibt er als harter Backstop.
+- Der **Status-LED**-Heartbeat stoppt den Light Sleep nicht mehr (neuer Knopf
+  `set led-sleep on|off`, Default `on`): der LED-Tick ist auf einen One-Shot je
+  Blink-Flanke umgebaut, damit der Chip zwischen den Pulsen parken kann.
+
+**Restrisiko (dokumentiert):** Steckt man einen Host an, **waehrend** der Chip
+schon schlaeft, sieht der SOF-Waechter das erst beim naechsten Aufwachen; der
+Host kann die Verbindung in der Zwischenzeit verworfen haben (laut IDF-Doku ggf.
+Ab-/Anstecken noetig). Im Normalbetrieb (nur USB-Strom, sonst WLAN) greift der
+Guard aber sofort, sobald die CPU wach ist. Die Notausgaenge aus Stufe 1
+(BOOT-Taste, NVS-Version, OTA-Validierung) bleiben unveraendert bestehen.
+
+> Beleg: `components/esp_driver_usb_serial_jtag/Kconfig`,
+> `docs/en/api-guides/usb-serial-jtag-console.rst` (Abschnitt „Light-sleep"),
+> `driver/usb_serial_jtag.h` (`usb_serial_jtag_is_connected()`), Branch `v6.1`.
 
 ### 8.3 Messwerte (FNB-48 USB-Leistungsmesser)
 
@@ -371,8 +410,11 @@ ueberlebt.
 | station-only + light sleep (radio aus) | 0,024 W | **USB-Konsole starb** |
 | station-only + light sleep + radio-save 5000/30 | 0,028 W | **USB-Konsole starb** |
 
-**Kernaussage (qualitativ, weiterhin gueltig):** Light Sleep schaltet die
-USB-Serial-JTAG-Konsole des C6 ab und ist deshalb auf diesem Ziel unbrauchbar
-(Abschnitt 8.1); Radio-Sleep bleibt als sicherer Hebel erhalten. Die
+**Kernaussage (aktualisiert):** Ohne Schutz schaltet Light Sleep die
+USB-Serial-JTAG-Konsole des C6 ab und ist dann unbrauchbar (Abschnitt 8.1). Mit
+dem IDF-Guard `CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION` (Abschnitt 8.2b) parkt der
+Chip nur, solange **kein** USB-Host verbunden ist, und die Konsole bleibt
+erhalten — Light Sleep ist damit auf diesem Ziel nutzbar. Radio-Sleep
+(`radio-save`) bleibt als unabhaengiger, immer sicherer Hebel erhalten. Die
 **Quantifizierung** der Einsparung ist mit der oben beschriebenen
 Reihenmessung noch zu erbringen.

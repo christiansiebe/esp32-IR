@@ -19,16 +19,12 @@
 #include <stddef.h>
 
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_timer.h"
 #include "led_strip.h"
 #include "led_strip_rmt.h"
 
 static const char *TAG = "led";
-
-/* Tick fast enough to place the shortest pulse (100 ms) with a little margin,
- * but slowly enough to be negligible: ~5 % CPU-free overhead, and the strip is
- * written only on a change. */
-#define LED_TICK_US 50000 /* 50 ms */
 
 typedef struct {
     uint8_t r;
@@ -46,6 +42,13 @@ static led_status_t s_status = LED_STATUS_BOOT;
 static led_status_t s_override = LED_STATUS_COUNT; /* COUNT == automatic */
 static uint32_t s_phase_start_ms;
 static uint8_t s_brightness = 16;
+static bool s_allow_sleep = true;
+
+/* Held (only) when the LED is active and the operator asked for exact pulse
+ * timing (led_sleep off): it keeps the CPU awake so the blink does not jitter,
+ * at the cost of the whole light-sleep saving. */
+static esp_pm_lock_handle_t s_pm_lock;
+static bool s_lock_held;
 
 /* Last value actually written, so an unchanged frame is never re-sent. */
 static led_effective_t s_last;
@@ -54,6 +57,11 @@ static bool s_last_valid;
 static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+static led_status_t effective_status(void)
+{
+    return s_override < LED_STATUS_COUNT ? s_override : s_status;
 }
 
 static void write_effective(const led_effective_t *want)
@@ -71,28 +79,72 @@ static void write_effective(const led_effective_t *want)
     (void)led_strip_refresh(s_strip);
 }
 
+/* Arm the one-shot tick for the next blink edge (pulse start or pulse end).
+ * A steady state has no edge, so the timer is left disarmed and the CPU may
+ * sleep indefinitely. The phase is derived from the wall clock, so a coarse
+ * wake (or a light-sleep gap) never shifts the pattern. */
+static void arm_in_ms(uint32_t ms)
+{
+    if (s_timer == NULL) {
+        return;
+    }
+    (void)esp_timer_stop(s_timer); /* ESP_ERR_INVALID_STATE when not running */
+    (void)esp_timer_start_once(s_timer, (uint64_t)(ms ? ms : 1u) * 1000u);
+}
+
+static void arm_next_edge(void)
+{
+    uint32_t period = 0;
+    uint32_t pulse = 0;
+    led_status_pattern(effective_status(), &period, &pulse);
+    if (period == 0u || pulse >= period) {
+        return; /* steady on/off: nothing to wake for */
+    }
+    uint32_t phase = (now_ms() - s_phase_start_ms) % period;
+    uint32_t delay = (phase < pulse) ? (pulse - phase) : (period - phase);
+    arm_in_ms(delay);
+}
+
+/* Take the NO_LIGHT_SLEEP lock only while it is needed, and only once. */
+static void update_pm_lock(void)
+{
+    bool want = s_active && !s_allow_sleep;
+    if (want && !s_lock_held) {
+        if (s_pm_lock == NULL &&
+            esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "led", &s_pm_lock) != ESP_OK) {
+            s_pm_lock = NULL;
+            return;
+        }
+        if (s_pm_lock != NULL && esp_pm_lock_acquire(s_pm_lock) == ESP_OK) {
+            s_lock_held = true;
+        }
+    } else if (!want && s_lock_held && s_pm_lock != NULL) {
+        (void)esp_pm_lock_release(s_pm_lock);
+        s_lock_held = false;
+    }
+}
+
 static void tick(void *arg)
 {
     (void)arg;
     if (!s_active) {
         return;
     }
-    led_status_t status = s_override < LED_STATUS_COUNT ? s_override : s_status;
     led_status_output_t out;
-    led_status_output(status, now_ms() - s_phase_start_ms, &out);
+    led_status_output(effective_status(), now_ms() - s_phase_start_ms, &out);
     led_effective_t want = {
         .r = led_status_scale(out.r, s_brightness),
         .g = led_status_scale(out.g, s_brightness),
         .b = led_status_scale(out.b, s_brightness),
         .on = out.on,
     };
-    if (s_last_valid && want.r == s_last.r && want.g == s_last.g &&
-        want.b == s_last.b && want.on == s_last.on) {
-        return; /* no change: do not touch the strip */
+    if (!(s_last_valid && want.r == s_last.r && want.g == s_last.g &&
+          want.b == s_last.b && want.on == s_last.on)) {
+        write_effective(&want);
+        s_last = want;
+        s_last_valid = true;
     }
-    write_effective(&want);
-    s_last = want;
-    s_last_valid = true;
+    arm_next_edge();
 }
 
 static void release_driver(void)
@@ -101,6 +153,10 @@ static void release_driver(void)
         (void)esp_timer_stop(s_timer);
         (void)esp_timer_delete(s_timer);
         s_timer = NULL;
+    }
+    if (s_lock_held && s_pm_lock != NULL) {
+        (void)esp_pm_lock_release(s_pm_lock);
+        s_lock_held = false;
     }
     if (s_strip != NULL) {
         /* Drive the pixel dark before freeing so a release never leaves the LED
@@ -142,19 +198,23 @@ static bool create_driver(uint8_t gpio, uint8_t brightness)
         .callback = tick,
         .name = "led_tick",
     };
-    if (esp_timer_create(&timer_args, &s_timer) != ESP_OK ||
-        esp_timer_start_periodic(s_timer, LED_TICK_US) != ESP_OK) {
-        ESP_LOGW(TAG, "LED timer start failed; releasing the driver");
+    if (esp_timer_create(&timer_args, &s_timer) != ESP_OK) {
+        ESP_LOGW(TAG, "LED timer create failed; releasing the driver");
         release_driver();
         return false;
     }
-    ESP_LOGI(TAG, "Status LED on GPIO %u (brightness %u)", (unsigned)gpio,
-             (unsigned)brightness);
+    update_pm_lock();
+    /* Light the first frame promptly; the tick then re-arms for the next edge. */
+    arm_in_ms(0);
+    ESP_LOGI(TAG, "Status LED on GPIO %u (brightness %u, sleep %s)", (unsigned)gpio,
+             (unsigned)brightness, s_allow_sleep ? "allowed" : "blocked");
     return true;
 }
 
-void led_indicator_apply_config(bool enabled, uint8_t gpio, uint8_t brightness)
+void led_indicator_apply_config(bool enabled, uint8_t gpio, uint8_t brightness,
+                                bool allow_sleep)
 {
+    s_allow_sleep = allow_sleep;
     bool want = enabled && gpio != 0u;
     if (!want) {
         if (s_active) {
@@ -164,12 +224,14 @@ void led_indicator_apply_config(bool enabled, uint8_t gpio, uint8_t brightness)
         return;
     }
     /* Rebuild only when the GPIO changed (the driver binds the pin at create
-     * time). A brightness-only change is applied by the next tick. */
+     * time). A brightness/sleep-only change is applied in place. */
     if (!s_active || s_gpio != gpio) {
         release_driver();
         (void)create_driver(gpio, brightness);
     } else {
         s_brightness = brightness;
+        update_pm_lock();
+        arm_in_ms(0); /* re-latch with the new brightness/sleep setting */
     }
 }
 
@@ -180,6 +242,7 @@ void led_indicator_set_status(led_status_t status)
     }
     s_status = status;
     s_phase_start_ms = now_ms();
+    arm_in_ms(0); /* show the new state now, not at the old pattern's edge */
 }
 
 void led_indicator_set_override(led_status_t override_status)
@@ -189,6 +252,7 @@ void led_indicator_set_override(led_status_t override_status)
     }
     s_override = override_status;
     s_phase_start_ms = now_ms();
+    arm_in_ms(0);
 }
 
 led_status_t led_indicator_status(void)
@@ -203,11 +267,13 @@ bool led_indicator_is_active(void)
 
 #else /* sender, or a receiver on a board without the WS2812 LED: inert stubs */
 
-void led_indicator_apply_config(bool enabled, uint8_t gpio, uint8_t brightness)
+void led_indicator_apply_config(bool enabled, uint8_t gpio, uint8_t brightness,
+                                bool allow_sleep)
 {
     (void)enabled;
     (void)gpio;
     (void)brightness;
+    (void)allow_sleep;
 }
 
 void led_indicator_set_status(led_status_t status)

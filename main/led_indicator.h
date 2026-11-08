@@ -24,8 +24,16 @@
 
 /* Create/refresh the driver from the LED knobs (LED on/off, GPIO, brightness)
  * and start the blink tick. Safe to call repeatedly: it releases the driver
- * when the LED is disabled or gpio is 0 (no idle current). */
-void led_indicator_apply_config(bool enabled, uint8_t gpio, uint8_t brightness);
+ * when the LED is disabled or gpio is 0 (no idle current).
+ *
+ * allow_sleep is the persisted led_sleep knob: when true the heartbeat stands
+ * down while the CPU light-sleeps (no NO_LIGHT_SLEEP lock is held, so the chip
+ * parks between pulses -- the phase is derived from the wall clock, so it stays
+ * correct). When false the tick holds an ESP_PM_NO_LIGHT_SLEEP lock for as long
+ * as the LED is active, keeping the pulse timing exact at the cost of light
+ * sleep. Ignored when the LED is off (nothing is held either way). */
+void led_indicator_apply_config(bool enabled, uint8_t gpio, uint8_t brightness,
+                                bool allow_sleep);
 
 /* Report the current receiver state. The colour only changes on a real state
  * transition, so calling this from a hot path is cheap. */

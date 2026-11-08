@@ -4132,7 +4132,8 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        "\"cpu_freq_mhz\":%d,\"cpu_freq_max_mhz\":%d,"
                        "\"cpu_freq_min_mhz\":%d,\"sleep_state\":%u,"
                        "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu,"
-                       "\"led_status\":\"%s\",\"led_active\":%u}",
+                       "\"led_status\":\"%s\",\"led_active\":%u,"
+                       "\"led_sleep\":%u}",
                        fw_version(),
                        readings[0], readings[1], readings[2],
                        average_json,
@@ -4150,7 +4151,8 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        (unsigned int)(pm_config.light_sleep_enable ? 1 : 0),
                        (unsigned long)g_sleep_accumulated_ms,
                        led_status_name(led_indicator_status()),
-                       (unsigned int)(led_indicator_is_active() ? 1 : 0));
+                       (unsigned int)(led_indicator_is_active() ? 1 : 0),
+                       (unsigned int)(active_runtime_config()->led_sleep ? 1 : 0));
     if (len < 0 || (size_t)len >= sizeof(payload)) {
         return ESP_FAIL;
     }
@@ -5163,6 +5165,9 @@ static esp_err_t led_page_handler(httpd_req_t *req)
         "<td>Daten-GPIO; <code>0</code> deaktiviert die LED (sauberer No-op)</td></tr>"
         "<tr><td><code>set led-brightness &lt;n&gt;</code></td><td>0&ndash;255</td>"
         "<td><code>16</code></td><td>globale Helligkeit; <code>0</code> = dunkel</td></tr>"
+        "<tr><td><code>set led-sleep on|off</code></td><td>on/off</td><td><code>on</code></td>"
+        "<td>LED darf w&auml;hrend des Light-Sleeps pausieren (spart Strom); "
+        "<code>off</code> h&auml;lt die CPU wach f&uuml;r exakten Blinktakt</td></tr>"
         "<tr><td><code>set led-status &lt;name|auto&gt;</code></td>"
         "<td>boot/wifi/ap/wait/ok/error/ota/auto</td><td><code>auto</code></td>"
         "<td>nur RAM (nicht persistiert): erzwingt einen Zustand zum Testen</td></tr>"
@@ -5178,7 +5183,7 @@ static esp_err_t led_page_handler(httpd_req_t *req)
         "if(!r.ok)throw 0;const d=await r.json();"
         "const s=names.includes(d.led_status)?d.led_status:'?';"
         "mark(s);const el=document.getElementById('now');"
-        "el.textContent=(human[s]||s)+'\\u2003'+(d.led_active?'(Treiber aktiv)':'(LED aus / nicht verf\\u00fcgbar)');"
+        "el.textContent=(human[s]||s)+'\\u2003'+(d.led_active?'(Treiber aktiv)':'(LED aus / nicht verf\\u00fcgbar)')+'\\u2003'+(d.led_sleep?'(pausiert im Light-Sleep)':'(CPU wach f\\u00fcr Blinktakt)');"
         "}catch(e){document.getElementById('now').textContent='Status nicht verf\\u00fcgbar';}"
         "setTimeout(poll,2000);}poll();</script></body></html>";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -6095,10 +6100,10 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
          * status-LED knobs exist only on the receiver (the sender has no LED). */
 #if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|led|led-gpio|led-brightness|led-status> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|led|led-gpio|led-brightness|led-sleep|led-status> <value>\n");
 #elif !CONFIG_ESPNOW_ROLE_SENDER
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|led|led-gpio|led-brightness|led-status> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|led|led-gpio|led-brightness|led-sleep|led-status> <value>\n");
 #elif SOC_WIFI_HE_SUPPORT
         snprintf(out, out_size,
                  "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen> <value>\n");
@@ -6186,9 +6191,10 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     }
     /* Status LED: rebuild the driver / re-apply brightness from the new knobs. */
     if (strcmp(key, "led") == 0 || strcmp(key, "led-gpio") == 0 ||
-        strcmp(key, "led-brightness") == 0 || strcmp(key, "led-bright") == 0) {
+        strcmp(key, "led-brightness") == 0 || strcmp(key, "led-bright") == 0 ||
+        strcmp(key, "led-sleep") == 0) {
         led_indicator_apply_config(cfg->led_enabled, cfg->led_gpio,
-                                   cfg->led_brightness);
+                                   cfg->led_brightness, cfg->led_sleep);
         led_refresh();
     }
 #if SOC_WIFI_HE_SUPPORT
@@ -6231,7 +6237,7 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
     wifi_ps_apply_and_reconnect();
     /* Restore the default LED knobs (on / GPIO 8 / dim). */
     led_indicator_apply_config(cfg->led_enabled, cfg->led_gpio,
-                               cfg->led_brightness);
+                               cfg->led_brightness, cfg->led_sleep);
     led_refresh();
 #endif
 #if CONFIG_ESPNOW_ROLE_SENDER
@@ -6304,11 +6310,11 @@ static void web_console_register_commands(void)
      * (HE), so it is only advertised on the HE-capable targets (the C6). */
 #if SOC_WIFI_HE_SUPPORT
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|led|led-gpio|led-brightness|led-status",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|led|led-gpio|led-brightness|led-sleep|led-status",
                          console_cmd_set);
 #else
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|led|led-gpio|led-brightness|led-status",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|led|led-gpio|led-brightness|led-sleep|led-status",
                          console_cmd_set);
 #endif
 #else
@@ -8862,15 +8868,12 @@ static void run_sender(void)
  * compile-time defaults, so a 'set' from a previous session — or before an OTA
  * that kept the NVS partition — is in effect from the first tick.
  *
- * The receiver must stay responsive for HTTP and ESP-NOW and never enters
- * light sleep by default; the sender enables its adaptive light sleep inside
- * the verified quiet window (uart_sleep_window.c re-applies its own config with
- * light sleep on, so the sender is driven through that module).
- *
- * A receiver whose console is the USB Serial/JTAG peripheral (ESP32-C6) must
- * never light-sleep: the PHY is powered down and the /dev/ttyACM* port is lost
- * for good. runtime_config_apply()/clamp() already force the flag off; the
- * NO_LIGHT_SLEEP lock below is a second, unconditional guard. */
+ * The receiver stays responsive for HTTP and ESP-NOW. Its light sleep is
+ * opt-in per build: the classic-ESP32 receiver never parks, and the ESP32-C6
+ * parks only behind the CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION guard (see below).
+ * The sender enables its adaptive light sleep inside the verified quiet window
+ * (uart_sleep_window.c re-applies its own config with light sleep on, so the
+ * sender is driven through that module). */
 static void apply_power_management(void)
 {
     runtime_config_t *cfg = active_runtime_config();
@@ -8884,11 +8887,13 @@ static void apply_power_management(void)
              (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
              cfg->light_sleep ? "on" : "off");
 #else
-    /* A USB Serial/JTAG-console receiver (ESP32-C6) must never light-sleep: the
-     * PHY is powered down and the /dev/ttyACM* port is lost for good. Force the
-     * flag off here as well (runtime_config_apply()/clamp() already do) and hold
-     * a NO_LIGHT_SLEEP lock for the lifetime of the device as a hard backstop,
-     * so no later esp_pm_configure() can ever re-enable the park. */
+    /* A USB Serial/JTAG-console receiver (ESP32-C6) may light-sleep only behind
+     * the CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION guard: the USJ driver then holds
+     * ESP_PM_NO_LIGHT_SLEEP for as long as a host is attached, so the console is
+     * never lost, and releases it when only a charger remains, so the chip still
+     * parks during normal Wi-Fi-only operation. Without that guard the flag is
+     * forced off (runtime_config_apply()/clamp() do the same) and we hold a
+     * NO_LIGHT_SLEEP lock for the lifetime of the device as a hard backstop. */
     bool allow_sleep = runtime_config_light_sleep_allowed();
     esp_pm_config_t pm = {
         .max_freq_mhz = (int)cfg->cpu_mhz,
@@ -9202,7 +9207,7 @@ void app_main(void)
     g_led_boot_until_ms = (int64_t)(esp_timer_get_time() / 1000) + LED_STATUS_BOOT_MS;
     const runtime_config_t *led_cfg = active_runtime_config();
     led_indicator_apply_config(led_cfg->led_enabled, led_cfg->led_gpio,
-                               led_cfg->led_brightness);
+                               led_cfg->led_brightness, led_cfg->led_sleep);
     led_indicator_set_status(LED_STATUS_BOOT);
 #endif
     /* Arm the task watchdog (generous timeout + panic) before any worker starts,

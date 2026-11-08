@@ -505,6 +505,21 @@ python3 "$repo/remote-shell/ha/test_print_health.py"
 
 "$out/test_runtime_config_usb_console"
 
+# Same USB-console target, but WITH the CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION guard
+# (the shipped C6 image): light sleep is allowed again because the USJ driver
+# keeps the port alive while a host is attached, and the C6 receiver defaults it
+# on. The counterpart to the test above.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DCONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=1 \
+    -DCONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=1 \
+    -I"$repo/main" \
+    "$repo/main/runtime_config.c" \
+    "$here/test_runtime_config_usb_guard.c" \
+    -o "$out/test_runtime_config_usb_guard"
+
+"$out/test_runtime_config_usb_guard"
+
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.
 cxx="${CXX:-g++}"

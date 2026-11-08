@@ -354,6 +354,18 @@ int main(void)
           "the led-bright alias works");
     CHECK(!runtime_config_set(&cfg, "led-brightness", "256", 240, err, sizeof(err)),
           "led-brightness above 255 is rejected");
+    /* led-sleep: on by default; a non-bool is rejected and leaves it untouched. */
+    CHECK(cfg.led_sleep == RUNTIME_CONFIG_LED_SLEEP_DEFAULT,
+          "led-sleep defaults to on");
+    CHECK(runtime_config_set(&cfg, "led-sleep", "off", 240, err, sizeof(err)) &&
+              !cfg.led_sleep,
+          "set led-sleep=off");
+    CHECK(runtime_config_set(&cfg, "led-sleep", "on", 240, err, sizeof(err)) &&
+              cfg.led_sleep,
+          "set led-sleep=on");
+    CHECK(!runtime_config_set(&cfg, "led-sleep", "maybe", 240, err, sizeof(err)) &&
+              cfg.led_sleep,
+          "a non-bool led-sleep is rejected");
     /* A rejected LED value leaves the config untouched. */
     before = cfg;
     CHECK(!runtime_config_set(&cfg, "led-gpio", "99", 240, err, sizeof(err)) &&
@@ -370,8 +382,9 @@ int main(void)
     lr.led_enabled = true;
     lr.led_gpio = 9;
     lr.led_brightness = 32;
+    lr.led_sleep = false;
     runtime_config_render(&lr, rbuf, sizeof(rbuf));
-    CHECK(strstr(rbuf, "led: on gpio=9 brightness=32") != NULL,
+    CHECK(strstr(rbuf, "led: on gpio=9 brightness=32 sleep=off") != NULL,
           "render shows the LED knobs");
 
     /* Blob roundtrip: encode then decode restores every knob, including TWT. */
@@ -392,6 +405,7 @@ int main(void)
     rt.led_enabled = true;
     rt.led_gpio = 9;
     rt.led_brightness = 32;
+    rt.led_sleep = false;
     uint8_t blob[RUNTIME_CONFIG_BLOB_SIZE];
     runtime_config_encode(&rt, blob, sizeof(blob));
     CHECK(blob[0] == RUNTIME_CONFIG_BLOB_VERSION, "blob carries the current version");
@@ -410,7 +424,8 @@ int main(void)
               back.listen_interval == rt.listen_interval &&
               back.led_enabled == rt.led_enabled &&
               back.led_gpio == rt.led_gpio &&
-              back.led_brightness == rt.led_brightness,
+              back.led_brightness == rt.led_brightness &&
+              back.led_sleep == rt.led_sleep,
           "the blob roundtrip restores every knob");
     /* A wrong version or size is rejected so an old blob is ignored. */
     blob[0] = (uint8_t)(RUNTIME_CONFIG_BLOB_VERSION - 1);
@@ -430,7 +445,8 @@ int main(void)
               cfg.listen_interval == defaults.listen_interval &&
               cfg.led_enabled == defaults.led_enabled &&
               cfg.led_gpio == defaults.led_gpio &&
-              cfg.led_brightness == defaults.led_brightness,
+              cfg.led_brightness == defaults.led_brightness &&
+              cfg.led_sleep == defaults.led_sleep,
           "reset restores the defaults");
 
     printf("runtime config: %d checks, %d failures\n", g_checks, g_failures);

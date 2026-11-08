@@ -101,6 +101,12 @@
 #define RUNTIME_CONFIG_LED_GPIO_DEFAULT 8u
 #define RUNTIME_CONFIG_LED_BRIGHTNESS_MAX 255u
 #define RUNTIME_CONFIG_LED_BRIGHTNESS_DEFAULT 16u
+/* led_sleep lets the LED heartbeat stand down while the device light-sleeps, so
+ * the chip can stay parked between pulses instead of being woken every tick.
+ * On by default (the point of the LED is a glanceable state, not a live trace);
+ * off holds a NO_LIGHT_SLEEP lock for as long as the LED is on, so the pulse
+ * timing stays exact at the cost of the whole light-sleep saving. */
+#define RUNTIME_CONFIG_LED_SLEEP_DEFAULT true
 
 typedef struct {
     uint32_t cpu_mhz;      /* DFS ceiling (max_freq) */
@@ -119,6 +125,7 @@ typedef struct {
     bool led_enabled;         /* receiver: master switch for the status LED */
     uint8_t led_gpio;         /* receiver: LED data GPIO; 0 = disabled */
     uint8_t led_brightness;   /* receiver: global LED brightness (0..255) */
+    bool led_sleep;           /* receiver: let the LED stand down during light sleep */
 } runtime_config_t;
 
 /* Persisted blob wire format (NVS glue in main.c does the nvs_set_blob /
@@ -135,11 +142,12 @@ typedef struct {
  * identical, so only the appended tail differs.
  *
  * v7 appends the status-LED knobs: led_enabled at [22], led_gpio at [23],
- * led_brightness at [24]; the blob is 25 bytes. The 22-byte v6 prefix is
- * unchanged, so a v6 blob is a different (wrong) size and is ignored by
- * runtime_config_decode(), and the device falls back to the defaults. */
-#define RUNTIME_CONFIG_BLOB_VERSION 7u
-#define RUNTIME_CONFIG_BLOB_SIZE 25u
+ * led_brightness at [24]; the blob is 25 bytes. v8 appends led_sleep at [25]
+ * (the LED-heartbeat-vs-light-sleep trade-off); the blob is 26 bytes. The v7
+ * prefix is unchanged, so a v7 blob is a different (wrong) size and is ignored
+ * by runtime_config_decode(), and the device falls back to the defaults. */
+#define RUNTIME_CONFIG_BLOB_VERSION 8u
+#define RUNTIME_CONFIG_BLOB_SIZE 26u
 
 /* Encode cfg into a RUNTIME_CONFIG_BLOB_SIZE-byte blob. No-op when the buffer is
  * NULL or too small. */
@@ -181,14 +189,19 @@ bool runtime_config_parse_ps(const char *text, uint8_t *out);
  * the outputs untouched) for a zero interval. Pure C, host-tested. */
 bool runtime_config_twt_split(uint32_t wake_us, uint8_t *expn, uint16_t *mant);
 
-/* False when the USB Serial/JTAG peripheral is the primary console (the
- * ESP32-C6, which has no USB-UART bridge). Light sleep powers that PHY down:
- * the /dev/ttyACM* console disappears and, because the light-sleep flag is
- * persisted, the next boot never re-enumerates the port -- the device becomes
- * unreachable over USB (no console, no flash). IDF offers no light-sleep
- * keep-alive for this peripheral (SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP is
- * not defined on the C6, IDF-6395), so light sleep is refused whenever this is
- * false. Modem/radio sleep (the radio-save knob) is unaffected. */
+/* Whether this build may hand light sleep to esp_pm_configure().
+ *
+ * A build whose primary console is the USB Serial/JTAG peripheral (the
+ * ESP32-C6, which has no USB-UART bridge) loses that port for good if it parks
+ * with a USB *host* attached: the /dev/ttyACM* port never re-enumerates and,
+ * because the flag is persisted, the device becomes unreachable over USB (no
+ * console, no flash). The C6 image therefore sets
+ * CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION, whose driver holds an
+ * ESP_PM_NO_LIGHT_SLEEP lock for exactly as long as a host is connected (a
+ * charger/power bank does not count -- no SOF packets), which makes light sleep
+ * safe and returns true here. A USB-console build *without* that guard (an old
+ * sdkconfig) still returns false, as do none of the other builds. Modem/radio
+ * sleep (the radio-save knob) is unaffected. */
 bool runtime_config_light_sleep_allowed(void);
 
 /* Set one knob by name. Returns true when the name is known and the value was

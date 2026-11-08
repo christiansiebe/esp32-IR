@@ -21,3 +21,16 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 # (main/serial_console.c) work over USB. With the UART0 default the C6 would
 # only mirror logs to USB as a non-blocking, input-less secondary console.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# --- Light sleep with the USB console ---
+# Light sleep gates the USB Serial/JTAG PHY, so a C6 that parks with a USB *host*
+# attached would drop /dev/ttyACM* for good (it never re-enumerates; IDF-6395).
+# This IDF option closes exactly that hole: the USJ driver holds an
+# ESP_PM_NO_LIGHT_SLEEP lock for as long as a host is connected (detected via SOF
+# packets, so a plain charger/power bank does NOT count) and releases it when only
+# a charger remains. That makes automatic light sleep safe on the C6, so the
+# receiver can park between Wi-Fi beacons and ESP-NOW wake windows. The C6 image
+# defaults light_sleep to on (runtime_config_defaults()) and keeps the knob
+# runtime-settable ('set sleep on|off'); without this guard the receiver still
+# refuses light sleep. See docs/radio-sleep-break-even.md and AGENTS.md.
+CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y

@@ -18,10 +18,28 @@
 #ifndef CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 #define CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG 0
 #endif
+/* Set on the C6 receiver (sdkconfig.defaults.esp32c6): while a USB *host* is
+ * connected the driver holds an ESP_PM_NO_LIGHT_SLEEP lock, so light sleep can
+ * be enabled without ever losing the /dev/ttyACM* console. A charger/power bank
+ * does not count as connected (no SOF packets), so light sleep still engages
+ * during normal Wi-Fi-only operation. */
+#ifndef CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION
+#define CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION 0
+#endif
 
+/* Is it safe to hand light sleep to esp_pm_configure() on this build?
+ *
+ * A build whose console is the USB Serial/JTAG peripheral (the ESP32-C6) loses
+ * that port for good if it parks with a host attached -- the port never
+ * re-enumerates and, because the flag is persisted, the device becomes
+ * unreachable over USB. IDF's own CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION guard
+ * closes that hole: it acquires ESP_PM_NO_LIGHT_SLEEP for as long as a host is
+ * connected and releases it when only a charger remains, so light sleep is safe
+ * to enable. Without that guard (an older sdkconfig) we keep refusing, exactly
+ * as before. Non-USB-console builds are unaffected. */
 bool runtime_config_light_sleep_allowed(void)
 {
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG && !CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION
     return false;
 #else
     return true;
@@ -37,7 +55,14 @@ runtime_config_t runtime_config_defaults(void)
     runtime_config_t cfg = {
 #if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
         .light_sleep = true,
+#elif CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+        /* ESP32-C6 receiver: light sleep is safe once the USB-host guard is
+         * compiled in (it parks only while no host is attached); an old C6
+         * sdkconfig without the guard keeps it off. */
+        .light_sleep = runtime_config_light_sleep_allowed(),
 #else
+        /* Classic-ESP32 receiver: unchanged -- it scales the clock (DFS) but
+         * never parks, so the ESP-NOW/HTTP timing is untouched. */
         .light_sleep = false,
 #endif
         .cpu_mhz = snap_cpu_mhz(CONFIG_ESPNOW_CPU_MAX_MHZ),
@@ -48,7 +73,12 @@ runtime_config_t runtime_config_defaults(void)
         .wifi_txpower_dbm = 0u,
         .ap_beacon_tu = 0u,
         /* Inert until radio_save is switched on; 100/70 mirrors the sender's
-         * proven wake-interval/window defaults. */
+         * proven wake-interval/window defaults. Off by default on the receiver:
+         * an *associated* C6 (the normal case) already parks its radio between
+         * DTIM beacons via modem-sleep (ps=min), which releases the APB lock and
+         * lets light sleep engage, and the repo's bench notes show the ESP-NOW
+         * wake window hurts an associated link. Only an *unassociated* receiver
+         * needs 'set radio-save on' for light sleep to engage. */
         .radio_save = false,
         .wake_interval_ms = 100u,
         .wake_window_ms = 70u,
@@ -59,10 +89,12 @@ runtime_config_t runtime_config_defaults(void)
          * 'max' is only reached through an explicit 'set ps max'. */
         .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
         .listen_interval = RUNTIME_CONFIG_LISTEN_DEFAULT,
-        /* Status LED: on, GPIO 8 (the C6 devkit default), dim. */
+        /* Status LED: on, GPIO 8 (the C6 devkit default), dim. led_sleep lets
+         * the heartbeat stand down while the chip light-sleeps. */
         .led_enabled = true,
         .led_gpio = RUNTIME_CONFIG_LED_GPIO_DEFAULT,
         .led_brightness = RUNTIME_CONFIG_LED_BRIGHTNESS_DEFAULT,
+        .led_sleep = RUNTIME_CONFIG_LED_SLEEP_DEFAULT,
     };
     return cfg;
 }
@@ -168,6 +200,7 @@ void runtime_config_encode(const runtime_config_t *cfg, uint8_t *blob, size_t bl
     blob[22] = cfg->led_enabled ? 1u : 0u;
     blob[23] = cfg->led_gpio;
     blob[24] = cfg->led_brightness;
+    blob[25] = cfg->led_sleep ? 1u : 0u;
 }
 
 bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config_t *cfg)
@@ -205,6 +238,7 @@ bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config
     loaded.led_enabled = blob[22] != 0;
     loaded.led_gpio = blob[23];
     loaded.led_brightness = blob[24];
+    loaded.led_sleep = blob[25] != 0;
     *cfg = loaded;
     return true;
 }
@@ -456,11 +490,16 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             return false;
         }
         next.led_brightness = (uint8_t)v;
+    } else if (strcmp(key, "led-sleep") == 0) {
+        if (!runtime_config_parse_bool(value, &next.led_sleep)) {
+            snprintf(err, err_size, "led-sleep: expected on or off\n");
+            return false;
+        }
     } else {
         snprintf(err, err_size,
                  "unknown key '%s' (cpu, freq, cpu-min, sleep, retries, txpower, "
                  "beacon, radio-save, wake-interval, wake-window, twt, twt-wake, "
-                 "ps, listen, led, led-gpio, led-brightness)\n",
+                 "ps, listen, led, led-gpio, led-brightness, led-sleep)\n",
                  key);
         return false;
     }
@@ -500,9 +539,11 @@ void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz)
         min_mhz = max_mhz;
     }
     cfg->cpu_min_mhz = min_mhz;
-    /* A build whose console is the USB Serial/JTAG peripheral must never enter
-     * light sleep (it would kill the port for good); force the persisted value
-     * off so a blob written by an earlier build cannot brick the USB port. */
+    /* A USB-console build without the USB-host light-sleep guard must never
+     * enter light sleep (it would kill the port for good); force the persisted
+     * value off so a blob written by an earlier build cannot brick the USB port.
+     * With CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION the guard handles this at run
+     * time, so the value is kept. */
     if (!runtime_config_light_sleep_allowed()) {
         cfg->light_sleep = false;
     }
@@ -616,7 +657,7 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              "twt: %s\n"
              "wifi ps: %s\n"
              "listen interval: %u beacons\n"
-             "led: %s gpio=%u brightness=%u\n",
+             "led: %s gpio=%u brightness=%u sleep=%s\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on"
                               : (runtime_config_light_sleep_allowed()
@@ -625,7 +666,7 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              (unsigned)cfg->espnow_retries, tx, beacon, wake, twt, ps,
              (unsigned)cfg->listen_interval,
              cfg->led_enabled ? "on" : "off", (unsigned)cfg->led_gpio,
-             (unsigned)cfg->led_brightness);
+             (unsigned)cfg->led_brightness, cfg->led_sleep ? "on" : "off");
 }
 
 #ifdef ESP_PLATFORM
