@@ -367,9 +367,16 @@ static volatile uint8_t g_link_fallback_stage;
 
 static SemaphoreHandle_t g_send_done;
 static SemaphoreHandle_t g_sleep_send_done;
+/* Serializes the broadcast ESP-NOW senders (SML telegrams, the sleep-state
+ * announcement, the broadcast time-sync request). They all target broadcast_mac
+ * and share the single g_sleep_announce_in_flight flag / g_send_done semaphore,
+ * so without this lock a concurrent SML send's confirmation could be routed to
+ * the sleep path (or vice versa) and be counted as the wrong send's result. */
+static SemaphoreHandle_t g_broadcast_tx_mutex;
 /* set only around the sleep-state announcement send, so the broadcast send
  * callback can route the confirmation to g_sleep_send_done and not confuse the
- * SML send path. */
+ * SML send path. Held under g_broadcast_tx_mutex, which is what makes the single
+ * flag unambiguous. */
 static volatile bool g_sleep_announce_in_flight;
 static esp_now_send_status_t g_last_send_status;
 static QueueHandle_t g_espnow_ota_rx_queue;
@@ -2236,14 +2243,6 @@ static void espnow_diag_worker(void *arg)
 
 static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_status_t status)
 {
-    /* The sleep-state announcement goes to the broadcast address too, so it
-     * would release the SML send semaphore. Distinguish it with a flag set by
-     * send_sleep_state_packet() just before its send. The flag is read before
-     * the callback can race us: the callback runs on the Wi-Fi task while the
-     * UART task still owns the flag's critical section around esp_now_send. */
-    const bool was_sleep_announce = g_sleep_announce_in_flight;
-    g_sleep_announce_in_flight = false;
-
     if (status != ESP_NOW_SEND_SUCCESS) {
         ESP_LOGW(TAG, "ESP-NOW send callback reported a failure");
     } else {
@@ -2259,13 +2258,25 @@ static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_statu
     if (tx_info == NULL || tx_info->des_addr == NULL) {
         return;
     }
+    const bool is_broadcast =
+        memcmp(tx_info->des_addr, broadcast_mac, ESP_NOW_ETH_ALEN) == 0;
+    /* The sleep-state announcement is a broadcast too. Distinguish it from an
+     * SML broadcast with a flag consulted only for broadcast confirmations, so a
+     * concurrent unicast send's callback is never misrouted (it falls through to
+     * the diagnostic branch). The broadcast senders are serialized by
+     * g_broadcast_tx_mutex, so at most one broadcast confirmation is in flight
+     * and the single flag is unambiguous. */
+    const bool was_sleep_announce = is_broadcast && g_sleep_announce_in_flight;
+    if (is_broadcast) {
+        g_sleep_announce_in_flight = false;
+    }
     if (was_sleep_announce) {
         if (g_sleep_send_done != NULL) {
             xSemaphoreGive(g_sleep_send_done);
         }
         return;
     }
-    if (memcmp(tx_info->des_addr, broadcast_mac, ESP_NOW_ETH_ALEN) == 0) {
+    if (is_broadcast) {
         g_last_send_status = status;
         if (g_send_done != NULL) {
             xSemaphoreGive(g_send_done);
@@ -2325,8 +2336,21 @@ static void time_sync_worker(void *arg)
         g_utc_valid = false; /* response must arrive before the next send */
         portEXIT_CRITICAL(&g_time_sync_lock);
 
-        if (esp_now_send(destination, (const uint8_t *)&request,
-                         sizeof(request)) != ESP_OK) {
+        /* Serialize with the other broadcast senders: a broadcast time-sync
+         * request shares broadcast_mac and the send-completion semaphore, so it
+         * must not overlap the SML/sleep-announce sends. */
+        if (g_broadcast_tx_mutex != NULL) {
+            xSemaphoreTake(g_broadcast_tx_mutex, portMAX_DELAY);
+        }
+        if (g_send_done != NULL) {
+            xSemaphoreTake(g_send_done, 0);
+        }
+        esp_err_t ts_err = esp_now_send(destination, (const uint8_t *)&request,
+                                        sizeof(request));
+        if (g_broadcast_tx_mutex != NULL) {
+            xSemaphoreGive(g_broadcast_tx_mutex);
+        }
+        if (ts_err != ESP_OK) {
             ESP_LOGW(TAG, "Time-sync request send failed");
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
@@ -2705,6 +2729,15 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         portEXIT_CRITICAL(&g_sml_history_lock);
     }
     g_sml_last_transport_sequence = packet.header.sequence;
+    /* A live SML packet from the sender is proof it is awake and reachable
+     * right now, so clear any stale "sleeping" state: if the sender's awake
+     * announcement was lost, or its park was skipped after it announced
+     * "sleeping", the data itself is the authoritative wake signal. */
+    portENTER_CRITICAL(&g_sender_mac_lock);
+    if (g_sender_sleep_state != 0u) {
+        g_sender_sleep_state = 0u;
+    }
+    portEXIT_CRITICAL(&g_sender_mac_lock);
     memcpy(packet.values, data + sizeof(packet.header),
            packet.header.value_count * sizeof(packet.values[0]));
 
@@ -3095,9 +3128,22 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
 
     size_t packet_length = sizeof(packet.header) +
                            item->value_count * sizeof(packet.values[0]);
+    /* Serialize with the other broadcast senders so the single
+     * g_sleep_announce_in_flight flag unambiguously identifies our send. */
+    if (g_broadcast_tx_mutex != NULL) {
+        xSemaphoreTake(g_broadcast_tx_mutex, portMAX_DELAY);
+    }
+    /* Drop a stale completion token (e.g. the confirmation of an earlier
+     * broadcast that timed out) so the wait below observes only THIS send. */
+    if (g_send_done != NULL) {
+        xSemaphoreTake(g_send_done, 0);
+    }
     esp_err_t err = esp_now_send(broadcast_mac, (const uint8_t *)&packet,
                                  packet_length);
     if (err != ESP_OK) {
+        if (g_broadcast_tx_mutex != NULL) {
+            xSemaphoreGive(g_broadcast_tx_mutex);
+        }
         portENTER_CRITICAL(&g_uart_stats_lock);
         ++g_sml_send_fail;
         portEXIT_CRITICAL(&g_uart_stats_lock);
@@ -3107,6 +3153,9 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
         return false;
     }
     if (xSemaphoreTake(g_send_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        if (g_broadcast_tx_mutex != NULL) {
+            xSemaphoreGive(g_broadcast_tx_mutex);
+        }
         portENTER_CRITICAL(&g_uart_stats_lock);
         ++g_sml_send_fail;
         portEXIT_CRITICAL(&g_uart_stats_lock);
@@ -3114,6 +3163,9 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
         diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "sml send timeout seq=%lu",
                        (unsigned long)sequence);
         return false;
+    }
+    if (g_broadcast_tx_mutex != NULL) {
+        xSemaphoreGive(g_broadcast_tx_mutex);
     }
     if (g_last_send_status != ESP_NOW_SEND_SUCCESS) {
         portENTER_CRITICAL(&g_uart_stats_lock);
@@ -3157,6 +3209,12 @@ static void send_sleep_state_packet(bool sleeping)
         .window_ms = uart_sleep_window_ms(),
         .uptime_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
     };
+    /* Serialize with the SML/time-sync broadcast senders: only one broadcast
+     * confirmation may be in flight, otherwise the shared flag would misroute
+     * it. */
+    if (g_broadcast_tx_mutex != NULL) {
+        xSemaphoreTake(g_broadcast_tx_mutex, portMAX_DELAY);
+    }
     /* Consume a stale confirmation (e.g. a previous timeout) so the wait below
      * observes only the confirmation of THIS send. */
     if (g_sleep_send_done != NULL) {
@@ -3167,6 +3225,9 @@ static void send_sleep_state_packet(bool sleeping)
                                  sizeof(packet));
     if (err != ESP_OK) {
         g_sleep_announce_in_flight = false;
+        if (g_broadcast_tx_mutex != NULL) {
+            xSemaphoreGive(g_broadcast_tx_mutex);
+        }
         ESP_LOGD(TAG, "Sleep-state announce send failed: %s", esp_err_to_name(err));
         return;
     }
@@ -3178,6 +3239,9 @@ static void send_sleep_state_packet(bool sleeping)
         ESP_LOGW(TAG, "Sleep-state announce delivery not confirmed within 20 ms");
     }
     g_sleep_announce_in_flight = false;
+    if (g_broadcast_tx_mutex != NULL) {
+        xSemaphoreGive(g_broadcast_tx_mutex);
+    }
 }
 #endif /* CONFIG_ESPNOW_ROLE_SENDER */
 
@@ -8411,6 +8475,11 @@ static void run_sender(void)
     g_sleep_send_done = xSemaphoreCreateBinary();
     if (g_sleep_send_done == NULL) {
         ESP_LOGE(TAG, "Could not create sleep-state announce semaphore");
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+    g_broadcast_tx_mutex = xSemaphoreCreateMutex();
+    if (g_broadcast_tx_mutex == NULL) {
+        ESP_LOGE(TAG, "Could not create broadcast TX mutex");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
 #if CONFIG_ESPNOW_ROLE_SENDER
