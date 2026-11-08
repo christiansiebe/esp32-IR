@@ -8,34 +8,41 @@
 `average_power_w` ist der **Hauszähler (SML)**, NICHT der C6-Verbrauch — taugt hier nicht
 als Leistungsmaß.
 
-**Ergebnis (4 Läufe, je Kombi 120–200 s; 5. Lauf verschränkt A/B):**
+**Ergebnis (7 Läufe, je Kombi 120–200 s; Läufe 5+6 verschränkt A/B gegen Drift):**
 
 | Kombination | Verlust | Bewertung |
 |---|---|---|
-| `ps=off` + `radio-save off` (Baseline) | 2,5–13 % | Grundrauschen (WLAN) |
-| `ps=min` + `radio-save off` (**Auslieferungs-Default!**) | **90,8 %** | ✗ unbrauchbar |
+| `ps=off` + `radio-save off` (Baseline) | 2,5–13 % (7 Läufe) | Grundrauschen (WLAN-Interferenz) |
+| `ps=min` + `rs off` (**Auslieferungs-Default!**) | **90,8 / 97,5 / 96,0 %** | ✗ unbrauchbar |
 | `ps=max listen=10` + `rs off` | 91,7 % | ✗ |
 | `ps=max listen=10` + `rs 100/70` | 31–35 % | ✗ |
 | `ps=max listen=10` + `rs 50/40` | 24,2 % | ✗ |
 | `ps=max listen=10` + `rs 30/25` | 11,7 % | ~ |
-| **`ps=max listen=10` + `rs 20/15`** | **8,5–14 %** | ✓ = Baseline (5. Lauf verschränkt) |
+| **`ps=max listen=10` + `rs 20/15`** | **8,5–14 %** | ✓ = Baseline (verschränkt) |
+| `ps=max listen=10` + `rs 15/12` | 14,0 % | ✓ |
+| `ps=max listen=50/255` + `rs 20/15` | 11,3 / 12,0 % | ✓ (listen praktisch frei) |
 | `ps=off` + `rs 20/15` | **0,8 %** | ✓✓ praktisch verlustfrei |
 | `ps=off` + `rs 100/70` | 3,4 % | ✓ |
+| `twt on` + `ps=off` + `rs 20/15` | 4,7 % | ~ (TWT vom AP abgelehnt, ohne Effekt) |
 
 **Kernbefund:** Der **ESP-NOW-Wake-Window (`radio-save`) ist der eigentliche Hebel** —
 `ps=min`/`ps=max` **ohne** `radio-save` vernichtet den Empfang fast vollständig (der
-C6 parkt das Modem, ESP-NOW-Frames fallen ins Leere). Mit `radio-save on` **und kurzem
-Fenster (20/15 ms)** verschwindet der Verlust; `ps=max`+`rs 20/15` ist im verschränkten
-Lauf **nicht** schlechter als `ps=off`. Große Fenster (100/70) kosten ~⅓.
+C6 parkt das Modem, ESP-NOW-Frames fallen ins Leere; `transport_losses` bleibt dabei
+~0, es sind echte Funklöcher). Mit `radio-save on` **und kurzem Fenster (20/15 ms)**
+verschwindet der Verlust; `ps=max`+`rs 20/15` ist im verschränkten Lauf **nicht**
+schlechter als `ps=off`. Große Fenster (100/70) kosten ~⅓. Ein zu kurzes Fenster
+(15/12) bringt nichts mehr; **20/15 ms ist der Sweet Spot**. `listen` ist mit
+`radio-save` an fast kostenlos (10→255 nur ~1 %). **TWT ist auf der FRITZ!Box 5530
+wirkungslos** (AP lehnt Setup ab), daher nicht bewertbar.
 
 **Empfehlung (stromsparend UND verlustfrei):**
 - Sicherste Kombi: **`set ps off` + `set radio-save on` + `wake-interval 20` +
   `wake-window 15`** (0,8 % ≈ Baseline, Modem schläft trotzdem im Fenster).
 - Wenn Modem-Sleep zwingend: **`set ps max` + `set listen 10` + `radio-save on`
-  20/15** (≈ Baseline).
-- **Nie** `ps=min`/`ps=max` **ohne** `radio-save on` — das ist der 91-%-Fehler.
+  20/15** (≈ Baseline); größeres `listen` (bis 255) kostet kaum.
+- **Nie** `ps=min`/`ps=max` **ohne** `radio-save on` — das ist der 90-%-Fehler.
 - **Default ändern:** `RUNTIME_CONFIG_PS_DEFAULT` ist `min` + `radio_save=false` →
-  genau die 91-%-Kombi. Default auf `ps=off` (oder `radio_save=true` + 20/15) ziehen.
+  genau die 90-%-Kombi. Default auf `ps=off` (oder `radio_save=true` + 20/15) ziehen.
 
 **Offen/verwirrend:** `set sleep on` wird **abgelehnt** — `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`
 ist aktiv, darum `runtime_config_light_sleep_allowed()==false`. Light-Sleep ist auf diesem
