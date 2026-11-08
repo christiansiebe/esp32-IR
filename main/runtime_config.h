@@ -89,6 +89,19 @@
 #define RUNTIME_CONFIG_LISTEN_MAX 255u
 #define RUNTIME_CONFIG_LISTEN_DEFAULT 3u
 
+/* Status LED (receiver only). The ESP32-C6 devkit drives its single addressable
+ * WS2812 RGB LED on GPIO 8 by default. led_gpio 0 disables the LED entirely
+ * (the driver is never created, so it is a clean no-op without LED hardware);
+ * the range is capped at the hard GPIO limit (48). led_brightness is the global
+ * 0..255 scale applied to every colour; the default 16 keeps the average draw
+ * in the low single-digit mA. led_enabled is the master switch: off releases
+ * the RMT driver so no idle current remains. */
+#define RUNTIME_CONFIG_LED_GPIO_MIN 0u
+#define RUNTIME_CONFIG_LED_GPIO_MAX 48u
+#define RUNTIME_CONFIG_LED_GPIO_DEFAULT 8u
+#define RUNTIME_CONFIG_LED_BRIGHTNESS_MAX 255u
+#define RUNTIME_CONFIG_LED_BRIGHTNESS_DEFAULT 16u
+
 typedef struct {
     uint32_t cpu_mhz;      /* DFS ceiling (max_freq) */
     uint32_t cpu_min_mhz;  /* DFS floor (min_freq); == cpu_mhz pins the clock */
@@ -103,6 +116,9 @@ typedef struct {
     uint16_t twt_wake_ms;     /* iTWT wake interval in ms (500..10000) */
     uint8_t wifi_ps_mode;     /* receiver: Wi-Fi modem PS mode (0/1/2) */
     uint16_t listen_interval; /* receiver: beacon listen interval for PS max */
+    bool led_enabled;         /* receiver: master switch for the status LED */
+    uint8_t led_gpio;         /* receiver: LED data GPIO; 0 = disabled */
+    uint8_t led_brightness;   /* receiver: global LED brightness (0..255) */
 } runtime_config_t;
 
 /* Persisted blob wire format (NVS glue in main.c does the nvs_set_blob /
@@ -116,9 +132,14 @@ typedef struct {
  * NOTE: the parallel feat/c6-ap-switch branch also introduces this blob helper
  * and bumps the version to 5 (18 bytes, appending ap_enabled). At merge time the
  * two layouts must be folded into one version; the field offsets up to [15] are
- * identical, so only the appended tail differs. */
-#define RUNTIME_CONFIG_BLOB_VERSION 6u
-#define RUNTIME_CONFIG_BLOB_SIZE 22u
+ * identical, so only the appended tail differs.
+ *
+ * v7 appends the status-LED knobs: led_enabled at [22], led_gpio at [23],
+ * led_brightness at [24]; the blob is 25 bytes. The 22-byte v6 prefix is
+ * unchanged, so a v6 blob is a different (wrong) size and is ignored by
+ * runtime_config_decode(), and the device falls back to the defaults. */
+#define RUNTIME_CONFIG_BLOB_VERSION 7u
+#define RUNTIME_CONFIG_BLOB_SIZE 25u
 
 /* Encode cfg into a RUNTIME_CONFIG_BLOB_SIZE-byte blob. No-op when the buffer is
  * NULL or too small. */

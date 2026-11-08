@@ -42,8 +42,13 @@ set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "wall_clock.c" "wall_clock_store.c"
               "energy_totals.c" "energy_totals_store.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
+    # The status LED only exists on the receiver. led_indicator.c compiles to
+    # inert stubs on any target other than the ESP32-C6 (its whole body is behind
+    # CONFIG_IDF_TARGET_ESP32C6), so the classic-ESP32 receiver can list it too;
+    # led_status.c is the pure, host-tested decision module it uses.
     list(APPEND main_srcs "mqtt_bridge.c" "mqtt_publish.c" "mqtt_events.c"
-                          "web_guard.c" "health_policy.c" "health_task.c")
+                          "web_guard.c" "health_policy.c" "health_task.c"
+                          "led_status.c" "led_indicator.c")
 endif()
 if(CONFIG_ESPNOW_ROLE_SENDER)
     list(APPEND main_srcs "tx_batch.c" "uart_sleep_window.c" "uart_recovery.c")

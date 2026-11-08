@@ -115,6 +115,42 @@ build is unchanged until you opt in. Bench note (ESP32-C6): the idle draw is set
 by the always-on Wi-Fi radio, not the CPU — the defaults measure ~0.433 W and
 stacking every knob only reaches ~0.420 W (~3 %); see `AGENTS.md`.
 
+### Status LED (ESP32-C6 receiver)
+
+The ESP32-C6 receiver shows its state on the board's single addressable WS2812
+RGB LED (default **GPIO 8**). It is a dim, slow "heartbeat": a short pulse every
+1.5–2.5 s whose colour names the state, and the strip is written **only when the
+colour or the on/off phase changes** (no continuous refresh, no animation loop).
+The whole feature is compiled out on the sender and on the classic-ESP32 receiver
+(where GPIO 8 is a SPI-flash pin); the LED only exists on the C6.
+
+| State | Colour | Meaning |
+| --- | --- | --- |
+| `boot` | white | first ~1 s after start |
+| `wifi` | amber | station associating to the home WLAN |
+| `ap` | blue | no WLAN configured (SoftAP/setup mode) |
+| `wait` | cyan | associated, no ESP-NOW data yet |
+| `ok` | green | ESP-NOW data flowing (normal) |
+| `error` | red | sender silent > 30 s, WLAN dropped, or web guard tripped |
+| `ota` | magenta | OTA download in progress |
+
+Three persisted knobs (NVS, like the other `set` keys) plus one RAM-only
+diagnostic:
+
+| Key | Range | Default | Effect |
+| --- | --- | --- | --- |
+| `set led <on\|off>` | on/off | `on` | master switch; `off` releases the RMT driver (0 idle current) |
+| `set led-gpio <n>` | 0..48 | `8` | LED data GPIO; `0` disables the LED (clean no-op without LED hardware) |
+| `set led-brightness <n>` | 0..255 | `16` | global brightness; `0` is dark |
+| `set led-status <name\|auto>` | boot/wifi/ap/wait/ok/error/ota/auto | `auto` | force one state for bench work (RAM only, not persisted) |
+
+`set led off` (or `led-gpio 0`) stops the tick and deletes the driver, so the
+LED adds nothing to the receiver's idle draw. At the default brightness 16 the
+lit current is a few mA at most and the ~5 % duty cycle keeps the *average* far
+below 1 mA — negligible next to the always-on Wi-Fi radio (~0.43 W). The strip is
+never refreshed while the colour and phase are unchanged, so the CPU cost is a
+handful of writes per second at most.
+
 ## Repository notes
 
 `AGENTS.md` holds the working notes: build gotchas, the flash layout, the

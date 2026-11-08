@@ -59,6 +59,10 @@ runtime_config_t runtime_config_defaults(void)
          * 'max' is only reached through an explicit 'set ps max'. */
         .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
         .listen_interval = RUNTIME_CONFIG_LISTEN_DEFAULT,
+        /* Status LED: on, GPIO 8 (the C6 devkit default), dim. */
+        .led_enabled = true,
+        .led_gpio = RUNTIME_CONFIG_LED_GPIO_DEFAULT,
+        .led_brightness = RUNTIME_CONFIG_LED_BRIGHTNESS_DEFAULT,
     };
     return cfg;
 }
@@ -161,6 +165,9 @@ void runtime_config_encode(const runtime_config_t *cfg, uint8_t *blob, size_t bl
     blob[19] = cfg->wifi_ps_mode;
     uint16_t listen = cfg->listen_interval;
     memcpy(&blob[20], &listen, sizeof(listen));
+    blob[22] = cfg->led_enabled ? 1u : 0u;
+    blob[23] = cfg->led_gpio;
+    blob[24] = cfg->led_brightness;
 }
 
 bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config_t *cfg)
@@ -195,6 +202,9 @@ bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config
     uint16_t listen = 0;
     memcpy(&listen, &blob[20], sizeof(listen));
     loaded.listen_interval = listen;
+    loaded.led_enabled = blob[22] != 0;
+    loaded.led_gpio = blob[23];
+    loaded.led_brightness = blob[24];
     *cfg = loaded;
     return true;
 }
@@ -420,11 +430,37 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             return false;
         }
         next.listen_interval = (uint16_t)v;
+    } else if (strcmp(key, "led") == 0) {
+        if (!runtime_config_parse_bool(value, &next.led_enabled)) {
+            snprintf(err, err_size, "led: expected on or off\n");
+            return false;
+        }
+    } else if (strcmp(key, "led-gpio") == 0) {
+        char *end = NULL;
+        unsigned long v = strtoul(value, &end, 10);
+        if (end == value || *end != '\0' ||
+            v > RUNTIME_CONFIG_LED_GPIO_MAX) {
+            snprintf(err, err_size, "led-gpio: expected %u..%u (0 disables)\n",
+                     (unsigned)RUNTIME_CONFIG_LED_GPIO_MIN,
+                     (unsigned)RUNTIME_CONFIG_LED_GPIO_MAX);
+            return false;
+        }
+        next.led_gpio = (uint8_t)v;
+    } else if (strcmp(key, "led-brightness") == 0 ||
+               strcmp(key, "led-bright") == 0) {
+        char *end = NULL;
+        unsigned long v = strtoul(value, &end, 10);
+        if (end == value || *end != '\0' || v > RUNTIME_CONFIG_LED_BRIGHTNESS_MAX) {
+            snprintf(err, err_size, "led-brightness: expected 0..%u\n",
+                     (unsigned)RUNTIME_CONFIG_LED_BRIGHTNESS_MAX);
+            return false;
+        }
+        next.led_brightness = (uint8_t)v;
     } else {
         snprintf(err, err_size,
                  "unknown key '%s' (cpu, freq, cpu-min, sleep, retries, txpower, "
                  "beacon, radio-save, wake-interval, wake-window, twt, twt-wake, "
-                 "ps, listen)\n",
+                 "ps, listen, led, led-gpio, led-brightness)\n",
                  key);
         return false;
     }
@@ -520,6 +556,12 @@ void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz)
     if (cfg->listen_interval > RUNTIME_CONFIG_LISTEN_MAX) {
         cfg->listen_interval = RUNTIME_CONFIG_LISTEN_MAX;
     }
+    /* An out-of-range LED GPIO (a persisted value from a build with a wider
+     * range) falls back to the default; led_brightness is a uint8_t, so it is
+     * always in range. */
+    if (cfg->led_gpio > RUNTIME_CONFIG_LED_GPIO_MAX) {
+        cfg->led_gpio = RUNTIME_CONFIG_LED_GPIO_DEFAULT;
+    }
 }
 
 void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_size)
@@ -573,14 +615,17 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              "radio save: %s\n"
              "twt: %s\n"
              "wifi ps: %s\n"
-             "listen interval: %u beacons\n",
+             "listen interval: %u beacons\n"
+             "led: %s gpio=%u brightness=%u\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on"
                               : (runtime_config_light_sleep_allowed()
                                      ? "off"
                                      : "off (unavailable: USB Serial/JTAG console)"),
              (unsigned)cfg->espnow_retries, tx, beacon, wake, twt, ps,
-             (unsigned)cfg->listen_interval);
+             (unsigned)cfg->listen_interval,
+             cfg->led_enabled ? "on" : "off", (unsigned)cfg->led_gpio,
+             (unsigned)cfg->led_brightness);
 }
 
 #ifdef ESP_PLATFORM

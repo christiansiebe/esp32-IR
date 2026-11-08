@@ -482,6 +482,17 @@ python3 "$repo/remote-shell/ha/test_print_health.py"
 
 "$out/test_runtime_config"
 
+# Status-LED decision logic (colour + blink phase per receiver state). Pure C,
+# host-tested like the runtime knobs so a wrong colour/phase cannot slip in.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/led_status.c" \
+    "$here/test_led_status.c" \
+    -o "$out/test_led_status"
+
+"$out/test_led_status"
+
 # Same knobs, but built as the USB Serial/JTAG-console target (ESP32-C6):
 # light sleep must be refused so the /dev/ttyACM* console can never be lost.
 "$cc" -std=c11 -Wall -Wextra -O2 \

@@ -382,6 +382,35 @@ jobs:
             "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image contains the Wi-Fi PS / listen knob"
 
+      - name: Verify the status LED is compiled in (ESP32-C6 receiver)
+        if: matrix.target == 'esp32c6' && startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The WS2812 status LED (main/led_indicator.c) is C6-receiver-only. Its
+          # log strings prove the RMT/led_strip driver is actually linked in, not
+          # just the config flag. The image must also carry the LED console keys.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Status LED on GPIO ' "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Status LED disabled; releasing the RMT driver' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image contains the status-LED path"
+
+      - name: Verify the status LED is absent (sender / classic ESP32)
+        if: matrix.target == 'esp32' || matrix.role == 'sender'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The classic-ESP32 receiver has no WS2812 (its GPIO 8 is a SPI-flash
+          # pin) and the sender has no LED at all, so led_indicator.c must be
+          # compiled to inert stubs: the driver's log strings must not appear.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          if grep -a -q 'Status LED on GPIO ' "build/${{ matrix.role }}/esp32-IR.bin"; then
+            echo "::error::${{ matrix.role }} image unexpectedly contains the status LED"
+            exit 1
+          fi
+          echo "${{ matrix.role }} image correctly omits the status LED"
+
       - name: Stage firmware and flash files
         shell: bash
         run: |

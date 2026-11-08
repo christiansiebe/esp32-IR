@@ -322,6 +322,58 @@ int main(void)
     CHECK(strstr(rbuf, "listen interval: 30") != NULL,
           "render shows the listen interval");
 
+    /* Status-LED knobs. Default: on, GPIO 8, brightness 16. */
+    cfg = runtime_config_defaults();
+    CHECK(cfg.led_enabled, "led is on by default");
+    CHECK(cfg.led_gpio == RUNTIME_CONFIG_LED_GPIO_DEFAULT, "led-gpio defaults to 8");
+    CHECK(cfg.led_brightness == RUNTIME_CONFIG_LED_BRIGHTNESS_DEFAULT,
+          "led-brightness defaults to 16");
+    CHECK(runtime_config_set(&cfg, "led", "off", 240, err, sizeof(err)) &&
+              !cfg.led_enabled,
+          "set led=off");
+    CHECK(runtime_config_set(&cfg, "led", "on", 240, err, sizeof(err)) &&
+              cfg.led_enabled,
+          "set led=on");
+    CHECK(!runtime_config_set(&cfg, "led", "maybe", 240, err, sizeof(err)),
+          "a non-bool led value is rejected");
+    CHECK(runtime_config_set(&cfg, "led-gpio", "0", 240, err, sizeof(err)) &&
+              cfg.led_gpio == 0,
+          "set led-gpio=0 disables the LED");
+    CHECK(runtime_config_set(&cfg, "led-gpio", "48", 240, err, sizeof(err)) &&
+              cfg.led_gpio == 48,
+          "set led-gpio=48 (the hard GPIO limit)");
+    CHECK(!runtime_config_set(&cfg, "led-gpio", "49", 240, err, sizeof(err)),
+          "led-gpio above 48 is rejected");
+    CHECK(!runtime_config_set(&cfg, "led-gpio", "-1", 240, err, sizeof(err)),
+          "a negative led-gpio is rejected");
+    CHECK(runtime_config_set(&cfg, "led-brightness", "255", 240, err, sizeof(err)) &&
+              cfg.led_brightness == 255,
+          "set led-brightness=255");
+    CHECK(runtime_config_set(&cfg, "led-bright", "40", 240, err, sizeof(err)) &&
+              cfg.led_brightness == 40,
+          "the led-bright alias works");
+    CHECK(!runtime_config_set(&cfg, "led-brightness", "256", 240, err, sizeof(err)),
+          "led-brightness above 255 is rejected");
+    /* A rejected LED value leaves the config untouched. */
+    before = cfg;
+    CHECK(!runtime_config_set(&cfg, "led-gpio", "99", 240, err, sizeof(err)) &&
+              cfg.led_gpio == before.led_gpio && cfg.led_enabled == before.led_enabled,
+          "a rejected led-gpio leaves the config unchanged");
+    /* clamp() resets a persisted out-of-range GPIO to the default. */
+    runtime_config_t ledr = runtime_config_defaults();
+    ledr.led_gpio = 200;
+    runtime_config_clamp(&ledr, 240);
+    CHECK(ledr.led_gpio == RUNTIME_CONFIG_LED_GPIO_DEFAULT,
+          "clamp resets an out-of-range led-gpio to the default");
+    /* render() reports the LED knobs. */
+    runtime_config_t lr = runtime_config_defaults();
+    lr.led_enabled = true;
+    lr.led_gpio = 9;
+    lr.led_brightness = 32;
+    runtime_config_render(&lr, rbuf, sizeof(rbuf));
+    CHECK(strstr(rbuf, "led: on gpio=9 brightness=32") != NULL,
+          "render shows the LED knobs");
+
     /* Blob roundtrip: encode then decode restores every knob, including TWT. */
     runtime_config_t rt = runtime_config_defaults();
     rt.cpu_mhz = 160;
@@ -337,6 +389,9 @@ int main(void)
     rt.twt_wake_ms = 1000;
     rt.wifi_ps_mode = RUNTIME_CONFIG_PS_MAX;
     rt.listen_interval = 30;
+    rt.led_enabled = true;
+    rt.led_gpio = 9;
+    rt.led_brightness = 32;
     uint8_t blob[RUNTIME_CONFIG_BLOB_SIZE];
     runtime_config_encode(&rt, blob, sizeof(blob));
     CHECK(blob[0] == RUNTIME_CONFIG_BLOB_VERSION, "blob carries the current version");
@@ -352,7 +407,10 @@ int main(void)
               back.twt_enabled == rt.twt_enabled &&
               back.twt_wake_ms == rt.twt_wake_ms &&
               back.wifi_ps_mode == rt.wifi_ps_mode &&
-              back.listen_interval == rt.listen_interval,
+              back.listen_interval == rt.listen_interval &&
+              back.led_enabled == rt.led_enabled &&
+              back.led_gpio == rt.led_gpio &&
+              back.led_brightness == rt.led_brightness,
           "the blob roundtrip restores every knob");
     /* A wrong version or size is rejected so an old blob is ignored. */
     blob[0] = (uint8_t)(RUNTIME_CONFIG_BLOB_VERSION - 1);
@@ -369,7 +427,10 @@ int main(void)
               cfg.light_sleep == defaults.light_sleep &&
               cfg.twt_enabled == defaults.twt_enabled &&
               cfg.wifi_ps_mode == defaults.wifi_ps_mode &&
-              cfg.listen_interval == defaults.listen_interval,
+              cfg.listen_interval == defaults.listen_interval &&
+              cfg.led_enabled == defaults.led_enabled &&
+              cfg.led_gpio == defaults.led_gpio &&
+              cfg.led_brightness == defaults.led_brightness,
           "reset restores the defaults");
 
     printf("runtime config: %d checks, %d failures\n", g_checks, g_failures);
