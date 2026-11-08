@@ -66,6 +66,25 @@
 #define RUNTIME_CONFIG_TWT_WAKE_MAX_MS 10000u
 #define RUNTIME_CONFIG_TWT_WAKE_DEFAULT_MS 5000u
 
+/* Wi-Fi modem power-save mode (receiver). 0 = off (WIFI_PS_NONE, radio always
+ * awake), 1 = min (WIFI_PS_MIN_MODEM, wake at every DTIM beacon), 2 = max
+ * (WIFI_PS_MAX_MODEM, wake only every listen_interval beacons). The values line
+ * up with wifi_ps_type_t, so the apply path is a plain cast. Default 1 (min)
+ * reproduces the pre-knob behaviour; only an explicit 'set ps max' opts into
+ * the aggressive mode that the FRITZ!Box tolerance test needs.
+ *
+ * listen_interval is in AP beacon intervals and is honoured by the driver only
+ * with WIFI_PS_MAX_MODEM. It is read when the association request is built, so a
+ * change only takes effect after a reconnect (disconnect + connect). 1..255,
+ * default 3 (the IDF default when the field is 0). */
+#define RUNTIME_CONFIG_PS_OFF 0u
+#define RUNTIME_CONFIG_PS_MIN 1u
+#define RUNTIME_CONFIG_PS_MAX 2u
+#define RUNTIME_CONFIG_PS_DEFAULT RUNTIME_CONFIG_PS_MIN
+#define RUNTIME_CONFIG_LISTEN_MIN 1u
+#define RUNTIME_CONFIG_LISTEN_MAX 255u
+#define RUNTIME_CONFIG_LISTEN_DEFAULT 3u
+
 typedef struct {
     uint32_t cpu_mhz;      /* DFS ceiling (max_freq) */
     uint32_t cpu_min_mhz;  /* DFS floor (min_freq); == cpu_mhz pins the clock */
@@ -78,21 +97,24 @@ typedef struct {
     uint16_t wake_window_ms;  /* radio-awake time per wake interval; 0 = off */
     bool twt_enabled;         /* receiver: negotiate Wi-Fi 6 TWT with the AP */
     uint16_t twt_wake_ms;     /* iTWT wake interval in ms (500..10000) */
+    uint8_t wifi_ps_mode;     /* receiver: Wi-Fi modem PS mode (0/1/2) */
+    uint16_t listen_interval; /* receiver: beacon listen interval for PS max */
 } runtime_config_t;
 
 /* Persisted blob wire format (NVS glue in main.c does the nvs_set_blob /
- * nvs_get_blob around it; kept pure C so it is host-tested). v5 appends the
- * Wi-Fi 6 TWT knobs (twt_enabled, twt_wake_ms); the reserved trailing byte keeps
- * the 16-bit fields aligned for a future field. An old (shorter) or different-
- * version blob is the wrong size and is ignored by runtime_config_decode(), so
- * the caller keeps its defaults (TWT off).
+ * nvs_get_blob around it; kept pure C so it is host-tested). v5 appended the
+ * Wi-Fi 6 TWT knobs (twt_enabled, twt_wake_ms). v6 fills the byte that v5 left
+ * reserved with wifi_ps_mode and appends listen_interval at [20..21], so the
+ * 16-bit listen interval stays aligned; the blob is 22 bytes. An old (shorter)
+ * or different-version blob is the wrong size and is ignored by
+ * runtime_config_decode(), so the caller keeps its defaults.
  *
  * NOTE: the parallel feat/c6-ap-switch branch also introduces this blob helper
  * and bumps the version to 5 (18 bytes, appending ap_enabled). At merge time the
  * two layouts must be folded into one version; the field offsets up to [15] are
  * identical, so only the appended tail differs. */
-#define RUNTIME_CONFIG_BLOB_VERSION 5u
-#define RUNTIME_CONFIG_BLOB_SIZE 20u
+#define RUNTIME_CONFIG_BLOB_VERSION 6u
+#define RUNTIME_CONFIG_BLOB_SIZE 22u
 
 /* Encode cfg into a RUNTIME_CONFIG_BLOB_SIZE-byte blob. No-op when the buffer is
  * NULL or too small. */
@@ -120,6 +142,10 @@ bool runtime_config_parse_cpu_mhz_min(const char *text, uint32_t ceiling_mhz,
 
 /* Parse "on"/"off" (also 1/0, true/false) for a boolean knob. */
 bool runtime_config_parse_bool(const char *text, bool *out);
+
+/* Parse the Wi-Fi modem power-save mode: "off"/"none"/"0", "min"/"1",
+ * "max"/"2". Returns false for anything else (leaving *out untouched). */
+bool runtime_config_parse_ps(const char *text, uint8_t *out);
 
 /* Split a TWT wake interval (in microseconds) into the mantissa/exponent pair
  * the iTWT setup frame carries, where the interval is

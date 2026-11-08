@@ -55,6 +55,10 @@ runtime_config_t runtime_config_defaults(void)
         /* Wi-Fi 6 TWT is opt-in; the wake cadence is only used once enabled. */
         .twt_enabled = false,
         .twt_wake_ms = RUNTIME_CONFIG_TWT_WAKE_DEFAULT_MS,
+        /* Modem sleep is the receiver default (matches the pre-knob behaviour);
+         * 'max' is only reached through an explicit 'set ps max'. */
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
+        .listen_interval = RUNTIME_CONFIG_LISTEN_DEFAULT,
     };
     return cfg;
 }
@@ -154,7 +158,9 @@ void runtime_config_encode(const runtime_config_t *cfg, uint8_t *blob, size_t bl
     blob[16] = cfg->twt_enabled ? 1u : 0u;
     uint16_t twt_wake = cfg->twt_wake_ms;
     memcpy(&blob[17], &twt_wake, sizeof(twt_wake));
-    /* blob[19] is reserved (keeps the 16-bit fields aligned). */
+    blob[19] = cfg->wifi_ps_mode;
+    uint16_t listen = cfg->listen_interval;
+    memcpy(&blob[20], &listen, sizeof(listen));
 }
 
 bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config_t *cfg)
@@ -185,6 +191,10 @@ bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config
     uint16_t twt_wake = 0;
     memcpy(&twt_wake, &blob[17], sizeof(twt_wake));
     loaded.twt_wake_ms = twt_wake;
+    loaded.wifi_ps_mode = blob[19];
+    uint16_t listen = 0;
+    memcpy(&listen, &blob[20], sizeof(listen));
+    loaded.listen_interval = listen;
     *cfg = loaded;
     return true;
 }
@@ -202,6 +212,27 @@ bool runtime_config_parse_bool(const char *text, bool *out)
     if (strcmp(text, "off") == 0 || strcmp(text, "0") == 0 ||
         strcmp(text, "false") == 0) {
         *out = false;
+        return true;
+    }
+    return false;
+}
+
+bool runtime_config_parse_ps(const char *text, uint8_t *out)
+{
+    if (text == NULL || out == NULL) {
+        return false;
+    }
+    if (strcmp(text, "off") == 0 || strcmp(text, "none") == 0 ||
+        strcmp(text, "0") == 0) {
+        *out = RUNTIME_CONFIG_PS_OFF;
+        return true;
+    }
+    if (strcmp(text, "min") == 0 || strcmp(text, "1") == 0) {
+        *out = RUNTIME_CONFIG_PS_MIN;
+        return true;
+    }
+    if (strcmp(text, "max") == 0 || strcmp(text, "2") == 0) {
+        *out = RUNTIME_CONFIG_PS_MAX;
         return true;
     }
     return false;
@@ -371,10 +402,29 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             return false;
         }
         next.twt_wake_ms = (uint16_t)v;
+    } else if (strcmp(key, "ps") == 0 || strcmp(key, "wifi-ps") == 0) {
+        uint8_t mode = 0;
+        if (!runtime_config_parse_ps(value, &mode)) {
+            snprintf(err, err_size, "ps: expected off, min or max (0/1/2)\n");
+            return false;
+        }
+        next.wifi_ps_mode = mode;
+    } else if (strcmp(key, "listen") == 0 || strcmp(key, "listen-interval") == 0) {
+        char *end = NULL;
+        unsigned long v = strtoul(value, &end, 10);
+        if (end == value || *end != '\0' ||
+            v < RUNTIME_CONFIG_LISTEN_MIN || v > RUNTIME_CONFIG_LISTEN_MAX) {
+            snprintf(err, err_size, "listen: expected %u..%u beacon intervals\n",
+                     (unsigned)RUNTIME_CONFIG_LISTEN_MIN,
+                     (unsigned)RUNTIME_CONFIG_LISTEN_MAX);
+            return false;
+        }
+        next.listen_interval = (uint16_t)v;
     } else {
         snprintf(err, err_size,
                  "unknown key '%s' (cpu, freq, cpu-min, sleep, retries, txpower, "
-                 "beacon, radio-save, wake-interval, wake-window, twt, twt-wake)\n",
+                 "beacon, radio-save, wake-interval, wake-window, twt, twt-wake, "
+                 "ps, listen)\n",
                  key);
         return false;
     }
@@ -457,6 +507,19 @@ void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz)
     if (cfg->twt_wake_ms > RUNTIME_CONFIG_TWT_WAKE_MAX_MS) {
         cfg->twt_wake_ms = RUNTIME_CONFIG_TWT_WAKE_MAX_MS;
     }
+    /* An out-of-range PS mode falls back to the default (min modem); the listen
+     * interval is clamped into the 1..255 the association request carries. A
+     * persisted 0 (IDF's "use the default 3") is raised to the explicit default
+     * so 'config' always reports a concrete value. */
+    if (cfg->wifi_ps_mode > RUNTIME_CONFIG_PS_MAX) {
+        cfg->wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT;
+    }
+    if (cfg->listen_interval < RUNTIME_CONFIG_LISTEN_MIN) {
+        cfg->listen_interval = RUNTIME_CONFIG_LISTEN_MIN;
+    }
+    if (cfg->listen_interval > RUNTIME_CONFIG_LISTEN_MAX) {
+        cfg->listen_interval = RUNTIME_CONFIG_LISTEN_MAX;
+    }
 }
 
 void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_size)
@@ -496,6 +559,10 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
             snprintf(twt, sizeof(twt), "on (%u ms)", (unsigned)cfg->twt_wake_ms);
         }
     }
+    static const char *const ps_names[] = {"off", "min", "max"};
+    const char *ps = cfg->wifi_ps_mode <= RUNTIME_CONFIG_PS_MAX
+                         ? ps_names[cfg->wifi_ps_mode]
+                         : "min";
     snprintf(out, out_size,
              "cpu ceiling: %u MHz\n"
              "cpu floor: %u MHz\n"
@@ -504,13 +571,16 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              "wifi txpower: %s\n"
              "ap beacon: %s\n"
              "radio save: %s\n"
-             "twt: %s\n",
+             "twt: %s\n"
+             "wifi ps: %s\n"
+             "listen interval: %u beacons\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on"
                               : (runtime_config_light_sleep_allowed()
                                      ? "off"
                                      : "off (unavailable: USB Serial/JTAG console)"),
-             (unsigned)cfg->espnow_retries, tx, beacon, wake, twt);
+             (unsigned)cfg->espnow_retries, tx, beacon, wake, twt, ps,
+             (unsigned)cfg->listen_interval);
 }
 
 #ifdef ESP_PLATFORM

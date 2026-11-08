@@ -364,6 +364,24 @@ jobs:
           fi
           echo "${{ matrix.role }} image correctly omits the Wi-Fi 6 TWT path"
 
+      - name: Verify the Wi-Fi PS / listen-interval knob (receiver)
+        if: startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The 'set ps off|min|max' + 'set listen <n>' knobs drive
+          # WIFI_PS_MAX_MODEM + listen_interval and force a reconnect so the new
+          # interval reaches the association request. The strings live in main.c's
+          # apply_wifi_ps_config()/wifi_ps_apply_and_reconnect() (receiver-only),
+          # so grepping the built app proves the path is linked in. Both the
+          # classic-ESP32 and the C6 receiver carry it (modem sleep is not HE).
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Wi-Fi PS mode set to ' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'reconnecting to carry listen_interval=' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image contains the Wi-Fi PS / listen knob"
+
       - name: Stage firmware and flash files
         shell: bash
         run: |

@@ -250,6 +250,9 @@ static char g_wifi_ssid[WIFI_SSID_MAX_LEN + 1];
 static char g_wifi_password[WIFI_PASSWORD_MAX_LEN + 1];
 static bool g_wifi_configured;
 static bool g_wifi_connected;
+/* Defined with the NVS glue further down; fill_station_config() (above it) needs
+ * the persisted listen_interval. */
+static runtime_config_t *active_runtime_config(void);
 #if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
 /* Receiver: is a Wi-Fi 6 TWT agreement currently active? Kept separate from the
  * persisted twt_enabled knob so a teardown can still run after 'set twt off'
@@ -595,6 +598,11 @@ static void fill_station_config(wifi_config_t *config)
     memset(config, 0, sizeof(*config));
     strlcpy((char *)config->sta.ssid, g_wifi_ssid, sizeof(config->sta.ssid));
     strlcpy((char *)config->sta.password, g_wifi_password, sizeof(config->sta.password));
+    /* The driver only honours listen_interval with WIFI_PS_MAX_MODEM, and it is
+     * read when the association request is built, so a change needs a reconnect
+     * (the console 'set listen' does that). Default 3 (the IDF default when the
+     * field is 0) keeps the pre-knob behaviour on the non-HE build. */
+    config->sta.listen_interval = active_runtime_config()->listen_interval;
 }
 
 /* Last-known-wall-clock persistence; defined below (the SNTP callback needs it
@@ -903,6 +911,12 @@ static void energy_totals_start(void)
 /* Defined near apply_power_management() below; the Wi-Fi event handler and the
  * console 'set txpower|beacon|radio-save|wake-*' commands call it. */
 static void apply_radio_power_config(void);
+/* Push the persisted Wi-Fi modem PS mode (off/min/max) into the driver; defined
+ * with the other radio power knobs below. */
+static void apply_wifi_ps_config(void);
+/* Re-apply the PS mode and force a reconnect so a changed listen_interval is
+ * carried in a fresh association request; called by the console 'set ps|listen'. */
+static void wifi_ps_apply_and_reconnect(void);
 #endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
@@ -5626,10 +5640,12 @@ static bool g_runtime_config_ready;
 #define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
 #define RUNTIME_CONFIG_NVS_KEY "cfg"
 /* The wire layout lives in runtime_config.c (runtime_config_encode/decode) so it
- * is host-tested; the version there is v5, which appends the Wi-Fi 6 TWT knobs
- * (twt_enabled, twt_wake_ms) to the blob (16 -> 20 bytes). An older, shorter blob
- * is the wrong size and is ignored by runtime_config_decode(), so a device falls
- * back to the defaults (TWT off) instead of misreading the new fields.
+ * is host-tested; the version there is v6, which fills the byte v5 left reserved
+ * with wifi_ps_mode and appends listen_interval (20 -> 22 bytes). v5 had already
+ * appended the Wi-Fi 6 TWT knobs (twt_enabled, twt_wake_ms) to the 16-byte v4
+ * blob. An older, shorter blob is the wrong size and is ignored by
+ * runtime_config_decode(), so a device falls back to the defaults instead of
+ * misreading the new fields.
  * NOTE: the parallel feat/c6-ap-switch branch also bumps the version to 5 (18
  * bytes, appending ap_enabled); the two layouts must be merged into one version
  * at merge time (offsets up to [15] are identical). */
@@ -5913,13 +5929,14 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     char key[24] = {0};
     char value[32] = {0};
     if (sscanf(args, "%23s %31s", key, value) != 2) {
-        /* Keep the classic-ESP32 (non-HE) build's text unchanged. */
+        /* TWT is HE-only, so it is advertised only on the C6; the ps/listen
+         * knobs apply to every receiver (modem sleep is not HE-specific). */
 #if SOC_WIFI_HE_SUPPORT
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen> <value>\n");
 #else
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen> <value>\n");
 #endif
         return;
     }
@@ -5974,6 +5991,12 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         strcmp(key, "wake-window") == 0 || strcmp(key, "window") == 0) {
         apply_radio_power_config();
     }
+    /* 'set ps' and 'set listen' both need a reconnect: listen_interval is read
+     * from the station config only when the association request is built. */
+    if (strcmp(key, "ps") == 0 || strcmp(key, "wifi-ps") == 0 ||
+        strcmp(key, "listen") == 0 || strcmp(key, "listen-interval") == 0) {
+        wifi_ps_apply_and_reconnect();
+    }
 #if SOC_WIFI_HE_SUPPORT
     /* TWT only takes effect once associated; a 'set' while connected re-negotiates
      * (and 'set twt off' tears the agreement down). */
@@ -6008,6 +6031,11 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
     runtime_config_reset(cfg);
     runtime_config_erase();
     runtime_config_apply(cfg);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Restore the default modem PS mode + listen interval and reconnect so the
+     * default interval reaches the association request. */
+    wifi_ps_apply_and_reconnect();
+#endif
 #if CONFIG_ESPNOW_ROLE_SENDER
     uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
     uart_sleep_set_enabled(cfg->light_sleep);
@@ -6039,10 +6067,18 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
     if (cfg->twt_enabled) {
         snprintf(twt, sizeof(twt), " twt=%ums", (unsigned)cfg->twt_wake_ms);
     }
-    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u%s%s%s\n",
+    /* Always show the effective modem PS mode and listen interval: they are the
+     * levers of the FRITZ!Box tolerance test, so 'config' must report them even
+     * at their defaults. */
+    static const char *const ps_names[] = {"off", "min", "max"};
+    const char *ps = cfg->wifi_ps_mode <= RUNTIME_CONFIG_PS_MAX
+                         ? ps_names[cfg->wifi_ps_mode]
+                         : "min";
+    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on" : "off",
-             (unsigned)cfg->espnow_retries, radio, wake, twt);
+             (unsigned)cfg->espnow_retries, radio, wake, twt, ps,
+             (unsigned)cfg->listen_interval);
 }
 
 static void web_console_register_commands(void)
@@ -6056,11 +6092,11 @@ static void web_console_register_commands(void)
      * (HE), so it is only advertised on the HE-capable targets (the C6). */
 #if SOC_WIFI_HE_SUPPORT
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen",
                          console_cmd_set);
 #else
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen",
                          console_cmd_set);
 #endif
 #else
@@ -8665,17 +8701,17 @@ static void apply_radio_power_config(void)
      * (Espressif's examples set the window first, then the interval). Only the
      * ESP32-C6 family honours the ESP-NOW wake window; on the classic ESP32 the
      * call is accepted but breaks the link, so this is opt-in (radio-save off by
-     * default). Turning it off restores the always-awake radio (WIFI_PS_MIN_MODEM
-     * + a zeroed wake window), i.e. exactly the pre-knob behaviour. */
+     * default). Turning it off zeroes the wake window again (the always-awake
+     * radio). The Wi-Fi PS *mode* itself is owned by apply_wifi_ps_config() (the
+     * 'set ps' knob), not by this function, so the two knobs do not fight. */
     if (cfg->radio_save) {
-        esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
         esp_err_t err = esp_now_set_wake_window(cfg->wake_window_ms);
         if (err == ESP_OK) {
             err = esp_wifi_connectionless_module_set_wake_interval(cfg->wake_interval_ms);
         }
-        if (ps_err != ESP_OK || err != ESP_OK) {
-            ESP_LOGW(TAG, "Could not enable radio sleep (ps=%s, window=%s)",
-                     esp_err_to_name(ps_err), esp_err_to_name(err));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Could not enable radio sleep (window=%s)",
+                     esp_err_to_name(err));
         } else {
             ESP_LOGI(TAG, "Radio sleep on: modem sleeps, ESP-NOW wakes every %u ms "
                           "for %u ms",
@@ -8683,8 +8719,78 @@ static void apply_radio_power_config(void)
         }
     } else {
         esp_err_t err = esp_now_set_wake_window(0);
-        (void)esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
         ESP_LOGI(TAG, "Radio sleep off: radio always awake (%s)", esp_err_to_name(err));
+    }
+    /* Re-assert the configured modem PS mode (off/min/max). Doing it here keeps
+     * the mode in force across a (re)association, where the wake window is
+     * re-applied; the two are independent levers. */
+    apply_wifi_ps_config();
+}
+
+/* Push the persisted Wi-Fi modem power-save mode into the driver. Must run
+ * after esp_wifi_start(): before it, esp_wifi_set_ps() returns
+ * ESP_ERR_WIFI_NOT_INIT and is silently ignored. The stored value maps 1:1 onto
+ * wifi_ps_type_t (0/1/2), so a plain cast is safe. listen_interval is *not*
+ * applied here: the driver reads it from the station config only when the
+ * association request is built, so 'set listen' (and 'set ps') performs a
+ * reconnect via wifi_ps_apply_and_reconnect().
+ *
+ * Coexistence with the ESP-NOW radio-save knob: the modem PS mode and the
+ * ESP-NOW connectionless wake window (apply_radio_power_config) are two
+ * independent levers. WIFI_PS_MAX_MODEM makes the *station* skip beacons up to
+ * listen_interval, but ESP-NOW RX is governed by esp_now_set_wake_window() /
+ * esp_wifi_connectionless_module_set_wake_interval(): a frame that arrives while
+ * the modem is parked is only delivered if it falls inside an ESP-NOW wake
+ * window. A large listen_interval therefore does not by itself break ESP-NOW,
+ * but it parks the radio for longer stretches, so a too-large interval (or a
+ * long ESP-NOW wake interval) can make the ~5 s sender frames arrive late or be
+ * missed. That is exactly what the bench test measures; this knob only exposes
+ * the value, it does not force a mode. */
+static void apply_wifi_ps_config(void)
+{
+    runtime_config_t *cfg = active_runtime_config();
+    wifi_ps_type_t mode = (wifi_ps_type_t)cfg->wifi_ps_mode;
+    if (cfg->wifi_ps_mode > RUNTIME_CONFIG_PS_MAX) {
+        mode = WIFI_PS_MIN_MODEM;
+    }
+    esp_err_t err = esp_wifi_set_ps(mode);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not set Wi-Fi PS mode %u: %s",
+                 (unsigned)cfg->wifi_ps_mode, esp_err_to_name(err));
+        return;
+    }
+    const char *name = mode == WIFI_PS_NONE ? "off"
+                       : mode == WIFI_PS_MAX_MODEM ? "max"
+                                                   : "min";
+    ESP_LOGI(TAG, "Wi-Fi PS mode set to %s (listen_interval=%u beacons)",
+             name, (unsigned)cfg->listen_interval);
+}
+
+/* Re-apply the PS mode and force a reconnect so a changed listen_interval is
+ * carried in a fresh association request (the driver reads it only then). Also
+ * refreshes the station config so fill_station_config()'s new interval is what
+ * the driver associates with. Mirrors the proven order in the web-config save
+ * path: disconnect, set_config, connect. A no-op reconnect when no WLAN is
+ * configured (the PS mode itself is still applied). */
+static void wifi_ps_apply_and_reconnect(void)
+{
+    apply_wifi_ps_config();
+    if (!g_wifi_configured) {
+        return;
+    }
+    (void)esp_wifi_disconnect(); /* ESP_ERR_WIFI_NOT_CONNECT when already idle */
+    wifi_config_t sta_config;
+    fill_station_config(&sta_config);
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+    if (err == ESP_OK) {
+        err = esp_wifi_connect();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi reconnect after a PS change failed: %s",
+                 esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi PS applied; reconnecting to carry listen_interval=%u",
+                 (unsigned)active_runtime_config()->listen_interval);
     }
 }
 #endif

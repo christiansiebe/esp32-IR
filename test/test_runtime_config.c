@@ -263,6 +263,65 @@ int main(void)
     CHECK(tw.twt_wake_ms == RUNTIME_CONFIG_TWT_WAKE_MAX_MS,
           "clamp lowers a too-large twt wake interval");
 
+    /* Wi-Fi modem PS mode + listen interval. Mode defaults to min (the
+     * pre-knob behaviour); 'max' is the aggressive mode the FRITZ!Box test
+     * needs. listen_interval is in AP beacon intervals. */
+    cfg = runtime_config_defaults();
+    CHECK(cfg.wifi_ps_mode == RUNTIME_CONFIG_PS_DEFAULT,
+          "wifi ps defaults to min modem");
+    CHECK(cfg.listen_interval == RUNTIME_CONFIG_LISTEN_DEFAULT,
+          "listen interval defaults to 3");
+    uint8_t ps = 0xFF;
+    CHECK(runtime_config_parse_ps("off", &ps) && ps == RUNTIME_CONFIG_PS_OFF,
+          "parse_ps off");
+    CHECK(runtime_config_parse_ps("min", &ps) && ps == RUNTIME_CONFIG_PS_MIN,
+          "parse_ps min");
+    CHECK(runtime_config_parse_ps("max", &ps) && ps == RUNTIME_CONFIG_PS_MAX,
+          "parse_ps max");
+    CHECK(runtime_config_parse_ps("2", &ps) && ps == RUNTIME_CONFIG_PS_MAX,
+          "parse_ps numeric 2");
+    CHECK(!runtime_config_parse_ps("turbo", &ps), "parse_ps rejects junk");
+    CHECK(runtime_config_set(&cfg, "ps", "max", 240, err, sizeof(err)) &&
+              cfg.wifi_ps_mode == RUNTIME_CONFIG_PS_MAX,
+          "set ps=max");
+    CHECK(runtime_config_set(&cfg, "ps", "off", 240, err, sizeof(err)) &&
+              cfg.wifi_ps_mode == RUNTIME_CONFIG_PS_OFF,
+          "set ps=off");
+    CHECK(!runtime_config_set(&cfg, "ps", "turbo", 240, err, sizeof(err)),
+          "an unknown ps mode is rejected");
+    CHECK(runtime_config_set(&cfg, "listen", "20", 240, err, sizeof(err)) &&
+              cfg.listen_interval == 20,
+          "set listen=20");
+    CHECK(runtime_config_set(&cfg, "listen-interval", "5", 240, err, sizeof(err)) &&
+              cfg.listen_interval == 5,
+          "the listen-interval alias works");
+    CHECK(!runtime_config_set(&cfg, "listen", "0", 240, err, sizeof(err)),
+          "listen=0 is rejected (minimum 1)");
+    CHECK(!runtime_config_set(&cfg, "listen", "256", 240, err, sizeof(err)),
+          "listen above 255 is rejected");
+    /* clamp() forces a persisted PS mode/listen interval into range. */
+    runtime_config_t psr = runtime_config_defaults();
+    psr.wifi_ps_mode = 9;
+    psr.listen_interval = 0;
+    runtime_config_clamp(&psr, 240);
+    CHECK(psr.wifi_ps_mode == RUNTIME_CONFIG_PS_DEFAULT,
+          "clamp resets an out-of-range PS mode to the default");
+    CHECK(psr.listen_interval == RUNTIME_CONFIG_LISTEN_MIN,
+          "clamp raises listen=0 to the minimum");
+    psr.listen_interval = 9999;
+    runtime_config_clamp(&psr, 240);
+    CHECK(psr.listen_interval == RUNTIME_CONFIG_LISTEN_MAX,
+          "clamp lowers an over-large listen interval");
+    /* render() reports the PS mode and listen interval. */
+    runtime_config_t rr = runtime_config_defaults();
+    rr.wifi_ps_mode = RUNTIME_CONFIG_PS_MAX;
+    rr.listen_interval = 30;
+    char rbuf[512];
+    runtime_config_render(&rr, rbuf, sizeof(rbuf));
+    CHECK(strstr(rbuf, "wifi ps: max") != NULL, "render shows the PS mode");
+    CHECK(strstr(rbuf, "listen interval: 30") != NULL,
+          "render shows the listen interval");
+
     /* Blob roundtrip: encode then decode restores every knob, including TWT. */
     runtime_config_t rt = runtime_config_defaults();
     rt.cpu_mhz = 160;
@@ -276,6 +335,8 @@ int main(void)
     rt.wake_window_ms = 250;
     rt.twt_enabled = true;
     rt.twt_wake_ms = 1000;
+    rt.wifi_ps_mode = RUNTIME_CONFIG_PS_MAX;
+    rt.listen_interval = 30;
     uint8_t blob[RUNTIME_CONFIG_BLOB_SIZE];
     runtime_config_encode(&rt, blob, sizeof(blob));
     CHECK(blob[0] == RUNTIME_CONFIG_BLOB_VERSION, "blob carries the current version");
@@ -289,7 +350,9 @@ int main(void)
               back.wake_interval_ms == rt.wake_interval_ms &&
               back.wake_window_ms == rt.wake_window_ms &&
               back.twt_enabled == rt.twt_enabled &&
-              back.twt_wake_ms == rt.twt_wake_ms,
+              back.twt_wake_ms == rt.twt_wake_ms &&
+              back.wifi_ps_mode == rt.wifi_ps_mode &&
+              back.listen_interval == rt.listen_interval,
           "the blob roundtrip restores every knob");
     /* A wrong version or size is rejected so an old blob is ignored. */
     blob[0] = (uint8_t)(RUNTIME_CONFIG_BLOB_VERSION - 1);
@@ -304,7 +367,9 @@ int main(void)
     CHECK(cfg.cpu_mhz == defaults.cpu_mhz &&
               cfg.cpu_min_mhz == defaults.cpu_min_mhz &&
               cfg.light_sleep == defaults.light_sleep &&
-              cfg.twt_enabled == defaults.twt_enabled,
+              cfg.twt_enabled == defaults.twt_enabled &&
+              cfg.wifi_ps_mode == defaults.wifi_ps_mode &&
+              cfg.listen_interval == defaults.listen_interval,
           "reset restores the defaults");
 
     printf("runtime config: %d checks, %d failures\n", g_checks, g_failures);
