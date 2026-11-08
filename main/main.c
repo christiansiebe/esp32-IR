@@ -52,6 +52,7 @@
 #include "power_history.h"
 #include "energy_totals.h"
 #include "runtime_config.h"
+#include "net_config.h"
 #include "sml_selftest.h"
 #include "version.h"
 #include "wall_clock.h"
@@ -600,8 +601,8 @@ static void fill_station_config(wifi_config_t *config)
     strlcpy((char *)config->sta.password, g_wifi_password, sizeof(config->sta.password));
     /* The driver only honours listen_interval with WIFI_PS_MAX_MODEM, and it is
      * read when the association request is built, so a change needs a reconnect
-     * (the console 'set listen' does that). Default 3 (the IDF default when the
-     * field is 0) keeps the pre-knob behaviour on the non-HE build. */
+     * (the console 'set listen' does that). The default (10) keeps the pre-knob
+     * behaviour on the non-HE build. */
     config->sta.listen_interval = active_runtime_config()->listen_interval;
 }
 
@@ -5653,6 +5654,9 @@ static esp_err_t simulate_page_handler(httpd_req_t *req)
  * erases the namespace and returns to the compile-time defaults. */
 static runtime_config_t g_runtime_config;
 static bool g_runtime_config_ready;
+/* Safe-fallback bookkeeping: which knob (if any) the driver rejected and was
+ * repaired to its default. Surfaced by 'config' and reset by 'reset-config'. */
+static runtime_config_health_t g_runtime_health;
 
 #define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
 #define RUNTIME_CONFIG_NVS_KEY "cfg"
@@ -5710,8 +5714,10 @@ static void runtime_config_erase_namespace(void)
 }
 #endif
 
-/* Load the persisted knobs, clamped to what this build allows. A missing or
- * malformed blob leaves *cfg untouched (the caller keeps the defaults). */
+/* Load the persisted knobs, clamped to what this build allows. A missing blob
+ * is the normal first-boot case (silent). A blob that is present but the wrong
+ * size, wrong version or undecodable is logged and ignored, so the caller keeps
+ * the defaults instead of silently running an unexpected config. */
 static void runtime_config_load(runtime_config_t *cfg)
 {
     nvs_handle_t handle;
@@ -5722,11 +5728,25 @@ static void runtime_config_load(runtime_config_t *cfg)
     size_t len = sizeof(blob);
     esp_err_t err = nvs_get_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, &len);
     nvs_close(handle);
-    if (err != ESP_OK || len != sizeof(blob)) {
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "runtime config: NVS read failed (%s); using defaults",
+                 esp_err_to_name(err));
+        return;
+    }
+    if (len != sizeof(blob)) {
+        ESP_LOGW(TAG, "runtime config: stored blob is %u bytes, expected %u; "
+                      "using defaults",
+                 (unsigned)len, (unsigned)sizeof(blob));
         return;
     }
     runtime_config_t loaded;
     if (!runtime_config_decode(blob, len, &loaded)) {
+        ESP_LOGW(TAG, "runtime config: stored blob v%u is undecodable; using "
+                      "defaults",
+                 blob[0]);
         return;
     }
     runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
@@ -5741,6 +5761,33 @@ static runtime_config_t *active_runtime_config(void)
         g_runtime_config_ready = true;
     }
     return &g_runtime_config;
+}
+
+/* Apply the knobs and, when the PM API rejects them, fall back to the safe
+ * defaults so a rejected value is never kept. `key` names the knob being set
+ * (NULL for a whole-config apply). Persists the result either way (the value
+ * survives a reboot and an OTA). Returns true when the requested config is in
+ * effect; false when a repair happened. The health record makes the event
+ * visible in 'config'. */
+static bool runtime_config_apply_checked(runtime_config_t *cfg, const char *key)
+{
+    runtime_config_health_clear(&g_runtime_health);
+    bool ok = runtime_config_apply(cfg);
+    if (!ok) {
+        ESP_LOGW(TAG, "runtime config: apply failed for '%s'; repairing to default",
+                 key != NULL ? key : "config");
+        runtime_config_repair(cfg, key, "esp_pm_configure() rejected",
+                              &g_runtime_health);
+        if (!runtime_config_apply(cfg)) {
+            ESP_LOGE(TAG, "runtime config: apply still failed after repair; using "
+                          "full defaults");
+            runtime_config_repair(cfg, NULL, "apply failed after repair",
+                                  &g_runtime_health);
+            (void)runtime_config_apply(cfg);
+        }
+    }
+    runtime_config_store(cfg);
+    return ok;
 }
 
 /* Append NVS partition usage to out. Shared by the `test storage` console
@@ -5941,22 +5988,97 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
     snprintf(out, out_size, "unknown test '%s' (sleep, sml, espnow, storage)\n", what);
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* `set wifi-ssid <ssid>` / `set wifi-pass <pass>`: validate, persist to the
+ * metercfg namespace and reconnect (same disconnect/set_config/connect order as
+ * the /save form). An empty password keeps the stored one, so an SSID-only
+ * change cannot wipe the credential. On any error the stored values and the
+ * running connection are left untouched. */
+static void console_set_wifi_credential(const char *key, const char *value,
+                                        char *out, size_t out_size)
+{
+    char err[128] = {0};
+    char ssid[NET_CONFIG_SSID_MAX + 1] = {0};
+    char password[NET_CONFIG_WIFI_PASS_MAX + 1] = {0};
+    strlcpy(ssid, g_wifi_ssid, sizeof(ssid));
+    strlcpy(password, g_wifi_password, sizeof(password));
+
+    if (strcmp(key, "wifi-ssid") == 0) {
+        if (!net_config_validate_ssid(value, err, sizeof(err))) {
+            snprintf(out, out_size, "%s", err);
+            return;
+        }
+        strlcpy(ssid, value, sizeof(ssid));
+    } else {
+        /* An empty password means "keep the stored one". */
+        if (value[0] != '\0') {
+            if (!net_config_validate_wifi_pass(value, err, sizeof(err))) {
+                snprintf(out, out_size, "%s", err);
+                return;
+            }
+            strlcpy(password, value, sizeof(password));
+        }
+    }
+
+    esp_err_t save_err = save_wifi_credentials(ssid, password);
+    if (save_err != ESP_OK) {
+        snprintf(out, out_size, "wifi: could not persist (%s)\n",
+                 esp_err_to_name(save_err));
+        return;
+    }
+
+    (void)esp_wifi_disconnect();
+    wifi_config_t sta_config;
+    fill_station_config(&sta_config);
+    esp_err_t err2 = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+    if (err2 == ESP_OK) {
+        err2 = esp_wifi_connect();
+    }
+    if (err2 != ESP_OK) {
+        snprintf(out, out_size, "wifi %s saved, but reconnect failed (%s)\n", key,
+                 esp_err_to_name(err2));
+        return;
+    }
+    snprintf(out, out_size, "wifi %s saved; reconnecting to \"%s\"\n", key, ssid);
+}
+#endif /* !CONFIG_ESPNOW_ROLE_SENDER */
+
 static void console_cmd_set(const char *args, char *out, size_t out_size)
 {
     char key[24] = {0};
-    char value[32] = {0};
-    if (sscanf(args, "%23s %31s", key, value) != 2) {
+    char value[NET_CONFIG_MQTT_URI_MAX + 1] = {0};
+    if (sscanf(args, "%23s %160s", key, value) != 2) {
         /* TWT is HE-only, so it is advertised only on the C6; the ps/listen
          * knobs apply to every receiver (modem sleep is not HE-specific). */
-#if SOC_WIFI_HE_SUPPORT
+#if CONFIG_ESPNOW_ROLE_SENDER
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries> <value>\n");
+#elif SOC_WIFI_HE_SUPPORT
+        snprintf(out, out_size,
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #else
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #endif
         return;
     }
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* WLAN credentials and MQTT settings do not live in runtime_config: they go
+     * straight to their own NVS namespace and trigger a reconnect / bridge
+     * restart. Handled here before the runtime_config_set() fallthrough. */
+    if (strcmp(key, "wifi-ssid") == 0 || strcmp(key, "wifi-pass") == 0) {
+        console_set_wifi_credential(key, value, out, out_size);
+        return;
+    }
+    if (strncmp(key, "mqtt-", 5) == 0) {
+        char err[128] = {0};
+        (void)mqtt_bridge_set_config(key, value, err, sizeof(err));
+        snprintf(out, out_size, "%s", err);
+        return;
+    }
+#endif
+
     runtime_config_t *cfg = active_runtime_config();
     char err[64] = {0};
     if (!runtime_config_set(cfg, key, value, CONFIG_ESPNOW_CPU_MAX_MHZ, err,
@@ -5964,9 +6086,9 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         snprintf(out, out_size, "%s", err);
         return;
     }
-    bool applied = runtime_config_apply(cfg);
-    /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only). */
-    runtime_config_store(cfg);
+    /* Apply with the safe fallback: a rejected value is dropped and the default
+     * restored (persisted) instead of being kept. */
+    bool applied = runtime_config_apply_checked(cfg, key);
 
     /* Say so when the stored value differs from what was asked for (a value
      * below the Wi-Fi minimum or off the DFS grid is snapped, not rejected). */
@@ -6031,8 +6153,16 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     int written = snprintf(out, out_size,
                            "%s=%s%s%s\n", key, value, note,
                            applied ? "" : " (hardware rejected the change)");
-    if (written > 0 && (size_t)written < out_size) {
-        runtime_config_render(cfg, out + written, out_size - (size_t)written);
+    size_t used = (written > 0 && (size_t)written < out_size) ? (size_t)written : 0;
+    if (used != 0) {
+        runtime_config_render(cfg, out + used, out_size - used);
+    }
+    /* Surface a safe-fallback repair from a radio-side apply (txpower/beacon/
+     * radio-save/ps) that happened after the PM apply above. */
+    used = strlen(out);
+    if (used < out_size) {
+        runtime_config_health_render(&g_runtime_health, out + used,
+                                     out_size - used);
     }
 }
 
@@ -6045,6 +6175,7 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
      * have TWT off); after the reset the flag is false and teardown would skip. */
     twt_teardown();
 #endif
+    runtime_config_health_clear(&g_runtime_health);
     runtime_config_reset(cfg);
     runtime_config_erase();
     runtime_config_apply(cfg);
@@ -6091,11 +6222,18 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
     const char *ps = cfg->wifi_ps_mode <= RUNTIME_CONFIG_PS_MAX
                          ? ps_names[cfg->wifi_ps_mode]
                          : "min";
-    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u\n",
-             (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
-             cfg->light_sleep ? "on" : "off",
-             (unsigned)cfg->espnow_retries, radio, wake, twt, ps,
-             (unsigned)cfg->listen_interval);
+    int used = snprintf(out, out_size,
+                        "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u\n",
+                        (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
+                        cfg->light_sleep ? "on" : "off",
+                        (unsigned)cfg->espnow_retries, radio, wake, twt, ps,
+                        (unsigned)cfg->listen_interval);
+    /* Surface a safe-fallback repair (a knob the driver rejected and that was
+     * reset to its default) so the operator sees why a value differs. */
+    if (used > 0 && (size_t)used < out_size) {
+        runtime_config_health_render(&g_runtime_health, out + used,
+                                     out_size - (size_t)used);
+    }
 }
 
 static void web_console_register_commands(void)
@@ -6106,14 +6244,16 @@ static void web_console_register_commands(void)
 #if !CONFIG_ESPNOW_ROLE_SENDER
     /* txpower/beacon only apply on the receiver (the sender has no SoftAP and
      * drives its own radio), so only advertise them there. TWT needs Wi-Fi 6
-     * (HE), so it is only advertised on the HE-capable targets (the C6). */
+     * (HE), so it is only advertised on the HE-capable targets (the C6). The
+     * wifi-*/mqtt-* keys persist to their own NVS namespaces and reconnect /
+     * restart the bridge. */
 #if SOC_WIFI_HE_SUPPORT
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #else
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #endif
 #else
@@ -8657,10 +8797,25 @@ static void apply_power_management(void)
     };
     esp_err_t err = esp_pm_configure(&pm);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Could not apply the CPU config (%u-%u MHz): %s",
+        /* Safe fallback at boot: a persisted value the PM API rejects must not
+         * be kept. Drop to the compile-time defaults, persist them and try once
+         * more, so the device still comes up with a usable clock. */
+        ESP_LOGW(TAG, "Could not apply the persisted CPU config (%u-%u MHz): %s; "
+                      "repairing to defaults",
                  (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
                  esp_err_to_name(err));
-        return;
+        runtime_config_repair(cfg, "cpu", "esp_pm_configure() rejected at boot",
+                              &g_runtime_health);
+        runtime_config_store(cfg);
+        pm.max_freq_mhz = (int)cfg->cpu_mhz;
+        pm.min_freq_mhz = (int)cfg->cpu_min_mhz;
+        pm.light_sleep_enable = cfg->light_sleep && allow_sleep;
+        err = esp_pm_configure(&pm);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "CPU config still rejected after repair: %s",
+                     esp_err_to_name(err));
+            return;
+        }
     }
     if (!allow_sleep) {
         static esp_pm_lock_handle_t s_no_light_sleep;
@@ -8691,8 +8846,12 @@ static void apply_radio_power_config(void)
         /* esp_wifi_set_max_tx_power takes 0.25 dBm steps. */
         esp_err_t err = esp_wifi_set_max_tx_power((int8_t)(cfg->wifi_txpower_dbm * 4));
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Could not set Wi-Fi TX power to %u dBm: %s",
+            ESP_LOGW(TAG, "Could not set Wi-Fi TX power to %u dBm (%s); "
+                          "repairing to the chip default",
                      (unsigned)cfg->wifi_txpower_dbm, esp_err_to_name(err));
+            runtime_config_repair(cfg, "txpower", "esp_wifi_set_max_tx_power() failed",
+                                  &g_runtime_health);
+            runtime_config_store(cfg);
         } else {
             ESP_LOGI(TAG, "Wi-Fi TX power set to %u dBm",
                      (unsigned)cfg->wifi_txpower_dbm);
@@ -8704,8 +8863,12 @@ static void apply_radio_power_config(void)
             ap_config.ap.beacon_interval = cfg->ap_beacon_tu;
             esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Could not set AP beacon interval to %u TU: %s",
+                ESP_LOGW(TAG, "Could not set AP beacon interval to %u TU (%s); "
+                              "repairing to the IDF default",
                          (unsigned)cfg->ap_beacon_tu, esp_err_to_name(err));
+                runtime_config_repair(cfg, "beacon", "esp_wifi_set_config() failed",
+                                      &g_runtime_health);
+                runtime_config_store(cfg);
             } else {
                 ESP_LOGI(TAG, "AP beacon interval set to %u TU", (unsigned)cfg->ap_beacon_tu);
             }
@@ -8727,8 +8890,15 @@ static void apply_radio_power_config(void)
             err = esp_wifi_connectionless_module_set_wake_interval(cfg->wake_interval_ms);
         }
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Could not enable radio sleep (window=%s)",
+            /* This is the documented "accepted but breaks the link" case on the
+             * classic ESP32: do not keep a radio-save setting the driver cannot
+             * honour, drop it (and the wake knobs) back to off and persist. */
+            ESP_LOGW(TAG, "Could not enable radio sleep (%s); repairing to off",
                      esp_err_to_name(err));
+            runtime_config_repair(cfg, "radio-save", "radio-save apply failed",
+                                  &g_runtime_health);
+            runtime_config_store(cfg);
+            (void)esp_now_set_wake_window(0);
         } else {
             ESP_LOGI(TAG, "Radio sleep on: modem sleeps, ESP-NOW wakes every %u ms "
                           "for %u ms",
@@ -8772,9 +8942,36 @@ static void apply_wifi_ps_config(void)
     }
     esp_err_t err = esp_wifi_set_ps(mode);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Could not set Wi-Fi PS mode %u: %s",
+        /* Safe fallback: the driver rejected the mode, so drop it and re-apply
+         * the compile-time default (persisted) rather than leaving the device in
+         * an unknown power state. */
+        ESP_LOGW(TAG, "Could not set Wi-Fi PS mode %u (%s); repairing to default",
                  (unsigned)cfg->wifi_ps_mode, esp_err_to_name(err));
-        return;
+        runtime_config_repair(cfg, "ps", "esp_wifi_set_ps() failed",
+                              &g_runtime_health);
+        runtime_config_store(cfg);
+        mode = (wifi_ps_type_t)cfg->wifi_ps_mode;
+        err = esp_wifi_set_ps(mode);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Wi-Fi PS mode still rejected after repair: %s",
+                     esp_err_to_name(err));
+            return;
+        }
+    }
+    /* Self-check: read the live mode back and repair if it does not match the
+     * value we asked for (a driver that silently ignored the request). Only
+     * meaningful once associated: before that the driver may still report the
+     * pre-association default and a "repair" would clobber the user's setting. */
+    wifi_ps_type_t observed = WIFI_PS_NONE;
+    if (g_wifi_connected && esp_wifi_get_ps(&observed) == ESP_OK &&
+        !runtime_config_verify(cfg, (int)observed, 0, &g_runtime_health)) {
+        ESP_LOGW(TAG, "Wi-Fi PS verify mismatch (wanted %u, got %u); repairing",
+                 (unsigned)cfg->wifi_ps_mode, (unsigned)observed);
+        runtime_config_repair(cfg, "ps", "esp_wifi_get_ps() disagreed",
+                              &g_runtime_health);
+        runtime_config_store(cfg);
+        (void)esp_wifi_set_ps((wifi_ps_type_t)cfg->wifi_ps_mode);
+        mode = (wifi_ps_type_t)cfg->wifi_ps_mode;
     }
     const char *name = mode == WIFI_PS_NONE ? "off"
                        : mode == WIFI_PS_MAX_MODEM ? "max"

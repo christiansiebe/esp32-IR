@@ -44,6 +44,15 @@ bool mqtt_bridge_started(void);
  * pass). Exposed for diagnostics; mqtt_bridge_start() calls it internally. */
 bool mqtt_bridge_load_config(void);
 
+/* Persist one MQTT setting and restart the bridge so the change takes effect.
+ * key is one of "mqtt-uri", "mqtt-prefix", "mqtt-user" or "mqtt-pass"; value is
+ * validated first (net_config.c) and written to NVS only when valid. On success
+ * the running client is stopped, destroyed and re-created from the new NVS
+ * values. On failure the stored value and the running client are left untouched
+ * and a short reason is written into err. Empty user/pass clear the credential. */
+bool mqtt_bridge_set_config(const char *key, const char *value, char *err,
+                            size_t err_size);
+
 /* One-line human-readable status for the web console. */
 void mqtt_bridge_status(char *out, size_t out_size);
 

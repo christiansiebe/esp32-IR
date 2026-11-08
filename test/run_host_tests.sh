@@ -494,6 +494,17 @@ python3 "$repo/remote-shell/ha/test_print_health.py"
 
 "$out/test_runtime_config_usb_console"
 
+# WLAN/MQTT configuration validators behind `set wifi-*` / `set mqtt-*`: a bad
+# SSID/URI/prefix must be rejected before it reaches NVS or the driver. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/net_config.c" \
+    "$here/test_net_config.c" \
+    -o "$out/test_net_config"
+
+"$out/test_net_config"
+
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.
 cxx="${CXX:-g++}"

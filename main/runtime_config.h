@@ -37,12 +37,16 @@
  * power and how often the AP beacons. 0 means "leave the chip/IDF default
  * alone"; a positive value is clamped into the ranges below. TX power is in dBm
  * (esp_wifi_set_max_tx_power takes 0.25 dBm steps, so it is scaled on apply);
- * the beacon interval is in IDF time units (1 TU = 1024 us) and must be a
- * multiple of 100. */
-#define RUNTIME_CONFIG_TXPOWER_MIN_DBM 2u
+ * the beacon interval is in IDF time units (1 TU = 1024 us, so 60000 TU = the
+ * ~61 s maximum the uint16 field holds) and must be a multiple of 100.
+ *
+ * The bounds track the hard IDF/SoC limits rather than a hand-picked "sane"
+ * window: 1 dBm is the documented minimum of the 0.25 dBm TX-power scale, and
+ * 20 dBm is the chip maximum. The beacon interval is a uint16 TU count. */
+#define RUNTIME_CONFIG_TXPOWER_MIN_DBM 1u
 #define RUNTIME_CONFIG_TXPOWER_MAX_DBM 20u
 #define RUNTIME_CONFIG_BEACON_MIN_TU 100u
-#define RUNTIME_CONFIG_BEACON_MAX_TU 6000u
+#define RUNTIME_CONFIG_BEACON_MAX_TU 60000u
 
 /* Receiver radio sleep (opt-in). The Wi-Fi modem parks between wake windows and
  * the ESP-NOW connectionless module is told how often to wake and for how long
@@ -52,9 +56,14 @@
  * ESP-NOW wake window - on the classic ESP32 the API is accepted but breaks the
  * link, which is why this is receiver-only and off by default. */
 #define RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS 10u
-#define RUNTIME_CONFIG_WAKE_INTERVAL_MAX_MS 10000u
+#define RUNTIME_CONFIG_WAKE_INTERVAL_MAX_MS 65535u
 #define RUNTIME_CONFIG_WAKE_WINDOW_MIN_MS 1u
-#define RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS 10000u
+#define RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS 65535u
+
+/* Per-frame ESP-NOW send attempts. The value is only stored/displayed today
+ * (no send loop consumes it yet), so the ceiling is simply the 8-bit range a
+ * future uint8 consumer would accept. */
+#define RUNTIME_CONFIG_RETRIES_MAX 255u
 
 /* Wi-Fi 6 target wake time (iTWT), opt-in and receiver-only. Instead of waking
  * at every DTIM beacon the associated station negotiates a longer wake cadence
@@ -67,7 +76,7 @@
  * the knob is currently ineffective and the modem-PS knob ('set ps') is the
  * fallback. twt_wake_ms is the negotiated wake interval in milliseconds. */
 #define RUNTIME_CONFIG_TWT_WAKE_MIN_MS 500u
-#define RUNTIME_CONFIG_TWT_WAKE_MAX_MS 10000u
+#define RUNTIME_CONFIG_TWT_WAKE_MAX_MS 65535u
 #define RUNTIME_CONFIG_TWT_WAKE_DEFAULT_MS 5000u
 
 /* Wi-Fi modem power-save mode (receiver). 0 = off (WIFI_PS_NONE, radio always
@@ -79,15 +88,16 @@
  *
  * listen_interval is in AP beacon intervals and is honoured by the driver only
  * with WIFI_PS_MAX_MODEM. It is read when the association request is built, so a
- * change only takes effect after a reconnect (disconnect + connect). 1..255,
- * default 3 (the IDF default when the field is 0). */
+ * change only takes effect after a reconnect (disconnect + connect). The field
+ * is a uint16 in the association request, so the full 1..65535 range is
+ * reachable; the default is 10. */
 #define RUNTIME_CONFIG_PS_OFF 0u
 #define RUNTIME_CONFIG_PS_MIN 1u
 #define RUNTIME_CONFIG_PS_MAX 2u
 #define RUNTIME_CONFIG_PS_DEFAULT RUNTIME_CONFIG_PS_MIN
 #define RUNTIME_CONFIG_LISTEN_MIN 1u
-#define RUNTIME_CONFIG_LISTEN_MAX 255u
-#define RUNTIME_CONFIG_LISTEN_DEFAULT 3u
+#define RUNTIME_CONFIG_LISTEN_MAX 65535u
+#define RUNTIME_CONFIG_LISTEN_DEFAULT 10u
 
 typedef struct {
     uint32_t cpu_mhz;      /* DFS ceiling (max_freq) */
@@ -100,7 +110,7 @@ typedef struct {
     uint16_t wake_interval_ms;/* ESP-NOW connectionless wake interval; 0 = off */
     uint16_t wake_window_ms;  /* radio-awake time per wake interval; 0 = off */
     bool twt_enabled;         /* receiver: negotiate Wi-Fi 6 TWT with the AP */
-    uint16_t twt_wake_ms;     /* iTWT wake interval in ms (500..10000) */
+    uint16_t twt_wake_ms;     /* iTWT wake interval in ms (500..65535) */
     uint8_t wifi_ps_mode;     /* receiver: Wi-Fi modem PS mode (0/1/2) */
     uint16_t listen_interval; /* receiver: beacon listen interval for PS max */
 } runtime_config_t;
@@ -175,11 +185,57 @@ bool runtime_config_light_sleep_allowed(void);
 bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *value,
                         uint32_t ceiling_mhz, char *err, size_t err_size);
 
+/* --- Safe fallback / self-repair -------------------------------------------
+ * A knob the hardware or the Wi-Fi/PM driver rejects must not be kept: the
+ * value is dropped, the safe compile-time default is applied, and the failure
+ * is surfaced in 'config'. The bookkeeping is pure C so it is host-tested
+ * (test_runtime_config.c). */
+
+#define RUNTIME_CONFIG_HEALTH_REASON_MAX 96
+#define RUNTIME_CONFIG_HEALTH_KEY_MAX 24
+
+typedef struct {
+    bool error;                 /* a repair happened and is still the last event */
+    char key[RUNTIME_CONFIG_HEALTH_KEY_MAX];  /* knob that was repaired */
+    char reason[RUNTIME_CONFIG_HEALTH_REASON_MAX]; /* human-readable cause */
+    uint32_t repairs;           /* repairs since boot */
+} runtime_config_health_t;
+
+/* Reset the health record to "all good". */
+void runtime_config_health_clear(runtime_config_health_t *health);
+
+/* Record a repair: sets error/reason/key and bumps repairs. */
+void runtime_config_health_note(runtime_config_health_t *health, const char *key,
+                                const char *reason);
+
+/* Fallback after a failed apply or a verify mismatch. Records the failure for
+ * `key` and resets it in *cfg to its compile-time default: only that field when
+ * the key is known, the whole config when key is NULL/"config"/unknown. Returns
+ * true when a change was made (so the caller re-applies and persists the safe
+ * value). */
+bool runtime_config_repair(runtime_config_t *cfg, const char *key,
+                           const char *reason, runtime_config_health_t *health);
+
+/* Verify the observed live state against the desired cfg. observed_ps is the
+ * value esp_wifi_get_ps() returned (or -1 when the driver is not up);
+ * observed_pm_max_mhz is the max_freq_mhz esp_pm_get_configuration() reports (or
+ * 0 when PM is not configured). A mismatch records the failure (health->key
+ * "ps"/"cpu") and returns false; a match, or an unavailable observation, returns
+ * true and leaves health untouched. Pure, so the self-check is host-tested. */
+bool runtime_config_verify(const runtime_config_t *cfg, int observed_ps,
+                           int observed_pm_max_mhz,
+                           runtime_config_health_t *health);
+
+/* One-line "last apply error: <reason> (repaired to default)" for 'config', or
+ * an empty string when there is no pending error. */
+void runtime_config_health_render(const runtime_config_health_t *health, char *out,
+                                  size_t out_size);
+
 /* Clamp every field into the range the current build allows: the CPU ceiling to
  * [80, min(CPU_MAX_MHZ, ceiling_mhz)] snapped to a real DFS step, the floor to
- * [40, ceiling], and the retries to 0..10. Used when a persisted config is
- * loaded back, so an image built with a different ceiling cannot restore an
- * out-of-range clock. */
+ * [40, ceiling], and every radio knob to its hard IDF/SoC range. Used when a
+ * persisted config is loaded back, so an image built with a different ceiling
+ * cannot restore an out-of-range clock. */
 void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz);
 
 /* Render the current values into out. */
