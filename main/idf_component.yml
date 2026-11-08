@@ -11,3 +11,9 @@ dependencies:
     version: "^1.7.19"
   espressif/mdns:
     version: "^1.14.0"
+  # WS2812 status LED driver (RMT backend) for the ESP32-C6 receiver. The
+  # receiver-only source that uses it (main/led_indicator.c) is compiled out on
+  # the sender, but the dependency is declared unconditionally so the component
+  # manager resolves it for every build.
+  espressif/led_strip:
+    version: "^3.0.0"

@@ -115,6 +115,70 @@ build is unchanged until you opt in. Bench note (ESP32-C6): the idle draw is set
 by the always-on Wi-Fi radio, not the CPU — the defaults measure ~0.433 W and
 stacking every knob only reaches ~0.420 W (~3 %); see `AGENTS.md`.
 
+### Status LED (ESP32-C6 receiver)
+
+The ESP32-C6 receiver shows its state on the board's single addressable WS2812
+RGB LED (default **GPIO 8**). It is a dim, slow "heartbeat": a short pulse every
+1.5–2.5 s whose colour names the state, and the strip is written **only when the
+colour or the on/off phase changes** (no continuous refresh, no animation loop).
+The whole feature is compiled out on the sender and on the classic-ESP32 receiver
+(where GPIO 8 is a SPI-flash pin); the LED only exists on the C6.
+
+| State | Colour | Meaning |
+| --- | --- | --- |
+| `boot` | white | first ~1 s after start |
+| `wifi` | amber | station associating to the home WLAN |
+| `ap` | blue | no WLAN configured (SoftAP/setup mode) |
+| `wait` | cyan | associated, no ESP-NOW data yet |
+| `ok` | green | ESP-NOW data flowing (normal) |
+| `error` | red | sender silent > 30 s, WLAN dropped, or web guard tripped |
+| `ota` | magenta | OTA download in progress |
+
+Three persisted knobs (NVS, like the other `set` keys) plus one RAM-only
+diagnostic:
+
+| Key | Range | Default | Effect |
+| --- | --- | --- | --- |
+| `set led <on\|off>` | on/off | `on` | master switch; `off` releases the RMT driver (0 idle current) |
+| `set led-gpio <n>` | 0..48 | `8` | LED data GPIO; `0` disables the LED (clean no-op without LED hardware) |
+| `set led-brightness <n>` | 0..255 | `16` | global brightness; `0` is dark |
+| `set led-sleep <on\|off>` | on/off | `on` | let the heartbeat stand down while the chip light-sleeps; `off` holds the CPU awake for exact pulse timing |
+| `set led-status <name\|auto>` | boot/wifi/ap/wait/ok/error/ota/auto | `auto` | force one state for bench work (RAM only, not persisted) |
+
+The same legend is available in the web UI at **`/led`** (linked from the
+dashboard's *System* menu); it live-highlights the state the receiver is
+currently showing, read from `/api/dashboard` (`led_status`/`led_active`/
+`led_sleep`).
+
+`set led off` (or `led-gpio 0`) stops the tick and deletes the driver, so the
+LED adds nothing to the receiver's idle draw. At the default brightness 16 the
+lit current is a few mA at most and the ~5 % duty cycle keeps the *average* far
+below 1 mA — negligible next to the always-on Wi-Fi radio (~0.43 W). The strip is
+never refreshed while the colour and phase are unchanged, so the CPU cost is a
+handful of writes per second at most. The tick is a **one-shot timer armed for
+the next blink edge** (pulse start / pulse end), not a free-running periodic
+timer, so with `led-sleep on` the chip can park in light sleep between pulses and
+the phase stays correct (it is derived from the wall clock). `led-sleep off` is
+only for bench work that needs jitter-free timing.
+
+### C6 receiver light sleep
+
+The ESP32-C6 receiver can use automatic light sleep (with the Wi-Fi radio kept
+alive by modem sleep / the ESP-NOW wake window), which is what actually lowers
+the idle draw — the always-on radio dominates. Light sleep was previously
+disabled outright on the C6 because it gates the USB Serial/JTAG PHY and a park
+with a USB host attached loses `/dev/ttyACM*` for good. The C6 image now sets
+`CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION`, so IDF itself holds an
+`ESP_PM_NO_LIGHT_SLEEP` lock for as long as a host is attached (a charger/power
+bank does not count) and releases it otherwise; light sleep is therefore safe and
+**on by default** (`set sleep on|off`). An *unassociated* receiver needs
+`set radio-save on` before the radio's APB lock is released and the park can
+engage; an associated one already parks between DTIM beacons via modem sleep. If
+the sender goes silent the link-fallback drops light sleep **for the rest of that
+boot** (not persisted), so a bad park cannot reboot-loop the device while a
+routine sender maintenance gap does not disable the saving forever; a reboot
+re-arms it. See `docs/radio-sleep-break-even.md`.
+
 ## Repository notes
 
 `AGENTS.md` holds the working notes: build gotchas, the flash layout, the

@@ -317,18 +317,27 @@ jobs:
         run: |
           set -euo pipefail
           # The C6 console is the USB Serial/JTAG peripheral, which light sleep
-          # powers down: the port then never re-enumerates and the device is
-          # unreachable over USB. The guard refuses light sleep on such a build.
-          # The strings below live in runtime_config.c (USB-console branch) and
-          # the receiver power path only, so grepping the built app proves the
-          # guard is compiled in and not just the config flag.
+          # powers down: without protection the port never re-enumerates and the
+          # device becomes unreachable over USB. IDF's CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION
+          # closes that hole -- the USJ driver holds an ESP_PM_NO_LIGHT_SLEEP lock
+          # for as long as a host is attached (SOF packets; a charger does not
+          # count) -- so light sleep may be enabled by default here. Assert both
+          # the console choice and the guard, and that the guard-less fallback
+          # (still compiled in as a safety net for an old sdkconfig) is present.
           grep -q '^CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y$' sdkconfig
+          grep -q '^CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y$' sdkconfig
           test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          # Safety-net strings: the runtime branch that still refuses light sleep
+          # when the guard is absent (runtime_config.c render + main.c backstop).
           grep -a -q 'off (unavailable: USB Serial/JTAG console)' \
             "build/${{ matrix.role }}/esp32-IR.bin"
           grep -a -q 'Light sleep disabled: the USB Serial/JTAG console' \
             "build/${{ matrix.role }}/esp32-IR.bin"
-          echo "${{ matrix.role }} image refuses light sleep (USB console guarded)"
+          # The status LED now stands down during light sleep (led_sleep knob);
+          # this string proves the PM-aware LED path is linked in.
+          grep -a -q 'brightness %u, sleep %s' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image enables light sleep behind the USB-host guard"
 
       - name: Verify Wi-Fi 6 TWT is compiled in (ESP32-C6)
         if: matrix.target == 'esp32c6' && startsWith(matrix.role, 'receiver')
@@ -381,6 +390,35 @@ jobs:
           grep -a -q 'reconnecting to carry listen_interval=' \
             "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image contains the Wi-Fi PS / listen knob"
+
+      - name: Verify the status LED is compiled in (ESP32-C6 receiver)
+        if: matrix.target == 'esp32c6' && startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The WS2812 status LED (main/led_indicator.c) is C6-receiver-only. Its
+          # log strings prove the RMT/led_strip driver is actually linked in, not
+          # just the config flag. The image must also carry the LED console keys.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Status LED on GPIO ' "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Status LED disabled; releasing the RMT driver' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image contains the status-LED path"
+
+      - name: Verify the status LED is absent (sender / classic ESP32)
+        if: matrix.target == 'esp32' || matrix.role == 'sender'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The classic-ESP32 receiver has no WS2812 (its GPIO 8 is a SPI-flash
+          # pin) and the sender has no LED at all, so led_indicator.c must be
+          # compiled to inert stubs: the driver's log strings must not appear.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          if grep -a -q 'Status LED on GPIO ' "build/${{ matrix.role }}/esp32-IR.bin"; then
+            echo "::error::${{ matrix.role }} image unexpectedly contains the status LED"
+            exit 1
+          fi
+          echo "${{ matrix.role }} image correctly omits the status LED"
 
       - name: Stage firmware and flash files
         shell: bash

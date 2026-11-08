@@ -51,6 +51,8 @@
 #include "link_fallback.h"
 #include "power_history.h"
 #include "energy_totals.h"
+#include "led_indicator.h"
+#include "led_status.h"
 #include "runtime_config.h"
 #include "sml_selftest.h"
 #include "version.h"
@@ -250,6 +252,24 @@ static char g_wifi_ssid[WIFI_SSID_MAX_LEN + 1];
 static char g_wifi_password[WIFI_PASSWORD_MAX_LEN + 1];
 static bool g_wifi_configured;
 static bool g_wifi_connected;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Status-LED inputs. g_led_boot_until_ms keeps the LED white for a moment after
+ * boot; g_led_ota_active is set while an OTA is being received; g_led_data_seen
+ * flips true on the first received ESP-NOW frame and g_led_last_data_ms records
+ * when, so "OK" means data actually flows (and goes back to ERROR when it
+ * stops). g_led_wifi_was_connected tells "WLAN lost" apart from "WLAN never
+ * configured" (the latter is AP mode, not an error). */
+static int64_t g_led_boot_until_ms;
+static volatile bool g_led_ota_active;
+static volatile bool g_led_data_seen;
+static volatile uint32_t g_led_last_data_ms;
+static volatile bool g_led_wifi_was_connected;
+/* Sender silent for this long turns the LED red (well above the 5 s send cycle,
+ * so a transient gap does not flap). */
+#define LED_DATA_STALE_MS 30000u
+/* Dashboard silent for this long (web_guard) also shows red. */
+#define LED_WEB_STALE_MS 60000u
+#endif
 /* Defined with the NVS glue further down; fill_station_config() (above it) needs
  * the persisted listen_interval. */
 static runtime_config_t *active_runtime_config(void);
@@ -911,12 +931,21 @@ static void energy_totals_start(void)
 /* Defined near apply_power_management() below; the Wi-Fi event handler and the
  * console 'set txpower|beacon|radio-save|wake-*' commands call it. */
 static void apply_radio_power_config(void);
+/* Apply the persisted CPU/light-sleep knobs (esp_pm_configure); defined below,
+ * re-run by the receiver's link-fallback self-heal when it disables light sleep. */
+static void apply_power_management(void);
 /* Push the persisted Wi-Fi modem PS mode (off/min/max) into the driver; defined
  * with the other radio power knobs below. */
 static void apply_wifi_ps_config(void);
 /* Re-apply the PS mode and force a reconnect so a changed listen_interval is
  * carried in a fresh association request; called by the console 'set ps|listen'. */
 static void wifi_ps_apply_and_reconnect(void);
+/* Status LED (receiver). led_effective_status() folds the live receiver state
+ * into the LED state enum; led_refresh() pushes it to the indicator. Defined
+ * late (they read OTA/health/telemetry state declared further down), but the
+ * Wi-Fi event handler and the OTA paths call them, so they are declared here. */
+static led_status_t led_effective_status(void);
+static void led_refresh(void);
 #endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
@@ -937,7 +966,13 @@ static void wifi_event_handler(void *arg,
         const wifi_event_sta_connected_t *event = event_data;
         g_wifi_connected = true;
         g_espnow_channel = event->channel;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        g_led_wifi_was_connected = true;
+#endif
         ESP_LOGI(TAG, "Connected to configured Wi-Fi on channel %u", event->channel);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        led_refresh();
+#endif
 #if CONFIG_ESPNOW_ROLE_SENDER
         /* Now that the station is associated, enable the ESP-NOW connectionless
          * wake window: only at connected status does the Wi-Fi driver release
@@ -962,6 +997,10 @@ static void wifi_event_handler(void *arg,
         const wifi_event_sta_disconnected_t *event = event_data;
         g_wifi_connected = false;
         ESP_LOGW(TAG, "Wi-Fi station disconnected (reason %u)", event->reason);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        /* The LED shows ERROR (WLAN lost) until the reconnect succeeds. */
+        led_refresh();
+#endif
 #if CONFIG_ESPNOW_ROLE_SENDER
 #if CONFIG_ESPNOW_SENDER_ASSOCIATE
         /* Re-associate with the receiver AP so Wi-Fi modem sleep keeps the APB
@@ -2524,6 +2563,13 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 #endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
+    /* First inbound frame: the sender is alive, so the LED leaves the "waiting
+     * for sender" state and shows OK. */
+    if (!g_led_data_seen) {
+        g_led_data_seen = true;
+    }
+    g_led_last_data_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    led_refresh();
     /* Bootstrap the sender MAC from any inbound frame, whatever its type. The
      * receiver needs the MAC to send diagnostics/history requests, but gating
      * that on a fully valid SML packet means a silent SML path (no meter head,
@@ -2998,6 +3044,10 @@ static void power_sample_timer_callback(void *arg)
     if (enqueue_completed_interval) {
         mqtt_bridge_publish_history(&completed_interval);
     }
+    /* Fold the 1 Hz state into the LED: this is where "sender went silent" and
+     * "web_guard tripped" are noticed. led_refresh() writes the strip only when
+     * the colour/phase actually changed, so the 1 Hz call is nearly free. */
+    led_refresh();
 #endif
 }
 
@@ -3878,6 +3928,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "<div class=\"group\"><h3>System</h3>"
         "<a href=\"/console\">Debug-Konsole</a>"
         "<a href=\"/bootlog\">Boot-Log</a>"
+        "<a href=\"/led\">Status-LED</a>"
         "<a href=\"/simulate\">Neustart-Simulation</a>"
         "<a href=\"/config\">WLAN</a>"
         "<a href=\"/update\">Firmware-Update</a></div>"
@@ -4083,7 +4134,9 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        "\"transport_losses\":%lu,\"transport_reorders\":%lu,"
                        "\"cpu_freq_mhz\":%d,\"cpu_freq_max_mhz\":%d,"
                        "\"cpu_freq_min_mhz\":%d,\"sleep_state\":%u,"
-                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu}",
+                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu,"
+                       "\"led_status\":\"%s\",\"led_active\":%u,"
+                       "\"led_sleep\":%u}",
                        fw_version(),
                        readings[0], readings[1], readings[2],
                        average_json,
@@ -4099,7 +4152,10 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        pm_min_freq_mhz,
                        (unsigned int)g_sleep_state,
                        (unsigned int)(pm_config.light_sleep_enable ? 1 : 0),
-                       (unsigned long)g_sleep_accumulated_ms);
+                       (unsigned long)g_sleep_accumulated_ms,
+                       led_status_name(led_indicator_status()),
+                       (unsigned int)(led_indicator_is_active() ? 1 : 0),
+                       (unsigned int)(active_runtime_config()->led_sleep ? 1 : 0));
     if (len < 0 || (size_t)len >= sizeof(payload)) {
         return ESP_FAIL;
     }
@@ -5054,6 +5110,90 @@ static esp_err_t bootlog_page_handler(httpd_req_t *req)
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Status-LED legend: what each colour means on the C6 receiver's WS2812, plus
+ * the runtime knobs. The page polls /api/dashboard (already served) to
+ * highlight the state the LED is showing right now; it needs no key, like the
+ * other GET-only pages. */
+static esp_err_t led_page_handler(httpd_req_t *req)
+{
+    static const char page[] =
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<title>Status-LED</title>"
+        "<style>body{font-family:Arial,sans-serif;margin:24px;background:#10151f;"
+        "color:#e5edf7}.card{background:#182330;padding:20px;border-radius:12px}"
+        "table{border-collapse:collapse;width:100%;max-width:640px}"
+        "th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #2c3e50;"
+        "vertical-align:middle}th{color:#9fb4c8;font-size:0.8rem;text-transform:uppercase;"
+        "letter-spacing:0.05em}.dot{display:inline-block;width:16px;height:16px;"
+        "border-radius:50%;margin-right:8px;border:1px solid #0b0f16;vertical-align:middle}"
+        ".on{outline:2px solid #78d6ff;outline-offset:2px}"
+        "code{background:#0b0f16;padding:2px 6px;border-radius:5px}"
+        ".muted{color:#8aa0b8;font-size:0.9rem}a{color:#78d6ff}"
+        "tr.live{background:rgba(120,214,255,0.10)}</style></head><body>"
+        "<div class=\"card\"><h1>Status-LED (ESP32-C6-Empf&#228;nger)</h1>"
+        "<p class=\"muted\">Eine adressierbare WS2812-RGB-LED (Standard <code>GPIO 8</code>). "
+        "Sie pulsiert langsam und dunkel (&bdquo;Herzschlag&ldquo;, ca. 100&ndash;150&nbsp;ms "
+        "alle 1,5&ndash;2,5&nbsp;s); die Farbe nennt den Zustand. Der Streifen wird nur "
+        "bei Farb- oder Phasenwechsel geschrieben (kein Dauer-Refresh).</p>"
+        "<p>Gerade angezeigt: <strong id=\"now\">&#8230;</strong></p>"
+        "<table id=\"legend\"><thead><tr><th>Farbe</th><th>Zustand</th>"
+        "<th>Bedeutung</th></tr></thead><tbody>"
+        "<tr data-s=\"boot\"><td><span class=\"dot\" style=\"background:#ffffff\"></span>"
+        "wei&szlig;</td><td><code>boot</code></td><td>erste ~1&nbsp;s nach dem Start "
+        "(dauerhaft an)</td></tr>"
+        "<tr data-s=\"wifi\"><td><span class=\"dot\" style=\"background:#ffa000\"></span>"
+        "bernstein</td><td><code>wifi</code></td><td>Station verbindet sich mit dem "
+        "Heim-WLAN</td></tr>"
+        "<tr data-s=\"ap\"><td><span class=\"dot\" style=\"background:#0050ff\"></span>"
+        "blau</td><td><code>ap</code></td><td>kein WLAN konfiguriert (nur Setup-AP)</td></tr>"
+        "<tr data-s=\"wait\"><td><span class=\"dot\" style=\"background:#00b4b4\"></span>"
+        "cyan</td><td><code>wait</code></td><td>assoziiert, aber noch keine ESP-NOW-Daten</td></tr>"
+        "<tr data-s=\"ok\"><td><span class=\"dot\" style=\"background:#00ff00\"></span>"
+        "gr&uuml;n</td><td><code>ok</code></td><td>ESP-NOW-Daten flie&szlig;en (Normalfall)</td></tr>"
+        "<tr data-s=\"error\"><td><span class=\"dot\" style=\"background:#ff0000\"></span>"
+        "rot</td><td><code>error</code></td><td>Sender stumm &gt; 30&nbsp;s, WLAN getrennt "
+        "oder Web-Guard ausgel&ouml;st</td></tr>"
+        "<tr data-s=\"ota\"><td><span class=\"dot\" style=\"background:#ff00ff\"></span>"
+        "magenta</td><td><code>ota</code></td><td>OTA-Download l&auml;uft</td></tr>"
+        "</tbody></table>"
+        "<h2>Laufzeit-Kn&ouml;pfe</h2>"
+        "<p class=\"muted\">&Uuml;ber die Debug-Konsole (<a href=\"/console\">/console</a>) "
+        "oder <code>set</code>; Werte werden in NVS gespeichert.</p>"
+        "<table><thead><tr><th>Schl&uuml;ssel</th><th>Bereich</th><th>Default</th>"
+        "<th>Wirkung</th></tr></thead><tbody>"
+        "<tr><td><code>set led on|off</code></td><td>on/off</td><td><code>on</code></td>"
+        "<td>Gesamtschalter; <code>off</code> gibt den RMT-Treiber frei (0&nbsp;Strom)</td></tr>"
+        "<tr><td><code>set led-gpio &lt;n&gt;</code></td><td>0&ndash;48</td><td><code>8</code></td>"
+        "<td>Daten-GPIO; <code>0</code> deaktiviert die LED (sauberer No-op)</td></tr>"
+        "<tr><td><code>set led-brightness &lt;n&gt;</code></td><td>0&ndash;255</td>"
+        "<td><code>16</code></td><td>globale Helligkeit; <code>0</code> = dunkel</td></tr>"
+        "<tr><td><code>set led-sleep on|off</code></td><td>on/off</td><td><code>on</code></td>"
+        "<td>LED darf w&auml;hrend des Light-Sleeps pausieren (spart Strom); "
+        "<code>off</code> h&auml;lt die CPU wach f&uuml;r exakten Blinktakt</td></tr>"
+        "<tr><td><code>set led-status &lt;name|auto&gt;</code></td>"
+        "<td>boot/wifi/ap/wait/ok/error/ota/auto</td><td><code>auto</code></td>"
+        "<td>nur RAM (nicht persistiert): erzwingt einen Zustand zum Testen</td></tr>"
+        "</tbody></table>"
+        "<p><a href=\"/\">Zur&uuml;ck zur Z&auml;hler&uuml;bersicht</a></p></div>"
+        "<script>"
+        "const rows=[...document.querySelectorAll('#legend tbody tr')];"
+        "const names=['boot','wifi','ap','wait','ok','error','ota'];"
+        "const human={boot:'wei\\u00df (boot)',wifi:'bernstein (wifi)',ap:'blau (ap)',"
+        "wait:'cyan (wait)',ok:'gr\\u00fcn (ok)',error:'rot (error)',ota:'magenta (ota)'};"
+        "function mark(s){for(const r of rows){r.classList.toggle('live',r.dataset.s===s);}}"
+        "async function poll(){try{const r=await fetch('/api/dashboard',{cache:'no-store'});"
+        "if(!r.ok)throw 0;const d=await r.json();"
+        "const s=names.includes(d.led_status)?d.led_status:'?';"
+        "mark(s);const el=document.getElementById('now');"
+        "el.textContent=(human[s]||s)+'\\u2003'+(d.led_active?'(Treiber aktiv)':'(LED aus / nicht verf\\u00fcgbar)')+'\\u2003'+(d.led_sleep?'(pausiert im Light-Sleep)':'(CPU wach f\\u00fcr Blinktakt)');"
+        "}catch(e){document.getElementById('now').textContent='Status nicht verf\\u00fcgbar';}"
+        "setTimeout(poll,2000);}poll();</script></body></html>";
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+}
+#endif
+
 static esp_err_t log_page_handler(httpd_req_t *req)
 {
     static const char page[] =
@@ -5277,6 +5417,18 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
         "web probe: last err %u (%s), http %d, failures %u\n",
         (unsigned)probe_err, esp_err_to_name((esp_err_t)probe_err), probe_status,
         (unsigned)probe_fails);
+    if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+        return;
+    }
+    written += extra;
+    const runtime_config_t *led = active_runtime_config();
+    extra = snprintf(out + written, out_size - (size_t)written,
+                     "led: %s gpio=%u bri=%u, status %s, driver %s\n",
+                     led->led_enabled ? "on" : "off", (unsigned)led->led_gpio,
+                     (unsigned)led->led_brightness,
+                     led_status_name(led_indicator_status()),
+                     led_indicator_is_active() ? "up" : "off");
     if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
         snprintf(out, out_size, "status: output truncated\n");
     }
@@ -5947,8 +6099,15 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     char value[32] = {0};
     if (sscanf(args, "%23s %31s", key, value) != 2) {
         /* TWT is HE-only, so it is advertised only on the C6; the ps/listen
-         * knobs apply to every receiver (modem sleep is not HE-specific). */
-#if SOC_WIFI_HE_SUPPORT
+         * knobs apply to every receiver (modem sleep is not HE-specific). The
+         * status-LED knobs exist only on the receiver (the sender has no LED). */
+#if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
+        snprintf(out, out_size,
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|led|led-gpio|led-brightness|led-sleep|led-status> <value>\n");
+#elif !CONFIG_ESPNOW_ROLE_SENDER
+        snprintf(out, out_size,
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|led|led-gpio|led-brightness|led-sleep|led-status> <value>\n");
+#elif SOC_WIFI_HE_SUPPORT
         snprintf(out, out_size,
                  "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen> <value>\n");
 #else
@@ -5957,6 +6116,25 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
 #endif
         return;
     }
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* 'led-status' is a RAM-only diagnostic override (not persisted): force the
+     * LED to one state, or 'auto' to return to the automatic status. */
+    if (strcmp(key, "led-status") == 0) {
+        if (strcmp(value, "auto") == 0) {
+            led_indicator_set_override(LED_STATUS_COUNT);
+        } else {
+            led_status_t forced;
+            if (!led_status_parse(value, &forced)) {
+                snprintf(out, out_size,
+                         "led-status: expected auto or boot|wifi|ap|wait|ok|error|ota\n");
+                return;
+            }
+            led_indicator_set_override(forced);
+        }
+        snprintf(out, out_size, "led-status=%s\n", value);
+        return;
+    }
+#endif
     runtime_config_t *cfg = active_runtime_config();
     char err[64] = {0};
     if (!runtime_config_set(cfg, key, value, CONFIG_ESPNOW_CPU_MAX_MHZ, err,
@@ -6014,6 +6192,14 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         strcmp(key, "listen") == 0 || strcmp(key, "listen-interval") == 0) {
         wifi_ps_apply_and_reconnect();
     }
+    /* Status LED: rebuild the driver / re-apply brightness from the new knobs. */
+    if (strcmp(key, "led") == 0 || strcmp(key, "led-gpio") == 0 ||
+        strcmp(key, "led-brightness") == 0 || strcmp(key, "led-bright") == 0 ||
+        strcmp(key, "led-sleep") == 0) {
+        led_indicator_apply_config(cfg->led_enabled, cfg->led_gpio,
+                                   cfg->led_brightness, cfg->led_sleep);
+        led_refresh();
+    }
 #if SOC_WIFI_HE_SUPPORT
     /* TWT only takes effect once associated; a 'set' while connected re-negotiates
      * (and 'set twt off' tears the agreement down). */
@@ -6052,6 +6238,10 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
     /* Restore the default modem PS mode + listen interval and reconnect so the
      * default interval reaches the association request. */
     wifi_ps_apply_and_reconnect();
+    /* Restore the default LED knobs (on / GPIO 8 / dim). */
+    led_indicator_apply_config(cfg->led_enabled, cfg->led_gpio,
+                               cfg->led_brightness, cfg->led_sleep);
+    led_refresh();
 #endif
 #if CONFIG_ESPNOW_ROLE_SENDER
     uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
@@ -6091,11 +6281,25 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
     const char *ps = cfg->wifi_ps_mode <= RUNTIME_CONFIG_PS_MAX
                          ? ps_names[cfg->wifi_ps_mode]
                          : "min";
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* The status LED only exists on the receiver; show its three knobs there. */
+    char led[40] = "";
+    snprintf(led, sizeof(led), " led=%s gpio=%u bri=%u",
+             cfg->led_enabled ? "on" : "off", (unsigned)cfg->led_gpio,
+             (unsigned)cfg->led_brightness);
+    snprintf(out, out_size,
+             "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u%s\n",
+             (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
+             cfg->light_sleep ? "on" : "off",
+             (unsigned)cfg->espnow_retries, radio, wake, twt, ps,
+             (unsigned)cfg->listen_interval, led);
+#else
     snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on" : "off",
              (unsigned)cfg->espnow_retries, radio, wake, twt, ps,
              (unsigned)cfg->listen_interval);
+#endif
 }
 
 static void web_console_register_commands(void)
@@ -6109,11 +6313,11 @@ static void web_console_register_commands(void)
      * (HE), so it is only advertised on the HE-capable targets (the C6). */
 #if SOC_WIFI_HE_SUPPORT
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|led|led-gpio|led-brightness|led-sleep|led-status",
                          console_cmd_set);
 #else
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|led|led-gpio|led-brightness|led-sleep|led-status",
                          console_cmd_set);
 #endif
 #else
@@ -7657,6 +7861,11 @@ static bool ota_url_is_trusted(const char *url)
 static void ota_pull_task(void *arg)
 {
     (void)arg;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* The LED shows OTA (magenta) for the whole download. */
+    g_led_ota_active = true;
+    led_refresh();
+#endif
     /* Refuse an image that would land on the measurement partition *before* we
      * download a single byte. esp_https_ota uses the same next-update slot, so
      * this is the authoritative check. */
@@ -7664,6 +7873,10 @@ static void ota_pull_task(void *arg)
     if (update_partition == NULL || !ota_target_is_safe(update_partition)) {
         ESP_LOGE(TAG, "Pull OTA refused: no safe update partition");
         s_ota_pull_busy = false;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        g_led_ota_active = false;
+        led_refresh();
+#endif
         vTaskDelete(NULL);
         return;
     }
@@ -7813,10 +8026,20 @@ static esp_err_t ota_update_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Show OTA (magenta) while the image is written; cleared on any failure
+     * (the success path reboots). */
+    g_led_ota_active = true;
+    led_refresh();
+#endif
     esp_ota_handle_t ota_handle;
     esp_err_t err = esp_ota_begin(update_partition, (size_t)req->content_len, &ota_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Could not begin OTA: %s", esp_err_to_name(err));
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        g_led_ota_active = false;
+        led_refresh();
+#endif
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not start OTA");
         return ESP_FAIL;
     }
@@ -7828,6 +8051,10 @@ static esp_err_t ota_update_handler(httpd_req_t *req)
         int received = httpd_req_recv(req, (char *)buffer, amount);
         if (received <= 0) {
             esp_ota_abort(ota_handle);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+            g_led_ota_active = false;
+            led_refresh();
+#endif
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Firmware upload interrupted");
             return ESP_FAIL;
         }
@@ -7835,6 +8062,10 @@ static esp_err_t ota_update_handler(httpd_req_t *req)
         if (err != ESP_OK) {
             esp_ota_abort(ota_handle);
             ESP_LOGE(TAG, "OTA flash write failed: %s", esp_err_to_name(err));
+#if !CONFIG_ESPNOW_ROLE_SENDER
+            g_led_ota_active = false;
+            led_refresh();
+#endif
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Firmware write failed");
             return ESP_FAIL;
         }
@@ -7844,12 +8075,20 @@ static esp_err_t ota_update_handler(httpd_req_t *req)
     err = esp_ota_end(ota_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA image validation failed: %s", esp_err_to_name(err));
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        g_led_ota_active = false;
+        led_refresh();
+#endif
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Firmware image is invalid");
         return ESP_FAIL;
     }
     err = esp_ota_set_boot_partition(update_partition);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Could not select OTA boot partition: %s", esp_err_to_name(err));
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        g_led_ota_active = false;
+        led_refresh();
+#endif
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not activate firmware");
         return ESP_FAIL;
     }
@@ -8019,7 +8258,7 @@ static void start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 31;
+    config.max_uri_handlers = 32;
     /* Handlers that keep a full history page (128 records) on their stack run
      * on this task; keep headroom so a large page cannot overflow it and abort
      * the whole HTTP server. */
@@ -8151,6 +8390,13 @@ static void register_webserver_handlers(httpd_handle_t server)
         .method = HTTP_GET,
         .handler = log_page_handler,
     };
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    httpd_uri_t led_page = {
+        .uri = "/led",
+        .method = HTTP_GET,
+        .handler = led_page_handler,
+    };
+#endif
     httpd_uri_t update_page = {
         .uri = "/update",
         .method = HTTP_GET,
@@ -8236,6 +8482,9 @@ static void register_webserver_handlers(httpd_handle_t server)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_history_upload));
 #endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &led_page));
+#endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &save));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &console_page));
@@ -8376,10 +8625,26 @@ static void link_fallback_worker(void *arg)
                       "disabled, CPU stays awake", (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
 #else
         /* Receiver: no sender traffic. A hung receiver is already covered by
-         * web_guard, so only surface it here for the dashboard. */
+         * web_guard, so this only surfaces it. But if the receiver is allowed to
+         * light-sleep, that park is a candidate cause (the radio's ESP-NOW wake
+         * window can be too short for the sender's ~5 s burst): drop the park for
+         * good *for this boot* (mirrors the sender, which also disables its light
+         * sleep on link loss). It is not persisted, so a routine sender
+         * maintenance gap does not disable the saving forever; a reboot re-arms
+         * it and the guard fires again if the park is really the cause, so there
+         * is no reboot loop. Radio-save is left alone. */
         g_link_fallback_stage = 1;
-        ESP_LOGW(TAG, "Link fallback: no sender traffic for %u ms",
-                 (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
+        runtime_config_t *lfb_cfg = active_runtime_config();
+        if (runtime_config_light_sleep_allowed() && lfb_cfg->light_sleep) {
+            lfb_cfg->light_sleep = false;
+            apply_power_management();
+            g_link_fallback_stage = 2;
+            ESP_LOGW(TAG, "Link fallback: no sender traffic for %u ms; light "
+                          "sleep disabled for this boot", (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
+        } else {
+            ESP_LOGW(TAG, "Link fallback: no sender traffic for %u ms",
+                     (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
+        }
 #endif
     }
 }
@@ -8622,15 +8887,12 @@ static void run_sender(void)
  * compile-time defaults, so a 'set' from a previous session — or before an OTA
  * that kept the NVS partition — is in effect from the first tick.
  *
- * The receiver must stay responsive for HTTP and ESP-NOW and never enters
- * light sleep by default; the sender enables its adaptive light sleep inside
- * the verified quiet window (uart_sleep_window.c re-applies its own config with
- * light sleep on, so the sender is driven through that module).
- *
- * A receiver whose console is the USB Serial/JTAG peripheral (ESP32-C6) must
- * never light-sleep: the PHY is powered down and the /dev/ttyACM* port is lost
- * for good. runtime_config_apply()/clamp() already force the flag off; the
- * NO_LIGHT_SLEEP lock below is a second, unconditional guard. */
+ * The receiver stays responsive for HTTP and ESP-NOW. Its light sleep is
+ * opt-in per build: the classic-ESP32 receiver never parks, and the ESP32-C6
+ * parks only behind the CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION guard (see below).
+ * The sender enables its adaptive light sleep inside the verified quiet window
+ * (uart_sleep_window.c re-applies its own config with light sleep on, so the
+ * sender is driven through that module). */
 static void apply_power_management(void)
 {
     runtime_config_t *cfg = active_runtime_config();
@@ -8644,11 +8906,13 @@ static void apply_power_management(void)
              (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
              cfg->light_sleep ? "on" : "off");
 #else
-    /* A USB Serial/JTAG-console receiver (ESP32-C6) must never light-sleep: the
-     * PHY is powered down and the /dev/ttyACM* port is lost for good. Force the
-     * flag off here as well (runtime_config_apply()/clamp() already do) and hold
-     * a NO_LIGHT_SLEEP lock for the lifetime of the device as a hard backstop,
-     * so no later esp_pm_configure() can ever re-enable the park. */
+    /* A USB Serial/JTAG-console receiver (ESP32-C6) may light-sleep only behind
+     * the CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION guard: the USJ driver then holds
+     * ESP_PM_NO_LIGHT_SLEEP for as long as a host is attached, so the console is
+     * never lost, and releases it when only a charger remains, so the chip still
+     * parks during normal Wi-Fi-only operation. Without that guard the flag is
+     * forced off (runtime_config_apply()/clamp() do the same) and we hold a
+     * NO_LIGHT_SLEEP lock for the lifetime of the device as a hard backstop. */
     bool allow_sleep = runtime_config_light_sleep_allowed();
     esp_pm_config_t pm = {
         .max_freq_mhz = (int)cfg->cpu_mhz,
@@ -8810,6 +9074,53 @@ static void wifi_ps_apply_and_reconnect(void)
                  (unsigned)active_runtime_config()->listen_interval);
     }
 }
+
+/* Status-LED state machine (receiver).
+ *
+ * led_effective_status() folds every live input into one led_status_t; it is
+ * called from led_refresh() on the 1 Hz power-sample tick and on the Wi-Fi/ESP-
+ * NOW events. Precedence, highest first:
+ *   OTA > (WLAN lost) > (sender silent) > (web guard tripped)
+ *       > BOOT > AP mode > waiting for sender > OK.
+ * A state that needs the clock (BOOT, sender/web silence) is bounded by an
+ * int64 millisecond stamp, so a stale stamp can never wedge the LED. */
+static led_status_t led_effective_status(void)
+{
+    int64_t now = (int64_t)(esp_timer_get_time() / 1000);
+    /* Millisecond age via unsigned math, so it stays correct across the 32-bit
+     * wrap (~49 days) the receiver can easily outlive. */
+    uint32_t now_ms = (uint32_t)now;
+    if (g_led_ota_active) {
+        return LED_STATUS_OTA;
+    }
+    if (g_wifi_configured && g_led_wifi_was_connected && !g_wifi_connected) {
+        return LED_STATUS_ERROR; /* WLAN was up and dropped */
+    }
+    if (g_led_data_seen && (now_ms - g_led_last_data_ms) > LED_DATA_STALE_MS) {
+        return LED_STATUS_ERROR; /* sender went silent */
+    }
+    if (web_guard_active() && web_guard_last_activity_age_ms() > LED_WEB_STALE_MS) {
+        return LED_STATUS_ERROR; /* dashboard unresponsive */
+    }
+    if (now < g_led_boot_until_ms) {
+        return LED_STATUS_BOOT;
+    }
+    if (!g_wifi_configured) {
+        return LED_STATUS_AP_MODE;
+    }
+    if (!g_wifi_connected) {
+        return LED_STATUS_WIFI_CONNECTING;
+    }
+    if (!g_led_data_seen) {
+        return LED_STATUS_WIFI_OK_WAITING_SENDER;
+    }
+    return LED_STATUS_OK;
+}
+
+static void led_refresh(void)
+{
+    led_indicator_set_status(led_effective_status());
+}
 #endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
@@ -8909,6 +9220,14 @@ void app_main(void)
     /* The radio-side knobs need the Wi-Fi driver started, which
      * initialize_wifi_and_espnow() has done by now. */
     apply_radio_power_config();
+    /* Status LED: bring it up from the persisted knobs and show BOOT (white) for
+     * a moment. The 1 Hz power-sample tick and the Wi-Fi/ESP-NOW events keep it
+     * current afterwards; the tick drives the blink phase. */
+    g_led_boot_until_ms = (int64_t)(esp_timer_get_time() / 1000) + LED_STATUS_BOOT_MS;
+    const runtime_config_t *led_cfg = active_runtime_config();
+    led_indicator_apply_config(led_cfg->led_enabled, led_cfg->led_gpio,
+                               led_cfg->led_brightness, led_cfg->led_sleep);
+    led_indicator_set_status(LED_STATUS_BOOT);
 #endif
     /* Arm the task watchdog (generous timeout + panic) before any worker starts,
      * so the long-running workers can subscribe themselves and a wedged one

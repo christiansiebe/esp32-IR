@@ -35,36 +35,63 @@ ESP-NOW-Frames sieht. Rueckweg: `set ps min` bzw. `reset-config`.
 18 B, `ap_enabled`); dieser Stand ist v6 (22 B). Beim Merge die Layouts in EINE
 Version falten (Offsets bis [15] identisch).
 
-## NEU (2026-11-07): C6-Receiver – `sleep on` killt die USB-Konsole (BEHOBEN, CI-gruen 7e34996)
-**Befund (reproduziert):** `set sleep on` (automatic light sleep) schaltet auf dem
-C6 die USB-Serial/JTAG-Peripherie ab → `/dev/ttyACM0` verschwindet. Weil der Wert in
-NVS persistiert (`rtcfg/cfg`, Blob-Version 3), bootet das Geraet danach im Light Sleep
-und der USB-Port enumiert nie wieder → ueber USB unerreichbar (Flashen **und** Konsole
-tot). Ursache: `SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP` ist fuer den C6 nicht
-definiert (IDF-6395 offen).
+## NEU (2026-11-08): C6-Receiver – Light Sleep hinter dem USB-Host-Guard (Stufe 2)
+**Befund (2026-11-07, reproduziert):** `set sleep on` (automatic light sleep) schaltet
+auf dem C6 die USB-Serial/JTAG-Peripherie ab → `/dev/ttyACM0` verschwindet. Weil der
+Wert in NVS persistiert (`rtcfg/cfg`, Blob-Version 3), bootet das Geraet danach im
+Light Sleep und der USB-Port enumiert nie wieder → ueber USB unerreichbar (Flashen
+**und** Konsole tot). Ursache: `SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP` ist fuer den
+C6 nicht definiert (IDF-6395 offen).
 
-**Fix:**
-- Auf Builds mit `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG` wird Light Sleep **abgelehnt**:
-  `set sleep on` verworfen, ein restauriertes `light_sleep=1` per `clamp` auf `0`
-  gezwungen, `esp_pm_configure()` bekommt nie `light_sleep_enable=1`, zusaetzlich
-  `ESP_PM_NO_LIGHT_SLEEP`-Lock im Empfaenger. Radio-Sleep (`radio-save`) bleibt.
-  Pruefbar ueber `runtime_config_light_sleep_allowed()`.
-- **NVS-Blob-Version 3 → 4**: ein v3-Blob mit kaputtem `light_sleep` wird ignoriert
-  (Selbstheilung), Layout unveraendert (16 B).
-- **Recovery:** BOOT-Taste (3 s) loescht vor dem Rollback den ganzen NVS-Namespace
-  `rtcfg` (Hook `recovery_set_pre_rollback_fn`), damit ein schlechtes persistiertes
-  Config-Set den Rollback nicht ueberlebt. Beim C6 ist die BOOT-Taste **GPIO9**
-  (nicht GPIO0) — der `RECOVERY_BUTTON_GPIO`-Default ist dafuer jetzt
-  zielabhaengig (C6 9, klassischer ESP32 0).
-- Host-Test `test/test_runtime_config_usb_console.c` (mit
-  `-DCONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=1`) + CI-Schritt + CI-Grep im C6-Image.
+**Fix Stufe 1 (CI-gruen 7e34996):** Auf Builds mit
+`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG` wurde Light Sleep **komplett abgelehnt**
+(`set sleep on` verworfen, restauriertes `light_sleep=1` per `clamp` auf `0`
+gezwungen, `esp_pm_configure()` nie mit `light_sleep_enable=1`, zusaetzlich
+`ESP_PM_NO_LIGHT_SLEEP`-Lock). Radio-Sleep (`radio-save`) blieb. NVS-Blob 3 → 4
+(Selbstheilung). Recovery: BOOT-Taste (3 s) loescht vor dem Rollback den
+NVS-Namespace `rtcfg` (Hook `recovery_set_pre_rollback_fn`); C6-BOOT-Taste ist
+**GPIO9** (nicht GPIO0), `RECOVERY_BUTTON_GPIO`-Default zielabhaengig.
 
-**Messwerte (FNB-48, 5,2 V, Mittelwerte):** klassischer AP-Build 0,432 W ·
-station-only 0,298 W · station-only + radio-save 5000/30 **0,068 W** · station-only +
-light sleep 0,024 W (USB-Konsole starb) · station-only + light sleep + radio-save
-5000/30 0,028 W (USB-Konsole starb). → Radio-Sleep ist der sichere Hebel, Light Sleep
-ist auf USB-Konsolen-Builds tabu. (Ergaenzt die aeltere Messung unten, die bei anderem
-Setup „Light-Sleep an/aus: kein Unterschied" zeigte.)
+**Fix Stufe 2 (dieser Stand):** IDF v6.1 liefert die fehlende Mechanik:
+**`CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION`** (`esp_driver_usb_serial_jtag/Kconfig`). Der
+USJ-Treiber ueberwacht die SOF-Pakete des Hosts und haelt fuer die Dauer einer echten
+Host-Verbindung einen `ESP_PM_NO_LIGHT_SLEEP`-Lock; ein reines Ladegeraet/Powerbank
+zaehlt **nicht** als verbunden. Damit ist Light Sleep auf dem C6 sicher:
+- `sdkconfig.defaults.esp32c6`: `CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y`.
+- `runtime_config_light_sleep_allowed()` ist **true** mit Guard, **false** ohne
+  (Sicherheitsnetz fuer eine alte sdkconfig).
+- C6-Empfaenger defaultet **light sleep auf an**; `set sleep on|off` wieder wirksam;
+  `clamp` zwingt einen persistierten Wert nicht mehr auf 0; der lebenslange
+  `ESP_PM_NO_LIGHT_SLEEP`-Lock in `main.c` faellt weg, wenn der Guard greift.
+- **Status-LED stoppt den Sleep nicht mehr:** neuer Knopf `set led-sleep on|off`
+  (Default `on`); der LED-Tick ist auf One-Shot je Blink-Flanke umgebaut
+  (`main/led_indicator.c`), damit der Chip zwischen den Pulsen parkt. NVS-Blob 7 → 8
+  (26 B, `led_sleep` an [25]).
+- Host-Tests: `test/test_runtime_config_usb_console.c` (ohne Guard → ablehnen) **und**
+  `test/test_runtime_config_usb_guard.c` (mit Guard → erlauben); CI-Schritt prueft
+  beide Kconfig-Symbole + die Guard-/Fallback-Strings im C6-Image.
+
+**Restrisiko:** Ein **waehrend** des Schlafs angesteckter Host wird erst beim
+naechsten Aufwachen erkannt (SOF-Waechter laeuft nur bei wacher CPU); der Host kann
+die Verbindung zwischenzeitlich verworfen haben (IDF-Doku: ggf. Ab-/Anstecken noetig).
+Im Normalbetrieb (nur USB-Strom, sonst WLAN) greift der Guard sofort. Die Notausgaenge
+aus Stufe 1 (BOOT-Taste, NVS-Version, OTA-Validierung) bleiben unveraendert.
+
+**Selbstheilung bei Funkstille:** Bleibt der Sender laenger als
+`CONFIG_ESPNOW_LINK_FALLBACK_MS` stumm, waehrend der Empfaenger light-sleepen darf,
+schaltet der Link-Fallback (`link_fallback_worker`, Empfaenger-Zweig) den Park fuer
+**den Rest dieses Boots** ab (`light_sleep=false` + `apply_power_management()`), weil
+der Sleep eine der Ursachen sein kann (zu kurzes ESP-NOW-Wake-Fenster). Nicht
+persistiert (spiegelt den Sender, der seinen Light Sleep bei Linkverlust ebenfalls
+abschaltet): eine normale Sender-Wartungsluecke deaktiviert die Ersparnis nicht
+dauerhaft, und ein Reboot armiert den Park neu — greift er dann wieder, feuert der
+Guard erneut, also kein Reboot-Loop. `radio-save` bleibt unangetastet.
+
+**Messwerte:** Die alten FNB-48-Zahlen (0,432 / 0,298 / 0,068 / 0,024 / 0,028 W) sind
+**unbelastbar** (Messskript fror ein, Geraet lag nicht im C6-Strompfad — s.
+`docs/radio-sleep-break-even.md` §8.3). Qualitativ: Radio-Sleep (`radio-save`) bleibt
+der immer sichere Hebel; Light Sleep ist jetzt hinter dem Guard nutzbar, die
+Einsparung ist noch sauber (in Reihe) zu messen.
 
 ## NEU (2026-11-07): ESP32-C6-Empfänger – Standby-/Sparsamkeits-Optimierung (`feat/esp32c6-receiver`)
 **Ergebnis: Der Ruhestrom des C6 wird vom dauerhaft wachen WLAN-Funkmodul
