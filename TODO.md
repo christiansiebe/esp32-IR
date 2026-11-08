@@ -1,5 +1,32 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-08): Modem-Sleep-Wächter + sicherer C6-Light-Sleep – Branch `feat/nvs-web-knobs`
+**Warum:** Der C6-Empfänger hat drei Stromspar-Hebel, die je den Link zerstören
+können (Light Sleep → USB-Konsole tot; `ps min/max` → Disconnect-Sturm;
+`radio-save` → verpasste Frames). Dazu flappt die FRITZ!Box auch ohne Hebel.
+Ein Wächter, der **jeden** Disconnect zählt, würde den Sleep grundlos abschalten.
+
+- **`main/ps_fallback.{c,h}` + `ps_fallback_worker` (beide Rollen):** zählt STA-
+  Disconnects im gleitenden Fenster (Default 3/120 s, 30 s Schonfrist). Bei
+  einem Sturm fällt er **sticky** auf `WIFI_PS_NONE` + `radio-save=false` zurück
+  und persistiert das. Absichtliche Reconnects zählen nicht; `set ps` re-armt.
+- **Drei Fehler behoben (dieser Commit):**
+  1. **Compile-Bug:** `ps_fallback_worker` rief `diag_log_event()` (sender-only)
+     → **alle Empfänger-/C6-Builds scheiterten** (`'diag_log_event' used but
+     never defined`). Aufruf in `#if CONFIG_ESPNOW_ROLE_SENDER` gekapselt.
+  2. **Falsch-Positiv:** zählte auch ohne aktiven Hebel → jetzt nur bei
+     `ps != off` **oder** `radio-save`, und nur auf dem Empfänger.
+  3. **Test war immer grün:** `CHECK`-Makro in `test/test_ps_fallback.c` erhöhte
+     `g_failures` nie → gefixt.
+- **Sicherer Modem-Light-Sleep:** unassoziiert `radio-save on` (5000/70, ~70 mW,
+  stabil); assoziiert `ps off` + `radio-save off` (stabil, DTIM-dominiert).
+  Light Sleep bleibt am C6 aus (USB-Konsole).
+- **Verifiziert:** IDF-v6.1-Build aller Rollen gruen (`sender`, `receiver`,
+  `receiver-c6-apoff`), Host-Suite grün. Details: `docs/c6-modem-sleep-safety.md`.
+- **Offen (am Gerät):** `set ps max` + `set listen 5/10/20/30` am C6 mit der
+  FRITZ!Box messen; prüfen, ob der Wächter wie erwartet auslöst und die
+  ESP-NOW-Frames weiter ankommen.
+
 ## NEU (2026-11-08): Laufzeit-NVS-Knoepfe ueber die Web-Konsole – Branch `feat/nvs-web-knobs`, PR #67
 **Ziel:** Jeder nutzerseitige NVS-Wert ist zur Laufzeit aenderbar (Safe-Fallback),
 und die kuenstlichen Wertebereiche reichen bis an die harte IDF-/SoC-Grenze, damit

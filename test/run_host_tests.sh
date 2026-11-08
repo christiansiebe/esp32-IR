@@ -215,6 +215,18 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_link_fallback"
 
+# Modem-sleep fault watchdog: a storm of STA disconnects while a PS mode is in
+# force must drop to the proven mode (sticky), an intentional reconnect must not
+# count, and a stable association must clear the count. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/ps_fallback.c" \
+    "$here/test_ps_fallback.c" \
+    -o "$out/test_ps_fallback"
+
+"$out/test_ps_fallback"
+
 # Sender parser stall recovery: a wedged SML parser (bytes arriving, no telegram
 # finalised) must be reset by a timer armed by the first byte of the capture, not
 # by a telegram - the old rule left a wedge on the first telegram of a boot
