@@ -279,6 +279,22 @@ def extract_console_script(source: str) -> str:
     return match.group(1)
 
 
+def extract_led_page(source: str) -> str:
+    """Reconstruct the status-LED legend page from its C string literal."""
+    start = source.index("static esp_err_t led_page_handler")
+    marker = "</script></body></html>\";"
+    end = source.index(marker, start) + len(marker)
+    return c_string_contents(source[start:end])
+
+
+def extract_led_script(source: str) -> str:
+    page = extract_led_page(source)
+    match = re.search(r"<script>(.*)</script>", page, re.S)
+    if not match:
+        raise SystemExit("no <script> block found in the status-LED page")
+    return match.group(1)
+
+
 def extract_config_page(source: str) -> str:
     """Reconstruct the WLAN configuration page from its C string literal."""
     start = source.index("static esp_err_t config_handler")
@@ -299,7 +315,21 @@ def main() -> int:
     diag_script = extract_diag_script(source)
     sender_script = extract_sender_script(source)
     console_script = extract_console_script(source)
+    led_page = extract_led_page(source)
     config_page = extract_config_page(source)
+
+    # The status-LED legend must document every state name that led_status_name()
+    # can produce, so the page cannot drift from the firmware.
+    led_statuses = ["boot", "wifi", "ap", "wait", "ok", "error", "ota"]
+    for name in led_statuses:
+        if (">%s<" % name) not in led_page and ("\"%s\"" % name) not in led_page:
+            print("led page: missing state '%s'" % name)
+            return 1
+    for key in ("set led on", "set led-gpio", "set led-brightness", "set led-status"):
+        if key not in led_page:
+            print("led page: missing knob '%s'" % key)
+            return 1
+    print("led page documents all states + knobs")
 
     # Regression guard: the WLAN configuration page must offer BOTH an SSID and
     # a password input. A form with only the SSID left a fresh device unable to
@@ -346,6 +376,17 @@ def main() -> int:
         if console_check.returncode != 0:
             print("console page JS syntax error:")
             print(console_check.stderr)
+            return 1
+
+        led_script = extract_led_script(source)
+        led_path = os.path.join(workdir, "led.js")
+        with open(led_path, "w", encoding="utf-8") as handle:
+            handle.write(led_script)
+        led_check = subprocess.run([node, "--check", led_path],
+                                   capture_output=True, text=True)
+        if led_check.returncode != 0:
+            print("status-LED page JS syntax error:")
+            print(led_check.stderr)
             return 1
 
         check = subprocess.run([node, "--check", script_path],

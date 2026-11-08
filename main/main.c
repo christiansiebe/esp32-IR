@@ -3925,6 +3925,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "<div class=\"group\"><h3>System</h3>"
         "<a href=\"/console\">Debug-Konsole</a>"
         "<a href=\"/bootlog\">Boot-Log</a>"
+        "<a href=\"/led\">Status-LED</a>"
         "<a href=\"/simulate\">Neustart-Simulation</a>"
         "<a href=\"/config\">WLAN</a>"
         "<a href=\"/update\">Firmware-Update</a></div>"
@@ -4130,7 +4131,8 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        "\"transport_losses\":%lu,\"transport_reorders\":%lu,"
                        "\"cpu_freq_mhz\":%d,\"cpu_freq_max_mhz\":%d,"
                        "\"cpu_freq_min_mhz\":%d,\"sleep_state\":%u,"
-                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu}",
+                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu,"
+                       "\"led_status\":\"%s\",\"led_active\":%u}",
                        fw_version(),
                        readings[0], readings[1], readings[2],
                        average_json,
@@ -4146,7 +4148,9 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        pm_min_freq_mhz,
                        (unsigned int)g_sleep_state,
                        (unsigned int)(pm_config.light_sleep_enable ? 1 : 0),
-                       (unsigned long)g_sleep_accumulated_ms);
+                       (unsigned long)g_sleep_accumulated_ms,
+                       led_status_name(led_indicator_status()),
+                       (unsigned int)(led_indicator_is_active() ? 1 : 0));
     if (len < 0 || (size_t)len >= sizeof(payload)) {
         return ESP_FAIL;
     }
@@ -5100,6 +5104,87 @@ static esp_err_t bootlog_page_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Status-LED legend: what each colour means on the C6 receiver's WS2812, plus
+ * the runtime knobs. The page polls /api/dashboard (already served) to
+ * highlight the state the LED is showing right now; it needs no key, like the
+ * other GET-only pages. */
+static esp_err_t led_page_handler(httpd_req_t *req)
+{
+    static const char page[] =
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<title>Status-LED</title>"
+        "<style>body{font-family:Arial,sans-serif;margin:24px;background:#10151f;"
+        "color:#e5edf7}.card{background:#182330;padding:20px;border-radius:12px}"
+        "table{border-collapse:collapse;width:100%;max-width:640px}"
+        "th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #2c3e50;"
+        "vertical-align:middle}th{color:#9fb4c8;font-size:0.8rem;text-transform:uppercase;"
+        "letter-spacing:0.05em}.dot{display:inline-block;width:16px;height:16px;"
+        "border-radius:50%;margin-right:8px;border:1px solid #0b0f16;vertical-align:middle}"
+        ".on{outline:2px solid #78d6ff;outline-offset:2px}"
+        "code{background:#0b0f16;padding:2px 6px;border-radius:5px}"
+        ".muted{color:#8aa0b8;font-size:0.9rem}a{color:#78d6ff}"
+        "tr.live{background:rgba(120,214,255,0.10)}</style></head><body>"
+        "<div class=\"card\"><h1>Status-LED (ESP32-C6-Empf&#228;nger)</h1>"
+        "<p class=\"muted\">Eine adressierbare WS2812-RGB-LED (Standard <code>GPIO 8</code>). "
+        "Sie pulsiert langsam und dunkel (&bdquo;Herzschlag&ldquo;, ca. 100&ndash;150&nbsp;ms "
+        "alle 1,5&ndash;2,5&nbsp;s); die Farbe nennt den Zustand. Der Streifen wird nur "
+        "bei Farb- oder Phasenwechsel geschrieben (kein Dauer-Refresh).</p>"
+        "<p>Gerade angezeigt: <strong id=\"now\">&#8230;</strong></p>"
+        "<table id=\"legend\"><thead><tr><th>Farbe</th><th>Zustand</th>"
+        "<th>Bedeutung</th></tr></thead><tbody>"
+        "<tr data-s=\"boot\"><td><span class=\"dot\" style=\"background:#ffffff\"></span>"
+        "wei&szlig;</td><td><code>boot</code></td><td>erste ~1&nbsp;s nach dem Start "
+        "(dauerhaft an)</td></tr>"
+        "<tr data-s=\"wifi\"><td><span class=\"dot\" style=\"background:#ffa000\"></span>"
+        "bernstein</td><td><code>wifi</code></td><td>Station verbindet sich mit dem "
+        "Heim-WLAN</td></tr>"
+        "<tr data-s=\"ap\"><td><span class=\"dot\" style=\"background:#0050ff\"></span>"
+        "blau</td><td><code>ap</code></td><td>kein WLAN konfiguriert (nur Setup-AP)</td></tr>"
+        "<tr data-s=\"wait\"><td><span class=\"dot\" style=\"background:#00b4b4\"></span>"
+        "cyan</td><td><code>wait</code></td><td>assoziiert, aber noch keine ESP-NOW-Daten</td></tr>"
+        "<tr data-s=\"ok\"><td><span class=\"dot\" style=\"background:#00ff00\"></span>"
+        "gr&uuml;n</td><td><code>ok</code></td><td>ESP-NOW-Daten flie&szlig;en (Normalfall)</td></tr>"
+        "<tr data-s=\"error\"><td><span class=\"dot\" style=\"background:#ff0000\"></span>"
+        "rot</td><td><code>error</code></td><td>Sender stumm &gt; 30&nbsp;s, WLAN getrennt "
+        "oder Web-Guard ausgel&ouml;st</td></tr>"
+        "<tr data-s=\"ota\"><td><span class=\"dot\" style=\"background:#ff00ff\"></span>"
+        "magenta</td><td><code>ota</code></td><td>OTA-Download l&auml;uft</td></tr>"
+        "</tbody></table>"
+        "<h2>Laufzeit-Kn&ouml;pfe</h2>"
+        "<p class=\"muted\">&Uuml;ber die Debug-Konsole (<a href=\"/console\">/console</a>) "
+        "oder <code>set</code>; Werte werden in NVS gespeichert.</p>"
+        "<table><thead><tr><th>Schl&uuml;ssel</th><th>Bereich</th><th>Default</th>"
+        "<th>Wirkung</th></tr></thead><tbody>"
+        "<tr><td><code>set led on|off</code></td><td>on/off</td><td><code>on</code></td>"
+        "<td>Gesamtschalter; <code>off</code> gibt den RMT-Treiber frei (0&nbsp;Strom)</td></tr>"
+        "<tr><td><code>set led-gpio &lt;n&gt;</code></td><td>0&ndash;48</td><td><code>8</code></td>"
+        "<td>Daten-GPIO; <code>0</code> deaktiviert die LED (sauberer No-op)</td></tr>"
+        "<tr><td><code>set led-brightness &lt;n&gt;</code></td><td>0&ndash;255</td>"
+        "<td><code>16</code></td><td>globale Helligkeit; <code>0</code> = dunkel</td></tr>"
+        "<tr><td><code>set led-status &lt;name|auto&gt;</code></td>"
+        "<td>boot/wifi/ap/wait/ok/error/ota/auto</td><td><code>auto</code></td>"
+        "<td>nur RAM (nicht persistiert): erzwingt einen Zustand zum Testen</td></tr>"
+        "</tbody></table>"
+        "<p><a href=\"/\">Zur&uuml;ck zur Z&auml;hler&uuml;bersicht</a></p></div>"
+        "<script>"
+        "const rows=[...document.querySelectorAll('#legend tbody tr')];"
+        "const names=['boot','wifi','ap','wait','ok','error','ota'];"
+        "const human={boot:'wei\\u00df (boot)',wifi:'bernstein (wifi)',ap:'blau (ap)',"
+        "wait:'cyan (wait)',ok:'gr\\u00fcn (ok)',error:'rot (error)',ota:'magenta (ota)'};"
+        "function mark(s){for(const r of rows){r.classList.toggle('live',r.dataset.s===s);}}"
+        "async function poll(){try{const r=await fetch('/api/dashboard',{cache:'no-store'});"
+        "if(!r.ok)throw 0;const d=await r.json();"
+        "const s=names.includes(d.led_status)?d.led_status:'?';"
+        "mark(s);const el=document.getElementById('now');"
+        "el.textContent=(human[s]||s)+'\\u2003'+(d.led_active?'(Treiber aktiv)':'(LED aus / nicht verf\\u00fcgbar)');"
+        "}catch(e){document.getElementById('now').textContent='Status nicht verf\\u00fcgbar';}"
+        "setTimeout(poll,2000);}poll();</script></body></html>";
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+}
+#endif
 
 static esp_err_t log_page_handler(httpd_req_t *req)
 {
@@ -8164,7 +8249,7 @@ static void start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 31;
+    config.max_uri_handlers = 32;
     /* Handlers that keep a full history page (128 records) on their stack run
      * on this task; keep headroom so a large page cannot overflow it and abort
      * the whole HTTP server. */
@@ -8296,6 +8381,13 @@ static void register_webserver_handlers(httpd_handle_t server)
         .method = HTTP_GET,
         .handler = log_page_handler,
     };
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    httpd_uri_t led_page = {
+        .uri = "/led",
+        .method = HTTP_GET,
+        .handler = led_page_handler,
+    };
+#endif
     httpd_uri_t update_page = {
         .uri = "/update",
         .method = HTTP_GET,
@@ -8381,6 +8473,9 @@ static void register_webserver_handlers(httpd_handle_t server)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_history_upload));
 #endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &led_page));
+#endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &save));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &console_page));

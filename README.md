@@ -144,6 +144,10 @@ diagnostic:
 | `set led-brightness <n>` | 0..255 | `16` | global brightness; `0` is dark |
 | `set led-status <name\|auto>` | boot/wifi/ap/wait/ok/error/ota/auto | `auto` | force one state for bench work (RAM only, not persisted) |
 
+The same legend is available in the web UI at **`/led`** (linked from the
+dashboard's *System* menu); it live-highlights the state the receiver is
+currently showing, read from `/api/dashboard` (`led_status`/`led_active`).
+
 `set led off` (or `led-gpio 0`) stops the tick and deletes the driver, so the
 LED adds nothing to the receiver's idle draw. At the default brightness 16 the
 lit current is a few mA at most and the ~5 % duty cycle keeps the *average* far
