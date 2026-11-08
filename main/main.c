@@ -6245,7 +6245,7 @@ static void web_console_register_commands(void)
     /* txpower/beacon only apply on the receiver (the sender has no SoftAP and
      * drives its own radio), so only advertise them there. TWT needs Wi-Fi 6
      * (HE), so it is only advertised on the HE-capable targets (the C6). The
-     * wifi-*/mqtt-* keys persist to their own NVS namespaces and reconnect /
+     * wifi-/mqtt- keys persist to their own NVS namespaces and reconnect /
      * restart the bridge. */
 #if SOC_WIFI_HE_SUPPORT
     web_console_register("set",
