@@ -49,6 +49,39 @@ ist aktiv, darum `runtime_config_light_sleep_allowed()==false`. Light-Sleep ist 
 Build also gar nicht schaltbar (`light_sleep_enabled` bleibt 0). Für die Messung egal,
 aber die Konsole kostet CPU-Wachhaltung (USB-JTAG), siehe frühere 0,12–0,15-W-Notiz.
 
+## FIX (2026-11-08): C6-Receiver-Default auf verlustfreie Kombi – `f12a0e7`, CI-gruen
+**Problem:** Der ausgelieferte Default (`RUNTIME_CONFIG_PS_DEFAULT=min` + `radio_save=false`)
+ist **genau** die 90-%-Verlust-Kombi (dreimal gemessen). Schlimmer: der Branch
+`feat/esp32c6-receiver` (Basis von PR #64) hat den `set ps`-Knopf noch gar nicht und
+**hartkodiert** `esp_wifi_set_ps(WIFI_PS_MIN_MODEM)` in beiden Pfaden von
+`apply_radio_power_config()` — der Kommentar dort nennt MIN_MODEM „always awake", was
+die Messung widerlegt. Bis PR #64 gemerged ist, ist das das Auslieferungsrisiko.
+
+**Fix (`main/runtime_config.c`):** Der C6-Receiver defaultet jetzt auf die gemessen
+verlustfreie Stromspar-Kombi — ziel- und rollenabhängig:
+```c
+#if defined(CONFIG_IDF_TARGET_ESP32C6) && !CONFIG_ESPNOW_ROLE_SENDER
+        .radio_save = true,   .wake_interval_ms = 20u, .wake_window_ms = 15u,
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_OFF,
+#else   /* klassischer ESP32 + jeder Sender: alter Default unverändert */
+        .radio_save = false,  .wake_interval_ms = 100u, .wake_window_ms = 70u,
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
+#endif
+```
+Klassischer ESP32 und Sender bleiben byte-für-byte wie vorher (dort bricht das
+Wake-Window den Link). Neuer Host-Test `test/test_runtime_config_c6_defaults.c`
+(mit `-DCONFIG_IDF_TARGET_ESP32C6=1` in `run_host_tests.sh`) nagelt die Defaults
+fest; CI-Job „Host tests" lief mit **„C6 receiver defaults: 8 checks, 0 failures"**.
+
+**Verifiziert auf Hardware (.105):** Per Web-OTA auf `v0.4.0-9-g8b3181d` geflasht,
+danach `reset-config` (löscht nur den `rtcfg`-NVS-Namespace) → `config` zeigt
+**`radio-save=20/15 ps=off listen=3`**, also den *kompilierten* Default. Die alte
+Kombi ist damit auf dem Board verschwunden.
+
+**PR-Verknüpfung:** PR #64 ist `feat/c6-twt` → `feat/esp32c6-receiver`. Beim Merge
+landen Messung, Fix und der `set ps`/`listen`-Knopf gemeinsam auf dem Receiver-Branch
+und heilen die hartkodierte MIN_MODEM-Stelle.
+
 ## NEU (2026-11-08): C6-Empfänger – Laufzeit-Knopf `set ps` / `set listen` (WIFI_PS_MAX_MODEM) – CI-gruen `6a05b95`, PR #64
 **Warum:** Die FRITZ!Box 5530 Fiber **lehnt TWT ab** (`Connected AP does not support
 setup individual TWT agreement` / `ESP_ERR_NOT_SUPPORTED`, Assoc-Response
