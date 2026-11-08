@@ -516,6 +516,18 @@ python3 "$repo/remote-shell/ha/test_print_health.py"
     -o "$out/test_net_config"
 
 "$out/test_net_config"
+# Same knobs, but built as the ESP32-C6 *receiver*: the default must be the
+# measured loss-free power-saving combo (station PS off + ESP-NOW wake window
+# 20/15), not WIFI_PS_MIN_MODEM which loses ~90% of the telegrams.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DCONFIG_IDF_TARGET_ESP32C6=1 \
+    -I"$repo/main" \
+    "$repo/main/runtime_config.c" \
+    "$here/test_runtime_config_c6_defaults.c" \
+    -o "$out/test_runtime_config_c6_defaults"
+
+"$out/test_runtime_config_c6_defaults"
 
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.

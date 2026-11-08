@@ -1,6 +1,6 @@
 # To-do – esp32-IR
 
-## NEU (2026-11-08): Modem-Sleep-Wächter + sicherer C6-Light-Sleep – Branch `feat/nvs-web-knobs`
+## NEU (2026-11-08): Modem-Sleep-Wächter (ps_fallback) + Compile-/Test-Fixes – Branch `feat/nvs-web-knobs`
 **Warum:** Der C6-Empfänger hat drei Stromspar-Hebel, die je den Link zerstören
 können (Light Sleep → USB-Konsole tot; `ps min/max` → Disconnect-Sturm;
 `radio-save` → verpasste Frames). Dazu flappt die FRITZ!Box auch ohne Hebel.
@@ -18,9 +18,12 @@ Ein Wächter, der **jeden** Disconnect zählt, würde den Sleep grundlos abschal
      `ps != off` **oder** `radio-save`, und nur auf dem Empfänger.
   3. **Test war immer grün:** `CHECK`-Makro in `test/test_ps_fallback.c` erhöhte
      `g_failures` nie → gefixt.
-- **Sicherer Modem-Light-Sleep:** unassoziiert `radio-save on` (5000/70, ~70 mW,
-  stabil); assoziiert `ps off` + `radio-save off` (stabil, DTIM-dominiert).
-  Light Sleep bleibt am C6 aus (USB-Konsole).
+- **Sicherer Modem-Light-Sleep (gemessen, s. Messauftrag oben):** `ps off` +
+  `radio-save on` 20/15 (0,8 % ≈ Baseline); wenn Modem-Sleep zwingend, `ps max`
+  + `listen 10` + `radio-save on` 20/15. **Nie** `ps min/max` ohne `radio-save`.
+  Genau diesen Default setzt der Messauftrag/Fix oben; der Wächter ist das
+  Sicherheitsnetz, falls doch ein PS-Modus erzwungen wird. Light Sleep bleibt
+  am C6 aus (USB-Konsole).
 - **Verifiziert:** IDF-v6.1-Build aller Rollen gruen (`sender`, `receiver`,
   `receiver-c6-apoff`), Host-Suite grün. Details: `docs/c6-modem-sleep-safety.md`.
 - **Offen (am Gerät):** `set ps max` + `set listen 5/10/20/30` am C6 mit der
@@ -47,6 +50,87 @@ spaetere Aenderungen **kein Neukompilieren** brauchen.
   wird persistiert (sichtbar in `config`).
 - **Tests:** `test/test_runtime_config.c`, `test/test_net_config.c` (neu),
   `test/test_web_console.c` (Help-Puffer-Regression); alle Host-Suiten gruen.
+
+## MESSUNG (2026-11-08, .105): Modem-Sleep-Kombinationen ohne Telegramm-Verluste
+**Aufbau:** `.105` = C6-Empfänger (USB-JTAG-Konsole), Sender = **klassischer ESP32**
+(`v0.3.0-17-g9aec836`), ~60 SML-Telegramme/min. Verlust = Δ`sender.sml_sent_ok` −
+Δ`receiver.crc_valid` über 120–200-s-Fenster; Konsole per `set …` + `config`-Rücklesung.
+`average_power_w` ist der **Hauszähler (SML)**, NICHT der C6-Verbrauch — taugt hier nicht
+als Leistungsmaß.
+
+**Ergebnis (7 Läufe, je Kombi 120–200 s; Läufe 5+6 verschränkt A/B gegen Drift):**
+
+| Kombination | Verlust | Bewertung |
+|---|---|---|
+| `ps=off` + `radio-save off` (Baseline) | 2,5–13 % (7 Läufe) | Grundrauschen (WLAN-Interferenz) |
+| `ps=min` + `rs off` (**Auslieferungs-Default!**) | **90,8 / 97,5 / 96,0 %** | ✗ unbrauchbar |
+| `ps=max listen=10` + `rs off` | 91,7 % | ✗ |
+| `ps=max listen=10` + `rs 100/70` | 31–35 % | ✗ |
+| `ps=max listen=10` + `rs 50/40` | 24,2 % | ✗ |
+| `ps=max listen=10` + `rs 30/25` | 11,7 % | ~ |
+| **`ps=max listen=10` + `rs 20/15`** | **8,5–14 %** | ✓ = Baseline (verschränkt) |
+| `ps=max listen=10` + `rs 15/12` | 14,0 % | ✓ |
+| `ps=max listen=50/255` + `rs 20/15` | 11,3 / 12,0 % | ✓ (listen praktisch frei) |
+| `ps=off` + `rs 20/15` | **0,8 %** | ✓✓ praktisch verlustfrei |
+| `ps=off` + `rs 100/70` | 3,4 % | ✓ |
+| `twt on` + `ps=off` + `rs 20/15` | 4,7 % | ~ (TWT vom AP abgelehnt, ohne Effekt) |
+
+**Kernbefund:** Der **ESP-NOW-Wake-Window (`radio-save`) ist der eigentliche Hebel** —
+`ps=min`/`ps=max` **ohne** `radio-save` vernichtet den Empfang fast vollständig (der
+C6 parkt das Modem, ESP-NOW-Frames fallen ins Leere; `transport_losses` bleibt dabei
+~0, es sind echte Funklöcher). Mit `radio-save on` **und kurzem Fenster (20/15 ms)**
+verschwindet der Verlust; `ps=max`+`rs 20/15` ist im verschränkten Lauf **nicht**
+schlechter als `ps=off`. Große Fenster (100/70) kosten ~⅓. Ein zu kurzes Fenster
+(15/12) bringt nichts mehr; **20/15 ms ist der Sweet Spot**. `listen` ist mit
+`radio-save` an fast kostenlos (10→255 nur ~1 %). **TWT ist auf der FRITZ!Box 5530
+wirkungslos** (AP lehnt Setup ab), daher nicht bewertbar.
+
+**Empfehlung (stromsparend UND verlustfrei):**
+- Sicherste Kombi: **`set ps off` + `set radio-save on` + `wake-interval 20` +
+  `wake-window 15`** (0,8 % ≈ Baseline, Modem schläft trotzdem im Fenster).
+- Wenn Modem-Sleep zwingend: **`set ps max` + `set listen 10` + `radio-save on`
+  20/15** (≈ Baseline); größeres `listen` (bis 255) kostet kaum.
+- **Nie** `ps=min`/`ps=max` **ohne** `radio-save on` — das ist der 90-%-Fehler.
+- **Default ändern:** `RUNTIME_CONFIG_PS_DEFAULT` ist `min` + `radio_save=false` →
+  genau die 90-%-Kombi. Default auf `ps=off` (oder `radio_save=true` + 20/15) ziehen.
+
+**Offen/verwirrend:** `set sleep on` wird **abgelehnt** — `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`
+ist aktiv, darum `runtime_config_light_sleep_allowed()==false`. Light-Sleep ist auf diesem
+Build also gar nicht schaltbar (`light_sleep_enabled` bleibt 0). Für die Messung egal,
+aber die Konsole kostet CPU-Wachhaltung (USB-JTAG), siehe frühere 0,12–0,15-W-Notiz.
+
+## FIX (2026-11-08): C6-Receiver-Default auf verlustfreie Kombi – `f12a0e7`, CI-gruen
+**Problem:** Der ausgelieferte Default (`RUNTIME_CONFIG_PS_DEFAULT=min` + `radio_save=false`)
+ist **genau** die 90-%-Verlust-Kombi (dreimal gemessen). Schlimmer: der Branch
+`feat/esp32c6-receiver` (Basis von PR #64) hat den `set ps`-Knopf noch gar nicht und
+**hartkodiert** `esp_wifi_set_ps(WIFI_PS_MIN_MODEM)` in beiden Pfaden von
+`apply_radio_power_config()` — der Kommentar dort nennt MIN_MODEM „always awake", was
+die Messung widerlegt. Bis PR #64 gemerged ist, ist das das Auslieferungsrisiko.
+
+**Fix (`main/runtime_config.c`):** Der C6-Receiver defaultet jetzt auf die gemessen
+verlustfreie Stromspar-Kombi — ziel- und rollenabhängig:
+```c
+#if defined(CONFIG_IDF_TARGET_ESP32C6) && !CONFIG_ESPNOW_ROLE_SENDER
+        .radio_save = true,   .wake_interval_ms = 20u, .wake_window_ms = 15u,
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_OFF,
+#else   /* klassischer ESP32 + jeder Sender: alter Default unverändert */
+        .radio_save = false,  .wake_interval_ms = 100u, .wake_window_ms = 70u,
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
+#endif
+```
+Klassischer ESP32 und Sender bleiben byte-für-byte wie vorher (dort bricht das
+Wake-Window den Link). Neuer Host-Test `test/test_runtime_config_c6_defaults.c`
+(mit `-DCONFIG_IDF_TARGET_ESP32C6=1` in `run_host_tests.sh`) nagelt die Defaults
+fest; CI-Job „Host tests" lief mit **„C6 receiver defaults: 8 checks, 0 failures"**.
+
+**Verifiziert auf Hardware (.105):** Per Web-OTA auf `v0.4.0-9-g8b3181d` geflasht,
+danach `reset-config` (löscht nur den `rtcfg`-NVS-Namespace) → `config` zeigt
+**`radio-save=20/15 ps=off listen=3`**, also den *kompilierten* Default. Die alte
+Kombi ist damit auf dem Board verschwunden.
+
+**PR-Verknüpfung:** PR #64 ist `feat/c6-twt` → `feat/esp32c6-receiver`. Beim Merge
+landen Messung, Fix und der `set ps`/`listen`-Knopf gemeinsam auf dem Receiver-Branch
+und heilen die hartkodierte MIN_MODEM-Stelle.
 
 ## NEU (2026-11-08): C6-Empfänger – Laufzeit-Knopf `set ps` / `set listen` (WIFI_PS_MAX_MODEM) – CI-gruen `6a05b95`, PR #64
 **Warum:** Die FRITZ!Box 5530 Fiber **lehnt TWT ab** (`Connected AP does not support

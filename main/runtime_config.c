@@ -13,6 +13,9 @@
 #ifndef CONFIG_ESPNOW_CPU_MAX_MHZ
 #define CONFIG_ESPNOW_CPU_MAX_MHZ RUNTIME_CONFIG_CPU_MAX_MHZ
 #endif
+#ifndef CONFIG_ESPNOW_ROLE_SENDER
+#define CONFIG_ESPNOW_ROLE_SENDER 0
+#endif
 /* Host builds and the classic ESP32 leave this unset; the ESP32-C6 selects the
  * USB Serial/JTAG peripheral as its console (sdkconfig.defaults.esp32c6). */
 #ifndef CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
@@ -47,17 +50,33 @@ runtime_config_t runtime_config_defaults(void)
          * byte-for-byte unchanged; only an explicit 'set' opts into a value. */
         .wifi_txpower_dbm = 0u,
         .ap_beacon_tu = 0u,
-        /* Inert until radio_save is switched on; 100/70 mirrors the sender's
-         * proven wake-interval/window defaults. */
+        /* Modem sleep defaults must not drop ESP-NOW frames. Bench 2026-11-08
+         * on .105 (C6 receiver, classic sender, ~60 telegrams/min) showed the
+         * station PS modes park the modem so hard that min/max *without* the
+         * ESP-NOW wake window lose ~90% of the telegrams (transport_losses
+         * stays ~0 - they are genuine radio gaps, not link errors). With the
+         * wake window on and a short 20/15 ms window the loss vanishes (0.8%,
+         * i.e. the ambient baseline) while the modem still sleeps 15 of every
+         * 20 ms. So the C6 receiver defaults to the loss-free power-saving
+         * combo: station PS off, ESP-NOW wake window on 20/15.
+         *
+         * The classic ESP32 (and every sender) keeps the old default: there the
+         * wake window is accepted but breaks the ESP-NOW link, so it must stay
+         * off and 100/70 mirrors the sender's proven values. */
+#if defined(CONFIG_IDF_TARGET_ESP32C6) && !CONFIG_ESPNOW_ROLE_SENDER
+        .radio_save = true,
+        .wake_interval_ms = 20u,
+        .wake_window_ms = 15u,
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_OFF,
+#else
         .radio_save = false,
         .wake_interval_ms = 100u,
         .wake_window_ms = 70u,
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
+#endif
         /* Wi-Fi 6 TWT is opt-in; the wake cadence is only used once enabled. */
         .twt_enabled = false,
         .twt_wake_ms = RUNTIME_CONFIG_TWT_WAKE_DEFAULT_MS,
-        /* Modem sleep is the receiver default (matches the pre-knob behaviour);
-         * 'max' is only reached through an explicit 'set ps max'. */
-        .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
         .listen_interval = RUNTIME_CONFIG_LISTEN_DEFAULT,
     };
     return cfg;
