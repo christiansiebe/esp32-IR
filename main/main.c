@@ -931,6 +931,9 @@ static void energy_totals_start(void)
 /* Defined near apply_power_management() below; the Wi-Fi event handler and the
  * console 'set txpower|beacon|radio-save|wake-*' commands call it. */
 static void apply_radio_power_config(void);
+/* Apply the persisted CPU/light-sleep knobs (esp_pm_configure); defined below,
+ * re-run by the receiver's link-fallback self-heal when it disables light sleep. */
+static void apply_power_management(void);
 /* Push the persisted Wi-Fi modem PS mode (off/min/max) into the driver; defined
  * with the other radio power knobs below. */
 static void apply_wifi_ps_config(void);
@@ -8622,10 +8625,26 @@ static void link_fallback_worker(void *arg)
                       "disabled, CPU stays awake", (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
 #else
         /* Receiver: no sender traffic. A hung receiver is already covered by
-         * web_guard, so only surface it here for the dashboard. */
+         * web_guard, so this only surfaces it. But if the receiver is allowed to
+         * light-sleep, that park is a candidate cause (the radio's ESP-NOW wake
+         * window can be too short for the sender's ~5 s burst): drop the park for
+         * good *for this boot* (mirrors the sender, which also disables its light
+         * sleep on link loss). It is not persisted, so a routine sender
+         * maintenance gap does not disable the saving forever; a reboot re-arms
+         * it and the guard fires again if the park is really the cause, so there
+         * is no reboot loop. Radio-save is left alone. */
         g_link_fallback_stage = 1;
-        ESP_LOGW(TAG, "Link fallback: no sender traffic for %u ms",
-                 (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
+        runtime_config_t *lfb_cfg = active_runtime_config();
+        if (runtime_config_light_sleep_allowed() && lfb_cfg->light_sleep) {
+            lfb_cfg->light_sleep = false;
+            apply_power_management();
+            g_link_fallback_stage = 2;
+            ESP_LOGW(TAG, "Link fallback: no sender traffic for %u ms; light "
+                          "sleep disabled for this boot", (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
+        } else {
+            ESP_LOGW(TAG, "Link fallback: no sender traffic for %u ms",
+                     (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
+        }
 #endif
     }
 }

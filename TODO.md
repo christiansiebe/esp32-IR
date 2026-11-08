@@ -77,6 +77,16 @@ die Verbindung zwischenzeitlich verworfen haben (IDF-Doku: ggf. Ab-/Anstecken no
 Im Normalbetrieb (nur USB-Strom, sonst WLAN) greift der Guard sofort. Die Notausgaenge
 aus Stufe 1 (BOOT-Taste, NVS-Version, OTA-Validierung) bleiben unveraendert.
 
+**Selbstheilung bei Funkstille:** Bleibt der Sender laenger als
+`CONFIG_ESPNOW_LINK_FALLBACK_MS` stumm, waehrend der Empfaenger light-sleepen darf,
+schaltet der Link-Fallback (`link_fallback_worker`, Empfaenger-Zweig) den Park fuer
+**den Rest dieses Boots** ab (`light_sleep=false` + `apply_power_management()`), weil
+der Sleep eine der Ursachen sein kann (zu kurzes ESP-NOW-Wake-Fenster). Nicht
+persistiert (spiegelt den Sender, der seinen Light Sleep bei Linkverlust ebenfalls
+abschaltet): eine normale Sender-Wartungsluecke deaktiviert die Ersparnis nicht
+dauerhaft, und ein Reboot armiert den Park neu — greift er dann wieder, feuert der
+Guard erneut, also kein Reboot-Loop. `radio-save` bleibt unangetastet.
+
 **Messwerte:** Die alten FNB-48-Zahlen (0,432 / 0,298 / 0,068 / 0,024 / 0,028 W) sind
 **unbelastbar** (Messskript fror ein, Geraet lag nicht im C6-Strompfad — s.
 `docs/radio-sleep-break-even.md` §8.3). Qualitativ: Radio-Sleep (`radio-save`) bleibt

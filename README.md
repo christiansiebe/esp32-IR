@@ -142,18 +142,42 @@ diagnostic:
 | `set led <on\|off>` | on/off | `on` | master switch; `off` releases the RMT driver (0 idle current) |
 | `set led-gpio <n>` | 0..48 | `8` | LED data GPIO; `0` disables the LED (clean no-op without LED hardware) |
 | `set led-brightness <n>` | 0..255 | `16` | global brightness; `0` is dark |
+| `set led-sleep <on\|off>` | on/off | `on` | let the heartbeat stand down while the chip light-sleeps; `off` holds the CPU awake for exact pulse timing |
 | `set led-status <name\|auto>` | boot/wifi/ap/wait/ok/error/ota/auto | `auto` | force one state for bench work (RAM only, not persisted) |
 
 The same legend is available in the web UI at **`/led`** (linked from the
 dashboard's *System* menu); it live-highlights the state the receiver is
-currently showing, read from `/api/dashboard` (`led_status`/`led_active`).
+currently showing, read from `/api/dashboard` (`led_status`/`led_active`/
+`led_sleep`).
 
 `set led off` (or `led-gpio 0`) stops the tick and deletes the driver, so the
 LED adds nothing to the receiver's idle draw. At the default brightness 16 the
 lit current is a few mA at most and the ~5 % duty cycle keeps the *average* far
 below 1 mA — negligible next to the always-on Wi-Fi radio (~0.43 W). The strip is
 never refreshed while the colour and phase are unchanged, so the CPU cost is a
-handful of writes per second at most.
+handful of writes per second at most. The tick is a **one-shot timer armed for
+the next blink edge** (pulse start / pulse end), not a free-running periodic
+timer, so with `led-sleep on` the chip can park in light sleep between pulses and
+the phase stays correct (it is derived from the wall clock). `led-sleep off` is
+only for bench work that needs jitter-free timing.
+
+### C6 receiver light sleep
+
+The ESP32-C6 receiver can use automatic light sleep (with the Wi-Fi radio kept
+alive by modem sleep / the ESP-NOW wake window), which is what actually lowers
+the idle draw — the always-on radio dominates. Light sleep was previously
+disabled outright on the C6 because it gates the USB Serial/JTAG PHY and a park
+with a USB host attached loses `/dev/ttyACM*` for good. The C6 image now sets
+`CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION`, so IDF itself holds an
+`ESP_PM_NO_LIGHT_SLEEP` lock for as long as a host is attached (a charger/power
+bank does not count) and releases it otherwise; light sleep is therefore safe and
+**on by default** (`set sleep on|off`). An *unassociated* receiver needs
+`set radio-save on` before the radio's APB lock is released and the park can
+engage; an associated one already parks between DTIM beacons via modem sleep. If
+the sender goes silent the link-fallback drops light sleep **for the rest of that
+boot** (not persisted), so a bad park cannot reboot-loop the device while a
+routine sender maintenance gap does not disable the saving forever; a reboot
+re-arms it. See `docs/radio-sleep-break-even.md`.
 
 ## Repository notes
 
