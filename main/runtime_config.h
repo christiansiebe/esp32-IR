@@ -60,8 +60,12 @@
  * at every DTIM beacon the associated station negotiates a longer wake cadence
  * with the AP; the hardware only reached 0.07 W unassociated, so an associated
  * C6 that no longer wakes every beacon is the lever for the associated idle
- * draw. Off by default (the AP must support TWT; the FRITZ!Box 5530 Fiber does).
- * twt_wake_ms is the negotiated wake interval in milliseconds. */
+ * draw. Off by default: the AP must accept an *individual* TWT agreement. The
+ * FRITZ!Box 5530 Fiber advertises TWT in its association response but rejected
+ * the individual setup on the bench (ESP_ERR_WIFI_TWT_SETUP_REJECT /
+ * "does not support setup individual TWT agreement", see TODO.md), so on that AP
+ * the knob is currently ineffective and the modem-PS knob ('set ps') is the
+ * fallback. twt_wake_ms is the negotiated wake interval in milliseconds. */
 #define RUNTIME_CONFIG_TWT_WAKE_MIN_MS 500u
 #define RUNTIME_CONFIG_TWT_WAKE_MAX_MS 10000u
 #define RUNTIME_CONFIG_TWT_WAKE_DEFAULT_MS 5000u

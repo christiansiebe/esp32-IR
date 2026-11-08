@@ -989,13 +989,30 @@ static void wifi_event_handler(void *arg,
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_ITWT_SETUP) {
 #if SOC_WIFI_HE_SUPPORT
         const wifi_event_sta_itwt_setup_t *event = event_data;
-        /* status is an esp_err_t: ESP_OK on success (the AP accepted), anything
-         * else is the failure reason. The diag-event ring is sender-only, so the
-         * receiver surfaces this through the log instead. */
-        ESP_LOGI(TAG, "TWT setup: status=%s flow_id=%u wake_interval=%u*2^%u",
-                 esp_err_to_name(event->status), (unsigned)event->config.flow_id,
-                 (unsigned)event->config.wake_invl_mant,
-                 (unsigned)event->config.wake_invl_expn);
+        /* status is NOT an esp_err_t: 1 means the AP accepted the agreement, any
+         * other value is a failure reason (see esp_wifi_he_types.h and the IDF
+         * itwt example). Passing it to esp_err_to_name() logged a success as
+         * "UNKNOWN ERROR" and hid the real failures. */
+        if (event->status == 1) {
+            g_twt_active = true;
+            ESP_LOGI(TAG, "TWT setup OK: flow_id=%u wake_interval=%u*2^%u us",
+                     (unsigned)event->config.flow_id,
+                     (unsigned)event->config.wake_invl_mant,
+                     (unsigned)event->config.wake_invl_expn);
+        } else {
+            g_twt_active = false;
+            if (event->status == ESP_ERR_WIFI_TWT_SETUP_TIMEOUT) {
+                ESP_LOGW(TAG, "TWT setup timeout (no setup response frame)");
+            } else if (event->status == ESP_ERR_WIFI_TWT_SETUP_TXFAIL) {
+                ESP_LOGW(TAG, "TWT setup frame TX failed (reason %u)",
+                         (unsigned)event->reason);
+            } else if (event->status == ESP_ERR_WIFI_TWT_SETUP_REJECT) {
+                ESP_LOGW(TAG, "TWT setup rejected by the AP (does it support TWT?)");
+            } else {
+                ESP_LOGW(TAG, "TWT setup failed: status=%d reason=%u",
+                         (int)event->status, (unsigned)event->reason);
+            }
+        }
 #endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_ITWT_TEARDOWN) {
 #if SOC_WIFI_HE_SUPPORT
@@ -8811,7 +8828,11 @@ static void wifi_ps_apply_and_reconnect(void)
  * wake window still governs ESP-NOW RX inside that; the two coexist, and the
  * sender's ~5 s ESP-NOW cadence is expected to be received at that resolution.
  * This is documented in the PR; the end-to-end measurement is done on hardware.
- */
+ *
+ * Bench note (2026-11-07): the FRITZ!Box 5530 Fiber rejected the individual TWT
+ * setup (see TODO.md), so on that AP twt_enabled stays ineffective and no
+ * agreement is ever active. The status handling in wifi_event_handler() reports
+ * that rejection explicitly instead of mislabelling it. */
 static void twt_teardown(void)
 {
     if (!g_twt_active) {
@@ -8868,9 +8889,9 @@ static void apply_twt_config(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "TWT setup request failed: %s", esp_err_to_name(err));
     } else {
-        /* The request is sent; the AP's answer arrives as WIFI_EVENT_ITWT_SETUP.
-         * Mark active so a later disconnect/teardown still runs. */
-        g_twt_active = true;
+        /* Request sent; the AP's answer arrives as WIFI_EVENT_ITWT_SETUP, which
+         * sets g_twt_active on success. Do NOT mark it active here: a rejected
+         * setup would otherwise leave a later teardown running against nothing. */
         ESP_LOGI(TAG, "TWT setup requested: wake every %u ms (mant %u * 2^%u)",
                  (unsigned)cfg->twt_wake_ms, (unsigned)mant, (unsigned)expn);
     }
