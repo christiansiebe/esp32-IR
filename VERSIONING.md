@@ -4,6 +4,27 @@ Kurz und praktisch. Es gibt **eine** Versionsnummer für die Firmware. Sie
 steckt in einem Git-Tag; den Rest (welcher Commit, ob ungebaut) macht
 `git describe` automatisch.
 
+## ⛔ REGEL (verbindlich): Versionierung ist Pflicht
+
+Jede Firmware, die **geflasht oder veröffentlicht** wird, bekommt einen
+**SemVer-Tag** `vX.Y.Z` auf den Commit, der gebaut wird, und der Tag wird
+**gepusht**. Das ist keine Kür:
+
+1. **Tag setzen** auf den Commit, der geflasht wird (nicht auf einen älteren).
+2. **Tag pushen** (`git push origin vX.Y.Z`) — sonst kann `git describe` ihn auf
+   der CI oder auf einem anderen Rechner nicht auflösen.
+3. **Der Tag MUSS auf der Linie liegen, von der gebaut wird.** Vor dem Bauen
+   prüfen: `git describe --tags` muss `vX.Y.Z…` liefern, **keinen nackten SHA**.
+   Ein Tag auf einem Seitenzweig, der nicht Vorfahre des Build-Commits ist,
+   hilft nicht (genau das war der C6-Fehler: `v0.3.x` lag auf
+   `fix/memory-repair`/`fix/sender-diag-stack`, der C6-Build zeigte deshalb nur
+   `5c57283`).
+4. **Diese „Getaggte Stände"-Zeile mitziehen** — sie ist die einzige Stelle, an
+   der die aktuelle Nummer in der Doku steht, und sie ist in der Vergangenheit
+   dreimal stehengeblieben.
+5. Die CI **warnt**, wenn `git describe --tags` keinen Tag auflöst (Schutz gegen
+   die Regression).
+
 ## Zählweise
 
 SemVer `vMAJOR.MINOR.PATCH`, mit `v` davor und als Git-Tag:
@@ -20,8 +41,13 @@ Wann welche Zahl steigt:
 | MINOR | neue Funktion, abwärtskompatibel                | `v0.1.0` → `v0.2.0`             |
 | PATCH | Bugfix, keine neue Funktion                     | `v0.1.0` → `v0.1.1`             |
 
-Aktueller Stand: **`v0.1.0`** ist der erste getaggte Baseline-Stand. Vorher gab
-es keine Tags, deshalb war die Version `unknown`.
+Getaggte Stände: **`v0.1.0`** (erster Baseline), **`v0.1.1`** (2026-10-21),
+**`v0.2.0`/`v0.2.1`/`v0.2.2`/`v0.2.4`** (Empfänger-Historie robust gegen eine
+kaputte Datenbank), **`v0.3.0`** (Sender merkt sich den ESP-NOW-Kanal im NVS),
+**`v0.3.1`** (Sender bestätigt das OTA-Image erst, wenn alle Subsysteme bereit
+sind) und **`v0.4.0`** (Empfänger-Rolle auf den ESP32-C6 portiert; Wire- und
+Speicher-Layout unverändert, daher MINOR). Vor `v0.1.0` gab es keine Tags,
+deshalb war die Version `unknown`.
 
 ## Wie die Nummer ins Gerät kommt
 
@@ -79,3 +105,22 @@ git push origin v0.2.0
 
 Der Tag ist die Wahrheit. Die Zahl im Quelltext gibt es nicht extra — sonst
 driften Code und Tag auseinander.
+
+## Vor jedem Flash prüfen (Schutz gegen die Regression)
+
+```bash
+# 1) Liegt der Tag auf MEINER Build-Linie? (kein nackter SHA!)
+git describe --tags --always
+#   gut: v0.4.0-3-gabc1234      schlecht: abc1234  -> Tag fehlt/ist auf einem
+#                                                    Seitenzweig, NICHT bauen
+
+# 2) Ist der Tag von der CI aus erreichbar (gepusht)?
+git ls-remote --tags origin | grep "v0.4.0"
+```
+
+`git describe --tags` löst nur Tags auf, die **Vorfahre** des aktuellen Commits
+sind. Ein Tag auf einem anderen Zweig ist unsichtbar — genau so entstand der
+C6-Fehler: die Empfänger-Rolle wurde auf `feat/esp32c6-receiver`/`feat/c6-twt`
+portiert, aber der letzte erreichbare Tag lag auf `fix/sender-diag-stack`
+(`v0.3.1`), sodass das Gerät nur `5c57283` meldete. Nach dem C6-Port ist der
+Tag **`v0.4.0`** auf der C6-Linie zu setzen und zu pushen.

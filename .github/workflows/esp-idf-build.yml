@@ -176,6 +176,13 @@ jobs:
           fw_ver="$(cd "$GITHUB_WORKSPACE" && git describe --tags --always --dirty 2>/dev/null || echo unknown)"
           echo "FIRMWARE_VERSION=$fw_ver" >> "$GITHUB_ENV"
           echo "Firmware version: $fw_ver"
+          # A bare SHA (no vX.Y.Z prefix) means no tag is an ancestor of this
+          # commit: the versioning rule in VERSIONING.md was skipped (or the tag
+          # sits on a side branch, as happened for the C6 receiver). Warn loudly
+          # so the flashed image is not an anonymous commit.
+          if ! echo "$fw_ver" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::warning::FIRMWARE_VERSION '$fw_ver' has no SemVer tag on this line - tag the commit (see VERSIONING.md) and push the tag"
+          fi
           cat > "$RUNNER_TEMP/sdkconfig.defaults" <<EOF
           CONFIG_IDF_TARGET="${{ matrix.target }}"
           CONFIG_PARTITION_TABLE_CUSTOM=y
