@@ -91,6 +91,10 @@ bool burst_lock_window_should_extend(const burst_lock_t *bl, uint32_t open_ms,
  * up and, after max_misses in a row, drops back to re-learning (unlocked). */
 void burst_lock_window_close(burst_lock_t *bl);
 
+/* Drop the learned state (lock, period, burst history) but keep the counters, so
+ * a disabled lock does not report a stale "locked" and a later re-enable starts
+ * from a clean seed. */
+void burst_lock_forget(burst_lock_t *bl);
 #ifdef __cplusplus
 }
 #endif

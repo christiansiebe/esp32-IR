@@ -157,6 +157,22 @@ static void test_window_extension(void)
           "closed window does not extend");
 }
 
+static void test_forget(void)
+{
+    burst_lock_t bl;
+    burst_lock_init(&bl, 1000, 400, 50, 3);
+    feed_burst(&bl, 10000, 2, 2);
+    feed_burst(&bl, 15000, 2, 2);
+    CHECK(burst_lock_locked(&bl), "locked before forget");
+    uint32_t bursts = bl.bursts;
+
+    burst_lock_forget(&bl);
+    CHECK(!burst_lock_locked(&bl), "forget drops the lock");
+    CHECK(bl.period_ms == 0u, "forget clears the period");
+    CHECK(!bl.in_window && !bl.window_served, "forget clears the window state");
+    CHECK(bl.bursts == bursts, "forget keeps the counters");
+}
+
 int main(void)
 {
     test_init_defaults();
@@ -166,6 +182,7 @@ int main(void)
     test_implausible_period_ignored();
     test_rollover();
     test_window_extension();
+    test_forget();
 
     printf("burst lock: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

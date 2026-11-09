@@ -133,3 +133,16 @@ void burst_lock_window_close(burst_lock_t *bl)
         ++bl->unlocks;
     }
 }
+
+void burst_lock_forget(burst_lock_t *bl)
+{
+    if (bl == NULL) {
+        return;
+    }
+    bl->locked = false;
+    bl->in_window = false;
+    bl->window_served = false;
+    bl->have_burst = false;
+    bl->period_ms = 0u;
+    bl->misses = 0u;
+}

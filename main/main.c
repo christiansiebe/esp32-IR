@@ -9750,6 +9750,9 @@ static void apply_burst_lock_config(void)
         if (g_burst_lock_enabled) {
             portENTER_CRITICAL(&g_burst_lock_lock);
             g_burst_lock_enabled = false;
+            /* Drop the learned state too, so a disabled lock does not report a
+             * stale "locked" (and a later re-enable starts from a clean seed). */
+            burst_lock_forget(&g_burst_lock);
             portEXIT_CRITICAL(&g_burst_lock_lock);
             ESP_LOGI(TAG, "Burst lock off");
         }
