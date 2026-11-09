@@ -1,5 +1,27 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-08): `set ps`/`set listen` rissen den Link ein — behoben (`07419b1`, Branch `feat/c6-burst-lock`)
+**Erledigt + am Gerät verifiziert:** `set ps` fasst den Link nicht mehr an; `set listen`
+reconnected nur bei tatsächlich geändertem `listen_interval`, out-of-band über einen
+400 ms-One-Shot-Timer (Antwort wird vorher geflusht → kein „set timed out" mehr).
+Counter `wifi_reconnects` / `wifi_reconnect_skips` in `/api/dashboard` + `status`.
+Verifiziert: `set ps off` → skip; `set listen 10` (gleich) → skip; `set listen 20` →
+genau 1 reconnect; Link durchgehend HTTP 200.
+
+**Messung (300 s, ab9–ab12):** `ps off`+`radio-save 20/15` und `ps min`+burst-lock
+beide ~16–18 % Verlust **und identisch** → Umgebungsstörung, nicht der Sleep-Modus.
+Keine Konfiguration verursachte Reboots/HTTP-Fehler. Merksatz bleibt: **nie**
+`ps min/max` **ohne** `radio-save`.
+
+**OTA-Weg:** Cloudflare-Quick-Tunnel bricht Pull-OTA ab (Rollback) → direktes
+`POST /update` mit `--data-binary @build/receiver-c6-apoff/esp32-IR.bin` nutzen.
+
+**OFFEN:** Am Gerät .105 keine Sender-Telegramme (`crc_valid=0`, „No sender MAC known yet",
+`sender-diag` 503) — Sender stumm, prüfen. C6-WLAN-Flapper (`run->init`) im Bootlog; ein
+anderer Chat flasht .105 parallel.
+
+
+
 ## NEU (2026-11-08): Modem-Sleep-Wächter (ps_fallback) + Compile-/Test-Fixes – Branch `feat/nvs-web-knobs`
 **Warum:** Der C6-Empfänger hat drei Stromspar-Hebel, die je den Link zerstören
 können (Light Sleep → USB-Konsole tot; `ps min/max` → Disconnect-Sturm;
