@@ -132,6 +132,31 @@ static void test_rollover(void)
     CHECK(bl.period_ms == 5000u, "period correct across the rollover");
 }
 
+static void test_window_extension(void)
+{
+    burst_lock_t bl;
+    burst_lock_init(&bl, 1000, 400, 50, 3);
+    feed_burst(&bl, 10000, 2, 2);
+    feed_burst(&bl, 15000, 2, 2);
+    CHECK(burst_lock_locked(&bl), "locked");
+
+    /* A burst that now spans the sender's ACK round trips can run past one
+     * window: keep it open while frames keep landing, up to the hard cap. */
+    burst_lock_window_open(&bl);
+    feed_burst(&bl, 20000, 2, 2); /* last frame at 20002 */
+    CHECK(burst_lock_window_should_extend(&bl, 19950, 20050, 4000),
+          "extend while a frame just landed");
+    CHECK(!burst_lock_window_should_extend(&bl, 19950, 20200, 4000),
+          "quiet gap ends the extension");
+    CHECK(!burst_lock_window_should_extend(&bl, 19950, 19950 + 4000, 4000),
+          "hard cap ends the extension");
+    burst_lock_window_close(&bl);
+
+    /* Closed window never extends. */
+    CHECK(!burst_lock_window_should_extend(&bl, 20000, 20010, 4000),
+          "closed window does not extend");
+}
+
 int main(void)
 {
     test_init_defaults();
@@ -140,6 +165,7 @@ int main(void)
     test_window_served_and_miss();
     test_implausible_period_ignored();
     test_rollover();
+    test_window_extension();
 
     printf("burst lock: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -181,6 +181,16 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_burst_lock"
 
+# Receiver application-level ACK (sml_transport_ack_t): the header-only
+# build/parse pair the sender waits on and the receiver sends. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/components/sml_transport/include" \
+    "$here/test_sml_transport_ack.c" \
+    -o "$out/test_sml_transport_ack"
+
+"$out/test_sml_transport_ack"
+
 # Adaptive sender light-sleep window (main/uart_sleep_window.h). Pure C: the
 # min-gap cap and the back-off must never let the window clip a telegram.
 "$cc" -std=c11 -Wall -Wextra -O2 \

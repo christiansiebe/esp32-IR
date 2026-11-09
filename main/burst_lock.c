@@ -7,6 +7,11 @@
 #define BURST_LOCK_DEFAULT_MAX_MISSES 3u
 #define BURST_LOCK_MIN_PERIOD_MS 1000u
 #define BURST_LOCK_MAX_PERIOD_MS 20000u
+/* A window stays open (past window_ms) only while frames keep landing within
+ * this quiet gap; once the burst goes quiet for this long, it closes. Must stay
+ * above the sender's retransmit cadence (SML_ACK_TIMEOUT_MS +
+ * SML_ACK_RETRY_BACKOFF_MS), or a retry would land after the radio parked. */
+#define BURST_LOCK_EXTEND_QUIET_MS 150u
 
 void burst_lock_init(burst_lock_t *bl, uint32_t gap_ms, uint32_t window_ms,
                      uint32_t lead_ms, uint32_t max_misses)
@@ -89,6 +94,20 @@ void burst_lock_window_open(burst_lock_t *bl)
     }
     bl->in_window = true;
     bl->window_served = false;
+}
+
+bool burst_lock_window_should_extend(const burst_lock_t *bl, uint32_t open_ms,
+                                     uint32_t now_ms, uint32_t max_open_ms)
+{
+    if (bl == NULL || !bl->in_window) {
+        return false;
+    }
+    /* Hard cap: never hold the radio awake past this. */
+    if ((uint32_t)(now_ms - open_ms) >= max_open_ms) {
+        return false;
+    }
+    /* Keep open only while frames are still landing; a quiet gap ends it. */
+    return (uint32_t)(now_ms - bl->last_frame_ms) < BURST_LOCK_EXTEND_QUIET_MS;
 }
 
 void burst_lock_window_close(burst_lock_t *bl)

@@ -78,6 +78,15 @@ int32_t burst_lock_wait_ms(const burst_lock_t *bl, uint32_t now_ms);
 /* Open the window and clear the per-window "served" flag. */
 void burst_lock_window_open(burst_lock_t *bl);
 
+/* While the window is open, decide whether to keep it open past the nominal
+ * window_ms because frames are still arriving: a burst that now spans the
+ * sender's ACK round trips can run longer than one window, and cutting it off
+ * would lose the tail. `open_ms` is when the window was opened, `now_ms` the
+ * current time, `max_open_ms` a hard cap so a runaway cannot hold the radio
+ * awake forever. Returns false once the burst has gone quiet or the cap is hit. */
+bool burst_lock_window_should_extend(const burst_lock_t *bl, uint32_t open_ms,
+                                     uint32_t now_ms, uint32_t max_open_ms);
+
 /* Close the window: a served window resets the miss count; an empty one counts
  * up and, after max_misses in a row, drops back to re-learning (unlocked). */
 void burst_lock_window_close(burst_lock_t *bl);

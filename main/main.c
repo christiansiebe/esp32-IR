@@ -153,6 +153,18 @@ static const char *TAG = "espnow_meter";
 /* Most telegrams handed to ESP-NOW in a single send phase; the rest wait for
  * the next cycle. Normal arrival is ~1/s so a 5 s window has ~5 to send. */
 #define SML_TX_BURST 32
+/* How long the send phase waits for a telegram's receiver ACK before repeating
+ * it. The receiver answers immediately (its radio is awake for the whole burst),
+ * so 80 ms is generous; it is deliberately shorter than the receiver's window
+ * extension so a retransmit still lands inside the open window. */
+#define SML_ACK_TIMEOUT_MS 80
+/* Attempts per telegram per send phase (first try + retransmits). A telegram
+ * that stays unconfirmed after this is left at the head of the ring and retried
+ * in the next cycle rather than dropped. */
+#define SML_ACK_MAX_ATTEMPTS 4
+/* Pause before a retransmit; keeps the retry cadence (this + SML_ACK_TIMEOUT_MS)
+ * below the receiver's burst-lock extension threshold. */
+#define SML_ACK_RETRY_BACKOFF_MS 10
 #define METER_MAGIC          0x48425A31u
 #define METER_VERSION        1u
 #define SML_VALUE_HISTORY_COUNT 256
@@ -433,6 +445,24 @@ static uint32_t g_sml_sent_ok;
 static uint32_t g_sml_send_fail;
 static uint32_t g_sml_last_sequence;
 static uint32_t g_diag_requests;
+/* Application-level delivery confirmation. The receiver unicasts an ACK per
+ * telegram (see sml_transport_ack_t); the send phase waits for it and repeats
+ * the telegram when it does not arrive, so a lost broadcast is recovered instead
+ * of only being noticed later as a sequence gap. g_sml_ack_highest is a
+ * monotonic high-water mark (all send paths are in order), so a stale ACK for an
+ * older sequence can never satisfy a newer one. */
+static SemaphoreHandle_t g_sml_ack_sem;
+static volatile uint32_t g_sml_ack_highest;
+/* Set once any ACK has been seen this session. Until then a telegram that stays
+ * unacked is treated as "the peer does not acknowledge" and falls back to
+ * best-effort delivery (see flush_tx_batch), so a sender talking to an older,
+ * non-ACKing receiver can never wedge on its head telegram. Cleared never: once
+ * the receiver has proven it ACKs, strict confirmation stays on for the session
+ * and transient losses are simply retransmitted. */
+static volatile bool g_sml_ack_seen;
+static uint32_t g_sml_retransmits;
+static uint32_t g_sml_ack_timeouts;
+static uint32_t g_sml_unacked;
 /* UART receive-gap diagnosis. The IR read head produces bursts of bytes
  * separated by silent gaps, so gaps themselves are normal; what matters is
  * whether a gap happens while a telegram is still being parsed. */
@@ -495,6 +525,7 @@ static uint32_t g_sml_invalid_crc_telegrams;
 static uint32_t g_sml_transport_gaps;     /* total out-of-order packets seen */
 static uint32_t g_sml_transport_losses;   /* forward jumps: broadcast(s) lost */
 static uint32_t g_sml_transport_reorders; /* retried older packets (recovered) */
+static uint32_t g_sml_transport_duplicates; /* exact retransmits (lost ACK) dropped */
 static uint32_t g_sml_last_transport_sequence;
 #if BURST_LOCK_SUPPORTED
 /* Burst-locked receive window (see burst_lock.h). The receiver watches when the
@@ -507,6 +538,27 @@ static volatile bool g_burst_lock_enabled;
  * backfill, OTA relay). While > 0 the worker keeps the radio up so a response is
  * never missed because the modem was parked. */
 static volatile int g_burst_lock_hold;
+/* Cumulative time the modem was held awake by the burst lock, so the dashboard
+ * can show the actual awake duty instead of only the configured window. */
+static uint32_t g_burst_lock_awake_ms;
+static uint32_t g_burst_lock_awake_since_ms;
+
+/* Snapshot of the burst-lock state for the console/dashboard. `awake_pct` is the
+ * share of uptime the modem spent held awake by the lock, i.e. the real cost of
+ * the prediction (0 when the lock is off or never held). */
+typedef struct {
+    bool enabled;
+    bool locked;
+    uint32_t period_ms;
+    uint32_t window_ms;
+    uint32_t awake_ms;
+    uint32_t bursts;
+    uint32_t locks;
+    uint32_t unlocks;
+    uint32_t window_hits;
+    uint32_t window_misses;
+    uint32_t awake_pct;
+} burst_lock_stats_t;
 #endif
 static sml_value_record_t g_sml_latest_values[3];
 static bool g_sml_latest_value_valid[3];
@@ -954,6 +1006,7 @@ static void apply_burst_lock_config(void);
 /* Keep the radio awake across an ESP-NOW request/response exchange. */
 static void burst_lock_hold_awake(void);
 static void burst_lock_release_awake(void);
+static void burst_lock_get_stats(burst_lock_stats_t *out);
 #endif
 /* Apply the persisted CPU/light-sleep knobs (esp_pm_configure); defined below,
  * re-run by the receiver's link-fallback self-heal when it disables light sleep. */
@@ -2642,6 +2695,19 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
+    uint32_t ack_sequence;
+    if (sml_transport_ack_parse(data, data_len, &ack_sequence)) {
+        /* The receiver confirmed this telegram. Advance the high-water mark and
+         * wake the send phase so it stops repeating it. */
+        g_sml_ack_seen = true;
+        if (ack_sequence > g_sml_ack_highest) {
+            g_sml_ack_highest = ack_sequence;
+        }
+        if (g_sml_ack_sem != NULL) {
+            xSemaphoreGive(g_sml_ack_sem);
+        }
+        return;
+    }
     if (is_espnow_ota_packet(data, data_len)) {
         if (g_espnow_ota_rx_queue == NULL || data_len > ESP_NOW_MAX_DATA_LEN) {
             ESP_LOGE(TAG, "Sender OTA receiver is unavailable or packet is oversized");
@@ -2870,16 +2936,40 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         ESP_LOGW(TAG, "Dropped SML transport packet with sequence zero");
         return;
     }
+    /* Confirm receipt so the sender can stop retransmitting this sequence. Sent
+     * unicast (the sender's MAC is known from src_addr) and for *any* well-formed
+     * telegram - a duplicate or a bad-CRC telegram still arrived, so a retry
+     * would only burn airtime. Best-effort: a lost ACK just makes the sender
+     * repeat, which is harmless because the receiver de-duplicates by sequence. */
+    if (add_espnow_peer(info->src_addr, ESPNOW_IF) == ESP_OK) {
+        sml_transport_ack_t ack;
+        sml_transport_ack_build(&ack, packet.header.sequence);
+        (void)esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
+    }
     if (info->rx_ctrl != NULL) {
         record_rssi_sample(info->rx_ctrl->rssi);
+    }
+    /* Deduplicate an exact retransmit. When the ACK for a telegram is lost the
+     * sender repeats that same sequence; counting or storing it again would
+     * inflate crc_valid and double-record a value. The sequence is assigned
+     * monotonically per packet, so an equal sequence is always a repeat. Only
+     * equality is filtered - a *smaller* sequence (a reorder) and a large
+     * backward jump (the sender rebooted and restarted at 1) both fall through
+     * and are handled as before, so a sender reboot cannot wedge the receiver. */
+    if (packet.header.sequence == g_sml_last_transport_sequence) {
+        portENTER_CRITICAL(&g_sml_history_lock);
+        ++g_sml_transport_duplicates;
+        portEXIT_CRITICAL(&g_sml_history_lock);
+        return;
     }
     if (g_sml_last_transport_sequence != 0 &&
         packet.header.sequence != g_sml_last_transport_sequence + 1) {
         /* The sequence is assigned per packet by the sender and a not-yet-sent
          * packet can be re-queued with its OLD (smaller) sequence (retry), so
          * there are two very different cases:
-         *   - backward/duplicate (<=): a retry or reorder that was recovered,
-         *     NOT data loss; nothing to reset.
+         *   - backward (<): a retry or reorder that was recovered (an exact
+         *     duplicate was already returned above), NOT data loss; nothing to
+         *     reset.
          *   - forward jump (>): a broadcast packet (or several) really was lost
          *     over the air; the 60 s power average is then incomplete, so its
          *     accumulator is reset. Recovered data still flows in via backfill. */
@@ -3271,8 +3361,27 @@ void sml_adapter_telegram_callback(uint64_t timestamp_us, bool crc_valid,
     }
 }
 
-/* Returns true only when ESP-NOW confirmed the delivery, so the caller can put
- * an unconfirmed telegram back into the batch ring and retry it. */
+/* Wait up to `timeout_ms` for the receiver to acknowledge `sequence` (or any
+ * later one - a monotonic high-water mark covers ours). Returns true on
+ * confirmation. */
+static bool wait_for_sml_ack(uint32_t sequence, uint32_t timeout_ms)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    for (;;) {
+        if (g_sml_ack_highest >= sequence) {
+            return true;
+        }
+        TickType_t now = xTaskGetTickCount();
+        if ((int32_t)(deadline - now) <= 0) {
+            return g_sml_ack_highest >= sequence;
+        }
+        (void)xSemaphoreTake(g_sml_ack_sem, deadline - now);
+    }
+}
+
+/* Transmit one telegram and wait for the receiver's application-level ACK.
+ * Returns true only when the receiver confirmed it, so the caller can repeat an
+ * unconfirmed telegram instead of treating "handed to ESP-NOW" as delivered. */
 static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
 {
     sml_transport_packet_t packet = {
@@ -3293,6 +3402,10 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
     portENTER_CRITICAL(&g_uart_stats_lock);
     g_sml_last_sequence = sequence;
     portEXIT_CRITICAL(&g_uart_stats_lock);
+
+    /* Clear a stale TX-completion token so this send cannot read the previous
+     * one's status. */
+    (void)xSemaphoreTake(g_send_done, 0);
 
     size_t packet_length = sizeof(packet.header) +
                            item->value_count * sizeof(packet.values[0]);
@@ -3324,6 +3437,14 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
                  (unsigned long)sequence);
         diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "sml send unconfirmed seq=%lu",
                        (unsigned long)sequence);
+        return false;
+    }
+    /* The broadcast left our radio, but only the receiver's ACK proves it
+     * arrived. Wait for it before declaring the telegram delivered. */
+    if (!wait_for_sml_ack(sequence, SML_ACK_TIMEOUT_MS)) {
+        portENTER_CRITICAL(&g_uart_stats_lock);
+        ++g_sml_unacked;
+        portEXIT_CRITICAL(&g_uart_stats_lock);
         return false;
     }
     portENTER_CRITICAL(&g_uart_stats_lock);
@@ -3562,9 +3683,12 @@ static void flush_tx_batch(void)
 {
     /* One send phase: drain up to SML_TX_BURST telegrams oldest-first. The
      * sequence is the ring's own, so it stays contiguous across eviction and
-     * the receiver can reconcile gaps. An unconfirmed delivery is put back at
-     * the head and the phase stops, so the telegram is retried next cycle
-     * instead of being dropped (ESP-NOW is connectionless and unreliable). */
+     * the receiver can reconcile gaps. Each telegram is retransmitted until the
+     * receiver ACKs it (up to SML_ACK_MAX_ATTEMPTS) so a lost broadcast is
+     * recovered rather than only noticed later as a sequence gap. A telegram
+     * that stays unconfirmed is put back at the head and the phase stops, so it
+     * is retried next cycle instead of being dropped (ESP-NOW is connectionless
+     * and unreliable). */
     for (uint32_t sent = 0; sent < SML_TX_BURST; ++sent) {
         sml_tx_item_t item;
         uint32_t sequence;
@@ -3574,10 +3698,41 @@ static void flush_tx_batch(void)
         if (!have) {
             break;
         }
-        if (!send_sml_telegram(sequence, &item)) {
+        bool delivered = false;
+        for (uint32_t attempt = 0; attempt < SML_ACK_MAX_ATTEMPTS; ++attempt) {
+            if (send_sml_telegram(sequence, &item)) {
+                delivered = true;
+                break;
+            }
+            if (attempt + 1u < SML_ACK_MAX_ATTEMPTS) {
+                portENTER_CRITICAL(&g_uart_stats_lock);
+                ++g_sml_retransmits;
+                portEXIT_CRITICAL(&g_uart_stats_lock);
+                vTaskDelay(pdMS_TO_TICKS(SML_ACK_RETRY_BACKOFF_MS));
+            }
+        }
+        if (!delivered) {
             portENTER_CRITICAL(&g_uart_stats_lock);
-            (void)sml_tx_batch_requeue_front(&g_sml_tx_batch, &item, sequence);
+            ++g_sml_ack_timeouts;
+            /* Never seen an ACK this session: the peer does not acknowledge (an
+             * older receiver build). Fall back to best-effort delivery so the
+             * ring keeps draining instead of wedging on this telegram; a real
+             * loss is still reconciled by sequence at the receiver. */
+            bool best_effort = !g_sml_ack_seen;
+            if (best_effort) {
+                ++g_sml_sent_ok;
+                sml_tx_batch_mark_sent(&g_sml_tx_batch, sequence);
+            } else {
+                (void)sml_tx_batch_requeue_front(&g_sml_tx_batch, &item, sequence);
+            }
             portEXIT_CRITICAL(&g_uart_stats_lock);
+            if (best_effort) {
+                continue;
+            }
+            diag_log_event(ESPNOW_DIAG_LEVEL_WARN,
+                           "sml unacked after %u tries seq=%lu",
+                           (unsigned)SML_ACK_MAX_ATTEMPTS,
+                           (unsigned long)sequence);
             break;
         }
     }
@@ -3776,6 +3931,8 @@ static esp_err_t root_handler(httpd_req_t *req)
         "byId('meter-status').textContent='SML CRC gültig: '+d.crc_valid+"
         "' · CRC fehlerhaft: '+d.crc_invalid+"
         "' · Funkpakete verloren: '+d.transport_losses+' (rückgewonnen/Reorder: '+d.transport_reorders+')'+"
+        "' · Duplikate: '+(d.transport_duplicates!==undefined?d.transport_duplicates:'?')+"
+        "' · Empfang: '+(d.sender_rssi_valid?d.sender_rssi_dbm+' dBm':'?')+"
         "' · CPU: '+d.cpu_freq_mhz+' MHz (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)'+"
         "' · Sleep: '+(d.sleep_state?'leicht':'wach')+(d.light_sleep_enabled?' (aktiv)':' (aus)')+"
         "' · FW: '+(d.version||'?');"
@@ -4039,6 +4196,7 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
     uint32_t transport_gaps;
     uint32_t transport_losses;
     uint32_t transport_reorders;
+    uint32_t transport_duplicates;
     portENTER_CRITICAL(&g_sml_history_lock);
     latest_sequence = g_sml_latest_value_sequence;
     valid_telegrams = g_sml_valid_telegrams;
@@ -4046,6 +4204,7 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
     transport_gaps = g_sml_transport_gaps;
     transport_losses = g_sml_transport_losses;
     transport_reorders = g_sml_transport_reorders;
+    transport_duplicates = g_sml_transport_duplicates;
     size_t oldest_index = (g_sml_value_history_next +
                            SML_VALUE_HISTORY_COUNT -
                            g_sml_value_history_count) % SML_VALUE_HISTORY_COUNT;
@@ -4071,6 +4230,7 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
                               "\"overflow\":%s,\"crc_valid\":%lu,"
                               "\"crc_invalid\":%lu,\"transport_gaps\":%lu,"
                               "\"transport_losses\":%lu,\"transport_reorders\":%lu,"
+                              "\"transport_duplicates\":%lu,"
                               "\"values\":[",
                               (unsigned long)oldest_sequence,
                               (unsigned long)latest_sequence,
@@ -4079,7 +4239,8 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
                               (unsigned long)invalid_crc_telegrams,
                               (unsigned long)transport_gaps,
                               (unsigned long)transport_losses,
-                              (unsigned long)transport_reorders);
+                              (unsigned long)transport_reorders,
+                              (unsigned long)transport_duplicates);
     if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
         return ESP_FAIL;
     }
@@ -4121,6 +4282,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     uint32_t transport_gaps;
     uint32_t transport_losses;
     uint32_t transport_reorders;
+    uint32_t transport_duplicates;
     double power_sum;
     size_t power_count = 0;
     uint64_t power_reference_us = 0;
@@ -4134,6 +4296,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     transport_gaps = g_sml_transport_gaps;
     transport_losses = g_sml_transport_losses;
     transport_reorders = g_sml_transport_reorders;
+    transport_duplicates = g_sml_transport_duplicates;
 
     power_sum = g_sml_power_sample_sum_w;
     power_count = g_sml_power_sample_count;
@@ -4169,7 +4332,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
         }
     }
 
-    char payload[896];
+    char payload[1152];
     char average_json[48] = "null";
     if (power_count != 0) {
         int average_len = snprintf(average_json, sizeof(average_json),
@@ -4185,15 +4348,41 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     int pm_max_freq_mhz = pm_config.max_freq_mhz;
     int pm_min_freq_mhz = pm_config.min_freq_mhz;
     int pm_current_freq_mhz = esp_clk_cpu_freq() / 1000000;
+    /* Burst-lock duty is receiver-only (C6); on other targets the field is
+     * simply omitted so the JSON stays valid. Sized for the fixed keys plus the
+     * widest possible 32-bit values. */
+    char burst_json[256] = "";
+#if BURST_LOCK_SUPPORTED
+    {
+        burst_lock_stats_t bl;
+        burst_lock_get_stats(&bl);
+        int burst_len = snprintf(
+            burst_json, sizeof(burst_json),
+            ",\"burst_lock\":%s,\"burst_locked\":%s,\"burst_period_ms\":%u,"
+            "\"burst_window_ms\":%u,\"burst_awake_ms\":%u,"
+            "\"burst_awake_pct\":%u,\"burst_bursts\":%u,\"burst_window_hits\":%u,"
+            "\"burst_window_misses\":%u,\"burst_unlocks\":%u",
+            bl.enabled ? "true" : "false", bl.locked ? "true" : "false",
+            (unsigned)bl.period_ms, (unsigned)bl.window_ms,
+            (unsigned)bl.awake_ms, (unsigned)bl.awake_pct,
+            (unsigned)bl.bursts, (unsigned)bl.window_hits,
+            (unsigned)bl.window_misses, (unsigned)bl.unlocks);
+        if (burst_len < 0 || (size_t)burst_len >= sizeof(burst_json)) {
+            return ESP_FAIL;
+        }
+    }
+#endif
     int len = snprintf(payload, sizeof(payload),
                        "{\"version\":\"%s\",\"import\":%s,\"export\":%s,\"power\":%s,"
                        "\"average_power_w\":%s,\"average_samples\":%u,"
                        "\"average_duration_s\":%llu,\"crc_valid\":%lu,"
                        "\"crc_invalid\":%lu,\"transport_gaps\":%lu,"
                        "\"transport_losses\":%lu,\"transport_reorders\":%lu,"
+                       "\"transport_duplicates\":%lu,"
+                       "\"sender_rssi_dbm\":%d,\"sender_rssi_valid\":%s,"
                        "\"cpu_freq_mhz\":%d,\"cpu_freq_max_mhz\":%d,"
                        "\"cpu_freq_min_mhz\":%d,\"sleep_state\":%u,"
-                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu}",
+                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu%s}",
                        fw_version(),
                        readings[0], readings[1], readings[2],
                        average_json,
@@ -4204,12 +4393,16 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        (unsigned long)transport_gaps,
                        (unsigned long)transport_losses,
                        (unsigned long)transport_reorders,
+                       (unsigned long)transport_duplicates,
+                       (int)g_sender_rssi_dbm,
+                       g_sender_rssi_valid ? "true" : "false",
                        pm_current_freq_mhz,
                        pm_max_freq_mhz,
                        pm_min_freq_mhz,
                        (unsigned int)g_sleep_state,
                        (unsigned int)(pm_config.light_sleep_enable ? 1 : 0),
-                       (unsigned long)g_sleep_accumulated_ms);
+                       (unsigned long)g_sleep_accumulated_ms,
+                       burst_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
         return ESP_FAIL;
     }
@@ -5366,6 +5559,26 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
         return;
     }
     written += wdt;
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* Application-level ACK state: whether the receiver confirms telegrams and
+     * how much retransmission the link needs. "confirmed" means an ACK has been
+     * seen this session (strict delivery); "best effort" means the peer never
+     * acknowledged, so the sender falls back to blind sends. */
+    int ack = snprintf(
+        out + written, out_size - (size_t)written,
+        "sml ack: %s, sent %u, failed %u, retransmits %u, timeouts %u, "
+        "unacked %u, pending %u, missing %u\n",
+        g_sml_ack_seen ? "confirmed" : "best effort",
+        (unsigned)g_sml_sent_ok, (unsigned)g_sml_send_fail,
+        (unsigned)g_sml_retransmits, (unsigned)g_sml_ack_timeouts,
+        (unsigned)g_sml_unacked, (unsigned)sml_tx_batch_count(&g_sml_tx_batch),
+        (unsigned)sml_tx_batch_missing(&g_sml_tx_batch));
+    if (ack < 0 || (size_t)ack >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+        return;
+    }
+    written += ack;
+#endif
 #if !CONFIG_ESPNOW_ROLE_SENDER
     int extra = snprintf(
         out + written, out_size - (size_t)written,
@@ -5389,7 +5602,26 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
         (unsigned)probe_fails);
     if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
         snprintf(out, out_size, "status: output truncated\n");
+        return;
     }
+    written += extra;
+#if BURST_LOCK_SUPPORTED
+    burst_lock_stats_t bl;
+    burst_lock_get_stats(&bl);
+    extra = snprintf(
+        out + written, out_size - (size_t)written,
+        "burst lock: %s, %s, period %u ms, window %u ms\n"
+        "burst lock duty: awake %u ms (%u%%), bursts %u, locks %u, "
+        "hits %u, misses %u, unlocks %u\n",
+        bl.enabled ? "on" : "off", bl.locked ? "locked" : "learning",
+        (unsigned)bl.period_ms, (unsigned)bl.window_ms, (unsigned)bl.awake_ms,
+        (unsigned)bl.awake_pct, (unsigned)bl.bursts, (unsigned)bl.locks,
+        (unsigned)bl.window_hits, (unsigned)bl.window_misses,
+        (unsigned)bl.unlocks);
+    if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+    }
+#endif
 #endif
 }
 
@@ -6374,11 +6606,11 @@ static void web_console_register_commands(void)
      * restart the bridge. */
 #if SOC_WIFI_HE_SUPPORT
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #else
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #endif
 #else
@@ -8901,6 +9133,11 @@ static void run_sender(void)
         ESP_LOGE(TAG, "Could not create sleep-state announce semaphore");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
+    g_sml_ack_sem = xSemaphoreCreateBinary();
+    if (g_sml_ack_sem == NULL) {
+        ESP_LOGE(TAG, "Could not create SML ACK semaphore");
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
 #if CONFIG_ESPNOW_ROLE_SENDER
     uart_sleep_set_state_notify(send_sleep_state_packet);
 #endif
@@ -9385,6 +9622,40 @@ static void burst_lock_release_awake(void)
 /* A receive window below this would clip a burst once the phase jitter is
  * added, so the configured wake window is floored here. */
 #define BURST_LOCK_WINDOW_MIN_MS 80u
+/* Hard cap on how long one window may stay open while frames keep landing, so a
+ * stuck sender cannot hold the receiver's radio awake indefinitely. Sized for a
+ * full SML_TX_BURST drained with retransmits at ~90 ms per telegram. */
+#define BURST_LOCK_MAX_WINDOW_MS 4000u
+
+/* Acquire/release the forced modem wakeup while keeping the awake-time total in
+ * g_burst_lock_awake_ms, so the dashboard can report the real awake duty. */
+static void burst_lock_awake_hold(bool *held)
+{
+    if (*held) {
+        return;
+    }
+    (void)esp_wifi_force_wakeup_acquire();
+    *held = true;
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    g_burst_lock_awake_since_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+}
+
+static void burst_lock_awake_release(bool *held)
+{
+    if (!*held) {
+        return;
+    }
+    (void)esp_wifi_force_wakeup_release();
+    *held = false;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    if (g_burst_lock_awake_since_ms != 0) {
+        g_burst_lock_awake_ms += now_ms - g_burst_lock_awake_since_ms;
+        g_burst_lock_awake_since_ms = 0;
+    }
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+}
 
 /* Receiver burst-locked receive window.
  *
@@ -9418,29 +9689,20 @@ static void burst_lock_worker(void *arg)
         portEXIT_CRITICAL(&g_burst_lock_lock);
 
         if (!enabled) {
-            if (held) {
-                (void)esp_wifi_force_wakeup_release();
-                held = false;
-            }
+            burst_lock_awake_release(&held);
             vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_IDLE_POLL_MS));
             continue;
         }
         if (!locked || hold) {
             /* Stay awake to observe bursts until the period is known, or to
              * serve an in-flight ESP-NOW exchange. */
-            if (!held) {
-                (void)esp_wifi_force_wakeup_acquire();
-                held = true;
-            }
+            burst_lock_awake_hold(&held);
             vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_IDLE_POLL_MS));
             continue;
         }
         if (wait_ms > 0) {
             /* Between bursts: let the modem return to its PS mode. */
-            if (held) {
-                (void)esp_wifi_force_wakeup_release();
-                held = false;
-            }
+            burst_lock_awake_release(&held);
             uint32_t sleep_ms = (uint32_t)wait_ms;
             if (sleep_ms > BURST_LOCK_MAX_SLEEP_MS) {
                 sleep_ms = BURST_LOCK_MAX_SLEEP_MS;
@@ -9449,23 +9711,31 @@ static void burst_lock_worker(void *arg)
             continue;
         }
         /* Window opens: wake the modem, hold it through the predicted burst,
-         * then release it back to the PS mode. */
-        if (!held) {
-            (void)esp_wifi_force_wakeup_acquire();
-            held = true;
-        }
+         * then release it back to the PS mode. The window is extended while
+         * frames keep landing so a burst that now spans the sender's ACK round
+         * trips is covered end to end. */
+        burst_lock_awake_hold(&held);
         portENTER_CRITICAL(&g_burst_lock_lock);
         burst_lock_window_open(&g_burst_lock);
         uint32_t window_ms = g_burst_lock.window_ms;
         portEXIT_CRITICAL(&g_burst_lock_lock);
-        vTaskDelay(pdMS_TO_TICKS(window_ms));
+        uint32_t open_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        for (;;) {
+            vTaskDelay(pdMS_TO_TICKS(window_ms));
+            portENTER_CRITICAL(&g_burst_lock_lock);
+            bool extend = burst_lock_window_should_extend(
+                &g_burst_lock, open_ms,
+                (uint32_t)(esp_timer_get_time() / 1000ULL),
+                BURST_LOCK_MAX_WINDOW_MS);
+            portEXIT_CRITICAL(&g_burst_lock_lock);
+            if (!extend) {
+                break;
+            }
+        }
         portENTER_CRITICAL(&g_burst_lock_lock);
         burst_lock_window_close(&g_burst_lock);
         portEXIT_CRITICAL(&g_burst_lock_lock);
-        if (held) {
-            (void)esp_wifi_force_wakeup_release();
-            held = false;
-        }
+        burst_lock_awake_release(&held);
     }
 }
 
@@ -9498,6 +9768,33 @@ static void apply_burst_lock_config(void)
     portEXIT_CRITICAL(&g_burst_lock_lock);
     ESP_LOGI(TAG, "Burst lock on: predicting the sender burst, %u ms window",
              (unsigned)window);
+}
+
+/* Snapshot of the burst-lock state (type declared up with the globals). */
+static void burst_lock_get_stats(burst_lock_stats_t *out)
+{
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    uint32_t uptime_ms = now_ms;
+    memset(out, 0, sizeof(*out));
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    out->enabled = g_burst_lock_enabled;
+    out->locked = burst_lock_locked(&g_burst_lock);
+    out->period_ms = g_burst_lock.period_ms;
+    out->window_ms = g_burst_lock.window_ms;
+    out->bursts = g_burst_lock.bursts;
+    out->locks = g_burst_lock.locks;
+    out->unlocks = g_burst_lock.unlocks;
+    out->window_hits = g_burst_lock.window_hits;
+    out->window_misses = g_burst_lock.window_misses;
+    uint32_t awake = g_burst_lock_awake_ms;
+    if (g_burst_lock_awake_since_ms != 0) {
+        awake += now_ms - g_burst_lock_awake_since_ms;
+    }
+    out->awake_ms = awake;
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+    if (uptime_ms != 0) {
+        out->awake_pct = (uint32_t)((uint64_t)awake * 100u / uptime_ms);
+    }
 }
 #endif
 

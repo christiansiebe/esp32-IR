@@ -54,24 +54,36 @@ runtime_config_t runtime_config_defaults(void)
          * on .105 (C6 receiver, classic sender, ~60 telegrams/min) showed the
          * station PS modes park the modem so hard that min/max *without* the
          * ESP-NOW wake window lose ~90% of the telegrams (transport_losses
-         * stays ~0 - they are genuine radio gaps, not link errors). With the
-         * wake window on and a short 20/15 ms window the loss vanishes (0.8%,
-         * i.e. the ambient baseline) while the modem still sleeps 15 of every
-         * 20 ms. So the C6 receiver defaults to the loss-free power-saving
-         * combo: station PS off, ESP-NOW wake window on 20/15.
+         * stays ~0 - they are genuine radio gaps, not link errors). The
+         * driver's own wake window fixes that but drifts against the sender's
+         * burst, so a window short enough to save power drops bursts.
+         *
+         * The burst lock removes the drift: it learns the burst period and holds
+         * the modem awake only around the predicted burst, so the station can
+         * actually sleep (ps min) in between. Measured on .105 (300 s windows,
+         * interleaved): ps min + burst lock + radio-save off tracks the
+         * always-awake baseline within the ambient noise (3.3-5.4% vs 4.7-6.0%;
+         * the residual is 2.4 GHz interference, present even with the radio
+         * never parked), while the modem is awake only ~15% of the time (vs the
+         * 75% duty of the 20/15 wake window). It never touches the PS mode or
+         * the AP, so the HTTP/MQTT/OTA control path is unaffected. So the C6
+         * receiver defaults to the loss-free *and* low-power combo: station PS
+         * min + burst lock with a 150 ms window.
          *
          * The classic ESP32 (and every sender) keeps the old default: there the
          * wake window is accepted but breaks the ESP-NOW link, so it must stay
          * off and 100/70 mirrors the sender's proven values. */
 #if defined(CONFIG_IDF_TARGET_ESP32C6) && !CONFIG_ESPNOW_ROLE_SENDER
-        .radio_save = true,
+        .radio_save = false,
         .wake_interval_ms = 20u,
-        .wake_window_ms = 15u,
-        .wifi_ps_mode = RUNTIME_CONFIG_PS_OFF,
+        .wake_window_ms = 150u,
+        .burst_lock = true,
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_MIN,
 #else
         .radio_save = false,
         .wake_interval_ms = 100u,
         .wake_window_ms = 70u,
+        .burst_lock = false,
         .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
 #endif
         /* Wi-Fi 6 TWT is opt-in; the wake cadence is only used once enabled. */
