@@ -287,6 +287,23 @@ static bool g_sntp_started;
 static esp_netif_t *g_ap_netif;
 static esp_netif_t *g_sta_netif;
 static uint8_t g_espnow_channel = ESPNOW_CHANNEL;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* The listen_interval the current association was built with, and whether it is
+ * known yet. The driver reads listen_interval only when the association request
+ * is built, so a 'set listen' needs a reconnect - but only when the value
+ * actually differs. Tracking it here keeps a redundant 'set' from dropping the
+ * link (and the HTTP response that is still in flight) for nothing. */
+static volatile uint16_t g_wifi_assoc_listen;
+static volatile bool g_wifi_assoc_listen_valid;
+/* Reconnect accounting: how often a 'set ps|listen' actually forced a link
+ * re-establishment, and how often it was skipped because nothing needed it. The
+ * skip count is the one that shows the fix working (it used to always reconnect). */
+static uint32_t g_wifi_reconnects;
+static uint32_t g_wifi_reconnect_skips;
+/* One-shot timer that performs a needed reconnect out of the HTTP request path,
+ * so the console response is flushed before the link drops. */
+static esp_timer_handle_t g_wifi_reconnect_timer;
+#endif
 /* Wire layout for the crash-journal diagnostic section. Kept here (next to the
  * journal it mirrors) and outside the role guards so the receiver can decode it
  * too. */
@@ -1074,6 +1091,12 @@ static void wifi_event_handler(void *arg,
         const wifi_event_sta_connected_t *event = event_data;
         g_wifi_connected = true;
         g_espnow_channel = event->channel;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        /* Snapshot the listen_interval this association was built with, so a
+         * later 'set listen' can tell whether a reconnect is actually needed. */
+        g_wifi_assoc_listen = active_runtime_config()->listen_interval;
+        g_wifi_assoc_listen_valid = true;
+#endif
         ESP_LOGI(TAG, "Connected to configured Wi-Fi on channel %u", event->channel);
 #if CONFIG_ESPNOW_PS_FALLBACK
         /* Record the association start: a long, stable association clears the
@@ -4432,6 +4455,21 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
         }
     }
 #endif
+    /* Wi-Fi reconnect accounting (receiver-only): a growing "skipped" count is
+     * the fix working - a 'set ps|listen' that changed nothing no longer drops
+     * the link. */
+    char wifi_json[128] = "";
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    {
+        int wifi_len = snprintf(wifi_json, sizeof(wifi_json),
+                                ",\"wifi_reconnects\":%u,\"wifi_reconnect_skips\":%u",
+                                (unsigned)g_wifi_reconnects,
+                                (unsigned)g_wifi_reconnect_skips);
+        if (wifi_len < 0 || (size_t)wifi_len >= sizeof(wifi_json)) {
+            return ESP_FAIL;
+        }
+    }
+#endif
     int len = snprintf(payload, sizeof(payload),
                        "{\"version\":\"%s\",\"import\":%s,\"export\":%s,\"power\":%s,"
                        "\"average_power_w\":%s,\"average_samples\":%u,"
@@ -4442,7 +4480,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        "\"sender_rssi_dbm\":%d,\"sender_rssi_valid\":%s,"
                        "\"cpu_freq_mhz\":%d,\"cpu_freq_max_mhz\":%d,"
                        "\"cpu_freq_min_mhz\":%d,\"sleep_state\":%u,"
-                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu%s}",
+                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu%s%s}",
                        fw_version(),
                        readings[0], readings[1], readings[2],
                        average_json,
@@ -4462,7 +4500,8 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        (unsigned int)g_sleep_state,
                        (unsigned int)(pm_config.light_sleep_enable ? 1 : 0),
                        (unsigned long)g_sleep_accumulated_ms,
-                       burst_json);
+                       burst_json,
+                       wifi_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
         return ESP_FAIL;
     }
@@ -5682,6 +5721,13 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
         snprintf(out, out_size, "status: output truncated\n");
     }
 #endif
+    extra = snprintf(
+        out + written, out_size - (size_t)written,
+        "wifi reconnect: %u done, %u skipped (listen_interval unchanged)\n",
+        (unsigned)g_wifi_reconnects, (unsigned)g_wifi_reconnect_skips);
+    if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+    }
 #endif
 }
 
@@ -9538,20 +9584,14 @@ static void apply_wifi_ps_config(void)
              name, (unsigned)cfg->listen_interval);
 }
 
-/* Re-apply the PS mode and force a reconnect so a changed listen_interval is
- * carried in a fresh association request (the driver reads it only then). Also
- * refreshes the station config so fill_station_config()'s new interval is what
- * the driver associates with. Mirrors the proven order in the web-config save
- * path: disconnect, set_config, connect. A no-op reconnect when no WLAN is
- * configured (the PS mode itself is still applied). */
-static void wifi_ps_apply_and_reconnect(void)
+/* Perform the deferred reconnect so a changed listen_interval reaches a fresh
+ * association request. Runs from g_wifi_reconnect_timer, i.e. after the HTTP
+ * response that requested the change has been flushed: an inline
+ * esp_wifi_disconnect() tore the link down before the reply was sent, which is
+ * why a 'set ps' / 'set listen' looked like a timeout on the console page. */
+static void wifi_reconnect_timer_cb(void *arg)
 {
-    /* A deliberate PS change re-arms the modem-sleep watchdog: the user is
-     * explicitly (re)trying a mode, so a previous disconnect-storm latch must not
-     * block it. The reconnect below is then marked intentional so it is not
-     * counted as a fault. */
-    ps_fallback_rearm();
-    apply_wifi_ps_config();
+    (void)arg;
     if (!g_wifi_configured) {
         return;
     }
@@ -9564,11 +9604,45 @@ static void wifi_ps_apply_and_reconnect(void)
         err = esp_wifi_connect();
     }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Wi-Fi reconnect after a PS change failed: %s",
+        ESP_LOGW(TAG, "Wi-Fi reconnect to carry listen_interval failed: %s",
                  esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "Wi-Fi PS applied; reconnecting to carry listen_interval=%u",
+        ++g_wifi_reconnects;
+        ESP_LOGI(TAG, "Wi-Fi reconnecting to carry listen_interval=%u",
                  (unsigned)active_runtime_config()->listen_interval);
+    }
+}
+
+/* Apply the Wi-Fi PS mode, and reconnect only when the listen_interval differs
+ * from the one the current association was built with. The PS mode takes effect
+ * live (esp_wifi_set_ps), so a pure 'set ps' never touches the link; an
+ * unchanged 'set listen' is a no-op. Only a real change schedules the deferred
+ * reconnect above. */
+static void wifi_ps_apply_and_reconnect(void)
+{
+    /* A deliberate PS change re-arms the modem-sleep watchdog: the user is
+     * explicitly (re)trying a mode, so a previous disconnect-storm latch must not
+     * block it. A scheduled reconnect is then marked intentional so it is not
+     * counted as a fault. */
+    ps_fallback_rearm();
+    apply_wifi_ps_config();
+    if (!g_wifi_configured) {
+        return;
+    }
+    const uint16_t wanted = active_runtime_config()->listen_interval;
+    if (g_wifi_assoc_listen_valid && g_wifi_assoc_listen == wanted) {
+        ++g_wifi_reconnect_skips;
+        ESP_LOGI(TAG, "listen_interval=%u unchanged; link left up", (unsigned)wanted);
+        return;
+    }
+    if (g_wifi_reconnect_timer == NULL) {
+        return;
+    }
+    /* (Re)arm the one-shot: a burst of 'set listen' calls coalesces into one
+     * reconnect, and the HTTP reply is flushed before the link drops. */
+    (void)esp_timer_stop(g_wifi_reconnect_timer);
+    if (esp_timer_start_once(g_wifi_reconnect_timer, 400 * 1000) != ESP_OK) {
+        wifi_reconnect_timer_cb(NULL);
     }
 }
 #endif
@@ -9926,6 +10000,17 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_create(&power_sample_timer_args,
                                      &g_power_sample_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(g_power_sample_timer, 1000000));
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Deferred Wi-Fi reconnect for a changed listen_interval: created here so it
+     * exists before the web console can issue a 'set ps|listen'. */
+    const esp_timer_create_args_t wifi_reconnect_timer_args = {
+        .callback = wifi_reconnect_timer_cb,
+        .name = "wifi_reconnect",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&wifi_reconnect_timer_args,
+                                     &g_wifi_reconnect_timer));
+#endif
 
     /* Refresh the persisted wall clock on both roles so a reboot without a fresh
      * sync can always seed from it (a crash/power cut must not lose the time). */
