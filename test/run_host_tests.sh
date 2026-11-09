@@ -170,6 +170,17 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_tx_batch"
 
+# Receiver burst-locked wake window (main/burst_lock.c). Pure C: burst
+# detection, period learning, the wake prediction and the re-learn fallback.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/burst_lock.c" \
+    "$here/test_burst_lock.c" \
+    -o "$out/test_burst_lock"
+
+"$out/test_burst_lock"
+
 # Adaptive sender light-sleep window (main/uart_sleep_window.h). Pure C: the
 # min-gap cap and the back-off must never let the window clip a telegram.
 "$cc" -std=c11 -Wall -Wextra -O2 \

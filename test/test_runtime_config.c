@@ -346,6 +346,26 @@ int main(void)
     CHECK(strstr(rbuf, "listen interval: 30") != NULL,
           "render shows the listen interval");
 
+
+    /* burst-lock: off by default; a non-bool is rejected and leaves it alone. */
+    CHECK(!cfg.burst_lock, "burst-lock defaults to off");
+    CHECK(runtime_config_set(&cfg, "burst-lock", "on", 240, err, sizeof(err)) &&
+              cfg.burst_lock,
+          "set burst-lock=on");
+    CHECK(runtime_config_set(&cfg, "burst-lock", "off", 240, err, sizeof(err)) &&
+              !cfg.burst_lock,
+          "set burst-lock=off");
+    CHECK(!runtime_config_set(&cfg, "burst-lock", "maybe", 240, err, sizeof(err)) &&
+              !cfg.burst_lock,
+          "a non-bool burst-lock is rejected");
+    {
+        runtime_config_t bl = runtime_config_defaults();
+        bl.burst_lock = true;
+        runtime_config_render(&bl, rbuf, sizeof(rbuf));
+        CHECK(strstr(rbuf, "burst lock: on") != NULL,
+              "render shows the burst-lock knob");
+    }
+
     /* Blob roundtrip: encode then decode restores every knob, including TWT. */
     runtime_config_t rt = runtime_config_defaults();
     rt.cpu_mhz = 160;
@@ -361,6 +381,7 @@ int main(void)
     rt.twt_wake_ms = 1000;
     rt.wifi_ps_mode = RUNTIME_CONFIG_PS_MAX;
     rt.listen_interval = 30;
+    rt.burst_lock = true;
     uint8_t blob[RUNTIME_CONFIG_BLOB_SIZE];
     runtime_config_encode(&rt, blob, sizeof(blob));
     CHECK(blob[0] == RUNTIME_CONFIG_BLOB_VERSION, "blob carries the current version");
@@ -376,7 +397,7 @@ int main(void)
               back.twt_enabled == rt.twt_enabled &&
               back.twt_wake_ms == rt.twt_wake_ms &&
               back.wifi_ps_mode == rt.wifi_ps_mode &&
-              back.listen_interval == rt.listen_interval,
+              back.burst_lock == rt.burst_lock,
           "the blob roundtrip restores every knob");
     /* A wrong version or size is rejected so an old blob is ignored. */
     blob[0] = (uint8_t)(RUNTIME_CONFIG_BLOB_VERSION - 1);
@@ -455,7 +476,7 @@ int main(void)
               cfg.light_sleep == defaults.light_sleep &&
               cfg.twt_enabled == defaults.twt_enabled &&
               cfg.wifi_ps_mode == defaults.wifi_ps_mode &&
-              cfg.listen_interval == defaults.listen_interval,
+              cfg.burst_lock == defaults.burst_lock,
           "reset restores the defaults");
 
     printf("runtime config: %d checks, %d failures\n", g_checks, g_failures);

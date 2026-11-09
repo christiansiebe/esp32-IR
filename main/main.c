@@ -63,6 +63,7 @@
 #if !CONFIG_ESPNOW_ROLE_SENDER
 #include "mqtt_bridge.h"
 #include "health_task.h"
+#include "burst_lock.h"
 #endif
 #include "crash_journal.h"
 #include "liveness_guard.h"
@@ -74,6 +75,15 @@
 #include "sml_adapter.h"
 #include "tx_batch.h"
 #include "uart_recovery.h"
+#endif
+
+/* Burst-locked receive window is receiver-only and uses the Wi-Fi
+ * force-wakeup API, which only the newer (HE-capable) targets ship; our
+ * receiver build for it is the ESP32-C6. */
+#if !CONFIG_ESPNOW_ROLE_SENDER && defined(CONFIG_IDF_TARGET_ESP32C6)
+#define BURST_LOCK_SUPPORTED 1
+#else
+#define BURST_LOCK_SUPPORTED 0
 #endif
 
 static const char *TAG = "espnow_meter";
@@ -486,6 +496,18 @@ static uint32_t g_sml_transport_gaps;     /* total out-of-order packets seen */
 static uint32_t g_sml_transport_losses;   /* forward jumps: broadcast(s) lost */
 static uint32_t g_sml_transport_reorders; /* retried older packets (recovered) */
 static uint32_t g_sml_last_transport_sequence;
+#if BURST_LOCK_SUPPORTED
+/* Burst-locked receive window (see burst_lock.h). The receiver watches when the
+ * sender's bursts arrive, predicts the next one and wakes the modem only around
+ * it instead of a free-running wake window that drifts against the burst. */
+static burst_lock_t g_burst_lock;
+static portMUX_TYPE g_burst_lock_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool g_burst_lock_enabled;
+/* Count of in-flight ESP-NOW request/response exchanges (sender diag, history
+ * backfill, OTA relay). While > 0 the worker keeps the radio up so a response is
+ * never missed because the modem was parked. */
+static volatile int g_burst_lock_hold;
+#endif
 static sml_value_record_t g_sml_latest_values[3];
 static bool g_sml_latest_value_valid[3];
 static rssi_record_t g_rssi_history[RSSI_HISTORY_COUNT];
@@ -926,6 +948,16 @@ static void energy_totals_start(void)
 /* Defined near apply_power_management() below; the Wi-Fi event handler and the
  * console 'set txpower|beacon|radio-save|wake-*' commands call it. */
 static void apply_radio_power_config(void);
+#if BURST_LOCK_SUPPORTED
+/* Receiver burst-locked receive window; defined near app_main() below. */
+static void apply_burst_lock_config(void);
+/* Keep the radio awake across an ESP-NOW request/response exchange. */
+static void burst_lock_hold_awake(void);
+static void burst_lock_release_awake(void);
+#endif
+/* Apply the persisted CPU/light-sleep knobs (esp_pm_configure); defined below,
+ * re-run by the receiver's link-fallback self-heal when it disables light sleep. */
+static void apply_power_management(void);
 /* Push the persisted Wi-Fi modem PS mode (off/min/max) into the driver; defined
  * with the other radio power knobs below. */
 static void apply_wifi_ps_config(void);
@@ -2866,6 +2898,14 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         portEXIT_CRITICAL(&g_sml_history_lock);
     }
     g_sml_last_transport_sequence = packet.header.sequence;
+#if BURST_LOCK_SUPPORTED
+    if (g_burst_lock_enabled) {
+        portENTER_CRITICAL(&g_burst_lock_lock);
+        (void)burst_lock_note_frame(&g_burst_lock,
+                                    (uint32_t)(esp_timer_get_time() / 1000ULL));
+        portEXIT_CRITICAL(&g_burst_lock_lock);
+    }
+#endif
     memcpy(packet.values, data + sizeof(packet.header),
            packet.header.value_count * sizeof(packet.values[0]));
 
@@ -6134,10 +6174,10 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
                  "usage: set <cpu|freq|cpu-min|sleep|retries> <value>\n");
 #elif SOC_WIFI_HE_SUPPORT
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #else
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #endif
         return;
     }
@@ -6206,7 +6246,8 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         strcmp(key, "beacon") == 0 || strcmp(key, "beacon-tu") == 0 ||
         strcmp(key, "radio-save") == 0 || strcmp(key, "radio-ps") == 0 ||
         strcmp(key, "wake-interval") == 0 || strcmp(key, "wake") == 0 ||
-        strcmp(key, "wake-window") == 0 || strcmp(key, "window") == 0) {
+        strcmp(key, "wake-window") == 0 || strcmp(key, "window") == 0 ||
+        strcmp(key, "burst-lock") == 0) {
         apply_radio_power_config();
     }
     /* 'set ps' and 'set listen' both need a reconnect: listen_interval is read
@@ -6285,10 +6326,15 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
         snprintf(radio, sizeof(radio), " txpwr=%u beacon=%u",
                  (unsigned)cfg->wifi_txpower_dbm, (unsigned)cfg->ap_beacon_tu);
     }
-    char wake[32] = "";
+    char wake[48] = "";
     if (cfg->radio_save) {
         snprintf(wake, sizeof(wake), " radio-save=%u/%u",
                  (unsigned)cfg->wake_interval_ms, (unsigned)cfg->wake_window_ms);
+    }
+    if (cfg->burst_lock) {
+        size_t used = strlen(wake);
+        snprintf(wake + used, sizeof(wake) - used, " burst-lock=on/%ums",
+                 (unsigned)cfg->wake_window_ms);
     }
     char twt[32] = "";
     if (cfg->twt_enabled) {
@@ -6501,11 +6547,20 @@ static esp_err_t sender_diag_exchange_once(const void *payload, size_t payload_l
         return err;
     }
 
+#if BURST_LOCK_SUPPORTED
+    /* Keep the modem awake for the whole request/response round trip so the
+     * reply is not lost to a parked radio. */
+    burst_lock_hold_awake();
+#endif
+
     while (xQueueReceive(g_diag_response_queue, &(espnow_ota_rx_item_t){0}, 0) == pdTRUE) {
     }
 
     err = esp_now_send(sender_mac, (const uint8_t *)payload, payload_len);
     if (err != ESP_OK) {
+#if BURST_LOCK_SUPPORTED
+        burst_lock_release_awake();
+#endif
         return err;
     }
 
@@ -6527,8 +6582,14 @@ static esp_err_t sender_diag_exchange_once(const void *payload, size_t payload_l
         }
         memcpy(response, item.data, item.length);
         *response_len = item.length;
+#if BURST_LOCK_SUPPORTED
+        burst_lock_release_awake();
+#endif
         return ESP_OK;
     }
+#if BURST_LOCK_SUPPORTED
+    burst_lock_release_awake();
+#endif
     return ESP_ERR_TIMEOUT;
 }
 
@@ -9055,8 +9116,17 @@ static void apply_radio_power_config(void)
      * call is accepted but breaks the link, so this is opt-in (radio-save off by
      * default). Turning it off zeroes the wake window again (the always-awake
      * radio). The Wi-Fi PS *mode* itself is owned by apply_wifi_ps_config() (the
-     * 'set ps' knob), not by this function, so the two knobs do not fight. */
-    if (cfg->radio_save) {
+     * 'set ps' knob), not by this function, so the two knobs do not fight.
+     *
+     * The burst lock supersedes the free-running wake window: it drives the
+     * radio with esp_wifi_force_wakeup_acquire/release around the *predicted*
+     * burst, so the driver-scheduled wake window must be off or the two fight
+     * for the radio (see burst_lock_worker). */
+    bool burst_lock_on = false;
+#if BURST_LOCK_SUPPORTED
+    burst_lock_on = cfg->burst_lock;
+#endif
+    if (cfg->radio_save && !burst_lock_on) {
         esp_err_t err = esp_now_set_wake_window(cfg->wake_window_ms);
         if (err == ESP_OK) {
             err = esp_wifi_connectionless_module_set_wake_interval(cfg->wake_interval_ms);
@@ -9078,12 +9148,19 @@ static void apply_radio_power_config(void)
         }
     } else {
         esp_err_t err = esp_now_set_wake_window(0);
-        ESP_LOGI(TAG, "Radio sleep off: radio always awake (%s)", esp_err_to_name(err));
+        if (burst_lock_on) {
+            ESP_LOGI(TAG, "Radio sleep off: the burst lock drives the radio");
+        } else {
+            ESP_LOGI(TAG, "Radio sleep off: radio always awake (%s)", esp_err_to_name(err));
+        }
     }
     /* Re-assert the configured modem PS mode (off/min/max). Doing it here keeps
      * the mode in force across a (re)association, where the wake window is
      * re-applied; the two are independent levers. */
     apply_wifi_ps_config();
+#if BURST_LOCK_SUPPORTED
+    apply_burst_lock_config();
+#endif
 }
 
 /* Push the persisted Wi-Fi modem power-save mode into the driver. Must run
@@ -9280,6 +9357,150 @@ static void apply_twt_config(void)
 }
 #endif
 
+#if BURST_LOCK_SUPPORTED
+/* Hold the radio up across an ESP-NOW request/response exchange (sender diag,
+ * history backfill, OTA relay). Nested/nested-safe; the worker keeps the modem
+ * awake while the count is non-zero. */
+static void burst_lock_hold_awake(void)
+{
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    ++g_burst_lock_hold;
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+}
+
+static void burst_lock_release_awake(void)
+{
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    if (g_burst_lock_hold > 0) {
+        --g_burst_lock_hold;
+    }
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+}
+
+/* Poll cadence while awake and waiting to (re)learn the burst period. */
+#define BURST_LOCK_IDLE_POLL_MS 50u
+/* Never sleep longer than this in one step, so a config change is noticed
+ * promptly. */
+#define BURST_LOCK_MAX_SLEEP_MS 1000u
+/* A receive window below this would clip a burst once the phase jitter is
+ * added, so the configured wake window is floored here. */
+#define BURST_LOCK_WINDOW_MIN_MS 80u
+
+/* Receiver burst-locked receive window.
+ *
+ * The sender drains its ring once per SML_TX_CYCLE_MS as a short burst (a few
+ * frames a few ms apart). A station in modem PS (ps=min/max) only wakes for the
+ * DTIM beacons, so a burst that is not beacon-aligned is missed whole - that is
+ * the ~90% loss measured on the bench with PS on and no ESP-NOW wake window.
+ * The driver's own connectionless wake window fixes that but drifts against the
+ * burst, so a window short enough to save power also drops bursts.
+ *
+ * This worker removes the drift: it learns the burst period from the arrivals
+ * (burst_lock.c) and holds the radio awake with esp_wifi_force_wakeup_acquire()
+ * for a short window around the *predicted* burst, releasing it (back to the
+ * configured PS mode) in between. It never touches the PS mode or the AP, so the
+ * association, the SoftAP and the HTTP/MQTT control path keep working; it only
+ * adds receive time exactly where the meter data lands. While the lock is not
+ * yet learned the radio is held awake so nothing is missed during learning. */
+static void burst_lock_worker(void *arg)
+{
+    (void)arg;
+    bool held = false;
+    for (;;) {
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        bool enabled = g_burst_lock_enabled;
+        bool locked;
+        int32_t wait_ms;
+        portENTER_CRITICAL(&g_burst_lock_lock);
+        locked = burst_lock_locked(&g_burst_lock);
+        wait_ms = burst_lock_wait_ms(&g_burst_lock, now_ms);
+        bool hold = g_burst_lock_hold > 0;
+        portEXIT_CRITICAL(&g_burst_lock_lock);
+
+        if (!enabled) {
+            if (held) {
+                (void)esp_wifi_force_wakeup_release();
+                held = false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_IDLE_POLL_MS));
+            continue;
+        }
+        if (!locked || hold) {
+            /* Stay awake to observe bursts until the period is known, or to
+             * serve an in-flight ESP-NOW exchange. */
+            if (!held) {
+                (void)esp_wifi_force_wakeup_acquire();
+                held = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_IDLE_POLL_MS));
+            continue;
+        }
+        if (wait_ms > 0) {
+            /* Between bursts: let the modem return to its PS mode. */
+            if (held) {
+                (void)esp_wifi_force_wakeup_release();
+                held = false;
+            }
+            uint32_t sleep_ms = (uint32_t)wait_ms;
+            if (sleep_ms > BURST_LOCK_MAX_SLEEP_MS) {
+                sleep_ms = BURST_LOCK_MAX_SLEEP_MS;
+            }
+            vTaskDelay(pdMS_TO_TICKS(sleep_ms));
+            continue;
+        }
+        /* Window opens: wake the modem, hold it through the predicted burst,
+         * then release it back to the PS mode. */
+        if (!held) {
+            (void)esp_wifi_force_wakeup_acquire();
+            held = true;
+        }
+        portENTER_CRITICAL(&g_burst_lock_lock);
+        burst_lock_window_open(&g_burst_lock);
+        uint32_t window_ms = g_burst_lock.window_ms;
+        portEXIT_CRITICAL(&g_burst_lock_lock);
+        vTaskDelay(pdMS_TO_TICKS(window_ms));
+        portENTER_CRITICAL(&g_burst_lock_lock);
+        burst_lock_window_close(&g_burst_lock);
+        portEXIT_CRITICAL(&g_burst_lock_lock);
+        if (held) {
+            (void)esp_wifi_force_wakeup_release();
+            held = false;
+        }
+    }
+}
+
+/* Push the burst-lock knob into the running worker. Enabling it (re)seeds the
+ * predictor from the configured wake window; disabling it releases the radio
+ * back to whatever PS mode is configured. */
+static void apply_burst_lock_config(void)
+{
+    const runtime_config_t *cfg = active_runtime_config();
+    bool want = cfg->burst_lock;
+    if (!want) {
+        if (g_burst_lock_enabled) {
+            portENTER_CRITICAL(&g_burst_lock_lock);
+            g_burst_lock_enabled = false;
+            portEXIT_CRITICAL(&g_burst_lock_lock);
+            ESP_LOGI(TAG, "Burst lock off");
+        }
+        return;
+    }
+    uint32_t window = cfg->wake_window_ms;
+    if (window < BURST_LOCK_WINDOW_MIN_MS) {
+        window = BURST_LOCK_WINDOW_MIN_MS;
+    }
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    /* Frames within a burst are a few ms apart; 1000 ms cleanly separates one
+     * burst from the next. The window is opened a third of its length early to
+     * absorb the wake latency and the phase jitter. */
+    burst_lock_init(&g_burst_lock, 1000u, window, window / 3u, 3u);
+    g_burst_lock_enabled = true;
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+    ESP_LOGI(TAG, "Burst lock on: predicting the sender burst, %u ms window",
+             (unsigned)window);
+}
+#endif
+
 void app_main(void)
 {
     /* Capture the boot log in RAM first, so the Wi-Fi dashboard can offer it
@@ -9431,6 +9652,15 @@ void app_main(void)
 #if CONFIG_ESPNOW_PS_FALLBACK
     if (xTaskCreate(ps_fallback_worker, "ps_fallback", 3072, NULL, 2, NULL) != pdPASS) {
         ESP_LOGW(TAG, "Could not start the modem-sleep fallback worker");
+    }
+#endif
+#if BURST_LOCK_SUPPORTED
+    /* Burst-locked receive window: predicts the sender's burst and drives the
+     * modem with the force-wakeup API around it. Runs even when the knob is off
+     * (it then holds the radio up and waits) so a 'set burst-lock on' takes
+     * effect without a reboot. */
+    if (xTaskCreate(burst_lock_worker, "burst_lock", 3072, NULL, 4, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the burst-lock worker");
     }
 #endif
     ESP_LOGI(TAG, "Receiver ready: http://192.168.4.1/ | /sender | /diag | /log | /console | /bootlog | /config | /update");

@@ -180,6 +180,7 @@ void runtime_config_encode(const runtime_config_t *cfg, uint8_t *blob, size_t bl
     blob[19] = cfg->wifi_ps_mode;
     uint16_t listen = cfg->listen_interval;
     memcpy(&blob[20], &listen, sizeof(listen));
+    blob[22] = cfg->burst_lock ? 1u : 0u;
 }
 
 bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config_t *cfg)
@@ -214,6 +215,7 @@ bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config
     uint16_t listen = 0;
     memcpy(&listen, &blob[20], sizeof(listen));
     loaded.listen_interval = listen;
+    loaded.burst_lock = blob[22] != 0;
     *cfg = loaded;
     return true;
 }
@@ -377,6 +379,11 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             snprintf(err, err_size, "radio-save: expected on or off\n");
             return false;
         }
+    } else if (strcmp(key, "burst-lock") == 0) {
+        if (!runtime_config_parse_bool(value, &next.burst_lock)) {
+            snprintf(err, err_size, "burst-lock: expected on or off\n");
+            return false;
+        }
     } else if (strcmp(key, "wake-interval") == 0 || strcmp(key, "wake") == 0) {
         char *end = NULL;
         unsigned long v = strtoul(value, &end, 10);
@@ -443,8 +450,8 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
     } else {
         snprintf(err, err_size,
                  "unknown key '%s' (cpu, freq, cpu-min, sleep, retries, txpower, "
-                 "beacon, radio-save, wake-interval, wake-window, twt, twt-wake, "
-                 "ps, listen, wifi-ssid, wifi-pass, mqtt-uri, mqtt-prefix, "
+                 "beacon, radio-save, burst-lock, wake-interval, wake-window, twt, "
+                 "twt-wake, ps, listen, wifi-ssid, wifi-pass, mqtt-uri, mqtt-prefix, "
                  "mqtt-user, mqtt-pass)\n",
                  key);
         return false;
@@ -705,6 +712,7 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              "wifi txpower: %s\n"
              "ap beacon: %s\n"
              "radio save: %s\n"
+             "burst lock: %s\n"
              "twt: %s\n"
              "wifi ps: %s\n"
              "listen interval: %u beacons\n",
@@ -713,7 +721,8 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
                               : (runtime_config_light_sleep_allowed()
                                      ? "off"
                                      : "off (unavailable: USB Serial/JTAG console)"),
-             (unsigned)cfg->espnow_retries, tx, beacon, wake, twt, ps,
+             (unsigned)cfg->espnow_retries, tx, beacon, wake,
+             cfg->burst_lock ? "on" : "off", twt, ps,
              (unsigned)cfg->listen_interval);
 }
 

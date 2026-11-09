@@ -113,6 +113,9 @@ typedef struct {
     uint16_t twt_wake_ms;     /* iTWT wake interval in ms (500..65535) */
     uint8_t wifi_ps_mode;     /* receiver: Wi-Fi modem PS mode (0/1/2) */
     uint16_t listen_interval; /* receiver: beacon listen interval for PS max */
+    bool burst_lock;          /* receiver: predict the sender's burst and open a
+                               * short RX window around it instead of a free-running
+                               * connectionless wake window (see burst_lock.c) */
 } runtime_config_t;
 
 /* Persisted blob wire format (NVS glue in main.c does the nvs_set_blob /
@@ -126,9 +129,15 @@ typedef struct {
  * NOTE: the parallel feat/c6-ap-switch branch also introduces this blob helper
  * and bumps the version to 5 (18 bytes, appending ap_enabled). At merge time the
  * two layouts must be folded into one version; the field offsets up to [15] are
- * identical, so only the appended tail differs. */
-#define RUNTIME_CONFIG_BLOB_VERSION 6u
-#define RUNTIME_CONFIG_BLOB_SIZE 22u
+ * identical, so only the appended tail differs.
+ *
+ * v7 appends the burst-lock flag at [22] (receiver: predict the sender's burst
+ * and open a short RX window around it instead of a free-running connectionless
+ * wake window); the blob is 23 bytes. The v6 prefix is unchanged, so a v6 blob
+ * is a different (wrong) size and is ignored by runtime_config_decode(), and the
+ * device falls back to the defaults. */
+#define RUNTIME_CONFIG_BLOB_VERSION 7u
+#define RUNTIME_CONFIG_BLOB_SIZE 23u
 
 /* Encode cfg into a RUNTIME_CONFIG_BLOB_SIZE-byte blob. No-op when the buffer is
  * NULL or too small. */
