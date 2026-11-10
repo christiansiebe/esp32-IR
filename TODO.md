@@ -11,7 +11,7 @@
   triggert nicht. **Offen:** Root-Cause = Wall-Clock steht/springt unregelmäßig
   (bekannter C6-WLAN/NTP-Flapper); NICHT spekulativ gefixt, weil ein falscher
   Zeit-Fix die `POWER_HISTORY_MIN_VALID_UTC`/Dedup-Logik (MUST-NOT-BREAK) beschädigen könnte.
-- **Gefixt (Commit `XXXX`, Web-Erreichbarkeit=Teil des MUST):** Der Haupt-Endpunkt
+- **Gefixt (Commit `c188526`, Web-Erreichbarkeit=Teil des MUST):** Der Haupt-Endpunkt
   `/api/power-history` warf **HTTP 500 "History aggregation failed"**, obwohl das
   SPIFFS-Backend ready war und Records enthielt → gespeicherte Werte im Dashboard
   **unsichtbar**. Root-Cause: `power_history_aggregate()` brach bei *einem einzigen*
