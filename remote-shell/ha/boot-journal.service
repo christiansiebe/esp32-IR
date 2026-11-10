@@ -1,0 +1,19 @@
+[Unit]
+Description=Persistent boot journal (reset count + reason)
+# Laeuft frueh, damit auch kurze Laeufe gezaehlt werden; braucht aber /var/lib
+# (lokales Dateisystem) und das Journal fuer die Panic-Suche.
+After=local-fs.target systemd-journald.service
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /usr/local/sbin/boot_journal.py start
+# ExecStop laeuft bei jedem sauberen Stop - auch beim Reboot/Shutdown. Genau das
+# ist der Clean-Marker: fehlt er, war der vorige Lauf ein Hard-Reset.
+ExecStop=/usr/bin/python3 /usr/local/sbin/boot_journal.py mark-clean
+# Beim Shutdown keine Verzoegerung durch Nachlauf.
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
