@@ -1,5 +1,28 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-11): "keine Werte im Speicher" — verifizierte Diagnose + Web-500-Fix
+**Geräteverifiziert (Receiver C6 .105, Sender via /api/sender-diag):**
+- Beide Rollen empfangen/decodieren **live weiter** (Receiver `crc_valid` steigt
+  14105→14124 in 20 s, power/avg bewegen sich; Sender `sml_sent_ok`/UART-RX steigen),
+  aber die **persistente Minuten-History schreibt seit `2026-11-09T05:21` keine neuen
+  Records** (CSV endet dort; Sender `storage_records` konstant 10014). CSV-Records
+  sind diskontinuierlich (~stundenweise, sample_count=60) → Wall-Clock springt nicht
+  zuverlässig minütlich → Minuten-Bucket-Sprung-Gate (`bucket_start > g_power_bucket_start_utc`)
+  triggert nicht. **Offen:** Root-Cause = Wall-Clock steht/springt unregelmäßig
+  (bekannter C6-WLAN/NTP-Flapper); NICHT spekulativ gefixt, weil ein falscher
+  Zeit-Fix die `POWER_HISTORY_MIN_VALID_UTC`/Dedup-Logik (MUST-NOT-BREAK) beschädigen könnte.
+- **Gefixt (Commit `XXXX`, Web-Erreichbarkeit=Teil des MUST):** Der Haupt-Endpunkt
+  `/api/power-history` warf **HTTP 500 "History aggregation failed"**, obwohl das
+  SPIFFS-Backend ready war und Records enthielt → gespeicherte Werte im Dashboard
+  **unsichtbar**. Root-Cause: `power_history_aggregate()` brach bei *einem einzigen*
+  unlesbaren Ring-Slot hart ab (fread-Fehler → ESP_FAIL), während
+  `power_history_read()`(CSV/JSON-Snapshot) unlesbare Slots tolerierte. Fix:
+  die Aggregation überspringt beschädigte Blöcke und aggregiert die gültigen
+  Records. Sender- + Receiver-Build grün, Host-Suite (power_history/backfill/...)
+  grün, kein Verhalten an den verlustfreien Defaults/Defaults geändert.
+
+
+
 ## NEU (2026-11-10): Isolierte git-Objekte sichtbar gemacht — `docs/branch-inventory.md`
 **Erledigt (nur lesend + lokale refs, nichts gepusht/committet/gelöscht):**
 - Verwaiste Commits gesichert als lokale `archive/*`-Branches:

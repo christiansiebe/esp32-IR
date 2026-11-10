@@ -1801,10 +1801,17 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
                              slot * sizeof(power_history_record_t));
         if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
             fread(block, sizeof(block[0]), chunk, g_history_file) != chunk) {
-            xSemaphoreGive(g_history_mutex);
-            ESP_LOGE(TAG, "Could not read persistent history records at slot %lu",
+            /* A single unreadable slot must not blank the whole graph: skip the
+             * damaged block and keep the records already aggregated, matching
+             * power_history_read()'s tolerance. A persistent SPIFFS read failure
+             * here would otherwise turn every /api/power-history request into an
+             * HTTP 500 and hide all stored values. */
+            ESP_LOGE(TAG, "Could not read persistent history records at slot %lu; "
+                          "skipping the block",
                      (unsigned long)slot);
-            return ESP_FAIL;
+            remaining -= chunk;
+            index += chunk;
+            continue;
         }
         if (power_history_aggregate_core(window_start_utc, bucket_seconds, block,
                                          chunk, sum_w, count, bucket_count) != ESP_OK) {
