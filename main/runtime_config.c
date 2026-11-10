@@ -21,10 +21,23 @@
 #ifndef CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 #define CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG 0
 #endif
+/* The C6 receiver enables CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION: the IDF holds a
+ * ESP_PM_NO_LIGHT_SLEEP lock as long as the USB Serial/JTAG host is connected,
+ * and drops it when the host unplugs. That gives "USB only while plugged in" for
+ * free. Host builds leave it unset, which below resolves to the safe "block". */
+#ifndef CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION
+#define CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION 0
+#endif
 
 bool runtime_config_light_sleep_allowed(void)
 {
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    /* A USB-Serial/JTAG console build may light-sleep only if the IDF protects
+     * the port: with USJ_NO_AUTO_LS_ON_CONNECTION the USB host itself holds the
+     * NO_LIGHT_SLEEP lock while connected (so the console & esptool work at
+     * boot), and releases it once the cable is unplugged (so steady-state sleep
+     * kicks in). Without that protection light sleep would silently strand the
+     * only console/flash path (IDF-6395), so keep it blocked. */
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG && !CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION
     return false;
 #else
     return true;

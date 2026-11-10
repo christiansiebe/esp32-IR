@@ -2563,7 +2563,15 @@ static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_statu
 /* Ask the receiver for its wall clock: once on boot, then hourly. The receiver
  * is the only side with an NTP-synced clock, so the sender cannot do this
  * itself. Between calibrations the sender keeps its own esp_timer offset. */
+#if defined(CONFIG_ESPNOW_SYNC_SLOT_MS) && CONFIG_ESPNOW_SYNC_SLOT_MS > 0
+/* Synchronised-slot mode: the sender must hit a narrow receiver window, so keep
+ * its wall clock tightly aligned (drift much smaller than the slot) by syncing
+ * every 20 s instead of hourly. The receiver answers each request, so the extra
+ * traffic is small. */
+#define TIME_SYNC_INTERVAL_US (20LL * 1000000LL)
+#else
 #define TIME_SYNC_INTERVAL_US (60LL * 60LL * 1000000LL)
+#endif
 
 static void time_sync_worker(void *arg)
 {
@@ -4018,6 +4026,9 @@ static esp_err_t root_handler(httpd_req_t *req)
         "' · Empfang: '+(d.sender_rssi_valid?d.sender_rssi_dbm+' dBm':'?')+"
         "' · CPU: '+d.cpu_freq_mhz+' MHz (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)'+"
         "' · Sleep: '+(d.sleep_state?'leicht':'wach')+(d.light_sleep_enabled?' (aktiv)':' (aus)')+"
+        "' · PS: '+(d.wifi_ps_mode||'?')+"
+        "' · Fenster: '+(d.wake_window_ms!==undefined&&d.radio_save?('ESPNOW '+d.wake_window_ms+' ms/'+d.wake_interval_ms+' ms wach/schlaf'):(d.burst_lock?'burst-lock '+d.burst_window_ms+' ms':(d.radio_save?'ESPNOW '+d.wake_window_ms+' ms':'kein Fenster')))+"
+        "' · Zuverlässigkeit: '+(d.burst_bursts>0?(d.burst_reliability_pct+'% ('+d.burst_window_hits+'/'+(d.burst_window_hits+d.burst_window_misses)+' Fenster)'):'—')+"
         "' · FW: '+(d.version||'?');"
         "}catch(e){byId('meter-status').textContent='Verbindung zum Zähler fehlgeschlagen: '+e;}"
         "setTimeout(updateMeter,1000);}updateMeter();"
@@ -4415,7 +4426,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
         }
     }
 
-    char payload[1152];
+    char payload[1400];
     char average_json[48] = "null";
     if (power_count != 0) {
         int average_len = snprintf(average_json, sizeof(average_json),
@@ -4434,23 +4445,55 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     /* Burst-lock duty is receiver-only (C6); on other targets the field is
      * simply omitted so the JSON stays valid. Sized for the fixed keys plus the
      * widest possible 32-bit values. */
-    char burst_json[256] = "";
+    char burst_json[320] = "";
 #if BURST_LOCK_SUPPORTED
     {
         burst_lock_stats_t bl;
         burst_lock_get_stats(&bl);
+        /* Reliability = how often an opened wake window actually caught a burst
+         * (a frame arrived in it). Undefined (100%) before any window has closed. */
+        uint32_t served = bl.window_hits + bl.window_misses;
+        uint32_t reliability_pct =
+            served != 0u ? (uint32_t)((uint64_t)bl.window_hits * 100u / served)
+                         : 100u;
         int burst_len = snprintf(
             burst_json, sizeof(burst_json),
             ",\"burst_lock\":%s,\"burst_locked\":%s,\"burst_period_ms\":%u,"
             "\"burst_window_ms\":%u,\"burst_awake_ms\":%u,"
             "\"burst_awake_pct\":%u,\"burst_bursts\":%u,\"burst_window_hits\":%u,"
-            "\"burst_window_misses\":%u,\"burst_unlocks\":%u",
+            "\"burst_window_misses\":%u,\"burst_reliability_pct\":%u,"
+            "\"burst_unlocks\":%u",
             bl.enabled ? "true" : "false", bl.locked ? "true" : "false",
             (unsigned)bl.period_ms, (unsigned)bl.window_ms,
             (unsigned)bl.awake_ms, (unsigned)bl.awake_pct,
             (unsigned)bl.bursts, (unsigned)bl.window_hits,
-            (unsigned)bl.window_misses, (unsigned)bl.unlocks);
+            (unsigned)bl.window_misses, (unsigned)reliability_pct,
+            (unsigned)bl.unlocks);
         if (burst_len < 0 || (size_t)burst_len >= sizeof(burst_json)) {
+            return ESP_FAIL;
+        }
+    }
+#endif
+    /* Radio-side sleep-window configuration: the classic ESP-NOW connectionless
+     * wake window (radio_save) and the station PS mode that governs how long the
+     * modem sleeps between wakes. Reading the live runtime config here keeps the
+     * dashboard able to show the currently effective values alongside the burst
+     * lock, without touching the radio. */
+    char radio_json[160] = "";
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    {
+        runtime_config_t *rcfg = active_runtime_config();
+        const char *ps_name = rcfg->wifi_ps_mode == 0 ? "off"
+                              : rcfg->wifi_ps_mode == 2 ? "max"
+                                                     : "min";
+        int radio_len = snprintf(
+            radio_json, sizeof(radio_json),
+            ",\"radio_save\":%s,\"wake_interval_ms\":%u,\"wake_window_ms\":%u,"
+            "\"wifi_ps_mode\":\"%s\",\"listen_interval\":%u",
+            rcfg->radio_save ? "true" : "false",
+            (unsigned)rcfg->wake_interval_ms, (unsigned)rcfg->wake_window_ms,
+            ps_name, (unsigned)rcfg->listen_interval);
+        if (radio_len < 0 || (size_t)radio_len >= sizeof(radio_json)) {
             return ESP_FAIL;
         }
     }
@@ -4480,7 +4523,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        "\"sender_rssi_dbm\":%d,\"sender_rssi_valid\":%s,"
                        "\"cpu_freq_mhz\":%d,\"cpu_freq_max_mhz\":%d,"
                        "\"cpu_freq_min_mhz\":%d,\"sleep_state\":%u,"
-                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu%s%s}",
+                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu%s%s%s}",
                        fw_version(),
                        readings[0], readings[1], readings[2],
                        average_json,
@@ -4501,7 +4544,8 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        (unsigned int)(pm_config.light_sleep_enable ? 1 : 0),
                        (unsigned long)g_sleep_accumulated_ms,
                        burst_json,
-                       wifi_json);
+                       wifi_json,
+                       radio_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
         return ESP_FAIL;
     }
@@ -6638,6 +6682,13 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
     runtime_config_erase();
     runtime_config_apply(cfg);
 #if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Re-arm the radio-side knobs directly. The reconnect below does NOT do it:
+     * wifi_ps_apply_and_reconnect() only reconnects for a changed
+     * listen_interval, so the WIFI_EVENT_STA_CONNECTED re-apply that normally
+     * arms the burst lock / wake window may not fire. Without this, a reset that
+     * re-enables burst-lock leaves the worker disabled while ps=min parks the
+     * modem with no wake window (the silent ~90% loss case). */
+    apply_radio_power_config();
     /* Restore the default modem PS mode + listen interval and reconnect so the
      * default interval reaches the association request. */
     wifi_ps_apply_and_reconnect();
@@ -8164,9 +8215,22 @@ static esp_err_t relay_sender_firmware(httpd_req_t *req)
             expected = sizeof(chunk);
         }
         size_t received_total = 0;
+        int timeouts = 0;
         while (received_total < expected) {
             int received = httpd_req_recv(req, (char *)chunk + received_total,
                                           expected - received_total);
+            if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+                /* Same parked-modem tolerance as the receiver upload: a slow
+                 * client is not a failed transfer. */
+                if (++timeouts > 30) {
+                    err = ESP_FAIL;
+                    ESP_LOGE(TAG, "Sender firmware upload stalled");
+                    goto abort_transfer;
+                }
+                liveness_note_alive();
+                continue;
+            }
+            timeouts = 0;
             if (received <= 0) {
                 err = ESP_FAIL;
                 ESP_LOGE(TAG, "Sender firmware HTTP upload interrupted");
@@ -8445,9 +8509,25 @@ static esp_err_t ota_update_handler(httpd_req_t *req)
 
     uint8_t buffer[1024];
     size_t remaining = (size_t)req->content_len;
+    int timeouts = 0;
     while (remaining > 0) {
         size_t amount = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
         int received = httpd_req_recv(req, (char *)buffer, amount);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            /* A parked modem (ps=min) can stall the TCP stream for longer than
+             * the socket timeout; treat that as "no data yet", not a failure,
+             * or an otherwise healthy upload aborts mid-image. Bounded so a
+             * dead peer cannot wedge the handler forever. */
+            if (++timeouts > 30) {
+                esp_ota_abort(ota_handle);
+                httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT,
+                                    "Firmware upload stalled");
+                return ESP_FAIL;
+            }
+            liveness_note_alive();
+            continue;
+        }
+        timeouts = 0;
         if (received <= 0) {
             esp_ota_abort(ota_handle);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Firmware upload interrupted");
@@ -8645,8 +8725,10 @@ static void start_webserver(void)
     config.max_uri_handlers = 31;
     /* Handlers that keep a full history page (128 records) on their stack run
      * on this task; keep headroom so a large page cannot overflow it and abort
-     * the whole HTTP server. */
-    config.stack_size = 8192;
+     * the whole HTTP server. The dashboard handler also buffers the assembled
+     * JSON payload plus per-block sub-buffers on this stack, so allocate enough
+     * for both at their worst simultaneous depth. */
+    config.stack_size = 12288;
     config.lru_purge_enable = true;
     /* httpd reserves 3 sockets for itself, so asking for more than
      * CONFIG_LWIP_MAX_SOCKETS - 3 makes httpd_start() return ESP_ERR_INVALID_ARG;

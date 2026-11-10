@@ -561,6 +561,20 @@ python3 "$repo/remote-shell/ha/test_print_health.py"
 
 "$out/test_runtime_config_usb_console"
 
+# Same USB Serial/JTAG-console target, but with the IDF connection monitor
+# (CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION) that the C6 receiver runs: the port is
+# protected, so light sleep becomes allowed and `set sleep on` works again.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DCONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=1 \
+    -DCONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=1 \
+    -I"$repo/main" \
+    "$repo/main/runtime_config.c" \
+    "$here/test_runtime_config_usb_connected.c" \
+    -o "$out/test_runtime_config_usb_connected"
+
+"$out/test_runtime_config_usb_connected"
+
 # WLAN/MQTT configuration validators behind `set wifi-*` / `set mqtt-*`: a bad
 # SSID/URI/prefix must be rejected before it reaches NVS or the driver. Pure C.
 "$cc" -std=c11 -Wall -Wextra -O2 \

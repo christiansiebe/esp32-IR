@@ -179,14 +179,18 @@ bool runtime_config_parse_ps(const char *text, uint8_t *out);
  * the outputs untouched) for a zero interval. Pure C, host-tested. */
 bool runtime_config_twt_split(uint32_t wake_us, uint8_t *expn, uint16_t *mant);
 
-/* False when the USB Serial/JTAG peripheral is the primary console (the
- * ESP32-C6, which has no USB-UART bridge). Light sleep powers that PHY down:
- * the /dev/ttyACM* console disappears and, because the light-sleep flag is
- * persisted, the next boot never re-enumerates the port -- the device becomes
- * unreachable over USB (no console, no flash). IDF offers no light-sleep
- * keep-alive for this peripheral (SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP is
- * not defined on the C6, IDF-6395), so light sleep is refused whenever this is
- * false. Modem/radio sleep (the radio-save knob) is unaffected. */
+/* Whether this build may use light sleep. Light sleep powers the USB PHY down,
+ * and the ESP32-C6's USB Serial/JTAG peripheral has no keep-alive for it
+ * (SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP is not defined on the C6, IDF-6395).
+ *
+ * The C6 receiver enables CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION, so the IDF holds
+ * a ESP_PM_NO_LIGHT_SLEEP lock while a USB host is connected and drops it when
+ * the cable unplugs: the console and esptool keep working at boot, and steady
+ * state can sleep. Allowed is true in that configuration. It stays false (and
+ * light sleep is refused) only for a USB-Serial/JTAG build that lacks that
+ * connection-monitor protection, where sleep would silently strand the only
+ * console/flash path. Modem/radio sleep (the radio-save / burst-lock knobs) is
+ * unaffected by this guard. */
 bool runtime_config_light_sleep_allowed(void);
 
 /* Set one knob by name. Returns true when the name is known and the value was
