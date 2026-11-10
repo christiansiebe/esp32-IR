@@ -2562,16 +2562,13 @@ static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_statu
 
 /* Ask the receiver for its wall clock: once on boot, then hourly. The receiver
  * is the only side with an NTP-synced clock, so the sender cannot do this
- * itself. Between calibrations the sender keeps its own esp_timer offset. */
-#if defined(CONFIG_ESPNOW_SYNC_SLOT_MS) && CONFIG_ESPNOW_SYNC_SLOT_MS > 0
-/* Synchronised-slot mode: the sender must hit a narrow receiver window, so keep
- * its wall clock tightly aligned (drift much smaller than the slot) by syncing
- * every 20 s instead of hourly. The receiver answers each request, so the extra
- * traffic is small. */
-#define TIME_SYNC_INTERVAL_US (20LL * 1000000LL)
-#else
+ * itself. Between calibrations the sender keeps its own esp_timer offset.
+ *
+ * The sender reaches the receiver with the burst-lock receive window (which
+ * adapts to the actual burst, not a fixed wall-clock slot), so the clock only
+ * needs time-stamping accuracy - hourly is plenty; 5 s drift tolerance is not
+ * needed here. */
 #define TIME_SYNC_INTERVAL_US (60LL * 60LL * 1000000LL)
-#endif
 
 static void time_sync_worker(void *arg)
 {

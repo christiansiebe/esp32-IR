@@ -1,5 +1,54 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-10): Isolierte git-Objekte sichtbar gemacht — `docs/branch-inventory.md`
+**Erledigt (nur lesend + lokale refs, nichts gepusht/committet/gelöscht):**
+- Verwaiste Commits gesichert als lokale `archive/*`-Branches:
+  `archive/sync-slot-wip` (= `1b4389f`, der frühere **sync-slot + ACK-Handshake**-Versuch,
+  lag im Git-Stash → für `git log` unsichtbar; einzige echte ungemergte Arbeit, ersetzt durch
+  burst-lock), `archive/burst-lock-dupe-8d8c90c`, `archive/reconnect-dupe-5e6b310`.
+- Vollständiges Branch-Inventar (lokal + remote, Abstand zu `origin/main`) in
+  `docs/branch-inventory.md`.
+**OFFEN:** Archiv-Refs bei Bedarf pushen; obsolete `behind=246`-Branches aufräumen (erst nach
+Freigabe).
+
+## NEU (2026-11-10/11): SENDEFENSTER-Auftrag — Konzept bereits durch burst-lock umgesetzt, `1b4389f` verworfen
+**Auftrag „SENDEFENSTER + Light-Sleep (Sender/Receiver-Koordination)"** (delegierter Chat,
+`delegated/esp32-sendfenster`). **Ergebnis der Bestandsaufnahme:** Das geforderte Konzept ist auf
+dem aktuellen Branch `feat/c6-burst-lock` **bereits vollständig umgesetzt** — der alte Wall-Clock-
+sync-slot (`ESPNOW_SYNC_SLOT_MS`, `1b4389f`) wurde bewusst durch den **burst-lock**-Ansatz ersetzt
+(lernt die Sender-Burst-Phase und hält das Modem nur um die vorhergesagte Burst-Zeit wach), siehe
+`docs/branch-inventory.md` („durch burst-lock ersetzt/nicht weiterverfolgt"). Alle vier Muss-Ziele
+sind im aktuellen Code erfüllt:
+
+1. **SENDEFENSTER:** `main/burst_lock.{c,h}` + `burst_lock_worker` (`main/main.c`) — Receiver
+   öffnet `esp_wifi_force_wakeup_acquire()`-Fenster nur um die vorhergesagte Sender-Burst.
+2. **kein SML-Verlust:** `main/tx_batch.c` (Ring, Kap. 256, älteste evict, Requeue) +
+   `uart_sleep_window.c` (nur im verifizierten ruhigen Fenster schlafen).
+3. **Web-Erreichbarkeit:** burst-lock fasst PS-Modus/AP nie an → HTTP-Dashboard erreichbar
+   (kein Timeout), nur die Modem-Wake-Phase variiert.
+4. **Reliable-ACK:** `send_sml_telegram`/`wait_for_sml_ack`/`flush_tx_batch` — Receiver quittiert
+   jede Sequenz (`sml_transport_ack_t`), Sender retried bis `SML_ACK_MAX_ATTEMPTS=4` und reiht
+   Unquittiertes wieder ein (`sml_tx_batch_requeue_front`).
+
+**Entscheidung `1b4389f` → ENDGÜLTIG VERWORFEN** (reaktivieren bringt keinen Gewinn): Der
+burst-lock liefert dasselbe Sendefenster **ohne** präzise Wall-Clock-Sync als Voraussetzung und
+ist am Gerät gemessen verlustfrei (`ps=off`+`radio-save on` 20/15 → 0,8 % ≈ Baseline, und
+`ps min`+burst-lock ≈ Baseline). Der letzte tote Überrest (`#if defined(CONFIG_ESPNOW_SYNC_SLOT_MS)`
+in `main/main.c` ohne Kconfig-Symbol) wurde entfernt (nur Dokumentation/Mehrfach-Sync-Pfad, kein
+Verhalten; Zeit-Sync bleibt stündlich).
+
+**Verifiziert (Build + Host-Tests, Branch `feat/c6-burst-lock`, HEAD `0467070`+Cleanup):**
+`send`, `receiver` (=klassischer ESP32) und `receiver-c6` (=ESP32-C6, CI-äquivalent) bauen grün,
+keine Fehler. Host-Suite grün inkl. Reliable-Ack-Reihe: `test_tx_batch` 55, `burst lock` 44,
+`sml transport ack` 11, `uart sleep window` 25, `sleep announce` 9, `liveness` 139 (alle 0
+failures). Sender-Bin enthält `adaptive sleep path compiled in`, C6-Receiver-Bin enthält
+burst-lock/ACK-Strings.
+**Hardware-Grenze (dokumentiert, nicht brechbar):** Light-Sleep ist auf dem C6-Build NICHT
+schaltbar (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG` → `runtime_config_light_sleep_allowed()==false`,
+IDF-6395); der verlustfreie C6-Stromspar-Default läuft über `radio-save`/burst-lock. Am echten
+Gerät .105 steht noch der offene Punkt oben (Sender-Telegramme `crc_valid=0`/`sender-diag` 503,
+anderer Chat flasht parallel) — unabhängig von diesem Auftrag.
+
 ## NEU (2026-11-08): `set ps`/`set listen` rissen den Link ein — behoben (`07419b1`, Branch `feat/c6-burst-lock`)
 **Erledigt + am Gerät verifiziert:** `set ps` fasst den Link nicht mehr an; `set listen`
 reconnected nur bei tatsächlich geändertem `listen_interval`, out-of-band über einen
