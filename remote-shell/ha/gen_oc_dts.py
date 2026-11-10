@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Erzeugt oc.dts: ein big-Cluster-OPP oberhalb der Werksgrenze (2496 MHz).
+"""Erzeugt oc.dts: ein big-Cluster-OPP oberhalb der Werksgrenze (2472 MHz).
 
 Getrennt von gen_lowfreq_dts.py, damit der Standardlauf die committete
 `lowfreq.dts` NICHT anfasst. Dieses Skript schreibt nach `oc.dts` und nimmt
@@ -7,8 +7,8 @@ dort - optional zusaetzlich zu den Tief-Takten - den gemessenen Overclock-Punkt
 auf:
 
     big-PLL: HHI 0xff63c000 + 0x2f4, Bits [8:0] = N, sys_pll = N * 12 MHz.
-    Stock big max = 2400 MHz (N=200). Gemessen stabil: N=208 = 2496 MHz
-    (120 s Soak, 570 Laeufe, 0 Fehler). 2508/2520 grenzwertig, 2532 haengt.
+    Stock big max = 2400 MHz (N=200). Gemessen stabil: N=206 = 2472 MHz
+    (30 min Soak, 22828 Laeufe, 0 Fehler). 2508/2520 grenzwertig, 2532 haengt.
 
 Risiko: die Spannung liegt am Regler-Anschlag (100 % duty = 1040 mV). Oberhalb
 von 2400 MHz laeuft alles UNTERSPANNT - es gibt keinen Spielraum, den Takt
@@ -28,9 +28,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import gen_lowfreq_dts as lf  # noqa: E402
 
-# Gemessener stabiler Punkt (siehe PLL-OC-README.md).
-OC_RATE = 2496000000
-OC_N = 208                      # OC_RATE / 12 MHz
+# Gemessener stabiler Punkt (siehe PLL-OC-README.md / OC-README.md).
+OC_RATE = 2472000000
+OC_N = 206                      # OC_RATE / 12 MHz
 OC_UV_DEFAULT = 1040000         # 100 % PWM-Duty = Regler-Anschlag
 STOCK_MAX = 2400000000          # Werks-maximum des big-Clusters
 
@@ -60,7 +60,7 @@ HEAD = """\
  * sys_pll = N * 12 MHz. Stock big max is 2400 MHz (N=200). The point below is
  * the measured-stable overclock point:
  *
- *   %d MHz = N=%d (measured: 120 s soak, 570 runs, 0 errors)
+ *   %d MHz = N=%d (measured: 30 min soak, 22828 runs, 0 errors)
  *
  * The voltage is the regulator ceiling: at stock 2400 MHz the PWM regulator
  * already sits at 100 %% duty (1040 mV). Every point above 2400 MHz therefore

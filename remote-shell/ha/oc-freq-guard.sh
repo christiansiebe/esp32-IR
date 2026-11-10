@@ -1,7 +1,7 @@
 #!/bin/sh
 # Caps the big-cluster maximum frequency at the stock value.
 #
-# Why this exists: oc.dts adds a 2496 MHz OPP above the stock 2400 MHz edge.
+# Why this exists: oc.dts adds a 2472 MHz OPP above the stock 2400 MHz edge.
 # cpufreq-dt sets a policy's maximum to the highest OPP it sees, so without a
 # cap the board would boot straight into the overclock point - which runs
 # UNDERVOLTED (the PWM regulator is already at 100 % duty at 2400 MHz). This
