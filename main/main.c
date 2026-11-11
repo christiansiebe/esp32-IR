@@ -774,6 +774,50 @@ static int64_t g_wall_clock_last_saved_utc;
  * with the real time once a sync arrives. */
 static bool g_wall_clock_trusted;
 
+/* Monotonic-clock fallback for the minute recorder on the receiver.
+ *
+ * The receiver is the only continuous recorder (the sender hands its minutes
+ * over after the fact), and it records straight from time(). If the wall clock
+ * never becomes valid on a boot - SNTP keeps failing (the known C6 WLAN/NTP
+ * flapper) and there is no fresh store value - time() stays below the 2024
+ * sanity bound and every sample of that boot is silently dropped (the exact
+ * failure wall_clock.h documents). The sender is immune because it derives its
+ * clock from an ESP-NOW-calibrated offset that advances with uptime.
+ *
+ * This mirrors that: a last-known-good UTC is latched to a monotonic instant,
+ * and current_utc_seconds() on the receiver falls back to that offset while
+ * time() is still invalid. The stored/synced real time keeps refreshing the
+ * baseline, so once SNTP lands the fallback moves onto the true clock. Values
+ * stay above POWER_HISTORY_MIN_VALID_UTC, so the dedup/validity logic is
+ * untouched. */
+static int64_t g_clock_mono_base_utc; /* 0 = no baseline yet */
+static uint64_t g_clock_mono_base_us;  /* esp_timer instant for g_clock_mono_base_utc */
+
+static void clock_mono_set_base(int64_t utc_seconds)
+{
+    if (!wall_clock_utc_is_sane(utc_seconds)) {
+        return;
+    }
+    g_clock_mono_base_utc = utc_seconds;
+    g_clock_mono_base_us = (uint64_t)esp_timer_get_time();
+}
+
+/* Receiver-only: a wall clock derived from the monotonic timer and the last
+ * known-good UTC, so the minute recorder keeps writing during a boot where the
+ * wall clock has not become valid yet. Returns 0 when there is no baseline. */
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static int64_t clock_mono_now_utc(void)
+{
+    if (g_clock_mono_base_utc == 0) {
+        return 0;
+    }
+    int64_t elapsed_s = (int64_t)(((uint64_t)esp_timer_get_time() -
+                                   g_clock_mono_base_us) / 1000000ULL);
+    int64_t utc = g_clock_mono_base_utc + elapsed_s;
+    return wall_clock_utc_is_sane(utc) ? utc : 0;
+}
+#endif
+
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* Defined with the sender diagnostics / boot-marker block further down. */
 static void boot_marker_on_clock_valid(void);
@@ -848,6 +892,9 @@ static int64_t wall_clock_seed_from_store(void)
         return 0;
     }
 #endif
+    /* Latch the same value as the monotonic baseline so the minute recorder can
+     * keep advancing even if the wall clock is subsequently lost before sync. */
+    clock_mono_set_base(stored);
     portENTER_CRITICAL(&g_wall_clock_lock);
     g_wall_clock_last_saved_utc = stored;
     g_wall_clock_trusted = false;
@@ -3098,7 +3145,14 @@ static int64_t current_utc_seconds(void)
 #if CONFIG_ESPNOW_ROLE_SENDER
     return (int64_t)(event_wall_ms() / 1000);
 #else
-    return (int64_t)time(NULL);
+    int64_t t = (int64_t)time(NULL);
+    if (t >= WALL_CLOCK_MIN_UTC) {
+        /* Fresh wall clock: latch it as the monotonic baseline so the recorder
+         * keeps advancing even if time() is later lost before the next sync. */
+        clock_mono_set_base(t);
+        return t;
+    }
+    return clock_mono_now_utc();
 #endif
 }
 
