@@ -5,12 +5,20 @@
 - Beide Rollen empfangen/decodieren **live weiter** (Receiver `crc_valid` steigt
   14105→14124 in 20 s, power/avg bewegen sich; Sender `sml_sent_ok`/UART-RX steigen),
   aber die **persistente Minuten-History schreibt seit `2026-11-09T05:21` keine neuen
-  Records** (CSV endet dort; Sender `storage_records` konstant 10014). CSV-Records
+  Records** (CSV endet dort). CSV-Records
   sind diskontinuierlich (~stundenweise, sample_count=60) → Wall-Clock springt nicht
   zuverlässig minütlich → Minuten-Bucket-Sprung-Gate (`bucket_start > g_power_bucket_start_utc`)
-  triggert nicht. **Offen:** Root-Cause = Wall-Clock steht/springt unregelmäßig
-  (bekannter C6-WLAN/NTP-Flapper); NICHT spekulativ gefixt, weil ein falscher
-  Zeit-Fix die `POWER_HISTORY_MIN_VALID_UTC`/Dedup-Logik (MUST-NOT-BREAK) beschädigen könnte.
+  triggert NICHT. **Beweis:** der Sender (ESP-NOW-Kalibrieruhr) schreibt weiter
+  `storage_records` herauf (10036→10038), der Receiver (SNTP-`time()`) stoppt.
+  **Gefixt (Commit `3606c3b`):** Receiver bekommt eine monotone-Uhr-Fallback wie der
+  Sender — letzte bekannte gute UTC wird an einen monotinen Zeitpunkt gelatcht
+  (Store-Seed bzw. jede gültige `time()`), `current_utc_seconds()` fällt bei
+  invalider `time()` darauf zurück. Werte bleiben ≥ `POWER_HISTORY_MIN_VALID_UTC`,
+  Dedup/Valid-Logik unangetastet. Sender+Receiver-Build grün, Host-Suite grün.
+  **Deployment/on-device-Verifikation steht aus** (flashen/OTA braucht den
+  Wi-Fi/OTA-Key des Nutzers; kein USB-Serial an dieser Maschine).
+  Hinweis: Ein falscher Zeit-Fix hätte die `POWER_HISTORY_MIN_VALID_UTC`/Dedup-Logik
+  (MUST-NOT-BREAK) beschädigen können — deshalb monotone-Fallback, nicht Time-Override.
 - **Gefixt (Commit `c188526`, Web-Erreichbarkeit=Teil des MUST):** Der Haupt-Endpunkt
   `/api/power-history` warf **HTTP 500 "History aggregation failed"**, obwohl das
   SPIFFS-Backend ready war und Records enthielt → gespeicherte Werte im Dashboard
