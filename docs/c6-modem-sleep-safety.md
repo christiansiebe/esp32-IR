@@ -187,6 +187,100 @@ Loggers** (Opcodes nur `0x81–0x8A`; `0x84` = Stream stoppen). Framing USB-HID
 (der beobachtete „Hänger"). **TWT** wird von der FRITZ!Box 5530 **abgelehnt**
 (`TWT Responder:0`) und ist damit unbrauchbar.
 
+## Externe Referenzen (Espressif/ESPHome) — recherchiert 2026-11-14
+
+> **Kennzeichnung:** Dieser Abschnitt ist **recherchiert** (curl gegen die unten
+> genannten URLs, Abruf 2026-11-14), **nicht** am Gerät gemessen. Projektstand
+> dabei: Branch `feat/c6-mqtt-cmd`, HEAD `a89a416` (`v0.4.0-35-ga89a416`),
+> **ESP-IDF v6.1.0** (`dependencies.lock`, Docker-Image `espressif/idf:v6.1`).
+> Frage: Sollte der C6-Empfänger-Stromsparmodus eine **erprobte
+> Espressif-Lösung nachbauen** statt eigener Mechanismen?
+> **Kurzantwort: nein** — unsere drei Hebel (`esp_wifi_set_ps` /
+> `esp_now_set_wake_window` + `connectionless_module_set_wake_interval` /
+> `burst-lock`) sind genau die dokumentierten Espressif-Bausteine; die eigenen
+> Zusätze (`ps_fallback`, `link_fallback`, `burst_lock`) füllen nur Lücken, die
+> Espressif offen lässt (kein eingebauter Disconnect-Sturm-Wächter, keine
+> Burst-Vorhersage).
+
+### Quellen und Abgleich
+
+| Quelle | Kernaussage | Bezug zu unserem Aufbau | Handlungsbedarf |
+|---|---|---|---|
+| **ESP-IDF v6.1 „Wi-Fi Performance and Power Save"** — <https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32c6/api-guides/wifi-driver/wifi-performance-and-power-save.html> | Modem-Sleep nur station-only, stoppt beim Disconnect. `WIFI_PS_MIN_MODEM`: wacht **jedes DTIM** auf, Broadcast geht **nicht** verloren, spart aber wenig, weil DTIM AP-bestimmt ist. `WIFI_PS_MAX_MODEM`: wacht nur alle `listen_interval` auf, **kann Beacons/Broadcast verpassen** (Verlustrisiko steigt mit `listen`). Default ist `WIFI_PS_MIN_MODEM`. | Deckt sich exakt mit unseren Messwerten: `ps min` = Median **0,068 W**, in ruhigen Phasen **0 Disconnects**; `ps max` + `listen`>10 riskiert Verlust (unsere 90-%-Fehlkombi war `ps min/max` **ohne** `radio-save`). `listen_interval` wirkt nur unter MAX. | nein (bereits korrekt umgesetzt) |
+| **ESP-IDF v6.1 „Connectionless Modules Power-saving"** (gleiche Seite) | ESP-NOW-RX im Schlaf braucht **Window + Interval**; „At connected state, the start of Interval would be aligned with TBTT"; das effektive Fenster ist das **Maximum** über alle connectionless-Module. | Erklärt die Drift: das driver-geplante Fenster (TBTT-aligned) kann nicht auf den 5-s-Sender-Burst gezielt werden → unser `burst_lock` sagt den Burst stattdessen voraus (siehe `main/burst_lock.h`). | nein (`burst_lock` ist die passende Antwort) |
+| **ESP-IDF v6.1 ESP-NOW API** `esp_now_set_wake_window()` Attention 1 — <https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32c6/api-reference/network/esp_now.html> | „This configuration could work at connected status. **When ESP_WIFI_STA_DISCONNECTED_PM_ENABLE is enabled, this configuration could work at disconnected status.**" Default des Wake-Window ist **Maximum** (RX immer an). | Genau der Grund für `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y` in `sdkconfig.defaults:58–66` (sonst greift das Wake-Window nur assoziiert). | nein — ist schon gesetzt |
+| **ESP-IDF v6.1 `components/esp_wifi/Kconfig`** — `ESP_WIFI_STA_DISCONNECTED_PM_ENABLE` (<https://github.com/espressif/esp-idf/blob/v6.1/components/esp_wifi/Kconfig>) | **Default `y`**; „Chip will do modem-sleep when rf module is not in use any more" (gilt **nur im nicht-assoziierten** Zustand). | Bei uns zusätzlich **explizit** =`y`. | nein |
+| **ESP-FAQ „Wi-Fi"** (PS-Modi + schwaches Netz) — <https://docs.espressif.com/projects/esp-faq/en/latest/software-framework/wifi.html> | PS-Modi: MIN = `DTIM × 102,4 ms`, MAX = `listen_interval × 102,4 ms`. Für **schwache/gestörte** Netze: Modem-Sleep **nach** `esp_wifi_start()` per `esp_wifi_set_ps(WIFI_PS_NONE)` abschalten und erst nach `IP_EVENT_STA_GOT_IP` aktivieren; **beim Reconnect vorher aus, danach an**. | Espressifs **eigene** Empfehlung für genau unsere Umgebung. Wir setzen `apply_wifi_ps_config()` aktuell auch schon **vor** der Assoziation (PS wird über den Reconnect hinweg gehalten). | **prüfen** (mittlere Prio) |
+| **ESPHome Issue #17238** (geschlossen 2026-06-27) + Fix-PR **#17240** (merged 2026-06-27, Merge-Commit `bda7890`) — <https://github.com/esphome/esphome/issues/17238> | Ein hartkodiertes **50 ms Window / 100 ms Interval** (= 50 % RX-Duty) ließ „~half of frames" verloren gehen; das war ein **versehentliches** Throttling bei vorhandenem `deep_sleep:`-Block. Der Fix entfernt das Throttling **ganz** (RX immer wach, PS opt-in). | Unsere **20/15** = **75 % Duty** (15 ms Fenster / 20 ms Intervall) ist **weniger aggressiv** als das als schädlich belegte 50/100. Und: bei uns ist `ps off` + `radio-save 20/15` am Gerät mit **0,8 % ≈ Baseline** gemessen (verlustfrei); `15/12` brachte nichts mehr, `100/70` kostete ~⅓. | nein — 20/15 ist plausibel (siehe (b)) |
+| **Espressif Advisory AR2024-006** (Issue-Date 2024/08/30, V1.0) — <https://www.espressif.com/sites/default/files/advisory_downloads/AR2024-006_EN.pdf> | Betrifft **Auto Light Sleep** auf ESP32-C6 (rev ≥ v0.1): **Issue 1** WLAN+BLE-Coexistenz → Beacon-Timeouts/„Wi-Fi communication exceptions"; **Issue 2** WLAN init **ohne** start + Auto-Light-Sleep → `TG0_WDT_HPSYS`-Reset. Gefixt in v5.1.x/v5.2.3/v5.3 (Commits: v5.3 `1aaae85a`+`c56b21bb` bzw. `5feffad9`). | Wir fahren **IDF v6.1.0** (deutlich **nach** allen Fixed Commits) und Light Sleep ist auf dem C6-Build **hart aus** (`runtime_config_light_sleep_allowed()==false`, `ESP_PM_NO_LIGHT_SLEEP`-Lock). **Nicht betroffen.** | nein (nur Doku) |
+
+**Erreichbarkeit der Quellen (2026-11-14):** Alle vorstehenden URLs waren per
+`curl` mit **HTTP 200** erreichbar. Zwei Einschränkungen explizit vermerkt:
+1. Die **öffentliche Espressif-Advisory-Liste**
+   (<https://www.espressif.com/en/support/documents/advisories>) listet für 2024
+   nur AR2024-002/005/009 — **AR2024-006 ist dort nicht verlinkt**; das PDF war
+   nur über die **Direkt-URL** `.../advisory_downloads/AR2024-006_EN.pdf`
+   abrufbar (kein 404, 75 KB, 3 Seiten, verifiziert).
+2. Eine **eigene „ESP-NOW FAQ"-Seite** existiert nicht; die ESP-NOW-Aussagen
+   stehen in der **API-Referenz** (`esp_now.html`) und im Abschnitt
+   „Connectionless Modules Power-saving" der Wi-Fi-Power-Save-Seite, ergänzt um
+   die **ESP-FAQ**. Alle drei wurden ausgewertet.
+
+### Antworten auf die vier Fragen
+
+**(a) Sollten wir `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE` setzen?**
+Er ist **bereits gesetzt** (`sdkconfig.defaults:66`, zusätzlich in allen
+`_sdkconfig`-Artefakten) und in IDF v6.1 ohnehin **Default `y`**. Er ist die
+Voraussetzung dafür, dass `esp_now_set_wake_window()` auch **unassoziiert**
+wirkt (API-Attention 1) — genau der Punkt, der den früheren Wake-Window-Versuch
+scheitern ließ. **Keine Änderung nötig; nicht abschalten.**
+
+**(b) Ist unsere 20/15-ms-Wahl gegen Quelle 3 plausibel oder zu aggressiv?**
+**Plausibel, nicht zu aggressiv.** Unsere 20/15 (Interval 20 ms, Window 15 ms) =
+**75 % RX-Duty**; das von ESPHome als schädlich belegte Beispiel lag bei
+**50 %** (50/100). Wir sind also *konservativer* als der dokumentierte
+Fehlerfall. Zusätzlich stützt die eigene Messung die Wahl: `ps off` + `radio-save
+20/15` → **0,8 % ≈ Baseline** (verlustfrei), `15/12` bringt nichts mehr
+(kleiner geht nicht sinnvoll), `100/70` kostet ~⅓. Wichtige Einschränkung: 20/15
+ist **nur zusammen mit dem receiver-Default `ps off` + `burst-lock`** der
+Sweet Spot; als *alleinigen* universellen Default (ohne Burst-Vorhersage) würde
+ich es **nicht** festschreiben — genau davor warnt Quelle 3. Der aktuelle
+C6-Receiver-Default (`radio_save=false`, `burst_lock=true`, 150-ms-Fenster) ist
+die verlustfreie UND sparsame Kombi und bleibt richtig.
+
+**(c) Gibt es eine Espressif-Empfehlung gegen `reason 34` bei PS?**
+**Keine spezifische** „reason-34"-Doku. `WIFI_REASON_MISSING_ACKS = 34` ist in
+`esp_wifi_types_generic.h` (v6.1) nur als „Missing ACKs" definiert. Ableitbar
+aus den Quellen ist:
+1. **MIN statt MAX** verwenden (MIN wacht jedes DTIM, verliert keinen
+   Broadcast) — deckt sich mit unserer Beobachtung, dass MAX nur mit
+   `radio-save`/`listen` klein sicher ist.
+2. **PS erst nach `IP_EVENT_STA_GOT_IP`** aktivieren und **beim Reconnect
+   vorher abschalten** (ESP-FAQ-Empfehlung für schwache/gestörte Netze).
+3. Wenn es trotzdem flappt: **`WIFI_PS_NONE`** — exakt unser
+   `ps_fallback`-sticky-Rückfall.
+Da `reason 34` hier **auch ohne** jeden Hebel auftritt (Umgebungsstörung der
+FRITZ!Box-5530-Mesh), liegt die belastbare Abhilfe **AP-seitig** (Mesh/Band-
+Steering/DFS/Kanal), nicht im Sleep-Modus. Unser `ps_fallback` (nur bei
+aktivem `ps != off`, anhaltender Sturm 20/60 s ×3) ist damit
+Espressif-konform: er greift genau dann, wenn die drei Empfehlungen oben
+nicht mehr helfen.
+
+**(d) Was davon gehört in einen GitHub-Issue/PR?** (Empfehlung — **nichts
+erstellt**, kein Push)
+- **Kein** PR im eigenen Repo nötig: alle vier Quellen bestätigen den
+  **Ist-Zustand** (Kconfig gesetzt, MIN-Default, 20/15 plausibel, Light Sleep
+  aus, AR2024-006 nicht betroffen). Ein Firmware-Change wäre durch die Quellen
+  **nicht** gedeckt.
+- **Optionaler Kandidat** für einen eigenen **Issue** (nicht Code-PR): die
+  **reason-34-Flapping der FRITZ!Box 5530 Mesh unabhängig vom PS-Modus** mit
+  Messwerten (`ps off` 9/60 s vs `ps min` 11/60 s; A/B-verschränkt) + Bitte um
+  AP-seitige Klärung (Mesh/DFS/Band-Steering). Das ist eine
+  Umgebungs-/Router-Frage, kein Firmware-Bug.
+- **Nicht** sinnvoll: ein Upstream-Issue bei espressif/esp-idf — es gibt keine
+  offene Verhaltenslücke, die unsere Messwerte belegen (AR2024-006 ist in v6.1
+  gefixt, die PS-Semantik ist dokumentiert).
+
 **Vorbehalt (Messmethodik):** Belastbar sind die Zahlen nur, wenn der FNB48 **in
 Reihe** in der C6-VBUS-Leitung liegt (nicht als Geschwister am Hub) und jeder Lauf
 mit `0x84` beendet wird — sonst Standbild/Ripple (siehe
