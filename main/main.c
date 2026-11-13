@@ -9909,6 +9909,14 @@ static void burst_lock_release_awake(void)
 
 /* Poll cadence while awake and waiting to (re)learn the burst period. */
 #define BURST_LOCK_IDLE_POLL_MS 50u
+/* While the period is not yet learned the radio is held awake so the first
+ * burst is not missed. That must be bounded: with no sender in range the lock
+ * never forms, and an unbounded hold pins the radio awake forever - measured
+ * ~0.39 W held vs ~0.15 W parked. After this long without a lock the worker
+ * parks the radio and only keeps observing; the next frame that still arrives
+ * (e.g. on a DTIM wake) re-learns the lock. A sender that is actually present
+ * sends within a few seconds, so this never delays its first lock. */
+#define BURST_LOCK_LEARN_TIMEOUT_MS 60000u
 /* Never sleep longer than this in one step, so a config change is noticed
  * promptly. */
 #define BURST_LOCK_MAX_SLEEP_MS 1000u
@@ -9970,6 +9978,7 @@ static void burst_lock_worker(void *arg)
 {
     (void)arg;
     bool held = false;
+    uint32_t learn_since_ms = 0;
     for (;;) {
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
         bool enabled = g_burst_lock_enabled;
@@ -9983,12 +9992,29 @@ static void burst_lock_worker(void *arg)
 
         if (!enabled) {
             burst_lock_awake_release(&held);
+            learn_since_ms = 0;
             vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_IDLE_POLL_MS));
             continue;
         }
-        if (!locked || hold) {
-            /* Stay awake to observe bursts until the period is known, or to
-             * serve an in-flight ESP-NOW exchange. */
+        if (!locked) {
+            /* Stay awake to observe bursts until the period is known - but only
+             * for a bounded time, so a missing sender cannot pin the radio
+             * awake forever (see BURST_LOCK_LEARN_TIMEOUT_MS). */
+            if (learn_since_ms == 0u) {
+                learn_since_ms = now_ms;
+            }
+            if (hold ||
+                (uint32_t)(now_ms - learn_since_ms) < BURST_LOCK_LEARN_TIMEOUT_MS) {
+                burst_lock_awake_hold(&held);
+            } else {
+                burst_lock_awake_release(&held);
+            }
+            vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_IDLE_POLL_MS));
+            continue;
+        }
+        learn_since_ms = 0;
+        if (hold) {
+            /* Serve an in-flight ESP-NOW exchange before parking again. */
             burst_lock_awake_hold(&held);
             vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_IDLE_POLL_MS));
             continue;
