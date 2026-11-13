@@ -159,6 +159,18 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_mqtt_events"
 
+# MQTT remote command channel: chunk reassembly (esp-mqtt can split a payload
+# across MQTT_EVENT_DATA events) and the JSON result payload.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/mqtt_cmd.c" \
+    "$repo/main/json_escape.c" \
+    "$here/test_mqtt_cmd.c" \
+    -o "$out/test_mqtt_cmd"
+
+"$out/test_mqtt_cmd"
+
 # Sender-side batching ring + backfill arithmetic (no radio): batching,
 # oldest-eviction and the gap count the receiver reconciles against.
 "$cc" -std=c11 -Wall -Wextra -O2 \

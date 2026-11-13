@@ -60,7 +60,10 @@ int mqtt_topics_build(const char *prefix, mqtt_topics_t *out)
         join(base, "status", tmp.status, sizeof(tmp.status)) != 0 ||
         join(base, "state", tmp.state, sizeof(tmp.state)) != 0 ||
         join(base, "event/reboot", tmp.event_reboot,
-             sizeof(tmp.event_reboot)) != 0) {
+             sizeof(tmp.event_reboot)) != 0 ||
+        join(base, "cmd", tmp.cmd, sizeof(tmp.cmd)) != 0 ||
+        join(base, "cmd/result", tmp.cmd_result,
+             sizeof(tmp.cmd_result)) != 0) {
         return -1;
     }
     *out = tmp;

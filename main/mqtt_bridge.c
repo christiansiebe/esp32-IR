@@ -7,13 +7,18 @@
 #include "crash_journal.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "mqtt_client.h"
 #include "nvs.h"
+#include "mqtt_cmd.h"
 #include "mqtt_events.h"
 #include "mqtt_publish.h"
 #include "mqtt_topics.h"
 #include "net_config.h"
 #include "version.h"
+#include "web_console.h"
 
 static const char *TAG = "mqtt";
 
@@ -36,6 +41,67 @@ static char s_prefix[80];
 static int s_reset_reason;
 static bool s_journal_valid;
 static crash_journal_t s_journal;
+
+/* Remote command channel (<base>/cmd). Reassembly runs on the MQTT task, but the
+ * command itself is handed to a separate worker: a slow command (e.g. 'pull')
+ * must not block the MQTT task's keepalive handling. */
+static mqtt_cmd_rx_t s_cmd_rx;
+static QueueHandle_t s_cmd_queue;
+static TaskHandle_t s_cmd_task;
+static char s_cmd_scratch[MQTT_CMD_LINE_MAX];
+
+/* Run one command line through the same dispatcher as the web/serial console and
+ * publish the answer retained to <base>/cmd/result. Runs on the cmd worker. */
+static void mqtt_cmd_run_and_publish(const char *line)
+{
+    char out[WEB_CONSOLE_OUT_MAX];
+    out[0] = '\0';
+    bool known = web_console_run(line, out, sizeof(out));
+
+    if (!s_connected) {
+        return;
+    }
+    mqtt_topics_t topics;
+    if (mqtt_topics_build(s_prefix, &topics) != 0) {
+        return;
+    }
+    char payload[MQTT_CMD_PAYLOAD_MAX];
+    if (mqtt_cmd_result_payload(line, known, out, payload, sizeof(payload)) != 0) {
+        ESP_LOGW(TAG, "command result too large to publish");
+        return;
+    }
+    esp_mqtt_client_publish(s_client, topics.cmd_result, payload, 0, 0, 1);
+}
+
+static void mqtt_cmd_worker(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        if (xQueueReceive(s_cmd_queue, s_cmd_scratch, portMAX_DELAY) == pdTRUE) {
+            mqtt_cmd_run_and_publish(s_cmd_scratch);
+        }
+    }
+}
+
+/* Create the command queue and worker once. Idempotent: set_config restarts the
+ * client but must not spawn a second worker. */
+static void mqtt_cmd_worker_ensure(void)
+{
+    if (s_cmd_queue == NULL) {
+        s_cmd_queue = xQueueCreate(1, MQTT_CMD_LINE_MAX);
+        if (s_cmd_queue == NULL) {
+            ESP_LOGW(TAG, "could not create the command queue");
+            return;
+        }
+    }
+    if (s_cmd_task == NULL) {
+        if (xTaskCreate(mqtt_cmd_worker, "mqtt_cmd", 8192, NULL, 4,
+                        &s_cmd_task) != pdPASS) {
+            s_cmd_task = NULL;
+            ESP_LOGW(TAG, "could not start the command worker");
+        }
+    }
+}
 
 /* Publish the retained reboot event to <base>/event/reboot so Home Assistant
  * can show why the device (re)started. Retained, so a late subscriber still
@@ -115,12 +181,52 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             }
         }
         mqtt_publish_reboot_event(&topics);
+
+        /* Subscribe last: the command channel is optional and must not delay the
+         * discovery/reboot publishes that Home Assistant waits for. QoS 1 so a
+         * command is not silently lost; the broker redelivers on reconnect. */
+        mqtt_cmd_rx_reset(&s_cmd_rx);
+        esp_mqtt_client_subscribe(s_client, topics.cmd, 1);
         break;
     }
     case MQTT_EVENT_DISCONNECTED:
         s_connected = false;
+        mqtt_cmd_rx_reset(&s_cmd_rx);
         ESP_LOGW(TAG, "disconnected from broker");
         break;
+    case MQTT_EVENT_DATA: {
+        esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
+        if (event == NULL) {
+            break;
+        }
+        /* Only the command topic is subscribed, but esp-mqtt leaves topic NULL on
+         * continuation chunks unless CONFIG_MQTT_TOPIC_PRESENT_ALL_DATA_EVENTS is
+         * set. So: check the topic when it is present, and otherwise continue an
+         * already-started reassembly. Anything else is ignored. */
+        if (event->topic != NULL) {
+            mqtt_topics_t topics;
+            if (mqtt_topics_build(s_prefix, &topics) != 0 ||
+                (int)strlen(topics.cmd) != event->topic_len ||
+                strncmp(topics.cmd, event->topic, (size_t)event->topic_len) != 0) {
+                break;
+            }
+        } else if (!s_cmd_rx.active) {
+            break;
+        }
+        mqtt_cmd_rx_result_t result =
+            mqtt_cmd_rx_feed(&s_cmd_rx, event->data, event->data_len,
+                             event->current_data_offset, event->total_data_len);
+        if (result == MQTT_CMD_RX_DONE && s_cmd_queue != NULL) {
+            char line[MQTT_CMD_LINE_MAX];
+            strlcpy(line, mqtt_cmd_rx_line(&s_cmd_rx), sizeof(line));
+            /* The queue holds one command: if the worker is still busy the new
+             * one is rejected (never queued twice), so a burst cannot pile up. */
+            if (xQueueSend(s_cmd_queue, line, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "command worker busy; dropping a command");
+            }
+        }
+        break;
+    }
     case MQTT_EVENT_ERROR:
         ESP_LOGW(TAG, "mqtt error");
         break;
@@ -217,6 +323,7 @@ void mqtt_bridge_start(void)
         return;
     }
     s_started = true;
+    mqtt_cmd_worker_ensure();
     ESP_LOGI(TAG, "MQTT client started for %s", uri);
 }
 

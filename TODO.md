@@ -1,5 +1,27 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-07): MQTT-Kommando-Kanal — Rückrichtung `<base>/cmd` → `<base>/cmd/result`
+**Branch `feat/c6-mqtt-cmd` (Basis `feat/c6-burst-lock`).**
+- Der Receiver publiziert bisher nur nach MQTT. Jetzt **abonniert** er `<base>/cmd`
+  (QoS 1, Subscribe erst nach dem Discovery-/Reboot-Publish) und schickt jede Zeile
+  durch denselben Dispatcher wie die Web-/Seriell-Konsole (`web_console_run`); die
+  Antwort geht **retained** nach `<base>/cmd/result` als
+  `{"cmd":...,"ok":...,"out":...}`. Damit ist der Empfänger auch ohne Web-UI
+  bedienbar (`status`, `config`, `set ps min`, `pull`, …).
+- **Warum ein eigener Worker:** der MQTT-Task darf nie einen Befehl ausführen —
+  ein langsamer Befehl (z. B. `pull`) würde den Keepalive blockieren und die
+  Verbindung killen. Reassembly läuft im MQTT-Task, Ausführung in `mqtt_cmd`
+  (Queue-Tiefe 1, kein Stapeln).
+- **Reassembly:** esp-mqtt liefert große Payloads in mehreren `MQTT_EVENT_DATA`-
+  Events; auf Folge-Chunks ist `topic` **NULL** (außer
+  `CONFIG_MQTT_TOPIC_PRESENT_ALL_DATA_EVENTS`) — der Handler prüft das Topic nur,
+  wenn es gesetzt ist, und setzt sonst eine laufende Reassembly fort. Reines,
+  host-getestetes Modul `main/mqtt_cmd.{c,h}` (`test/test_mqtt_cmd.c`, 22 Checks).
+- **Sicherheit:** kein Kommando ohne gültigen Broker-Login (der Kanal hängt an der
+  authentifizierten MQTT-Session; `meter`/`Strom-Meter-2026` verifiziert). Der
+  Broker-ACL erlaubt `meter` Schreiben/Lesen auf `*`.
+- **Host-Suite grün**, Build über die GitHub-CI (`receiver-c6`) steht aus.
+
 ## NEU (2026-11-11): "keine Werte im Speicher" — verifizierte Diagnose + Web-500-Fix
 **Geräteverifiziert (Receiver C6 .105, Sender via /api/sender-diag):**
 - Beide Rollen empfangen/decodieren **live weiter** (Receiver `crc_valid` steigt

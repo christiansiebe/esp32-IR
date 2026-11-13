@@ -111,6 +111,19 @@ workspace/
 workspace-sd-fallback/
 subagents/
 
+# "eff"-Regelkreis des Sandbox-Agenten (Control-/Health-/Inject-Logs, PIDs,
+# Teach-/Zustandsdateien). Reine Laufzeitdaten im Repo-Root, nie Quellcode.
+eff/
+eff.bak-*/
+.eff_injected
+.eff_loop_learn.json
+.eff_nachweis
+.eff_reactivate
+eff_health.tsv
+prompts/
+verification_report.txt
+verification_short.txt
+
 # Agent-Memory der Sandbox (wird ueber remote-shell/memory/SHARED.md geteilt).
 .openhands/memory/
 

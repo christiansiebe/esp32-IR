@@ -43,6 +43,7 @@ set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "energy_totals.c" "energy_totals_store.c")
 if(CONFIG_ESPNOW_ROLE_RECEIVER)
     list(APPEND main_srcs "mqtt_bridge.c" "mqtt_publish.c" "mqtt_events.c"
+                          "mqtt_cmd.c"
                           "web_guard.c" "health_policy.c" "health_task.c"
                           "burst_lock.c")
 endif()

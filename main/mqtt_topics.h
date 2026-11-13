@@ -26,6 +26,8 @@ typedef struct {
     char status[MQTT_TOPIC_MAX];  /* <base>/status, online/offline via LWT */
     char state[MQTT_TOPIC_MAX];   /* <base>/state, retained HA discovery hub */
     char event_reboot[MQTT_TOPIC_MAX]; /* <base>/event/reboot, retained reset reason */
+    char cmd[MQTT_TOPIC_MAX];        /* <base>/cmd, subscribed command line */
+    char cmd_result[MQTT_TOPIC_MAX]; /* <base>/cmd/result, retained answer */
 } mqtt_topics_t;
 
 /* Build the fixed topics. \p prefix is trimmed of surrounding '/' and must be
