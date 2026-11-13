@@ -105,7 +105,7 @@ PS-Modus erzwungen wird.
   failures`).
 - CI (GitHub Actions) baut alle fünf Matrix-Rollen und läuft die Host-Tests.
 
-## Nachtrag 2026-11-13: der `apoff`-Build kam nie hoch (Fix) + gemessene 0,068 W
+## Nachtrag 2026-11-13: der `apoff`-Build kam nie hoch (Fix) + gemessene Leistung
 
 **Symptom am Prüfstand (C6FH4, USB):** Der station-only-Build (`role
 receiver-c6-apoff`, `CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y`) bootete in einer
@@ -134,13 +134,22 @@ Panic, IP 192.168.178.105, Kanal 11). CI-Lauf `43482262429` grün.
 |---|---|---|
 | `ps off` + `radio-save on` 20/15 (APSTA-Baseline) | 0,399 W | 200 |
 | `ps min` + `radio-save on` 20/15 | 0,397 W | 200 |
-| **`ps min` + `radio-save on` 5000/30** | **0,068–0,070 W** | 200 (18/18) |
-| `ps min` allein (radio-save off) | 0,068 W | 200 |
+| **`ps min` + `radio-save on` 5000/30** | **0,068–0,070 W** (⚠ s. Korrektur) | 200 (18/18) |
+| `ps min` allein (radio-save off) | 0,068 W (⚠ s. Korrektur) | 200 |
 
-**Fazit:** Station-only (kein SoftAP) ist der eigentliche Hebel: erst dort kann
-`esp_wifi_set_ps` die STA parken, und der Verbrauch fällt von **0,40 W auf
-0,068 W (−83 %)**. Im APSTA-Build ist das strukturell unmöglich, weil die SoftAP
-ihre Beacons dauerhaft senden muss (`ESPNOW_IF == WIFI_IF_AP`, `main/main.c`).
+> ⚠ **Korrektur 2026-11-14:** Am selben Gerät (jetzt `v0.4.0-35-ga89a416`) ließen
+> sich die **0,068 W nicht reproduzieren** — `ps min` + `radio-save on 5000/30`
+> ergab erneut **0,146 W** (Median), identisch zu `ps min` allein. Der belastbare
+> A/B-Wert ist `ps off` 0,39 W → `ps min` 0,146 W (−62 %). Die 0,068 W bleiben als
+> damaliger Messwert stehen, gelten aber als **nicht bestätigt** (vermutlich
+> Messartefakt; siehe Nachtrag 2026-11-07).
+
+**Fazit:** Station-only (kein SoftAP) ist der strukturelle Hebel: erst dort kann
+`esp_wifi_set_ps` die STA parken. Reproduziert (2026-11-14) fällt der Verbrauch
+von **0,39 W auf 0,146 W (−62 %)**. Die früher notierten 0,068 W (−83 %) sind
+**nicht bestätigt** (s. Korrektur oben). Im APSTA-Build ist das Parken der STA
+unwirksam, weil die SoftAP ihre Beacons dauerhaft senden muss
+(`ESPNOW_IF == WIFI_IF_AP`, `main/main.c`).
 
 **Vorbehalt (offen):** Die FRITZ!Box (Mesh) flappt am Prüfstand auch **ohne**
 jeden Hebel (`reason 34` MISSING_ACKS alle ~3 s); das ist die dokumentierte
@@ -158,15 +167,22 @@ gemessen. Die Konfiguration ist `ps min` **oder** `ps max` + `listen_interval 10
 
 | Konfiguration | Leistung |
 |---|---|
-| `ps off` (Radio dauerhaft wach) | **0,394 W** |
-| `ps min`/`ps max` + `listen 10`, `radio-save off` (Ziel) | Median **0,068–0,081 W**, Minimum **0,065 W**, Mittel ~0,10–0,12 W |
-| `radio-save on` | Mittel **0,17 W** — schlechter, nicht verwenden |
+| `ps off` (Radio dauerhaft wach) | **0,39 W** |
+| `ps min`/`ps max` + `listen 10`, `radio-save off` (Ziel) | Median **0,146 W**, Minimum **0,129 W**, Mittel 0,15 W |
+| `ps min` + `radio-save on 5000/30` | Median **0,146 W** — kein messbarer Vorteil |
 
-- Der **Median** ist die ehrliche Ruhelast; der **Mittelwert** liegt höher, weil
-  periodische `listen`-Wakes/Bursts ihn hochziehen.
+- **A/B (2026-11-14, reproduziert):** `ps off` **0,390 W** → `ps min listen 10`
+  **0,146 W** = **−62 %**. Das ist der belastbare Spar-Effekt.
+- **Korrektur:** Die früher notierten **0,068 W** ließen sich am 2026-11-14 mit
+  *keiner* Konfiguration reproduzieren (`ps min` allein, `radio-save on 5000/30`
+  und `ps max` ergaben alle ≈0,146 W). Vermutlich war die frühere Zahl ein
+  Mess-/Aufbauartefakt (der C6 hängt als Pass-through am FNB-48, `0483:003a`;
+  `lsusb` zeigt ihn zusätzlich als `303a:1001`). Bis zu einer
+  Reihenschaltungs-Messung gelten die **0,146 W** als aktueller Stand; die
+  USB-Serial/JTAG-Peripherie selbst zieht bereits einen relevanten Anteil.
 - **`listen_interval 10` ist optimal** — 5/20/30 sind schlechter (mehr
-  Reconnect-Bursts). `radio-save on` ist hier **kontraproduktiv** (0,17 W statt
-  0,068 W), anders als bei früheren Aufbauten.
+  Reconnect-Bursts). `radio-save on` bringt hier **nichts** (0,146 W statt
+  0,146 W), anders als in älteren Notizen.
 
 **Warum der Sparmodus trotzdem „wiederkam":** Der alte Wächter
 `main/ps_fallback.c` schaltete bei **≥8 STA-Disconnects in 300 s** sticky auf
@@ -285,3 +301,43 @@ erstellt**, kein Push)
 Reihe** in der C6-VBUS-Leitung liegt (nicht als Geschwister am Hub) und jeder Lauf
 mit `0x84` beendet wird — sonst Standbild/Ripple (siehe
 `docs/radio-sleep-break-even.md` § 8.3).
+
+## Nachtrag 2026-11-14: `ps_fallback` auf „sustained storm" umgestellt + validiert
+
+**Ursache des wiederkehrenden Sparmodus-Verlusts:** Der alte Wächter latschte
+`ps off` schon bei **8 Disconnects in 300 s**. Die FRITZ!Box-5530-Mesh-Umgebung
+erzeugt `reason 34` (MISSING_ACKS) aber **unabhängig vom PS-Modus** (A/B: `ps off`
+9/60 s vs `ps min` 11/60 s), also löste ein reiner Zähler **Fehlalarm** aus und
+verwarf den Sparmodus (0,39 W statt 0,146 W).
+
+**Fix (`a89a416`):** Der Wächter verlangt jetzt einen **anhaltenden** Sturm —
+ein 60-s-Fenster über der Schwelle (Default **20**, ~12× der Umgebungs-Spitze)
+ist nur ein *Kandidat*; erst **3 über der Schwelle liegende Fenster in Folge**
+laschen den Fehler. Ein isolierter Umgebungs-Burst ist im nächsten Fenster vorbei
+und „sustained" nie; ein echter Modem-Sleep-Schaden hält den Link unten und ist
+in ~3 min bestätigt. `CONFIG_ESPNOW_PS_FALLBACK_SUSTAIN_WINDOWS=1` stellt das alte
+Verhalten wieder her. Kconfig: Fenster 300 s→60 s, Schwelle 8→20, neuer
+Sustain-Knopf; Host-Test deckt Sustain, Reset durch ruhiges Fenster, Schonfrist,
+intentional-Reconnect und Fenster-Gleiten ab.
+
+**CI-Verifikation (GitHub, `a89a416`):** Host-Tests (aggregation) **grün** +
+alle fünf Matrix-Rollen (`receiver`, `receiver-apoff`, `receiver-c6`,
+`receiver-c6-apoff`, `sender`) **grün**. Lauf `43526156557`.
+
+**Realwelt-Validierung am Gerät** (`v0.4.0-35-ga89a416`, apoff-C6):
+- `set ps min` → **hält stabil über den Beobachtungszeitraum** (`ps_cfg=min`,
+  `reconn=0`; der Wächter latscht trotz Umgebungsrauschen **nicht** mehr).
+- A/B-Leistung: `ps off` **0,390 W** → `ps min listen 10` **0,146 W** (−62 %).
+
+**Externe Referenzen (recherchiert, 2026-11-14):**
+- `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE` ist bereits gesetzt
+  (`sdkconfig.defaults`) und IDF-v6.1-Default `y`; er macht
+  `esp_now_set_wake_window()` auch **unassoziiert** wirksam. Beibehalten.
+- Unsere `radio-save` 20/15 (75 % RX-Duty) ist **konservativer** als der
+  ESPHome-Issue-#17238-Fehlerfall (50 %, 50/100) — plausibel, nicht zu aggressiv.
+- Keine Espressif-Doku speziell zu `reason 34`; die Quellen stützen MIN statt
+  MAX, PS erst nach `GOT_IP`, sonst `WIFI_PS_NONE` — genau unser sticky
+  `ps_fallback`. Die reason-34-Flapping tritt **auch mit `ps off`** auf, ist also
+  eine AP-/Mesh-Umgebungsfrage (Mesh/DFS/Band-Steering), kein Firmware-Bug.
+- Espressif-Advisory **AR2024-006** (C6 Auto-Light-Sleep) ist in v6.1 gefixt und
+  betrifft uns nicht (Light Sleep am USB-C6 ohnehin aus).
