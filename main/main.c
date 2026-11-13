@@ -3248,13 +3248,20 @@ static void power_sample_timer_callback(void *arg)
     power_history_record_t completed_interval = {0};
     bool enqueue_completed_interval = false;
     double live_watts = 0.0;
+    double live_average = 0.0;
     bool have_live_power = false;
+    bool have_live_average = false;
 
     portENTER_CRITICAL(&g_sml_history_lock);
     if (g_sml_latest_power_valid &&
         now_us - g_sml_latest_power_received_us <= POWER_SAMPLE_STALE_US) {
         live_watts = g_sml_latest_power_w;
         have_live_power = true;
+        if (g_sml_power_sample_count != 0) {
+            live_average = g_sml_power_sample_sum_w /
+                           (double)g_sml_power_sample_count;
+            have_live_average = true;
+        }
         append_power_sample_locked(now_us, g_sml_latest_power_w);
         if (wall_clock >= 1704067200) {
             int64_t bucket_start = ((int64_t)wall_clock /
@@ -3309,6 +3316,11 @@ static void power_sample_timer_callback(void *arg)
     if (have_live_power && g_sml_latest_power_received_us != g_last_published_power_us) {
         g_last_published_power_us = g_sml_latest_power_received_us;
         mqtt_bridge_publish_power(live_watts);
+        /* Republish the 15-minute mean alongside the live value so HA's
+         * "Leistung 15 min Mittel" tracks the dashboard without its own poll. */
+        if (have_live_average) {
+            mqtt_bridge_publish_average(live_average);
+        }
     }
     if (enqueue_completed_interval) {
         mqtt_bridge_publish_history(&completed_interval);
@@ -9207,17 +9219,24 @@ static void ps_fallback_worker(void *arg)
                                    "modem sleep broke the link (disconnect storm)");
         runtime_config_store(cfg);
         g_ps_fallback_stage = 2;
-        ESP_LOGW(TAG, "Modem-sleep fallback: %u disconnects in %u ms; Wi-Fi PS off, "
-                      "radio stays awake (err=%d)",
-                 (unsigned)ps_fallback_disconnects(&g_ps_fallback),
-                 (unsigned)CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS, (int)err);
 #if CONFIG_ESPNOW_ROLE_SENDER
         /* The diag event ring only exists on the sender; the receiver surfaces
          * the fallback through ESP_LOGW above and runtime_config_health_note(). */
         diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
                        "modem-sleep fallback: PS off after %u disconnects",
                        (unsigned)ps_fallback_disconnects(&g_ps_fallback));
+#else
+        /* Tell Home Assistant why the idle current just went up (the watchdog
+         * dropped to the proven PS-off mode and persisted it). The MQTT bridge
+         * is receiver-only, so this stays out of the sender build. */
+        mqtt_bridge_publish_fallback_event(
+            ps_fallback_disconnects(&g_ps_fallback),
+            (unsigned)CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS);
 #endif
+        ESP_LOGW(TAG, "Modem-sleep fallback: %u disconnects in %u ms; Wi-Fi PS off, "
+                      "radio stays awake (err=%d)",
+                 (unsigned)ps_fallback_disconnects(&g_ps_fallback),
+                 (unsigned)CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS, (int)err);
     }
 }
 #endif /* CONFIG_ESPNOW_PS_FALLBACK */

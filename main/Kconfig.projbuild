@@ -261,21 +261,25 @@ config ESPNOW_PS_FALLBACK_WINDOW_MS
     int "Modem-sleep watchdog: sliding window for the disconnect count (ms)"
     depends on ESPNOW_PS_FALLBACK
     range 10000 3600000
-    default 120000
+    default 300000
     help
         Disconnects are counted inside this window; older ones age out. Must be
         long enough that a normal, occasional re-association does not reach the
-        threshold.
+        threshold. The FRITZ!Box mesh in this install already produces the odd
+        reason-34 (MISSING_ACKS) re-association with power save fully off, so the
+        window has to be wide enough that this environmental baseline never trips
+        the fault - otherwise the receiver silently loses its low-power mode.
 
 config ESPNOW_PS_FALLBACK_THRESHOLD
     int "Modem-sleep watchdog: disconnects in the window that trip the fault"
     depends on ESPNOW_PS_FALLBACK
     range 2 100
-    default 3
+    default 8
     help
         How many disconnects inside the window mean the PS mode is breaking the
-        link. Three in two minutes is a storm; a healthy link re-associates at
-        most rarely.
+        link. A real modem-sleep storm drops the association every few seconds
+        (dozens in the window), so the threshold is set well above the ambient
+        rate of this environment; a healthy link stays far below it.
 
 config ESPNOW_PS_FALLBACK_GRACE_MS
     int "Modem-sleep watchdog: grace after boot before a fault may fire (ms)"

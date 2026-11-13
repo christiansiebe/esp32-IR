@@ -61,6 +61,8 @@ int mqtt_topics_build(const char *prefix, mqtt_topics_t *out)
         join(base, "state", tmp.state, sizeof(tmp.state)) != 0 ||
         join(base, "event/reboot", tmp.event_reboot,
              sizeof(tmp.event_reboot)) != 0 ||
+        join(base, "event/ps_fallback", tmp.event_ps_fallback,
+             sizeof(tmp.event_ps_fallback)) != 0 ||
         join(base, "cmd", tmp.cmd, sizeof(tmp.cmd)) != 0 ||
         join(base, "cmd/result", tmp.cmd_result,
              sizeof(tmp.cmd_result)) != 0) {
@@ -101,16 +103,16 @@ int mqtt_topic_obis(const char *base, unsigned sensor, const char *obis_text,
     return 0;
 }
 
-int mqtt_discovery_topic(const char *base, const char *component,
-                         const char *node_id, const char *object_id, char *out,
-                         size_t out_size)
+int mqtt_discovery_topic(const char *component, const char *node_id,
+                         const char *object_id, char *out, size_t out_size)
 {
-    if (base == NULL || component == NULL || node_id == NULL ||
-        object_id == NULL || out == NULL || out_size == 0) {
+    if (component == NULL || node_id == NULL || object_id == NULL ||
+        out == NULL || out_size == 0) {
         return -1;
     }
-    int written = snprintf(out, out_size, "%s/homeassistant/%s/%s/%s/config",
-                           base, component, node_id, object_id);
+    int written = snprintf(out, out_size, "%s/%s/%s/%s/config",
+                           MQTT_DISCOVERY_PREFIX, component, node_id,
+                           object_id);
     if (written < 0 || (size_t)written >= out_size) {
         if (out_size > 0) {
             out[0] = '\0';
@@ -119,6 +121,15 @@ int mqtt_discovery_topic(const char *base, const char *component,
     }
     return 0;
 }
+
+/* The HA device block, shared by every entity so Home Assistant groups them
+ * under one device. Kept as raw JSON (not a quoted string) - it is a nested
+ * object, not a scalar field. Must match the Odroid-side bridge's device block
+ * so a switchover keeps the same HA device/entities. */
+#define MQTT_DISCOVERY_DEVICE_JSON                                            \
+    "\"device\":{\"identifiers\":[\"esp32ir_meter\"],"                       \
+    "\"name\":\"ESP32 IR Stromzaehler\",\"manufacturer\":\"esp32-IR\","       \
+    "\"model\":\"SML Meter\"}"
 
 static int json_field(char *out, size_t n, size_t *pos, bool first,
                       const char *key, const char *value)
@@ -132,9 +143,22 @@ static int json_field(char *out, size_t n, size_t *pos, bool first,
     return 0;
 }
 
+static int json_raw(char *out, size_t n, size_t *pos, bool first,
+                    const char *raw)
+{
+    int written = snprintf(out + *pos, n - *pos, "%s%s", first ? "" : ",",
+                           raw);
+    if (written < 0 || (size_t)written >= n - *pos) {
+        return -1;
+    }
+    *pos += (size_t)written;
+    return 0;
+}
+
 int mqtt_discovery_payload(const char *name, const char *unique_id,
-                           const char *state_topic, const char *unit,
-                           const char *device_class, const char *state_class,
+                           const char *object_id, const char *state_topic,
+                           const char *unit, const char *device_class,
+                           const char *state_class,
                            const char *availability_topic, char *out,
                            size_t out_size)
 {
@@ -156,6 +180,7 @@ int mqtt_discovery_payload(const char *name, const char *unique_id,
     } fields[] = {
         {"name", name},
         {"unique_id", unique_id},
+        {"object_id", object_id},
         {"state_topic", state_topic},
         {"unit_of_measurement", unit},
         {"device_class", device_class},
@@ -173,6 +198,10 @@ int mqtt_discovery_payload(const char *name, const char *unique_id,
             return -1;
         }
         first = false;
+    }
+    if (json_raw(out, out_size, &pos, first, MQTT_DISCOVERY_DEVICE_JSON) != 0) {
+        out[0] = '\0';
+        return -1;
     }
     if (pos + 2 > out_size) {
         out[0] = '\0';

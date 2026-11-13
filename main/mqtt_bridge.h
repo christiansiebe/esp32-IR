@@ -34,8 +34,19 @@ void mqtt_bridge_publish_power(double watts);
 void mqtt_bridge_publish_import(double raw, int8_t scaler);
 void mqtt_bridge_publish_export(double raw, int8_t scaler);
 
+/* Publish the 15-minute mean of the live power (W) to <base>/average, retained.
+ * Mirrors the dashboard's own average so HA and the device UI agree. Cheap
+ * no-op when the bridge is not connected. */
+void mqtt_bridge_publish_average(double watts);
+
 /* Publish a finished minute record to <base>/history as JSON. */
 void mqtt_bridge_publish_history(const power_history_record_t *record);
+
+/* Publish the retained modem-sleep fallback event to <base>/event/ps_fallback
+ * so Home Assistant shows *why* the device dropped to the higher-power proven
+ * mode. Cheap no-op when the bridge is not connected. */
+void mqtt_bridge_publish_fallback_event(unsigned disconnects,
+                                        unsigned window_ms);
 
 /* True once a broker URI was loaded and the client was started. */
 bool mqtt_bridge_started(void);

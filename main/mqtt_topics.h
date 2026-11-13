@@ -19,6 +19,12 @@ extern "C" {
 
 #define MQTT_TOPIC_MAX 160
 
+/* Home Assistant discovery is addressed under the broker's configured
+ * discovery_prefix (HA's default is "homeassistant"), NOT under the device's own
+ * state prefix. Publishing it under <base>/homeassistant/... is invisible to HA,
+ * which is why the device's own discovery never took effect. */
+#define MQTT_DISCOVERY_PREFIX "homeassistant"
+
 typedef struct {
     char base[80];                /* sanitized prefix, e.g. "esp32ir/receiver" */
     char power[MQTT_TOPIC_MAX];   /* <base>/power, live power in W */
@@ -26,6 +32,7 @@ typedef struct {
     char status[MQTT_TOPIC_MAX];  /* <base>/status, online/offline via LWT */
     char state[MQTT_TOPIC_MAX];   /* <base>/state, retained HA discovery hub */
     char event_reboot[MQTT_TOPIC_MAX]; /* <base>/event/reboot, retained reset reason */
+    char event_ps_fallback[MQTT_TOPIC_MAX]; /* <base>/event/ps_fallback, retained */
     char cmd[MQTT_TOPIC_MAX];        /* <base>/cmd, subscribed command line */
     char cmd_result[MQTT_TOPIC_MAX]; /* <base>/cmd/result, retained answer */
 } mqtt_topics_t;
@@ -42,17 +49,19 @@ int mqtt_topic_obis(const char *base, unsigned sensor, const char *obis_text,
                     char *out, size_t out_size);
 
 /* Home Assistant discovery topic for one entity:
- * <base>/homeassistant/<component>/<node_id>/<object_id>/config
+ * homeassistant/<component>/<node_id>/<object_id>/config
+ * (the "homeassistant" discovery_prefix, not the device state prefix).
  * Returns 0 on success, -1 on invalid input or overflow. */
-int mqtt_discovery_topic(const char *base, const char *component,
-                         const char *node_id, const char *object_id, char *out,
-                         size_t out_size);
+int mqtt_discovery_topic(const char *component, const char *node_id,
+                         const char *object_id, char *out, size_t out_size);
 
-/* HA discovery JSON payload. Only non-NULL optional fields are emitted.
- * Returns 0 on success, -1 on overflow (buffer left NUL-terminated). */
+/* HA discovery JSON payload. Only non-NULL optional fields are emitted; the
+ * shared device block is always appended so HA groups the entities under one
+ * device. Returns 0 on success, -1 on overflow (buffer left NUL-terminated). */
 int mqtt_discovery_payload(const char *name, const char *unique_id,
-                           const char *state_topic, const char *unit,
-                           const char *device_class, const char *state_class,
+                           const char *object_id, const char *state_topic,
+                           const char *unit, const char *device_class,
+                           const char *state_class,
                            const char *availability_topic, char *out,
                            size_t out_size);
 

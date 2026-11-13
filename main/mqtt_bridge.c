@@ -131,6 +131,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         if (mqtt_topics_build(s_prefix, &topics) != 0) {
             break;
         }
+        /* Mark the device available *before* the discovery/state publishes so a
+         * freshly subscribing HA sees "online" at once. Without this explicit
+         * publish only the LWT ever writes the topic, so it stays "offline" and
+         * every entity reads as unavailable. */
+        esp_mqtt_client_publish(s_client, topics.status, "online", 0, 0, 1);
+
         /* Retained discovery hub so HA sees the device as soon as it is online. */
         const char *hub =
             "{\"name\":\"ESP32-IR\",\"unique_id\":\"esp32ir_recv\","
@@ -141,11 +147,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 
         char import_topic[MQTT_TOPIC_MAX];
         char export_topic[MQTT_TOPIC_MAX];
+        char average_topic[MQTT_TOPIC_MAX];
         snprintf(import_topic, sizeof(import_topic), "%s/import", topics.base);
         snprintf(export_topic, sizeof(export_topic), "%s/export", topics.base);
+        snprintf(average_topic, sizeof(average_topic), "%s/average", topics.base);
 
         char topic[MQTT_TOPIC_MAX];
-        char value_payload[512];
+        /* Holds the discovery JSON for the longest entity: two 160-byte topics
+         * (state + availability) plus the shared device block. */
+        char value_payload[768];
         struct {
             const char *component;
             const char *name;
@@ -164,16 +174,20 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
              "total_increasing"},
             {"sensor", "Einspeisung gesamt", "export", export_topic, "kWh",
              "energy", "total_increasing"},
+            /* 15-minute mean of the live power, mirrors the dashboard's own
+             * average so HA shows the same value the device UI does. */
+            {"sensor", "Leistung 15 min Mittel", "average", average_topic, "W",
+             "power", "measurement"},
         };
         for (size_t i = 0; i < sizeof(entities) / sizeof(entities[0]); ++i) {
             char unique_id[96];
             snprintf(unique_id, sizeof(unique_id), "esp32ir_recv_%s",
                      entities[i].object_id);
-            if (mqtt_discovery_topic(s_prefix, entities[i].component,
-                                     "esp32ir_recv", entities[i].object_id,
-                                     topic, sizeof(topic)) == 0 &&
+            if (mqtt_discovery_topic(entities[i].component, "esp32ir_recv",
+                                     entities[i].object_id, topic,
+                                     sizeof(topic)) == 0 &&
                 mqtt_discovery_payload(
-                    entities[i].name, unique_id,
+                    entities[i].name, unique_id, unique_id,
                     entities[i].state_topic, entities[i].unit,
                     entities[i].device_class, entities[i].state_class,
                     topics.status, value_payload, sizeof(value_payload)) == 0) {
@@ -365,6 +379,47 @@ static void publish_energy(const char *suffix, double raw, int8_t scaler)
                             sizeof(payload)) == 0) {
         esp_mqtt_client_publish(s_client, topic, payload, 0, 0, 1);
     }
+}
+
+void mqtt_bridge_publish_average(double watts)
+{
+    if (!s_connected) {
+        return;
+    }
+    mqtt_topics_t topics;
+    if (mqtt_topics_build(s_prefix, &topics) != 0) {
+        return;
+    }
+    char topic[MQTT_TOPIC_MAX];
+    char payload[24];
+    if (snprintf(topic, sizeof(topic), "%s/average", topics.base) >=
+        (int)sizeof(topic)) {
+        return;
+    }
+    if (mqtt_power_payload(watts, payload, sizeof(payload)) == 0) {
+        esp_mqtt_client_publish(s_client, topic, payload, 0, 0, 1);
+    }
+}
+
+void mqtt_bridge_publish_fallback_event(unsigned disconnects, unsigned window_ms)
+{
+    if (!s_connected) {
+        return;
+    }
+    mqtt_topics_t topics;
+    if (mqtt_topics_build(s_prefix, &topics) != 0) {
+        return;
+    }
+    char payload[192];
+    int written = snprintf(payload, sizeof(payload),
+                           "{\"event\":\"ps_fallback\",\"disconnects\":%u,"
+                           "\"window_ms\":%u,\"reason\":\"modem sleep broke the "
+                           "link\"}",
+                           disconnects, window_ms);
+    if (written < 0 || (size_t)written >= sizeof(payload)) {
+        return;
+    }
+    esp_mqtt_client_publish(s_client, topics.event_ps_fallback, payload, 0, 0, 1);
 }
 
 void mqtt_bridge_publish_import(double raw, int8_t scaler)

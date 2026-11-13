@@ -88,10 +88,13 @@ static void test_discovery_entities(void)
     char topic[MQTT_TOPIC_MAX];
     char payload[512];
 
-    CHECK(mqtt_discovery_topic("esp32ir/receiver", "sensor", "esp32ir_recv",
+    CHECK(mqtt_discovery_topic("sensor", "esp32ir_recv",
                                "power", topic, sizeof(topic)) == 0,
           "power discovery topic");
-    CHECK(mqtt_discovery_payload("Leistung", "esp32ir_recv_power", t.power, "W",
+    CHECK(strcmp(topic, "homeassistant/sensor/esp32ir_recv/power/config") == 0,
+          "power discovery topic is under the HA discovery prefix");
+    CHECK(mqtt_discovery_payload("Leistung", "esp32ir_recv_power",
+                                 "esp32ir_recv_power", t.power, "W",
                                  "power", "measurement", t.status, payload,
                                  sizeof(payload)) == 0,
           "power discovery payload");
@@ -100,10 +103,13 @@ static void test_discovery_entities(void)
           "power state_class");
     CHECK(strstr(payload, "\"state_topic\":\"esp32ir/receiver/power\"") != NULL,
           "power state_topic");
+    CHECK(strstr(payload, "\"device\":{\"identifiers\":[\"esp32ir_meter\"]") !=
+              NULL,
+          "device block present");
 
     CHECK(mqtt_discovery_payload("Bezug gesamt", "esp32ir_recv_import",
-                                 import_topic, "kWh", "energy",
-                                 "total_increasing", t.status, payload,
+                                 "esp32ir_recv_import", import_topic, "kWh",
+                                 "energy", "total_increasing", t.status, payload,
                                  sizeof(payload)) == 0,
           "import discovery payload");
     CHECK(strstr(payload, "\"device_class\":\"energy\"") != NULL, "import class");
@@ -114,14 +120,27 @@ static void test_discovery_entities(void)
           "import state_topic");
 
     CHECK(mqtt_discovery_payload("Einspeisung gesamt", "esp32ir_recv_export",
-                                 export_topic, "kWh", "energy",
-                                 "total_increasing", t.status, payload,
+                                 "esp32ir_recv_export", export_topic, "kWh",
+                                 "energy", "total_increasing", t.status, payload,
                                  sizeof(payload)) == 0,
           "export discovery payload");
     CHECK(strstr(payload, "\"state_topic\":\"esp32ir/receiver/export\"") != NULL,
           "export state_topic");
     CHECK(strstr(payload, "\"device_class\":\"energy\"") != NULL, "export class");
     CHECK(strstr(payload, "\"unit_of_measurement\":\"kWh\"") != NULL, "export unit");
+
+    /* The 15-minute mean entity mirrors the dashboard average. */
+    char average_topic[MQTT_TOPIC_MAX];
+    snprintf(average_topic, sizeof(average_topic), "%s/average", t.base);
+    CHECK(strcmp(average_topic, "esp32ir/receiver/average") == 0,
+          "average topic");
+    CHECK(mqtt_discovery_payload("Leistung 15 min Mittel", "esp32ir_recv_average",
+                                 "esp32ir_recv_average", average_topic, "W",
+                                 "power", "measurement", t.status, payload,
+                                 sizeof(payload)) == 0,
+          "average discovery payload");
+    CHECK(strstr(payload, "\"state_topic\":\"esp32ir/receiver/average\"") != NULL,
+          "average state_topic");
 }
 
 int main(void)
