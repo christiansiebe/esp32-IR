@@ -1,5 +1,6 @@
-/* Wi-Fi modem-sleep fault detector: too many STA disconnects inside the window
- * while a PS mode is active must fall back (sticky) to the proven mode, an
+/* Wi-Fi modem-sleep fault detector: a *sustained* storm of STA disconnects
+ * (several consecutive over-threshold windows) while a PS mode is active must
+ * fall back (sticky) to the proven mode, an isolated ambient burst must not, an
  * intentional reconnect must not count, and a stable association must clear the
  * count. Pure logic, no ESP-IDF. */
 #include <stdbool.h>
@@ -19,50 +20,95 @@ static int g_failures;
         }                                                            \
     } while (0)
 
-#define WIN_MS 120000u
-#define THRESH 3u
+#define WIN_MS 60000u
+#define THRESH 20u
+#define SUSTAIN 3u
 #define GRACE_MS 30000u
 #define STABLE_MS 120000u
 
 static void init(ps_fallback_t *fb)
 {
-    ps_fallback_init(fb, WIN_MS, THRESH, GRACE_MS, STABLE_MS, 0);
+    ps_fallback_init(fb, WIN_MS, THRESH, SUSTAIN, GRACE_MS, STABLE_MS, 0);
+}
+
+static void init_sustain(ps_fallback_t *fb, uint32_t sustain)
+{
+    ps_fallback_init(fb, WIN_MS, THRESH, sustain, GRACE_MS, STABLE_MS, 0);
+}
+
+/* Feed `n` disconnects into the window starting at `base_ms`, 100 ms apart. */
+static void storm(ps_fallback_t *fb, uint64_t base_ms, unsigned n)
+{
+    for (unsigned i = 0; i < n; ++i) {
+        ps_fallback_note_disconnect(fb, base_ms + 100u * (i + 1u));
+    }
 }
 
 int main(void)
 {
-    /* Two disconnects in the window are not yet a storm. */
+    /* An isolated over-threshold window is only a candidate, not a fault. */
+    ps_fallback_t one;
+    init(&one);
+    storm(&one, 0, 25); /* 25 in [0,60s) - over the threshold */
+    CHECK(!ps_fallback_should_fallback(&one, 61000, 61000),
+          "one over-threshold window -> no fallback");
+    /* The next window is quiet: the streak resets, so the burst never trips. */
+    CHECK(!ps_fallback_should_fallback(&one, 121000, 121000),
+          "an isolated burst does not sustain");
+
+    /* A sustained storm trips and latches. */
     ps_fallback_t fb;
     init(&fb);
-    ps_fallback_note_connected(&fb, 1000);
-    ps_fallback_note_disconnect(&fb, 2000);
-    ps_fallback_note_connected(&fb, 2500);
-    ps_fallback_note_disconnect(&fb, 3000);
-    CHECK(!ps_fallback_should_fallback(&fb, 3000, 31000),
-          "two disconnects -> no fallback");
-    CHECK(ps_fallback_disconnects(&fb) == 2, "two disconnects counted");
-
-    /* The third inside the window trips it. */
-    ps_fallback_note_connected(&fb, 3500);
-    ps_fallback_note_disconnect(&fb, 4000);
-    CHECK(ps_fallback_should_fallback(&fb, 4000, 31000),
-          "three disconnects -> fallback");
+    storm(&fb, 0, 25);          /* window 1: over */
+    CHECK(!ps_fallback_should_fallback(&fb, 61000, 61000),
+          "window 1 alone -> no fallback");
+    storm(&fb, 61000, 25);      /* window 2: over */
+    CHECK(!ps_fallback_should_fallback(&fb, 121000, 121000),
+          "two windows -> still no fallback");
+    storm(&fb, 121000, 25);     /* window 3: over */
+    CHECK(ps_fallback_should_fallback(&fb, 181000, 181000),
+          "three sustained windows -> fallback");
     CHECK(ps_fallback_is_latched(&fb), "fallback latches");
 
     /* Sticky: even a fresh connect does not un-latch. */
-    ps_fallback_note_connected(&fb, 5000);
-    CHECK(ps_fallback_should_fallback(&fb, 5000, 900000),
+    ps_fallback_note_connected(&fb, 190000);
+    CHECK(ps_fallback_should_fallback(&fb, 190000, 900000),
           "latched fallback stays true after a reconnect");
 
-    /* The uptime grace gates the fault even with a storm. */
+    /* An intervening quiet window breaks the streak. */
+    ps_fallback_t reset;
+    init(&reset);
+    storm(&reset, 0, 25);       /* w1 over */
+    CHECK(!ps_fallback_should_fallback(&reset, 61000, 61000), "reset w1");
+    storm(&reset, 61000, 25);   /* w2 over */
+    CHECK(!ps_fallback_should_fallback(&reset, 121000, 121000), "reset w2");
+    /* w3 quiet -> the streak goes back to zero. */
+    CHECK(!ps_fallback_should_fallback(&reset, 181000, 181000),
+          "a quiet window resets the streak");
+    storm(&reset, 181000, 25);  /* w4 over -> streak 1 */
+    CHECK(!ps_fallback_should_fallback(&reset, 241000, 241000),
+          "after the reset one window is not enough");
+    storm(&reset, 241000, 25);  /* w5 over -> streak 2 */
+    CHECK(!ps_fallback_should_fallback(&reset, 301000, 301000),
+          "after the reset two windows are not enough");
+    storm(&reset, 301000, 25);  /* w6 over -> streak 3 */
+    CHECK(ps_fallback_should_fallback(&reset, 361000, 361000),
+          "three windows after the reset trip");
+
+    /* sustain_windows=1 keeps the old single-window behaviour. */
+    ps_fallback_t fast;
+    init_sustain(&fast, 1);
+    storm(&fast, 0, 25);
+    CHECK(ps_fallback_should_fallback(&fast, 61000, 61000),
+          "sustain=1 trips on one over-threshold window");
+
+    /* The uptime grace gates the fault even with a confirmed storm. */
     ps_fallback_t slow;
-    init(&slow);
-    ps_fallback_note_disconnect(&slow, 1000);
-    ps_fallback_note_disconnect(&slow, 2000);
-    ps_fallback_note_disconnect(&slow, 3000);
-    CHECK(!ps_fallback_should_fallback(&slow, 3000, GRACE_MS - 1),
+    init_sustain(&slow, 1);
+    storm(&slow, 0, 25);
+    CHECK(!ps_fallback_should_fallback(&slow, 61000, GRACE_MS - 1),
           "storm but still inside the grace -> no fallback");
-    CHECK(ps_fallback_should_fallback(&slow, 3000, GRACE_MS),
+    CHECK(ps_fallback_should_fallback(&slow, 61000, GRACE_MS),
           "storm past the grace -> fallback");
 
     /* An intentional reconnect is not counted. */
@@ -73,7 +119,7 @@ int main(void)
     ps_fallback_note_disconnect(&intent, 2000);
     CHECK(ps_fallback_disconnects(&intent) == 0,
           "an intentional disconnect is not counted");
-    CHECK(!ps_fallback_should_fallback(&intent, 2000, 31000),
+    CHECK(!ps_fallback_should_fallback(&intent, 61000, 61000),
           "intentional reconnect -> no fallback");
 
     /* The window slides: disconnects spread wider than the window do not stack.

@@ -28,8 +28,11 @@ Wert (Selbstheilung). Das ist unverändert gültig.
 
 ### 2. Modem-Sleep ist opt-in und wird vom `ps_fallback`-Wächter abgesichert (neu)
 `main/ps_fallback.{c,h}` + `ps_fallback_worker` (beide Rollen) zählen STA-
-Disconnects in einem gleitenden Fenster. Ein Sturm (Default: **3 in 120 s**,
-nach 30 s Boot-Schonfrist) heißt: der Modem-Sleep bricht den Link. Dann fällt der
+Disconnects in einem gleitenden Fenster. Ein **anhaltender** Sturm (Default:
+**20 in 60 s**, über **3 Fenster in Folge**, nach 30 s Boot-Schonfrist) heißt:
+der Modem-Sleep bricht den Link. Ein einzelnes über der Schwelle liegendes
+Fenster ist nur ein *Kandidat*; erst wenn das nächste Fenster wieder über der
+Schwelle liegt (der Sturm also *sustained*), löst der Wächter aus. Dann fällt der
 Wächter **sticky** auf den bewährten Modus zurück und persistiert ihn:
 
 ```
@@ -141,7 +144,50 @@ ihre Beacons dauerhaft senden muss (`ESPNOW_IF == WIFI_IF_AP`, `main/main.c`).
 
 **Vorbehalt (offen):** Die FRITZ!Box (Mesh) flappt am Prüfstand auch **ohne**
 jeden Hebel (`reason 34` MISSING_ACKS alle ~3 s); das ist die dokumentierte
-Umgebungsstörung, nicht der Sleep-Modus. Der `ps_fallback`-Wächter (3/120 s)
+Umgebungsstörung, nicht der Sleep-Modus. Der `ps_fallback`-Wächter (20/60 s ×3)
 schaltet `ps` dann sticky ab, was den Sparmodus wieder aufhebt. Für einen
 belastbaren Dauerbetrieb ist der WLAN-Empfang/AP zu stabilisieren (RSSI am
 Prüfstand −41…−47 dBm, also gut — die Ursache liegt eher beim AP/DFS).
+
+## Nachtrag 2026-11-07: C6-Empfänger Stromsparmodus — Messwerte + FRITZ-Mesh-Caveat
+
+Am **apoff-C6-Empfänger** (`192.168.178.105`, `v0.4.0-34-gc018e52`,
+`/dev/ttyACM0`) mit dem **FNB48**-USB-Powermeter (`tools/fnb48_read.py`) neu
+gemessen. Die Konfiguration ist `ps min` **oder** `ps max` + `listen_interval 10`
+**ohne** `radio-save`:
+
+| Konfiguration | Leistung |
+|---|---|
+| `ps off` (Radio dauerhaft wach) | **0,394 W** |
+| `ps min`/`ps max` + `listen 10`, `radio-save off` (Ziel) | Median **0,068–0,081 W**, Minimum **0,065 W**, Mittel ~0,10–0,12 W |
+| `radio-save on` | Mittel **0,17 W** — schlechter, nicht verwenden |
+
+- Der **Median** ist die ehrliche Ruhelast; der **Mittelwert** liegt höher, weil
+  periodische `listen`-Wakes/Bursts ihn hochziehen.
+- **`listen_interval 10` ist optimal** — 5/20/30 sind schlechter (mehr
+  Reconnect-Bursts). `radio-save on` ist hier **kontraproduktiv** (0,17 W statt
+  0,068 W), anders als bei früheren Aufbauten.
+
+**Warum der Sparmodus trotzdem „wiederkam":** Der alte Wächter
+`main/ps_fallback.c` schaltete bei **≥8 STA-Disconnects in 300 s** sticky auf
+`ps off`. Diese
+FRITZ!Box-5530-Mesh-Umgebung erzeugt aber **intermittierende `reason 34`
+(MISSING_ACKS)-Disconnects unabhängig vom PS-Modus** — A/B gemessen: `ps off`
+**9/60 s** vs `ps min` **11/60 s**. Der Wächter deutet das als Sturm, löst
+**Fehlalarm** aus und hebt den Sparmodus auf (**0,068 W → 0,40 W**), obwohl der
+PS-Modus unschuldig ist; der Link selbst ist in ruhigen Phasen über 120–180 s
+**disconnect-frei**. Lehre: ein reiner Disconnect-Zähler ist als PS-Detektor
+untauglich, solange die Umgebung selbst flappt.
+
+**FNB48-Protokoll:** Es gibt **kein USB-Kommando zum Abschalten des internen
+Loggers** (Opcodes nur `0x81–0x8A`; `0x84` = Stream stoppen). Framing USB-HID
+`AA <cmd> 61×00 <CRC8 poly 0x39 init 0x42>`; Referenz `fnb48s-cli`
+(`b5777b1`, Ziel `2e3c:0049`) ist identisch zu `0483:003a`. Bricht man einen Lauf
+**ohne `0x84`** ab, läuft der Geräte-FIFO voll und die Anzeige **friert ein**
+(der beobachtete „Hänger"). **TWT** wird von der FRITZ!Box 5530 **abgelehnt**
+(`TWT Responder:0`) und ist damit unbrauchbar.
+
+**Vorbehalt (Messmethodik):** Belastbar sind die Zahlen nur, wenn der FNB48 **in
+Reihe** in der C6-VBUS-Leitung liegt (nicht als Geschwister am Hub) und jeder Lauf
+mit `0x84` beendet wird — sonst Standbild/Ripple (siehe
+`docs/radio-sleep-break-even.md` § 8.3).

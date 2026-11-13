@@ -33,28 +33,35 @@
 typedef struct {
     uint32_t window_ms;        /* sliding window the disconnects are counted in */
     uint32_t threshold;        /* disconnects in the window that trip the fault */
+    uint32_t sustain_windows;  /* over-threshold windows in a row needed to trip */
     uint32_t min_uptime_ms;    /* grace after boot before a fault may fire */
     uint32_t stable_reset_ms;  /* connected this long clears the window count */
     uint64_t window_start_ms;  /* start of the current counting window */
     uint32_t disconnects;      /* disconnects counted in the current window */
+    uint32_t over_threshold_windows; /* consecutive over-threshold windows seen */
     uint64_t connected_since_ms; /* start of the current association (0 = down) */
     bool pending_intentional;  /* the next disconnect is an expected reconnect */
     bool latched;              /* fell back; sticky until a fresh init */
 } ps_fallback_t;
 
-/* Defaults: three disconnects inside two minutes is a storm (a healthy link
- * re-associates at most rarely), and a two-minute stable association clears the
- * count so an occasional early drop does not accumulate forever. */
-#define PS_FALLBACK_DEFAULT_WINDOW_MS (120u * 1000u)
-#define PS_FALLBACK_DEFAULT_THRESHOLD 3u
+/* Defaults: a *sustained* storm is the fault. One window over the threshold is
+ * only a candidate; a real modem-sleep fault keeps the link down, so the next
+ * window is over the threshold again. An intermittent ambient storm (the
+ * FRITZ!Box mesh's reason-34 re-associations, which happen with power save off
+ * too) is over by the next window and never sustains. */
+#define PS_FALLBACK_DEFAULT_WINDOW_MS (60u * 1000u)
+#define PS_FALLBACK_DEFAULT_THRESHOLD 20u
+#define PS_FALLBACK_DEFAULT_SUSTAIN_WINDOWS 3u
 #define PS_FALLBACK_DEFAULT_MIN_UPTIME_MS (30u * 1000u)
 #define PS_FALLBACK_DEFAULT_STABLE_RESET_MS (120u * 1000u)
 
 /* Initialise at boot; both clocks start at `started_at_ms` so the uptime grace
- * covers startup. */
+ * covers startup. `sustain_windows` is the number of consecutive over-threshold
+ * windows that must be seen before the fault latches (>=1; 1 keeps the old
+ * single-window behaviour). */
 void ps_fallback_init(ps_fallback_t *fb, uint32_t window_ms, uint32_t threshold,
-                      uint32_t min_uptime_ms, uint32_t stable_reset_ms,
-                      uint64_t started_at_ms);
+                      uint32_t sustain_windows, uint32_t min_uptime_ms,
+                      uint32_t stable_reset_ms, uint64_t started_at_ms);
 
 /* The station associated. Records the association start so a long, stable
  * association can clear the disconnect count (the PS mode proved itself). */
@@ -69,8 +76,11 @@ void ps_fallback_note_disconnect(ps_fallback_t *fb, uint64_t now_ms);
  * 'set wifi-*' / reset-config), so it is not counted as a fault. */
 void ps_fallback_note_intentional(ps_fallback_t *fb);
 
-/* True when the disconnect storm tripped the fault (and the uptime grace has
- * passed). Latches on first true so the caller cannot flap. */
+/* True when the disconnect storm *sustained* across `sustain_windows`
+ * consecutive windows and the uptime grace has passed. A window over the
+ * threshold is counted and the window restarted; an intervening window back
+ * under the threshold resets the streak, so an isolated ambient burst never
+ * trips. Latches on the first true so the caller cannot flap. */
 bool ps_fallback_should_fallback(ps_fallback_t *fb, uint64_t now_ms,
                                  uint64_t uptime_ms);
 

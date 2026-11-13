@@ -1109,6 +1109,7 @@ static void ps_fallback_rearm(void)
     portENTER_CRITICAL(&g_ps_fallback_lock);
     ps_fallback_init(&g_ps_fallback, CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS,
                      CONFIG_ESPNOW_PS_FALLBACK_THRESHOLD,
+                     CONFIG_ESPNOW_PS_FALLBACK_SUSTAIN_WINDOWS,
                      CONFIG_ESPNOW_PS_FALLBACK_GRACE_MS,
                      PS_FALLBACK_DEFAULT_STABLE_RESET_MS, now_ms);
     portEXIT_CRITICAL(&g_ps_fallback_lock);
@@ -9168,6 +9169,7 @@ static void ps_fallback_worker(void *arg)
     portENTER_CRITICAL(&g_ps_fallback_lock);
     ps_fallback_init(&g_ps_fallback, CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS,
                      CONFIG_ESPNOW_PS_FALLBACK_THRESHOLD,
+                     CONFIG_ESPNOW_PS_FALLBACK_SUSTAIN_WINDOWS,
                      CONFIG_ESPNOW_PS_FALLBACK_GRACE_MS,
                      PS_FALLBACK_DEFAULT_STABLE_RESET_MS, started_ms);
     portEXIT_CRITICAL(&g_ps_fallback_lock);

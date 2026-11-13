@@ -261,25 +261,36 @@ config ESPNOW_PS_FALLBACK_WINDOW_MS
     int "Modem-sleep watchdog: sliding window for the disconnect count (ms)"
     depends on ESPNOW_PS_FALLBACK
     range 10000 3600000
-    default 300000
+    default 60000
     help
-        Disconnects are counted inside this window; older ones age out. Must be
-        long enough that a normal, occasional re-association does not reach the
-        threshold. The FRITZ!Box mesh in this install already produces the odd
-        reason-34 (MISSING_ACKS) re-association with power save fully off, so the
-        window has to be wide enough that this environmental baseline never trips
-        the fault - otherwise the receiver silently loses its low-power mode.
+        Disconnects are counted inside this window; older ones age out. Keep it
+        short enough that an isolated ambient burst (the FRITZ!Box mesh's odd
+        reason-34 re-association) is over by the next window, so it cannot
+        accumulate towards a false trip.
 
 config ESPNOW_PS_FALLBACK_THRESHOLD
     int "Modem-sleep watchdog: disconnects in the window that trip the fault"
     depends on ESPNOW_PS_FALLBACK
     range 2 100
-    default 8
+    default 20
     help
-        How many disconnects inside the window mean the PS mode is breaking the
-        link. A real modem-sleep storm drops the association every few seconds
-        (dozens in the window), so the threshold is set well above the ambient
-        rate of this environment; a healthy link stays far below it.
+        How many disconnects inside one window mean this window is part of a
+        storm. A real modem-sleep storm drops the association several times a
+        second (dozens in a 60 s window); the ambient rate of this environment
+        peaks around a dozen a minute and never reaches this.
+
+config ESPNOW_PS_FALLBACK_SUSTAIN_WINDOWS
+    int "Modem-sleep watchdog: consecutive over-threshold windows to trip"
+    depends on ESPNOW_PS_FALLBACK
+    range 1 100
+    default 3
+    help
+        A single over-threshold window is only a candidate. The fault latches
+        only after this many consecutive windows are each over the threshold,
+        i.e. the storm *sustains*. An intermittent ambient storm is over by the
+        next window and never sustains; a real modem-sleep fault keeps the link
+        down and is confirmed within a few minutes. Set 1 to keep the old
+        single-window behaviour.
 
 config ESPNOW_PS_FALLBACK_GRACE_MS
     int "Modem-sleep watchdog: grace after boot before a fault may fire (ms)"
