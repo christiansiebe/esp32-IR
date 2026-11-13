@@ -101,3 +101,47 @@ PS-Modus erzwungen wird.
 - Host-Suite `test/run_host_tests.sh` exit 0 (`ps fallback: 17 checks, 0
   failures`).
 - CI (GitHub Actions) baut alle fünf Matrix-Rollen und läuft die Host-Tests.
+
+## Nachtrag 2026-11-13: der `apoff`-Build kam nie hoch (Fix) + gemessene 0,068 W
+
+**Symptom am Prüfstand (C6FH4, USB):** Der station-only-Build (`role
+receiver-c6-apoff`, `CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y`) bootete in einer
+Schleife:
+
+```
+Guru Meditation Error: Core 0 panic'ed (Stack protection fault)
+Detected in task "sys_evt" at 0x40800400
+... unmittelbar nach "mDNS ready" + "SNTP time synchronization started"
+```
+
+**Ursache:** Im APSTA-Build startet mDNS schon am `WIFI_EVENT_AP_START`, der
+GOT_IP-Handler bleibt klein. Mit abgeschaltetem SoftAP gibt es kein AP_START:
+`start_mdns()`, die SNTP-Init und `mqtt_bridge_start()` laufen alle im **einen**
+`IP_EVENT_STA_GOT_IP`-Handler auf dem Default-Event-Task, den IDF mit **2304
+Byte** dimensioniert — zu wenig → Overflow. Genau deshalb kam die *einzige*
+sparsame Betriebsart nie hoch.
+
+**Fix:** `CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096` in
+`sdkconfig.defaults.esp32c6`. Danach bootet `receiver-c6-apoff` sauber (kein
+Panic, IP 192.168.178.105, Kanal 11). CI-Lauf `43482262429` grün.
+
+**Messung am Prüfstand (FNB-48, 5,19 V):**
+
+| Konfiguration (`receiver-c6-apoff`) | Leistung | HTTP |
+|---|---|---|
+| `ps off` + `radio-save on` 20/15 (APSTA-Baseline) | 0,399 W | 200 |
+| `ps min` + `radio-save on` 20/15 | 0,397 W | 200 |
+| **`ps min` + `radio-save on` 5000/30** | **0,068–0,070 W** | 200 (18/18) |
+| `ps min` allein (radio-save off) | 0,068 W | 200 |
+
+**Fazit:** Station-only (kein SoftAP) ist der eigentliche Hebel: erst dort kann
+`esp_wifi_set_ps` die STA parken, und der Verbrauch fällt von **0,40 W auf
+0,068 W (−83 %)**. Im APSTA-Build ist das strukturell unmöglich, weil die SoftAP
+ihre Beacons dauerhaft senden muss (`ESPNOW_IF == WIFI_IF_AP`, `main/main.c`).
+
+**Vorbehalt (offen):** Die FRITZ!Box (Mesh) flappt am Prüfstand auch **ohne**
+jeden Hebel (`reason 34` MISSING_ACKS alle ~3 s); das ist die dokumentierte
+Umgebungsstörung, nicht der Sleep-Modus. Der `ps_fallback`-Wächter (3/120 s)
+schaltet `ps` dann sticky ab, was den Sparmodus wieder aufhebt. Für einen
+belastbaren Dauerbetrieb ist der WLAN-Empfang/AP zu stabilisieren (RSSI am
+Prüfstand −41…−47 dBm, also gut — die Ursache liegt eher beim AP/DFS).
