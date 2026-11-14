@@ -106,8 +106,18 @@ Der SoftAP ist jetzt **kein Dauerläufer** mehr, sondern ein Setup-Fenster:
 - **Sicherheit:** Der AP lässt sich nur abschalten, solange die Station verbunden
   ist (sonst HTTP 400 / Konsolenfehler, der Knopf wird zurückgerollt). ESP-NOW-Peers
   werden beim Umschalten von `WIFI_IF_AP` auf `WIFI_IF_STA` migriert, damit der Link
-  den Wechsel überlebt. Ist der Sender still, holt der Link-Fallback den AP zurück
-  (Selbstheilung) — das kostet die ~0,22 W wieder, hat aber Vorrang.
+  den Wechsel überlebt.
+- **Verzögert (60 s nach STA-IP):** Der Sender lernt seinen ESP-NOW-Kanal, indem er
+  den Receiver-AP scannt (Scan-Fenster ~30 s). Fällt der AP zu früh weg, landet der
+  Sender auf dem festen `CONFIG_ESPNOW_CHANNEL`. Deshalb armt der `STA_GOT_IP`-Handler
+  nur einen Einmal-Timer (`ap_auto_off`, 60 s); 60 s AP kosten praktisch nichts.
+- **Selbstheilung nur bei bekanntem Sender:** Der Link-Fallback holt den AP nur
+  zurück, wenn der Sender **je** gehört wurde (`g_sender_mac_valid`). Ohne Sender
+  (Prüfstand) bliebe der AP sonst dauerhaft an und die Ersparnis wäre weg — genau
+  der Fall, der eine Messung mit 0,42 W zeigt.
+- **Sender merkt sich den Kanal:** Der zuletzt gelernte Receiver-AP-Kanal wird in
+  NVS (`metercfg/espnow_ch`) persistiert. Startet der Sender allein neu, während der
+  AP aus ist, läuft er auf dem richtigen Kanal statt auf dem festen Default.
 
 ## Reproduzieren
 

@@ -207,6 +207,11 @@ static const char *TAG = "espnow_meter";
 #define WIFI_CONFIG_NAMESPACE "metercfg"
 #define WIFI_SSID_KEY          "wifi_ssid"
 #define WIFI_PASSWORD_KEY      "wifi_pass"
+/* Sender: the last receiver-AP channel it learned. Persisted so a sender reboot
+ * while the receiver's setup AP is auto-off still starts on the right channel
+ * instead of the fixed CONFIG_ESPNOW_CHANNEL (which would leave the two sides on
+ * different channels until someone re-enables the AP). */
+#define WIFI_ESPNOW_CHANNEL_KEY "espnow_ch"
 #define WIFI_SSID_MAX_LEN      32
 #define WIFI_PASSWORD_MAX_LEN  64
 
@@ -299,6 +304,13 @@ static esp_netif_t *g_sta_netif;
  * WIFI_IF_STA) and the /config page. Set from the persisted ap_enabled knob at
  * boot and by apply_ap_mode() at runtime. */
 static bool g_ap_enabled = true;
+/* One-shot timer that drops the setup SoftAP a little after the station gets an
+ * IP (see ap_auto_off_timer_cb). The delay matters: the sender learns its
+ * ESP-NOW channel by scanning for this AP, so if both boards reboot together the
+ * AP must stay up long enough for the sender's scan loop (~30 s) to see it. The
+ * AP costs ~0.22 W, so a minute of overlap is cheap insurance. */
+static esp_timer_handle_t g_ap_auto_off_timer;
+#define AP_AUTO_OFF_DELAY_MS 60000u
 #endif
 static uint8_t g_espnow_channel = ESPNOW_CHANNEL;
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -733,6 +745,42 @@ static esp_err_t save_wifi_credentials(const char *ssid, const char *password)
     return err;
 }
 
+#if CONFIG_ESPNOW_ROLE_SENDER
+/* Remember the receiver-AP channel across reboots. While the receiver's setup AP
+ * is auto-off (the power-saving default) the sender cannot re-learn the channel
+ * by scanning, so a sender reboot would otherwise fall back to the fixed
+ * CONFIG_ESPNOW_CHANNEL and sit on the wrong channel. Best effort: a missing key
+ * just leaves the compile-time default in place. */
+static void load_espnow_channel(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(WIFI_CONFIG_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return;
+    }
+    uint8_t channel = 0;
+    if (nvs_get_u8(handle, WIFI_ESPNOW_CHANNEL_KEY, &channel) == ESP_OK &&
+        channel >= 1 && channel <= 13) {
+        g_espnow_channel = channel;
+    }
+    nvs_close(handle);
+}
+
+static void save_espnow_channel(uint8_t channel)
+{
+    if (channel < 1 || channel > 13) {
+        return;
+    }
+    nvs_handle_t handle;
+    if (nvs_open(WIFI_CONFIG_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    if (nvs_set_u8(handle, WIFI_ESPNOW_CHANNEL_KEY, channel) == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+}
+#endif
+
 static void fill_station_config(wifi_config_t *config)
 {
     memset(config, 0, sizeof(*config));
@@ -1163,6 +1211,27 @@ static void apply_twt_config(void);
 static void twt_teardown(void);
 #endif
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Deferred auto-off: runs AP_AUTO_OFF_DELAY_MS after the station got its IP, so
+ * a co-rebooting sender still finds the setup AP during its channel scan.
+ * apply_ap_mode() enforces the "station connected" rule and is a no-op if the AP
+ * is already off (e.g. 'set ap off' or the apoff build). */
+static void ap_auto_off_timer_cb(void *arg)
+{
+    (void)arg;
+    if (g_ap_enabled) {
+        char ap_err[96] = {0};
+        if (apply_ap_mode(false, ap_err, sizeof(ap_err))) {
+            ESP_LOGI(TAG, "Auto-off: setup SoftAP switched off after station "
+                          "connect (ap_auto_off on)");
+        } else {
+            ESP_LOGW(TAG, "Auto-off: could not switch the setup SoftAP off: %s",
+                     ap_err);
+        }
+    }
+}
+#endif
+
 static void wifi_event_handler(void *arg,
                                esp_event_base_t event_base,
                                int32_t event_id,
@@ -1322,19 +1391,17 @@ static void wifi_event_handler(void *arg,
         mqtt_bridge_start();
         /* Auto-off: the station now has an IP, so the setup SoftAP is no longer
          * the only way in. Dropping it reclaims the ~0.22 W a running AP costs
-         * (measured 2026-11-14). Only while it is actually up; apply_ap_mode()
-         * enforces the "station connected" safety rule. If the sender later
-         * cannot find the AP (its channel scan is gone), the receiver's link
-         * fallback brings the AP back. */
+         * (measured 2026-11-14). Arm a one-shot delay rather than dropping it
+         * right here: the sender learns its ESP-NOW channel by scanning for this
+         * AP, so after a co-reboot the AP must outlive the sender's scan loop
+         * (~30 s). apply_ap_mode() enforces the "station connected" safety rule;
+         * if the sender later cannot find the AP, the link fallback brings it
+         * back (only if the sender had been heard - see link_fallback_worker). */
         const runtime_config_t *got_cfg = active_runtime_config();
-        if (got_cfg->ap_auto_off && g_ap_enabled) {
-            char ap_err[96] = {0};
-            if (apply_ap_mode(false, ap_err, sizeof(ap_err))) {
-                ESP_LOGI(TAG, "Auto-off: setup SoftAP switched off after "
-                              "station connect (ap_auto_off on)");
-            } else {
-                ESP_LOGW(TAG, "Auto-off: could not switch the setup SoftAP off: %s",
-                         ap_err);
+        if (got_cfg->ap_auto_off && g_ap_enabled && g_ap_auto_off_timer != NULL) {
+            if (esp_timer_start_once(g_ap_auto_off_timer,
+                                     (uint64_t)AP_AUTO_OFF_DELAY_MS * 1000) != ESP_OK) {
+                ESP_LOGW(TAG, "Auto-off: could not arm the setup-AP drop timer");
             }
         }
 #endif
@@ -1382,6 +1449,7 @@ static uint8_t espnow_align_channel_from_receiver_ap(void)
     }
     g_espnow_channel = detected;
     ESP_ERROR_CHECK(esp_wifi_set_channel(g_espnow_channel, WIFI_SECOND_CHAN_NONE));
+    save_espnow_channel(g_espnow_channel);
     ESP_LOGI(TAG, "Using receiver AP channel %u for ESP-NOW", g_espnow_channel);
     return detected;
 }
@@ -1485,6 +1553,12 @@ static void initialize_wifi_and_espnow(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                wifi_event_handler, NULL));
     ESP_ERROR_CHECK(load_wifi_credentials());
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* Start on the channel we last saw the receiver AP on. If the receiver's
+     * setup AP is auto-off, the scan below finds nothing and this is what keeps
+     * us from parking on the fixed CONFIG_ESPNOW_CHANNEL. */
+    load_espnow_channel();
+#endif
     /* Boot the SoftAP from the persisted ap_enabled knob (default: on for the
      * AP build, off for the apoff build). ESP-NOW runs on the AP interface
      * while it is up, so this must be decided before esp_now_init() below;
@@ -1508,6 +1582,18 @@ static void initialize_wifi_and_espnow(void)
     wifi_config_t sta_config;
     fill_station_config(&sta_config);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Deferred setup-AP auto-off, armed from the STA_GOT_IP handler. Created
+     * before esp_wifi_start() so the handler (which can fire as soon as the
+     * station associates) always finds a valid handle. */
+    const esp_timer_create_args_t ap_auto_off_timer_args = {
+        .callback = ap_auto_off_timer_cb,
+        .name = "ap_auto_off",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&ap_auto_off_timer_args,
+                                     &g_ap_auto_off_timer));
 #endif
 
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -9392,14 +9478,21 @@ static void link_fallback_worker(void *arg)
                       "disabled, CPU stays awake", (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
 #else
         /* Receiver: no sender traffic. A hung receiver is already covered by
-         * web_guard, so only surface it here for the dashboard. Self-heal the
-         * auto-off: if the SoftAP is down, the sender may be unable to find our
-         * channel (it scans for the AP and otherwise falls back to the fixed
-         * CONFIG_ESPNOW_CHANNEL). Bring the AP back so the next scan succeeds;
-         * this costs the ~0.22 W again but restores the link, which is the
-         * higher priority. */
+         * web_guard, so only surface it here for the dashboard. */
         g_link_fallback_stage = 1;
-        if (!g_ap_enabled) {
+        /* Self-heal the auto-off ONLY if the sender was heard at least once:
+         * that proves the auto-off works in this setup (same channel), so a
+         * later silence is a real link loss worth spending the ~0.22 W to fix.
+         * If the sender was never heard, the auto-off either moved us off a
+         * channel the sender cannot scan (it falls back to the fixed
+         * CONFIG_ESPNOW_CHANNEL) or there is simply no sender yet - re-enabling
+         * the AP would not bring a sender back and would only give up the power
+         * saving. The AP then stays off, which is the low-power state. */
+        bool sender_heard;
+        portENTER_CRITICAL(&g_sender_mac_lock);
+        sender_heard = g_sender_mac_valid;
+        portEXIT_CRITICAL(&g_sender_mac_lock);
+        if (!g_ap_enabled && sender_heard) {
             char ap_err[96] = {0};
             if (apply_ap_mode(true, ap_err, sizeof(ap_err))) {
                 ESP_LOGW(TAG, "Link fallback: sender silent, setup SoftAP "
@@ -9408,6 +9501,9 @@ static void link_fallback_worker(void *arg)
                 ESP_LOGW(TAG, "Link fallback: could not re-enable the setup "
                               "SoftAP: %s", ap_err);
             }
+        } else if (!g_ap_enabled) {
+            ESP_LOGW(TAG, "Link fallback: no sender heard since boot; setup "
+                          "SoftAP stays off (power saving kept)");
         }
         ESP_LOGW(TAG, "Link fallback: no sender traffic for %u ms",
                  (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
