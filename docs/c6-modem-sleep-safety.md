@@ -341,3 +341,36 @@ alle fünf Matrix-Rollen (`receiver`, `receiver-apoff`, `receiver-c6`,
   eine AP-/Mesh-Umgebungsfrage (Mesh/DFS/Band-Steering), kein Firmware-Bug.
 - Espressif-Advisory **AR2024-006** (C6 Auto-Light-Sleep) ist in v6.1 gefixt und
   betrifft uns nicht (Light Sleep am USB-C6 ohnehin aus).
+
+## Nachtrag 2026-11-14 (2): der eigentliche Stromfresser — `burst-lock` ohne Sender
+
+**Ursache „alle Versuche scheiterten":** Der C6-Receiver-Default ist
+`ps min` **+ `burst_lock=true`** (`main/runtime_config.c`). Der
+`burst_lock_worker` hält das Radio **absichtlich dauerhaft wach, solange der
+Burst noch nicht gelernt ist** (`if (!locked) hold awake`), damit der erste
+Burst nicht verpasst wird. **Ohne Sender in Reichweite** (`sender_rssi_valid
+= false`, unser Prüfstand) lernt er nie → das Radio bleibt **dauerhaft wach** und
+negiert `ps min` komplett.
+
+**A/B am Gerät (apoff-C6, `ps min`, `listen 10`):**
+
+| Konfiguration | Leistung (Median) |
+|---|---|
+| `burst-lock on` (ungelernt, kein Sender) | **0,392 W** |
+| `burst-lock off` | **0,147 W** |
+
+**Fix (`02cf313`):** Der Lern-Hold ist jetzt auf **60 s** begrenzt
+(`BURST_LOCK_LEARN_TIMEOUT_MS`). Ein *anwesender* Sender sendet binnen Sekunden
+→ sein erster Lock ist unberührt; **ohne** Sender parkt der Worker das Radio nach
+dem Timeout und beobachtet nur noch (das nächste, ggf. auf einem DTIM-Wake
+eintreffende Frame lernt den Lock neu). Der ESP-NOW-Exchange-Hold (OTA/
+getunnelter Befehl) bleibt unverändert.
+
+**Verifikation:** CI `43530964926` (Host-Tests + alle fünf Rollen) **grün**;
+geflasht als `v0.4.0-38-g02cf313`. Messung danach, `burst-lock on` + `ps min`
+**ohne Sender, nach Timeout**: Median **0,135 W** (vorher 0,392 W) — der Fix
+greift. Damit ist der Receiver-Default nun auch ohne Sender sparsam.
+
+**Einordnung der früheren 0,068 W:** Sie gelten für den **gelockten** Pfad
+(Sender anwesend; der Worker parkt zwischen den Bursts). Der **ungelernte** Pfad
+war der Stromfresser und ist jetzt ebenfalls geparkt.
