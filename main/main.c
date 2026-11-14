@@ -10022,6 +10022,11 @@ static void burst_lock_release_awake(void)
 
 /* Poll cadence while awake and waiting to (re)learn the burst period. */
 #define BURST_LOCK_IDLE_POLL_MS 50u
+/* Idle cadence once the learn window has expired with no sender in range: the
+ * radio is parked and only a re-learn trigger is awaited, so 20 wakeups/s are
+ * pointless. The next frame (e.g. on a DTIM wake) is noted in the receive
+ * callback, not by this poll, so the slower cadence does not lose a burst. */
+#define BURST_LOCK_SETTLED_POLL_MS 500u
 /* While the period is not yet learned the radio is held awake so the first
  * burst is not missed. That must be bounded: with no sender in range the lock
  * never forms, and an unbounded hold pins the radio awake forever - measured
@@ -10106,7 +10111,7 @@ static void burst_lock_worker(void *arg)
         if (!enabled) {
             burst_lock_awake_release(&held);
             learn_since_ms = 0;
-            vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_IDLE_POLL_MS));
+            vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_SETTLED_POLL_MS));
             continue;
         }
         if (!locked) {
@@ -10116,13 +10121,16 @@ static void burst_lock_worker(void *arg)
             if (learn_since_ms == 0u) {
                 learn_since_ms = now_ms;
             }
-            if (hold ||
-                (uint32_t)(now_ms - learn_since_ms) < BURST_LOCK_LEARN_TIMEOUT_MS) {
+            bool learning = (uint32_t)(now_ms - learn_since_ms) <
+                            BURST_LOCK_LEARN_TIMEOUT_MS;
+            if (hold || learning) {
                 burst_lock_awake_hold(&held);
             } else {
                 burst_lock_awake_release(&held);
             }
-            vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_IDLE_POLL_MS));
+            vTaskDelay(pdMS_TO_TICKS(burst_lock_idle_poll_ms(
+                false, hold, learning, BURST_LOCK_IDLE_POLL_MS,
+                BURST_LOCK_SETTLED_POLL_MS)));
             continue;
         }
         learn_since_ms = 0;

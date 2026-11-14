@@ -157,6 +157,21 @@ static void test_window_extension(void)
           "closed window does not extend");
 }
 
+static void test_idle_poll_cadence(void)
+{
+    /* Fast whenever a burst could still be missed: locked, an exchange in
+     * flight, or still learning. Slow only once just a re-learn trigger is
+     * awaited, so an idle receiver stops waking 20x/s for nothing. */
+    CHECK(burst_lock_idle_poll_ms(true, false, false, 50, 500) == 50u,
+          "locked keeps the fast poll");
+    CHECK(burst_lock_idle_poll_ms(false, true, false, 50, 500) == 50u,
+          "a held exchange keeps the fast poll");
+    CHECK(burst_lock_idle_poll_ms(false, false, true, 50, 500) == 50u,
+          "still learning keeps the fast poll");
+    CHECK(burst_lock_idle_poll_ms(false, false, false, 50, 500) == 500u,
+          "settled idle uses the slow poll");
+}
+
 static void test_forget(void)
 {
     burst_lock_t bl;
@@ -182,6 +197,7 @@ int main(void)
     test_implausible_period_ignored();
     test_rollover();
     test_window_extension();
+    test_idle_poll_cadence();
     test_forget();
 
     printf("burst lock: %d checks, %d failures\n", g_checks, g_failures);

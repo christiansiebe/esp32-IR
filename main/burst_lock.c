@@ -87,6 +87,17 @@ int32_t burst_lock_wait_ms(const burst_lock_t *bl, uint32_t now_ms)
     return remaining > 0 ? remaining : 0;
 }
 
+uint32_t burst_lock_idle_poll_ms(bool locked, bool hold, bool learning,
+                                 uint32_t fast_ms, uint32_t settled_ms)
+{
+    /* Fast while a burst could still be missed; slow once only a re-learn
+     * trigger is awaited. */
+    if (locked || hold || learning) {
+        return fast_ms;
+    }
+    return settled_ms;
+}
+
 void burst_lock_window_open(burst_lock_t *bl)
 {
     if (bl == NULL) {

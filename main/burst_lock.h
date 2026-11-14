@@ -75,6 +75,15 @@ bool burst_lock_locked(const burst_lock_t *bl);
  * 0 as well, and burst_lock_locked() tells the two cases apart. */
 int32_t burst_lock_wait_ms(const burst_lock_t *bl, uint32_t now_ms);
 
+/* Poll cadence for the worker's idle branches. While a burst could still be
+ * missed - the period is locked and a window is being predicted, an ESP-NOW
+ * exchange is in flight, or the learning window is still open - the worker must
+ * sample often (`fast_ms`). Once only a re-learn trigger is awaited (learning
+ * timed out, no sender in range) a slow cadence (`settled_ms`) is enough and
+ * keeps the CPU idle instead of waking it 20x/s doing nothing. */
+uint32_t burst_lock_idle_poll_ms(bool locked, bool hold, bool learning,
+                                 uint32_t fast_ms, uint32_t settled_ms);
+
 /* Open the window and clear the per-window "served" flag. */
 void burst_lock_window_open(burst_lock_t *bl);
 
