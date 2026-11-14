@@ -374,3 +374,41 @@ greift. Damit ist der Receiver-Default nun auch ohne Sender sparsam.
 **Einordnung der früheren 0,068 W:** Sie gelten für den **gelockten** Pfad
 (Sender anwesend; der Worker parkt zwischen den Bursts). Der **ungelernte** Pfad
 war der Stromfresser und ist jetzt ebenfalls geparkt.
+
+## Nachtrag 2026-11-14 (3): ehrliche Leistungsmessung + `ps min` vs `ps max` + FNB-48-Freeze
+
+**Messmethodik-Fehler korrigiert.** Frühere Notizen nannten „Median 0,068 W" für
+`ps min`. Das ist der **geparkte Floor** (min), nicht der Mittelwert. Das Gerät
+parkt (≈0,065 W) und **wacht periodisch auf** (≈0,32–0,38 W), weil das
+Wi-Fi-Modem im PS-Modus alle paar hundert ms kurz aufwacht. Der ehrliche
+**Mittelwert** liegt höher. Ab jetzt werden avg/med/min + Parkanteil getrennt
+berichtet.
+
+**A/B am apoff-C6 (`v0.4.0-38-g02cf313`, `burst-lock off`, kein Sender):**
+
+| Konfiguration | Ø | median | min | geparkt (<0,09 W) |
+|---|---|---|---|---|
+| `ps min` listen 10 | 0,142 W | 0,130 W | 0,065 W | 26–35 % |
+| `ps max` listen 10 | 0,130 W | 0,125 W | 0,065 W | 47 % |
+| **`ps max` listen 30** | **0,095 W** | 0,067 W | 0,065 W | **79 %** |
+| `ps max` + burst-lock on (Lernphase) | 0,388 W | 0,387 W | 0,381 W | 0 % |
+
+- **`ps min` ≠ `ps max`:** Entgegen der früheren Notiz ist **`ps max` sparsamer**
+  (parkt länger; MIN wacht jedes DTIM → öfter). Der Receiver-Default bleibt
+  dennoch `ps min`, weil er **nur zusammen mit `burst-lock`** (Sender anwesend)
+  sinnvoll ist — der Burst-Lock hält das Radio genau um die Bursts wach.
+- **`listen 30` hilft** (weniger Reconnect-/Beacon-Wakes), kostet aber
+  Reaktionszeit.
+- **Mit Sender** (gelockt) gilt weiter der dokumentierte niedrige Wert; ohne
+  Sender greift jetzt der Lern-Timeout (siehe (2)).
+
+**Receiver-Default nach dem Fix (kein Sender, nach Lerntimeout):** Ø **0,141 W**
+(vorher, ungefedert gepinnt: 0,392 W). Der Fix wirkt.
+
+**FNB-48 „Freeze" behoben (`d459bc4`).** Der Meter friert ein, wenn eine Messung
+**ohne das `0x84`-Stop** endet (Ctrl-C, SIGTERM, Exception, gekillter Job) — sein
+interner Logger läuft weiter, der Puffer füllt sich, die Live-Werte stehen.
+`tools/fnb48_read.py` sendet das Stop jetzt auf **jedem** Pfad (auch bei
+SIGINT/SIGTERM, via KeyboardInterrupt im `finally`) und vor jedem Start doppelt.
+Verifiziert: nach SIGTERM mitten in einer Messung liefert der nächste Lauf sofort
+wieder frische Werte (CRC ok).
