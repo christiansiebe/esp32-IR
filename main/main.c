@@ -9827,12 +9827,17 @@ static void apply_wifi_ps_config(void)
     /* Self-check: read the live mode back and repair if it does not match the
      * value we asked for (a driver that silently ignored the request). Only
      * meaningful once associated: before that the driver may still report the
-     * pre-association default and a "repair" would clobber the user's setting. */
+     * pre-association default and a "repair" would clobber the user's setting.
+     * Compare against the *requested* mode, not cfg->wifi_ps_mode: with the
+     * adaptive ladder the live mode is the rung, so verifying against the start
+     * value would see a false mismatch and "repair" every step away. */
     wifi_ps_type_t observed = WIFI_PS_NONE;
+    runtime_config_t expected = *cfg;
+    expected.wifi_ps_mode = (uint8_t)mode;
     if (g_wifi_connected && esp_wifi_get_ps(&observed) == ESP_OK &&
-        !runtime_config_verify(cfg, (int)observed, 0, &g_runtime_health)) {
+        !runtime_config_verify(&expected, (int)observed, 0, &g_runtime_health)) {
         ESP_LOGW(TAG, "Wi-Fi PS verify mismatch (wanted %u, got %u); repairing",
-                 (unsigned)cfg->wifi_ps_mode, (unsigned)observed);
+                 (unsigned)mode, (unsigned)observed);
         runtime_config_repair(cfg, "ps", "esp_wifi_get_ps() disagreed",
                               &g_runtime_health);
         runtime_config_store(cfg);
