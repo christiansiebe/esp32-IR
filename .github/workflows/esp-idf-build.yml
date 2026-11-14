@@ -125,6 +125,15 @@ jobs:
             kconfig_role: SENDER
             target: esp32
             extra_kconfig: ""
+          # ESP32-C6 sender (single-core RISC-V, 160 MHz top clock, USB
+          # Serial/JTAG console). Same source tree as the classic sender; the
+          # target deltas live in sdkconfig.defaults.esp32c6. The USB console
+          # means light sleep must stay off (uart_sleep_window.c /
+          # runtime_config.c refuse the park) - the C6 keeps DFS only.
+          - role: sender-c6
+            kconfig_role: SENDER
+            target: esp32c6
+            extra_kconfig: ""
           # ESP32-C6 receiver (single-core RISC-V, 160 MHz top clock, USB
           # Serial/JTAG console). Same source tree; the target-specific knobs
           # live in sdkconfig.defaults.esp32c6 and the per-target Kconfig ranges.
@@ -223,7 +232,8 @@ jobs:
           }
           # The SoC top clock differs: the ESP32 classic reaches 240 MHz, the
           # ESP32-C6 only 160 MHz. The boot clock and the receiver ceiling track
-          # the target; the sender stays at 80 MHz on both.
+          # the target; every sender stays at 80 MHz on both (the Kconfig default
+          # "80 if ESPNOW_ROLE_SENDER" wins over the target default).
           if [ "${{ matrix.target }}" = "esp32c6" ]; then
             assert 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160'
           else
@@ -232,7 +242,7 @@ jobs:
           assert 'CONFIG_PM_ENABLE=y'
           assert 'CONFIG_PM_DFS_INIT_AUTO=y'
           assert 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y'
-          if [ "${{ matrix.role }}" = "sender" ]; then
+          if [[ "${{ matrix.role }}" == sender* ]]; then
             assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=80'
           elif [ "${{ matrix.target }}" = "esp32c6" ]; then
             assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=160'
@@ -243,19 +253,21 @@ jobs:
           echo "CPU clock: role ceiling with DFS (${{ matrix.role }}), 40 MHz floor"
 
       - name: Verify adaptive sleep config (sender)
-        if: matrix.role == 'sender'
+        if: startsWith(matrix.role, 'sender')
         shell: bash
         run: |
           set -euo pipefail
-          # The sender ships as one image with light sleep enabled by default.
+          # Every sender ships as one image with the light-sleep feature
+          # compiled in (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y in Kconfig).
           grep -q '^CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y$' sdkconfig
           grep -q '^CONFIG_ESPNOW_ROLE_SENDER=y$' sdkconfig
           # Guard against shipping a sender image without the sleep path. The
           # string below lives in uart_sleep_window.c's real branch only (the
           # stub build never emits it), so grepping the built app proves the
           # sleep code is actually compiled in, not just the config flag.
-          test -s "build/sender/esp32-IR.bin"
-          grep -a -q 'adaptive sleep path compiled in' "build/sender/esp32-IR.bin"
+          app="build/${{ matrix.role }}/esp32-IR.bin"
+          test -s "$app"
+          grep -a -q 'adaptive sleep path compiled in' "$app"
           echo "Sender image contains the adaptive light-sleep path"
           # The ESP-NOW wake window / modem sleep that would let DFS step down is
           # opt-in: on the ESP32 classic it breaks the ESP-NOW link (verified on
@@ -267,7 +279,17 @@ jobs:
           # wake window; the STA_DISCONNECTED_PM_ENABLE default is what makes the
           # window apply without an association when the option is turned on.
           grep -q '^CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y$' sdkconfig
-          echo "Sender image keeps the ESP-NOW radio on (power save opt-in, off)"
+          # On the ESP32-C6 the console is the USB Serial/JTAG peripheral, which
+          # light sleep powers down: the sender must refuse the park and keep DFS
+          # only. The string lives in uart_sleep_window.c's real branch, so this
+          # proves the guard is compiled in on the C6.
+          if [ "${{ matrix.target }}" = "esp32c6" ]; then
+            grep -q '^CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y$' sdkconfig
+            grep -a -q 'Light sleep disabled: the USB Serial/JTAG console' "$app"
+            echo "C6 sender refuses light sleep (USB console guarded), DFS only"
+          else
+            echo "Sender image keeps the ESP-NOW radio on (power save opt-in, off)"
+          fi
 
       - name: Verify station-only receiver config (apoff)
         if: matrix.role == 'receiver-apoff'

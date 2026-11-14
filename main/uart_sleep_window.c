@@ -11,6 +11,16 @@
  * a sleep window to decide whether the window was clean or too long. */
 #define UART_SLEEP_PORT_NUM UART_NUM_1
 
+/* A build whose primary console is the USB Serial/JTAG peripheral (ESP32-C6)
+ * must never light-sleep: the PHY is powered down and the /dev/ttyACM* console
+ * is lost for good. This mirrors runtime_config_light_sleep_allowed() as a hard
+ * backstop inside the sender sleep module. Undefined on the classic ESP32, so
+ * that target keeps light sleep byte-for-byte unchanged. */
+#ifndef CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#define CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG 0
+#endif
+#define UART_SLEEP_PARK_ALLOWED (!CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+
 /* SOC_LIGHT_SLEEP_SUPPORTED is the capability that actually exists on the
  * ESP32; SOC_PM_SUPPORT_LP_TIMER does NOT exist there, so a guard on it made
  * the whole file compile to the no-op stub while the build still reported the
@@ -73,11 +83,13 @@ bool uart_sleep_init_idf(void)
 
     /* Variable CPU clock (DFS) plus light sleep in the idle path. Without this
      * call light_sleep_enable stays 0 and the chip never sleeps. The ceiling is
-     * shared with the receiver (CONFIG_ESPNOW_CPU_MAX_MHZ). */
+     * shared with the receiver (CONFIG_ESPNOW_CPU_MAX_MHZ). A USB Serial/JTAG
+     * console build (ESP32-C6) keeps DFS but must never park: the PHY would go
+     * down and /dev/ttyACM* would be lost, so light_sleep_enable stays false. */
     esp_pm_config_t pm = {
         .max_freq_mhz = sleep_pm_max(),
         .min_freq_mhz = sleep_pm_min(),
-        .light_sleep_enable = true,
+        .light_sleep_enable = UART_SLEEP_PARK_ALLOWED,
     };
     if (esp_pm_configure(&pm) != ESP_OK) {
         return false;
@@ -90,6 +102,11 @@ bool uart_sleep_init_idf(void)
     /* Compiled in only when this real branch is active (not the stub), so the
      * CI can grep the built image to prove the sleep path is present. */
     ESP_LOGI(UART_SLEEP_TAG, "adaptive sleep path compiled in");
+    if (!UART_SLEEP_PARK_ALLOWED) {
+        ESP_LOGW(UART_SLEEP_TAG,
+                 "Light sleep disabled: the USB Serial/JTAG console would be "
+                 "lost (DFS only)");
+    }
     return true;
 }
 
@@ -286,7 +303,7 @@ bool uart_sleep_hold_is_active(void)
 
 void uart_sleep_set_enabled(bool enabled)
 {
-    if (enabled) {
+    if (enabled && UART_SLEEP_PARK_ALLOWED) {
         /* Clear the fallback latch and allow the idle path to park again. */
         s_disabled = false;
         esp_pm_config_t pm = {
@@ -308,7 +325,7 @@ bool uart_sleep_force_window(uint32_t ms, uint32_t *slept_ms_out)
     if (slept_ms_out != NULL) {
         *slept_ms_out = 0;
     }
-    if (s_disabled || ms == 0 || ms > 1000u) {
+    if (s_disabled || !UART_SLEEP_PARK_ALLOWED || ms == 0 || ms > 1000u) {
         return false;
     }
     uint32_t before_ms = s_slept_ms;

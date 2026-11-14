@@ -987,7 +987,12 @@ static void wifi_event_handler(void *arg,
         }
 #endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_ITWT_SETUP) {
-#if SOC_WIFI_HE_SUPPORT
+        /* TWT is a receiver-only feature (apply_twt_config()/twt_teardown() are
+         * compiled for the receiver); g_twt_active is declared under the same
+         * guard, so the handler must match it. On a Wi-Fi 6 sender (ESP32-C6)
+         * SOC_WIFI_HE_SUPPORT is set too, and an unguarded g_twt_active here
+         * was a hard build break. */
+#if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
         const wifi_event_sta_itwt_setup_t *event = event_data;
         /* status is NOT an esp_err_t: 1 means the AP accepted the agreement, any
          * other value is a failure reason (see esp_wifi_he_types.h and the IDF
@@ -8561,8 +8566,13 @@ static void run_sender(void)
 
 #if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
     if (uart_sleep_init_idf()) {
-        ESP_LOGI(TAG, "Adaptive sender light sleep enabled (initial window %u ms)",
-                 (unsigned)uart_sleep_default_cfg().initial_ms);
+        if (runtime_config_light_sleep_allowed()) {
+            ESP_LOGI(TAG, "Adaptive sender light sleep enabled (initial window %u ms)",
+                     (unsigned)uart_sleep_default_cfg().initial_ms);
+        } else {
+            ESP_LOGW(TAG, "Sender light sleep unavailable: the USB Serial/JTAG "
+                          "console would be lost; keeping DFS only");
+        }
     } else {
         ESP_LOGW(TAG, "Adaptive sender light sleep requested but not available "
                       "on this target; keeping DFS only");
