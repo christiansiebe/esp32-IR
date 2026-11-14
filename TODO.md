@@ -82,6 +82,12 @@ Kombi ist damit auf dem Board verschwunden.
 landen Messung, Fix und der `set ps`/`listen`-Knopf gemeinsam auf dem Receiver-Branch
 und heilen die hartkodierte MIN_MODEM-Stelle.
 
+## ✅ (2026-11-08) Antwort auf die Frage: SML-Lücken = Modem-Sleep, NICHT RSSI
+**Frage:** „Warum gibt es Lücken in den SML-Telegrammen – liegt es am RSSI?“
+
+**Antwort:** Nein, nicht RSSI. Die Ursache ist der WLAN-Modem-Sleep (`WIFI_PS_MIN/MAX_MODEM`): die Station parkt für `listen_interval` Beacon-Intervalle und nimmt in dieser Zeit keine ESP-NOW-Frames an → die ~1/s-Telegramme fallen ins Schlaffenster. Der RSSI war über alle Messreihen stabil (~ −80 dBm); die Lücken treten **systematisch** mit eingeschaltetem Modem-Sleep auf, nicht streuend wie bei schwachem Feld. Quantitative Belege stehen in der MESSUNG-Tabelle oben (`ps=min` ohne `radio-save` = 90–97 % Verlust; `ps=off` = ~0,8 %).
+**Empfehlung:** Empfänger auf die verlustfreie Kombi (`ps=off` + `radio-save 20/15`), nie `ps=min/max` ohne `radio-save`. Details: `esp32ir-espnow`, `esp32ir-history`.
+
 ## NEU (2026-11-08): C6-Empfänger – Laufzeit-Knopf `set ps` / `set listen` (WIFI_PS_MAX_MODEM) – CI-gruen `6a05b95`, PR #64
 **Warum:** Die FRITZ!Box 5530 Fiber **lehnt TWT ab** (`Connected AP does not support
 setup individual TWT agreement` / `ESP_ERR_NOT_SUPPORTED`, Assoc-Response
