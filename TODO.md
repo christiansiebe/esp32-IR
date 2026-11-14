@@ -1,6 +1,30 @@
 # To-do – esp32-IR
 
 
+## NEU (2026-11-14): FNB-48-Leistungsmesser – Auto-Stop beim Einstecken
+**Branch `feat/fnb48-autostop`. Betrifft nur `tools/` (Python), kein Firmware-Build.**
+- **Problem:** Der FNB-48 (USB `0483:003a`, HID, `/dev/hidrawN`) laeuft ohne das
+  Kommando `0x84` (STOP) intern weiter; der Puffer vollaeuft und die Live-Werte
+  frieren ein. `fnb48_read.py` stoppt zwar auf jedem Beendigungspfad (`d459bc4`),
+  das hilft aber nicht, wenn das Geraet frisch angesteckt wird und ein frueherer
+  Lauf (evtl. von einem anderen Host) den Logger laufen liess.
+- **Umgesetzt:**
+  - `fnb48_read.py --stop-only`/`-s` (+ `stop_stream()`): oeffnet den Knoten,
+    sendet `0x84` zweimal (Parser kann verklemmt sein) und beendet - kein Lesen,
+    kein Start.
+  - `tools/udev/99-fnb48-stop.rules`: `ACTION=="add"`, `SUBSYSTEM=="hidraw"`,
+    `ATTRS{idVendor}=="0483"`, `ATTRS{idProduct}=="003a"` -> `RUN+=` der
+    begrenzten Huelle `tools/udev/fnb48-stop.sh` (`timeout 5` + `--stop-only`).
+    Bewusst **kein** USB-unbind/reset (hat das Board schon hart resettet).
+  - `tools/udev/install-fnb48-stop.sh`: kopiert Regel+Huelle nach
+    `/usr/local/lib/fnb48` bzw. `/etc/udev/rules.d/` und ruft `udevadm control
+    --reload` - **Repo-Artefakt, nicht selbst ausgefuehrt**.
+  - Host-Test `test/test_fnb48_read.py` um `CMD_STOP`-Framing, CLI-Parsing und
+    die udev-Regel-/Huelle-Syntax erweitert (ohne Hardware, ohne Mocks).
+- **Offen:** Regel auf dem Board installieren (`sudo tools/udev/install-fnb48-stop.sh`)
+  und den ADD-Trigger mit gestecktem Messgeraet gegenpruefen (`udevadm monitor`).
+
+
 ## MESSUNG (2026-11-08, .105): Modem-Sleep-Kombinationen ohne Telegramm-Verluste
 **Aufbau:** `.105` = C6-Empfänger (USB-JTAG-Konsole), Sender = **klassischer ESP32**
 (`v0.3.0-17-g9aec836`), ~60 SML-Telegramme/min. Verlust = Δ`sender.sml_sent_ok` −

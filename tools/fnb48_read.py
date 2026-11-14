@@ -3,7 +3,8 @@
 
 Used to measure the real supply current of an ESP32 board (e.g. the C6
 receiver) on the bench. Stdlib only (os/select/struct/time) - no pyusb, no
-hidapi, no udev rules; the device is opened directly as a raw HID node.
+hidapi; the device is opened directly as a raw HID node (the reader needs no
+udev rule; the optional auto-stop rule lives in tools/udev/).
 
 Protocol (FNIRSI 64-byte HID reports, USB 0483:003a, HID, not a tty):
 
@@ -17,6 +18,12 @@ Protocol (FNIRSI 64-byte HID reports, USB 0483:003a, HID, not a tty):
   internal stream/logger keeps running, its buffer fills up and the live
   values freeze. A stop is also sent before each start to clear a stuck
   stream.
+
+  A stop is also sent on plug-in: the udev rule tools/udev/99-fnb48-stop.rules
+  runs ``fnb48_read.py --stop-only`` on the ADD event, so a stream left running
+  by an earlier run (possibly on another host) is cleared before a new read
+  starts. ``--stop-only`` opens the node, writes 0x84 and exits - it never
+  reads or starts the stream.
 
   Device -> host  (64 bytes):
     byte0 = 0xAA, byte1 = 0x04 (data packet) / 0x03 (info, ignored),
@@ -46,6 +53,7 @@ fails to bind after a hub/plug event:
 Usage:
     python3 tools/fnb48_read.py -n 60 -o c6.csv
     python3 tools/fnb48_read.py -n 30 --burst 0.15
+    python3 tools/fnb48_read.py --stop-only        # just clear a stuck stream
 """
 
 import argparse
@@ -125,6 +133,29 @@ def _send_stop(fd):
         os.write(fd, CMD_STOP)
     except OSError:
         pass
+
+
+def stop_stream(dev, repeats=2, gap=0.1, flush=0.2):
+    """Send only the 0x84 STOP to `dev`; read/start nothing. Returns True on ok.
+
+    This is the plug-event path (`--stop-only`, used by the udev rule): a run
+    killed earlier - possibly on another host - may have left the meter's
+    internal stream running. The stop is sent `repeats` times (the parser can
+    be wedged by an aborted run) and each is followed by a short FIFO drain.
+    The fd is always closed, even on error.
+    """
+    try:
+        fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        for _ in range(max(1, repeats)):
+            _send_stop(fd)
+            time.sleep(gap)
+            _drain(fd, flush)
+    finally:
+        os.close(fd)
+    return True
 
 
 def read_samples(dev, duration=1.0, keepalive=1.0, on_sample=None):
@@ -228,6 +259,9 @@ def find_bursts(powers, threshold, max_gap=0.5):
 def main():
     ap = argparse.ArgumentParser(description="Read FNIRSI FNB-48 measurements")
     ap.add_argument("-d", "--device", default="/dev/hidraw0")
+    ap.add_argument("-s", "--stop-only", action="store_true",
+                    help="only send the 0x84 STOP (no read/start); for the "
+                         "udev plug-event rule and for clearing a frozen meter")
     ap.add_argument("-n", "--duration", type=float, default=1.0,
                     help="read duration in seconds (default 1.0)")
     ap.add_argument("-o", "--csv", metavar="FILE",
@@ -241,6 +275,14 @@ def main():
     if not os.path.exists(args.device):
         print(f"ERROR: {args.device} does not exist", file=sys.stderr)
         return 1
+
+    if args.stop_only:
+        ok = stop_stream(args.device)
+        if not ok:
+            print(f"ERROR: cannot access {args.device}", file=sys.stderr)
+            return 1
+        print(f"STOP (0x84) sent to {args.device}")
+        return 0
 
     csv_fh = None
     on_sample = None
