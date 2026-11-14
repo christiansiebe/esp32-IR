@@ -4387,7 +4387,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "byId('history-resolution').textContent=(live&&d.aggregated&&d.bucket_seconds)?(' (1 Balken = '+Math.round(Number(d.bucket_seconds)/60)+' Min)'):(live?'':(' (1 Balken = 15 Min)'));"
         "byId('history-status').textContent=(d.clock_synced?'Netzwerkzeit synchronisiert':'Warte auf Netzwerkzeit')+"
         "' · gespeicherte Minutenwerte: '+d.record_count+' / '+d.capacity+' · letztes: '+latest+"
-        "' · aktuelle Messwerte im Intervall: '+d.current_sample_count+"
+        "' · Messwerte im Live-Ring (15 min): '+d.current_sample_count+"
         "' · Speicher: '+(d.busy?'kurz belegt, wird nachgeladen':(d.storage_ready?'bereit':'nicht bereit'))+"
         "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
         "if(typeof d.energy_day_wh==='number'){byId('history-day-info').textContent+=(' · heute '+fmt(d.energy_day_wh/1000,2)+' kWh · Monat '+fmt(d.energy_month_wh/1000,2)+' kWh');}"
@@ -6177,6 +6177,31 @@ static void console_cmd_time(const char *args, char *out, size_t out_size)
              system_time_is_valid() ? "yes" : "no");
 }
 
+/* `sntp resync`: tear the SNTP client down and start it again so a stalled sync
+ * (e.g. the home router restarted) is retried without rebooting the device. */
+static void console_cmd_sntp(const char *args, char *out, size_t out_size)
+{
+    if (args != NULL && args[0] != '\0' && strcmp(args, "resync") != 0) {
+        snprintf(out, out_size, "usage: sntp resync\n");
+        return;
+    }
+    if (g_sntp_started) {
+        esp_netif_sntp_deinit();
+        g_sntp_started = false;
+    }
+    esp_sntp_config_t sntp_config =
+        ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    sntp_config.wait_for_sync = false;
+    sntp_config.sync_cb = time_sync_notification;
+    esp_err_t err = esp_netif_sntp_init(&sntp_config);
+    if (err != ESP_OK) {
+        snprintf(out, out_size, "sntp resync failed: %s\n", esp_err_to_name(err));
+        return;
+    }
+    g_sntp_started = true;
+    snprintf(out, out_size, "sntp: client restarted (resync requested)\n");
+}
+
 static void console_cmd_wifi(const char *args, char *out, size_t out_size)
 {
     (void)args;
@@ -7166,6 +7191,8 @@ static void web_console_register_commands(void)
 #endif
     web_console_register("time", "current UTC clock and sync state",
                          console_cmd_time);
+    web_console_register("sntp", "restart the SNTP client: sntp resync",
+                         console_cmd_sntp);
     web_console_register("wifi", "configured SSID and link state",
                          console_cmd_wifi);
 #if !CONFIG_ESPNOW_ROLE_SENDER
