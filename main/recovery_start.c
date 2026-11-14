@@ -18,6 +18,14 @@ static const char *TAG = "recovery";
 
 #define RECOVERY_POLL_MS 50u
 
+/* Run just before a forced rollback (see the header). */
+static recovery_pre_rollback_fn s_pre_rollback_fn;
+
+void recovery_set_pre_rollback_fn(recovery_pre_rollback_fn fn)
+{
+    s_pre_rollback_fn = fn;
+}
+
 static bool button_pressed(void)
 {
     /* The BOOT button shorts the pin to ground. */
@@ -27,6 +35,11 @@ static bool button_pressed(void)
 esp_err_t recovery_button_force_rollback(void)
 {
     ESP_LOGE(TAG, "Forcing rollback to the previous firmware");
+    if (s_pre_rollback_fn != NULL) {
+        /* Drop persisted state the older image would re-apply on the next boot
+         * (e.g. a light_sleep=1 that left the USB console dead). */
+        s_pre_rollback_fn();
+    }
     esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
     /* Only reached when the rollback could not be started. */
     ESP_LOGE(TAG, "Rollback not possible: %s", esp_err_to_name(err));
@@ -71,6 +84,7 @@ esp_err_t recovery_button_check(void)
 
 #else /* sender, or CONFIG_RECOVERY_BUTTON_GPIO < 0 */
 
+void recovery_set_pre_rollback_fn(recovery_pre_rollback_fn fn) { (void)fn; }
 esp_err_t recovery_button_check(void) { return ESP_OK; }
 esp_err_t recovery_button_force_rollback(void)
 {

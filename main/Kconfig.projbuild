@@ -12,6 +12,7 @@ endchoice
 
 config RECOVERY_BUTTON_GPIO
     int "Recovery button GPIO (BOOT button; -1 disables)"
+    default 9 if IDF_TARGET_ESP32C6 && ESPNOW_ROLE_RECEIVER
     default 0 if ESPNOW_ROLE_RECEIVER
     default -1
     range -1 39
@@ -19,11 +20,17 @@ config RECOVERY_BUTTON_GPIO
         Holding this pin low for RECOVERY_BUTTON_HOLD_MS at startup forces a
         rollback to the previous firmware (esp_ota_mark_app_invalid_rollback_and_reboot),
         even when the running image was already confirmed -- the manual escape
-        hatch for a "confirmed but broken" image. The default 0 is the on-board
-        BOOT button on most ESP32 devkits. Set to -1 to disable.
+        hatch for a "confirmed but broken" image. The default is the on-board
+        BOOT button: GPIO9 on the ESP32-C6 (GPIO0 is not the boot strap there),
+        GPIO0 on most ESP32 classic devkits. Set to -1 to disable.
 
         Only the receiver honours this: the sender has no USB and is reachable
         only over ESP-NOW, so its recovery is the relayed OTA path instead.
+
+        Before rolling back, the whole persisted-knob NVS namespace ("rtcfg") is
+        erased, so a bad 'set' (a DFS ceiling that wedges the radio, or the
+        light-sleep flag that killed the ESP32-C6 USB Serial/JTAG console) cannot
+        be re-applied by the older image and brick the device again.
 
 config RECOVERY_BUTTON_HOLD_MS
     int "Recovery button hold time (ms)"
@@ -34,16 +41,28 @@ config RECOVERY_BUTTON_HOLD_MS
         How long the recovery button must be held at startup to force a
         rollback.
 
+config ESPNOW_CPU_MAX_MHZ_CEILING
+    # Upper bound for the DFS ceiling: the SoC's own top clock. The ESP32 classic
+    # tops out at 240 MHz, the ESP32-C6 (single-core RISC-V) at 160 MHz. A
+    # ceiling above the SoC maximum is rejected by esp_pm_configure() and would
+    # abort the Wi-Fi task. Kept as its own symbol so the range below has a
+    # single, unambiguous bound.
+    int
+    default 160 if IDF_TARGET_ESP32C6
+    default 240
+
 config ESPNOW_CPU_MAX_MHZ
     int "Maximum CPU frequency (MHz) for the DFS ceiling"
-    range 40 240
+    range 40 ESPNOW_CPU_MAX_MHZ_CEILING
     default 80 if ESPNOW_ROLE_SENDER
+    default 160 if IDF_TARGET_ESP32C6
     default 240
     help
         Upper clock for dynamic frequency scaling. The receiver is mains-powered
         and both the Wi-Fi dashboard and the minute-history backfill are
-        CPU/SPIFFS bound, so its default stays at 240 MHz to keep the web UI
-        responsive during a full re-sync.
+        CPU/SPIFFS bound, so its default stays at the SoC's top clock to keep
+        the web UI responsive during a full re-sync: 240 MHz on the ESP32
+        classic, 160 MHz on the ESP32-C6.
 
         The sender defaults to 80 MHz: its Wi-Fi radio is held awake for a
         reliable ESP-NOW link (CONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE is off by

@@ -65,6 +65,11 @@ jobs:
           # The UART0 console reads lines and feeds them to the shared command
           # dispatcher; IDF headers are stubbed, so this checks C syntax only.
           gcc -std=c11 -fsyntax-only -I test/host/include main/serial_console.c
+          # The ESP32-C6 uses the USB Serial/JTAG peripheral instead of UART0;
+          # that branch (the one the light-sleep bug killed) must not rot either.
+          gcc -std=c11 -fsyntax-only \
+            -DCONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=1 \
+            -I test/host/include main/serial_console.c
 
       - name: Compile the recovery-button glue
         shell: bash
@@ -91,6 +96,7 @@ jobs:
           python3 test/test_ha_stats.py
           python3 test/test_ws_min.py
           python3 test/test_ws_client.py
+          python3 test/test_fnb48_read.py
           python3 test/check_dashboard_js.py
 
   build:
@@ -104,22 +110,41 @@ jobs:
         include:
           - role: receiver
             kconfig_role: RECEIVER
+            target: esp32
             extra_kconfig: ""
           # Station-only receiver: no SoftAP. ESP-NOW then runs on WIFI_IF_STA
           # (the #if in main.c flips ESPNOW_IF) and the dashboard is served over
           # the home WLAN. ESPNOW_CHANNEL must match the home AP's channel.
           - role: receiver-apoff
             kconfig_role: RECEIVER
+            target: esp32
             extra_kconfig: "CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y"
           # The sender ships as a single image with the adaptive light sleep
           # enabled by default (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y in Kconfig).
           - role: sender
             kconfig_role: SENDER
+            target: esp32
             extra_kconfig: ""
+          # ESP32-C6 receiver (single-core RISC-V, 160 MHz top clock, USB
+          # Serial/JTAG console). Same source tree; the target-specific knobs
+          # live in sdkconfig.defaults.esp32c6 and the per-target Kconfig ranges.
+          - role: receiver-c6
+            kconfig_role: RECEIVER
+            target: esp32c6
+            extra_kconfig: ""
+          # ESP32-C6 receiver without the SoftAP (station-only). Only here can
+          # Wi-Fi modem sleep actually release the radio: a running SoftAP must
+          # keep beaconing, so the AP interface holds the radio awake regardless
+          # of esp_wifi_set_ps(). ESP-NOW runs on WIFI_IF_STA and both roles must
+          # share CONFIG_ESPNOW_CHANNEL (the sender can no longer scan the AP).
+          - role: receiver-c6-apoff
+            kconfig_role: RECEIVER
+            target: esp32c6
+            extra_kconfig: "CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y"
     env:
       IDF_CCACHE_ENABLE: "1"
       CCACHE_DIR: /root/.cache/ccache
-      IDF_TARGET: esp32
+      IDF_TARGET: ${{ matrix.target }}
 
     steps:
       - name: Check out source
@@ -134,9 +159,11 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /root/.cache/ccache
-          key: ${{ runner.os }}-idf-6.1-${{ matrix.role }}-${{ hashFiles('main/main.c', 'main/CMakeLists.txt', 'components/sml_parser/**', 'components/sml_transport/**', 'CMakeLists.txt', 'partitions.csv') }}
+          # The target is part of the key: esp32 and esp32c6 objects are not
+          # interchangeable and must not share a cache entry.
+          key: ${{ runner.os }}-idf-6.1-${{ matrix.target }}-${{ matrix.role }}-${{ hashFiles('main/main.c', 'main/CMakeLists.txt', 'components/sml_parser/**', 'components/sml_transport/**', 'CMakeLists.txt', 'partitions.csv') }}
           restore-keys: |
-            ${{ runner.os }}-idf-6.1-${{ matrix.role }}-
+            ${{ runner.os }}-idf-6.1-${{ matrix.target }}-${{ matrix.role }}-
 
       - name: Configure firmware role
         shell: bash
@@ -149,8 +176,15 @@ jobs:
           fw_ver="$(cd "$GITHUB_WORKSPACE" && git describe --tags --always --dirty 2>/dev/null || echo unknown)"
           echo "FIRMWARE_VERSION=$fw_ver" >> "$GITHUB_ENV"
           echo "Firmware version: $fw_ver"
+          # A bare SHA (no vX.Y.Z prefix) means no tag is an ancestor of this
+          # commit: the versioning rule in VERSIONING.md was skipped (or the tag
+          # sits on a side branch, as happened for the C6 receiver). Warn loudly
+          # so the flashed image is not an anonymous commit.
+          if ! echo "$fw_ver" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::warning::FIRMWARE_VERSION '$fw_ver' has no SemVer tag on this line - tag the commit (see VERSIONING.md) and push the tag"
+          fi
           cat > "$RUNNER_TEMP/sdkconfig.defaults" <<EOF
-          CONFIG_IDF_TARGET="esp32"
+          CONFIG_IDF_TARGET="${{ matrix.target }}"
           CONFIG_PARTITION_TABLE_CUSTOM=y
           CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
           CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
@@ -187,17 +221,26 @@ jobs:
               fail=1
             fi
           }
-          assert 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240'
+          # The SoC top clock differs: the ESP32 classic reaches 240 MHz, the
+          # ESP32-C6 only 160 MHz. The boot clock and the receiver ceiling track
+          # the target; the sender stays at 80 MHz on both.
+          if [ "${{ matrix.target }}" = "esp32c6" ]; then
+            assert 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160'
+          else
+            assert 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240'
+          fi
           assert 'CONFIG_PM_ENABLE=y'
           assert 'CONFIG_PM_DFS_INIT_AUTO=y'
           assert 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y'
           if [ "${{ matrix.role }}" = "sender" ]; then
             assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=80'
+          elif [ "${{ matrix.target }}" = "esp32c6" ]; then
+            assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=160'
           else
             assert 'CONFIG_ESPNOW_CPU_MAX_MHZ=240'
           fi
           [ "$fail" -eq 0 ]
-          echo "CPU clock: role ceiling with DFS (sender 80, receiver 240), 40 MHz floor"
+          echo "CPU clock: role ceiling with DFS (${{ matrix.role }}), 40 MHz floor"
 
       - name: Verify adaptive sleep config (sender)
         if: matrix.role == 'sender'
@@ -274,6 +317,77 @@ jobs:
           grep -a -q 'Health failure: %s; rebooting' \
             "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image runs the health watchdog"
+
+      - name: Verify the USB Serial/JTAG light-sleep guard (ESP32-C6)
+        if: matrix.target == 'esp32c6' && startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The C6 console is the USB Serial/JTAG peripheral, which light sleep
+          # powers down: the port then never re-enumerates and the device is
+          # unreachable over USB. The guard refuses light sleep on such a build.
+          # The strings below live in runtime_config.c (USB-console branch) and
+          # the receiver power path only, so grepping the built app proves the
+          # guard is compiled in and not just the config flag.
+          grep -q '^CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y$' sdkconfig
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'off (unavailable: USB Serial/JTAG console)' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Light sleep disabled: the USB Serial/JTAG console' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image refuses light sleep (USB console guarded)"
+
+      - name: Verify Wi-Fi 6 TWT is compiled in (ESP32-C6)
+        if: matrix.target == 'esp32c6' && startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Target Wake Time (iTWT) needs Wi-Fi 6 (HE); SOC_WIFI_HE_SUPPORT is 1
+          # on the C6 and 0 on the classic ESP32, so the TWT path is compiled in
+          # only here. The strings below live in main.c's HE-guarded TWT branch
+          # and runtime_config.c, so grepping the built app proves the code (and
+          # the esp_wifi_he.h API calls) is actually linked in, not just the
+          # config flag. The classic-ESP32 receiver image must NOT contain them.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'TWT setup requested: wake every' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'TWT teardown (all flows)' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image contains the Wi-Fi 6 TWT path"
+
+      - name: Verify Wi-Fi 6 TWT is absent (classic ESP32 receiver)
+        if: matrix.target == 'esp32' && startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The classic ESP32 is not Wi-Fi 6, so the TWT branch must be compiled
+          # out; a leaked string would mean the HE-only API is referenced on a
+          # target that has no esp_wifi_he.h.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          if grep -a -q 'TWT setup requested: wake every' \
+            "build/${{ matrix.role }}/esp32-IR.bin"; then
+            echo "::error::classic ESP32 receiver image unexpectedly contains TWT"
+            exit 1
+          fi
+          echo "${{ matrix.role }} image correctly omits the Wi-Fi 6 TWT path"
+
+      - name: Verify the Wi-Fi PS / listen-interval knob (receiver)
+        if: startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The 'set ps off|min|max' + 'set listen <n>' knobs drive
+          # WIFI_PS_MAX_MODEM + listen_interval and force a reconnect so the new
+          # interval reaches the association request. The strings live in main.c's
+          # apply_wifi_ps_config()/wifi_ps_apply_and_reconnect() (receiver-only),
+          # so grepping the built app proves the path is linked in. Both the
+          # classic-ESP32 and the C6 receiver carry it (modem sleep is not HE).
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Wi-Fi PS mode set to ' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'reconnecting to carry listen_interval=' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image contains the Wi-Fi PS / listen knob"
 
       - name: Stage firmware and flash files
         shell: bash

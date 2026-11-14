@@ -113,11 +113,84 @@ int main(void)
     CHECK(!runtime_config_set(&cfg, "retries", "99", 240, err, sizeof(err)),
           "out-of-range retries rejected");
 
+    /* Radio-side power knobs. Default 0 means "leave the chip/IDF default". */
+    cfg = runtime_config_defaults();
+    CHECK(cfg.wifi_txpower_dbm == 0 && cfg.ap_beacon_tu == 0,
+          "radio power knobs default to the chip/IDF default");
+    CHECK(runtime_config_set(&cfg, "txpower", "8", 240, err, sizeof(err)) &&
+              cfg.wifi_txpower_dbm == 8,
+          "set txpower=8 dBm");
+    CHECK(runtime_config_set(&cfg, "txpower", "0", 240, err, sizeof(err)) &&
+              cfg.wifi_txpower_dbm == 0,
+          "txpower 0 restores the chip default");
+    CHECK(!runtime_config_set(&cfg, "txpower", "1", 240, err, sizeof(err)),
+          "txpower below 2 dBm is rejected (chip minimum)");
+    CHECK(!runtime_config_set(&cfg, "txpower", "21", 240, err, sizeof(err)),
+          "txpower above 20 dBm is rejected");
+    CHECK(runtime_config_set(&cfg, "beacon", "1000", 240, err, sizeof(err)) &&
+              cfg.ap_beacon_tu == 1000,
+          "set beacon=1000 TU");
+    CHECK(runtime_config_set(&cfg, "beacon", "0", 240, err, sizeof(err)) &&
+              cfg.ap_beacon_tu == 0,
+          "beacon 0 restores the IDF default");
+    CHECK(!runtime_config_set(&cfg, "beacon", "150", 240, err, sizeof(err)),
+          "a beacon interval not a multiple of 100 TU is rejected");
+    CHECK(!runtime_config_set(&cfg, "beacon", "50", 240, err, sizeof(err)),
+          "a beacon interval below 100 TU is rejected");
+    /* clamp() drops an out-of-range radio knob back to the default. */
+    runtime_config_t stored = {.cpu_mhz = 240, .cpu_min_mhz = 40,
+                               .light_sleep = false, .espnow_retries = 3};
+    stored.wifi_txpower_dbm = 99;
+    stored.ap_beacon_tu = 150;
+    runtime_config_clamp(&stored, 240);
+    CHECK(stored.wifi_txpower_dbm == RUNTIME_CONFIG_TXPOWER_MAX_DBM,
+          "txpower above the max clamps to the max");
+    CHECK(stored.ap_beacon_tu == 0,
+          "an off-grid beacon interval resets to the IDF default");
+
+    /* Receiver radio-sleep knobs. radio_save is a bool; wake interval/window
+     * are in ms and the window is pulled inside the interval. */
+    cfg = runtime_config_defaults();
+    CHECK(!cfg.radio_save, "radio-save is off by default");
+    CHECK(runtime_config_set(&cfg, "radio-save", "on", 240, err, sizeof(err)) &&
+              cfg.radio_save,
+          "set radio-save=on");
+    CHECK(runtime_config_set(&cfg, "wake-interval", "500", 240, err, sizeof(err)) &&
+              cfg.wake_interval_ms == 500,
+          "set wake-interval=500 ms");
+    CHECK(runtime_config_set(&cfg, "wake-window", "200", 240, err, sizeof(err)) &&
+              cfg.wake_window_ms == 200,
+          "set wake-window=200 ms");
+    /* Raising the window above the interval would keep the radio awake; the
+     * interval wins and the window is pulled down to it. */
+    CHECK(runtime_config_set(&cfg, "wake-window", "900", 240, err, sizeof(err)) &&
+              cfg.wake_window_ms == 900,
+          "a window below the interval is accepted");
+    CHECK(runtime_config_set(&cfg, "wake-interval", "300", 240, err, sizeof(err)) &&
+              cfg.wake_interval_ms == 300 && cfg.wake_window_ms == 300,
+          "lowering the interval below the window pulls the window down");
+    CHECK(!runtime_config_set(&cfg, "wake-interval", "5", 240, err, sizeof(err)),
+          "wake-interval below the minimum is rejected");
+    CHECK(!runtime_config_set(&cfg, "wake-window", "0", 240, err, sizeof(err)),
+          "wake-window 0 is rejected");
+    /* clamp() pulls an over-interval window back inside a persisted value. */
+    runtime_config_t rs = runtime_config_defaults();
+    rs.radio_save = true;
+    rs.wake_interval_ms = 100;
+    rs.wake_window_ms = 5000;
+    runtime_config_clamp(&rs, 240);
+    CHECK(rs.wake_window_ms == 100,
+          "clamp pulls a persisted window inside the interval");
+    rs.wake_interval_ms = 3;
+    runtime_config_clamp(&rs, 240);
+    CHECK(rs.wake_interval_ms == RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS,
+          "clamp raises a too-small wake interval to the minimum");
+
     /* clamp(): a value restored from NVS is forced into what this build allows.
      * This is the guard that lets a persisted 'set' survive an OTA into an image
      * with a different ceiling. */
-    runtime_config_t stored = {.cpu_mhz = 240, .cpu_min_mhz = 40,
-                               .light_sleep = false, .espnow_retries = 3};
+    stored.cpu_mhz = 240;
+    stored.cpu_min_mhz = 40;
     runtime_config_clamp(&stored, 80);
     CHECK(stored.cpu_mhz == 80 && stored.cpu_min_mhz == 40,
           "a 240 MHz value restored into an 80 MHz build clamps to 80");
@@ -141,12 +214,162 @@ int main(void)
     runtime_config_clamp(&stored, 240);
     CHECK(stored.espnow_retries == 10, "retries above 10 clamp to 10");
 
+    /* Wi-Fi 6 TWT knobs. Off by default; the wake interval is the negotiated
+     * cadence in ms. */
+    cfg = runtime_config_defaults();
+    CHECK(!cfg.twt_enabled, "twt is off by default");
+    CHECK(cfg.twt_wake_ms == RUNTIME_CONFIG_TWT_WAKE_DEFAULT_MS,
+          "twt-wake defaults to 5000 ms");
+    CHECK(runtime_config_set(&cfg, "twt", "on", 240, err, sizeof(err)) &&
+              cfg.twt_enabled,
+          "set twt=on");
+    CHECK(runtime_config_set(&cfg, "twt-wake", "1000", 240, err, sizeof(err)) &&
+              cfg.twt_wake_ms == 1000,
+          "set twt-wake=1000 ms");
+    CHECK(runtime_config_set(&cfg, "twt", "off", 240, err, sizeof(err)) &&
+              !cfg.twt_enabled,
+          "set twt=off");
+    CHECK(!runtime_config_set(&cfg, "twt", "maybe", 240, err, sizeof(err)),
+          "a non-bool twt value is rejected");
+    CHECK(!runtime_config_set(&cfg, "twt-wake", "100", 240, err, sizeof(err)),
+          "twt-wake below the minimum is rejected");
+    CHECK(!runtime_config_set(&cfg, "twt-wake", "20000", 240, err, sizeof(err)),
+          "twt-wake above the maximum is rejected");
+
+    /* twt_split: interval = mant * 2^expn [us]. 5 s = 5,000,000 us needs
+     * expn 7 (5e6 / 2^7 = 39062.5 -> rounds up to 39063); 1 s = 1,000,000 us
+     * needs expn 4 (1e6 / 16 = 62500, exact). */
+    uint8_t expn = 0;
+    uint16_t mant = 0;
+    CHECK(runtime_config_twt_split(5000000u, &expn, &mant) && expn == 7 && mant == 39063,
+          "5 s splits to mant 39063 * 2^7");
+    CHECK(runtime_config_twt_split(1000000u, &expn, &mant) && expn == 4 && mant == 62500,
+          "1 s splits to mant 62500 * 2^4");
+    CHECK(!runtime_config_twt_split(0u, &expn, &mant), "a zero interval is rejected");
+    /* The mantissa must stay in the 16-bit field and the exponent in 5 bits. */
+    CHECK(runtime_config_twt_split(10000u, &expn, &mant) && expn <= 31,
+          "a small interval stays in range");
+    CHECK((uint32_t)mant * (1u << expn) >= 10000u,
+          "the split never shortens the requested interval");
+
+    /* clamp() forces a persisted TWT wake interval into range. */
+    runtime_config_t tw = runtime_config_defaults();
+    tw.twt_wake_ms = 100;
+    runtime_config_clamp(&tw, 240);
+    CHECK(tw.twt_wake_ms == RUNTIME_CONFIG_TWT_WAKE_MIN_MS,
+          "clamp raises a too-small twt wake interval");
+    tw.twt_wake_ms = 60000;
+    runtime_config_clamp(&tw, 240);
+    CHECK(tw.twt_wake_ms == RUNTIME_CONFIG_TWT_WAKE_MAX_MS,
+          "clamp lowers a too-large twt wake interval");
+
+    /* Wi-Fi modem PS mode + listen interval. Mode defaults to min (the
+     * pre-knob behaviour); 'max' is the aggressive mode the FRITZ!Box test
+     * needs. listen_interval is in AP beacon intervals. */
+    cfg = runtime_config_defaults();
+    CHECK(cfg.wifi_ps_mode == RUNTIME_CONFIG_PS_DEFAULT,
+          "wifi ps defaults to min modem");
+    CHECK(cfg.listen_interval == RUNTIME_CONFIG_LISTEN_DEFAULT,
+          "listen interval defaults to 3");
+    uint8_t ps = 0xFF;
+    CHECK(runtime_config_parse_ps("off", &ps) && ps == RUNTIME_CONFIG_PS_OFF,
+          "parse_ps off");
+    CHECK(runtime_config_parse_ps("min", &ps) && ps == RUNTIME_CONFIG_PS_MIN,
+          "parse_ps min");
+    CHECK(runtime_config_parse_ps("max", &ps) && ps == RUNTIME_CONFIG_PS_MAX,
+          "parse_ps max");
+    CHECK(runtime_config_parse_ps("2", &ps) && ps == RUNTIME_CONFIG_PS_MAX,
+          "parse_ps numeric 2");
+    CHECK(!runtime_config_parse_ps("turbo", &ps), "parse_ps rejects junk");
+    CHECK(runtime_config_set(&cfg, "ps", "max", 240, err, sizeof(err)) &&
+              cfg.wifi_ps_mode == RUNTIME_CONFIG_PS_MAX,
+          "set ps=max");
+    CHECK(runtime_config_set(&cfg, "ps", "off", 240, err, sizeof(err)) &&
+              cfg.wifi_ps_mode == RUNTIME_CONFIG_PS_OFF,
+          "set ps=off");
+    CHECK(!runtime_config_set(&cfg, "ps", "turbo", 240, err, sizeof(err)),
+          "an unknown ps mode is rejected");
+    CHECK(runtime_config_set(&cfg, "listen", "20", 240, err, sizeof(err)) &&
+              cfg.listen_interval == 20,
+          "set listen=20");
+    CHECK(runtime_config_set(&cfg, "listen-interval", "5", 240, err, sizeof(err)) &&
+              cfg.listen_interval == 5,
+          "the listen-interval alias works");
+    CHECK(!runtime_config_set(&cfg, "listen", "0", 240, err, sizeof(err)),
+          "listen=0 is rejected (minimum 1)");
+    CHECK(!runtime_config_set(&cfg, "listen", "256", 240, err, sizeof(err)),
+          "listen above 255 is rejected");
+    /* clamp() forces a persisted PS mode/listen interval into range. */
+    runtime_config_t psr = runtime_config_defaults();
+    psr.wifi_ps_mode = 9;
+    psr.listen_interval = 0;
+    runtime_config_clamp(&psr, 240);
+    CHECK(psr.wifi_ps_mode == RUNTIME_CONFIG_PS_DEFAULT,
+          "clamp resets an out-of-range PS mode to the default");
+    CHECK(psr.listen_interval == RUNTIME_CONFIG_LISTEN_MIN,
+          "clamp raises listen=0 to the minimum");
+    psr.listen_interval = 9999;
+    runtime_config_clamp(&psr, 240);
+    CHECK(psr.listen_interval == RUNTIME_CONFIG_LISTEN_MAX,
+          "clamp lowers an over-large listen interval");
+    /* render() reports the PS mode and listen interval. */
+    runtime_config_t rr = runtime_config_defaults();
+    rr.wifi_ps_mode = RUNTIME_CONFIG_PS_MAX;
+    rr.listen_interval = 30;
+    char rbuf[512];
+    runtime_config_render(&rr, rbuf, sizeof(rbuf));
+    CHECK(strstr(rbuf, "wifi ps: max") != NULL, "render shows the PS mode");
+    CHECK(strstr(rbuf, "listen interval: 30") != NULL,
+          "render shows the listen interval");
+
+    /* Blob roundtrip: encode then decode restores every knob, including TWT. */
+    runtime_config_t rt = runtime_config_defaults();
+    rt.cpu_mhz = 160;
+    rt.cpu_min_mhz = 80;
+    rt.light_sleep = false;
+    rt.espnow_retries = 7;
+    rt.wifi_txpower_dbm = 8;
+    rt.ap_beacon_tu = 200;
+    rt.radio_save = true;
+    rt.wake_interval_ms = 300;
+    rt.wake_window_ms = 250;
+    rt.twt_enabled = true;
+    rt.twt_wake_ms = 1000;
+    rt.wifi_ps_mode = RUNTIME_CONFIG_PS_MAX;
+    rt.listen_interval = 30;
+    uint8_t blob[RUNTIME_CONFIG_BLOB_SIZE];
+    runtime_config_encode(&rt, blob, sizeof(blob));
+    CHECK(blob[0] == RUNTIME_CONFIG_BLOB_VERSION, "blob carries the current version");
+    runtime_config_t back;
+    CHECK(runtime_config_decode(blob, sizeof(blob), &back), "blob decodes");
+    CHECK(back.cpu_mhz == rt.cpu_mhz && back.cpu_min_mhz == rt.cpu_min_mhz &&
+              back.espnow_retries == rt.espnow_retries &&
+              back.wifi_txpower_dbm == rt.wifi_txpower_dbm &&
+              back.ap_beacon_tu == rt.ap_beacon_tu &&
+              back.radio_save == rt.radio_save &&
+              back.wake_interval_ms == rt.wake_interval_ms &&
+              back.wake_window_ms == rt.wake_window_ms &&
+              back.twt_enabled == rt.twt_enabled &&
+              back.twt_wake_ms == rt.twt_wake_ms &&
+              back.wifi_ps_mode == rt.wifi_ps_mode &&
+              back.listen_interval == rt.listen_interval,
+          "the blob roundtrip restores every knob");
+    /* A wrong version or size is rejected so an old blob is ignored. */
+    blob[0] = (uint8_t)(RUNTIME_CONFIG_BLOB_VERSION - 1);
+    CHECK(!runtime_config_decode(blob, sizeof(blob), &back),
+          "a blob with the wrong version is rejected");
+    CHECK(!runtime_config_decode(blob, sizeof(blob) - 1, &back),
+          "a blob with the wrong size is rejected");
+
     /* reset restores the defaults. */
     cfg = runtime_config_reset(&cfg);
     runtime_config_t defaults = runtime_config_defaults();
     CHECK(cfg.cpu_mhz == defaults.cpu_mhz &&
               cfg.cpu_min_mhz == defaults.cpu_min_mhz &&
-              cfg.light_sleep == defaults.light_sleep,
+              cfg.light_sleep == defaults.light_sleep &&
+              cfg.twt_enabled == defaults.twt_enabled &&
+              cfg.wifi_ps_mode == defaults.wifi_ps_mode &&
+              cfg.listen_interval == defaults.listen_interval,
           "reset restores the defaults");
 
     printf("runtime config: %d checks, %d failures\n", g_checks, g_failures);

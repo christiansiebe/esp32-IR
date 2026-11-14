@@ -41,6 +41,9 @@ sdkconfig.*
 
 # The shipped defaults file is a source file, not a generated sdkconfig.
 !sdkconfig.defaults
+# Target-specific defaults (sdkconfig.defaults.<target>) are source files too;
+# IDF loads them automatically after sdkconfig.defaults (see tools/cmake/kconfig.cmake).
+!sdkconfig.defaults.*
 
 # ESP-IDF dependencies
 # For older versions or manual component management
@@ -103,9 +106,26 @@ remote-shell/run/
 # agent-server Conversation-/Event-Daten (dieses Repo ist auf dem Odroid der
 # agent-workspace-Bind-Mount). Kein Quellcode -- wird lokal live beschrieben.
 workspace/
+# Sandbox-/Sub-Agent-Laufzeitdaten, die im Repo-Verzeichnis landen, wenn die SSD
+# als Workspace-Fallback dient (Conversations, Logs). Nie Quellcode.
+workspace-sd-fallback/
+subagents/
 
 # Agent-Memory der Sandbox (wird ueber remote-shell/memory/SHARED.md geteilt).
 .openhands/memory/
+
+# Sandbox-Agent-Skills: .agents ist ein Symlink auf /root/.agents (ausserhalb
+# des Repos, per Themen-Split erzeugt). Nie committen.
+.agents
+# Lokale Sicherung des vollen AGENTS.md vor dem Themen-Split.
+AGENTS.md.vor-themen-split
+
+# Bench power-measurement logs written by tools/fnb48_read.py (-o file.csv).
+# Measurement data, never source. The committed partition tables are
+# re-included below; Firmware/** keeps its own re-include at the very end.
+*.csv
+*.cfn
+!partitions.csv
 
 # The Firmware/ tree is a deliberately committed release bundle (see AGENTS.md
 # "Flash bundles"), so re-include it even though *.bin / flasher_args.json match

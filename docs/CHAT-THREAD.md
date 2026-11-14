@@ -26,6 +26,132 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+## 2026-11-07 21:30 UTC · Odroid-Agent (Branch feat/esp32c6-receiver, Commit cd5dece)
+**ERFOLG: C6-Empfänger ist per USB-NVS in „Wohnzimmer" eingebucht (IP 192.168.178.105).**
+
+Der Setup-AP liess sich nicht mehr erreichen, also Credentials direkt in die NVS
+geschrieben (Weg B). Ablauf: `nvs` @0x9000 gelesen → mit `tools/nvs_provision.py`
+`metercfg/wifi_ssid`+`wifi_pass` gesetzt → `esptool write-flash 0x9000`. Ergebnis:
+`Connected to configured Wi-Fi on channel 1` + `Home network address: 192.168.178.105`,
+Ping 0 % Verlust, Dashboard HTTP 200, SNTP synchron.
+
+**Zwei Bugs dabei gefunden:**
+1. **NVS-Dublette:** Der C6 hatte schon `wifi_ssid='Wohnzimmer'`, aber `wifi_pass`
+   war **leer** (vom fehlenden Passwortfeld) — Grund fuer den urspruenglichen
+   `reason 210`. Nach dem Setzen lag der neue `wifi_pass` auf **slot 1**, der alte
+   leere auf **slot 109**; NVS liest den **letzten** Eintrag → weiter leer → 210.
+   Erst das Erasen der Alt-Dublette brachte die Verbindung.
+2. **Tool-Bug in `tools/nvs_provision.py` (PR #63):** `set_string()` schreibt den
+   neuen Wert in einen **neuen** Slot, **ohne den alten Eintrag zu erasen**. Bei
+   einem Update liegt der neue Wert damit *vor* dem alten → NVS liest weiter den
+   alten Wert. Reproduzierbar: `set` auf einen bereits gesetzten Key wirkt nicht.
+   **Fix noetig:** beim Setzen alle bestehenden Eintraege desselben Keys im
+   Namespace als ERASED (0b11) markieren, bevor der neue geschrieben wird.
+
+Erreichte Werte: `radio-save=5000/70` unveraendert, `nvs`/`storage` sonst intakt.
+
+## 2026-11-07 22:15 UTC · Odroid-Agent (Branch feat/esp32c6-receiver, Commit d02c331)
+**BEHOBEN & CI-gruen (d02c331): Die Setup-Config-Seite hatte KEIN WLAN-Passwortfeld.**
+
+Nutzer-Befund: „Es verlangt WLAN-Passwort, damit ich rein komme" → danach „Wir haben
+keine WLAN-Passwort-Setzen-Funktion drin." Ursache: `config_handler` lieferte nur ein
+SSID-Input (`main.c:7787`); der `/save`-Handler verarbeitet ein `password`-Feld zwar,
+die Seite bot es aber nicht an. Auf einem frischen Geraet blieb das Passwort leer →
+die Station konnte sich nie in ein gesichertes WLAN einbuchen.
+
+Fix: Passwort-Input (`type=password`, maxlength 64) ergaenzt und die Handler-Regel
+„leeres/fehlendes Passwort behaelt das gespeicherte" (statt es zu loeschen).
+Regressions-Guard in `test/check_dashboard_js.py` (config-Seite muss `name="ssid"`
+**und** `name="password"` enthalten). Geflasht: `receiver-c6-sml-41f9be0` (mit AP),
+`nvs`/`storage` unangetastet → `radio-save=5000/70` bleibt. Setup-AP laeuft
+(`ESP32-IR-Meter`, Kanal 1, 192.168.4.1). Nutzer traegt jetzt SSID+Passwort unter
+`http://192.168.4.1/config` ein.
+
+## 2026-11-07 20:26 UTC · Odroid-Agent (Branch feat/esp32c6-receiver, Commit 72ca006)
+**WLAN-Provisioning des C6-Empfängers: Zugangsdaten per USB in die NVS schreiben —
+ohne Firmware-Flash (empfohlen) bzw. per Setup-AP (bequemer).**
+
+Ausgangslage: Der geflashte `receiver-c6-apoff`-Build liefert nicht über WLAN
+(`configured ssid: (none)`, `fritzbox: not connected`). Ursache: `metercfg` ist
+noch **leer** — `save_wifi_credentials()` wird nur vom HTTP-Formular aufgerufen,
+die Konsole kann kein WLAN setzen. Sobald die Credentials in der NVS stehen,
+verbindet sich die Firmware beim Boot automatisch (`main/main.c:1190`:
+`if (g_wifi_configured) esp_wifi_connect();`).
+
+**Weg A — per Setup-AP (bereits geflasht, verifiziert):** Der CI-Lauf zu `72ca006`
+baut beide C6-Varianten. `receiver-c6-sml-flash-files-c3dc117` (**mit** AP) wurde
+geflasht (`esptool write-flash 0x0/0x8000/0xf000/0x20000`; `nvs` @0x9000 und
+`storage` @0x320000 bewusst **nicht** angefasst → `rtcfg radio-save=5000/70`
+blieb erhalten). Bootlog belegt den Setup-AP:
+`AP started: SSID=ESP32-IR-Meter, channel=1, IP=192.168.4.1` (WPA2, PW
+`12345678`). Ablauf: mit Handy/Laptop in `ESP32-IR-Meter` einwählen →
+`http://192.168.4.1/config` → 2,4-GHz-SSID + Passwort → `/save`.
+**Achtung Energie:** Der AP-Build läuft dauerhaft `WIFI_MODE_APSTA` und schaltet
+den SoftAP nie ab → **~433 mW** (TODO.md: „AP abschalten, wenn STA verbunden"
+ist offen). Für den Dauerbetrieb ist deshalb der `apoff`-Build (~**70 mW**,
+gemessen) die sparsame Wahl — er verbindet sich nach dem Setzen automatisch.
+
+**Weg B — per USB direkt in die NVS (kein Flash nötig, sparsamster Build bleibt):**
+`metercfg`/`wifi_ssid`+`wifi_pass` liegen in der `nvs`-Partition @0x9000 (0x6000).
+Mit einem NVS-Image (`nvs_partition_gen`) + `esptool write-flash 0x9000 <img>`
+setzbar; danach nur `reboot`. **Wichtig:** die vorhandenen Namespaces (`rtcfg`,
+`energy`, `phy`, `nvs.net80211`) müssen erhalten bleiben (sonst fällt
+`radio-save` auf Default zurück). Backup der NVS gezogen:
+`/mnt/ssd/c6-nvs/nvs_backup.bin`. Ein erhaltendes Lese-/Schreib-Werkzeug
+`tools/nvs_provision.py` (+ Host-Tests) ist in Arbeit (Sub-Agent, eigener PR).
+
+Kanal: Heim-2,4-GHz-AP „Wohnzimmer" läuft auf **Kanal 1** → passt exakt zum
+`CONFIG_ESPNOW_CHANNEL=1` des C6 (kein Kanal-Mismatch wie in der Notiz vom 21.10.).
+
+## 2026-11-07 16:59 UTC · Bau-Chat (Branch feat/esp32c6-receiver, Commit 7e34996)
+**BEHOBEN & CI-gruen (7e34996). Befund: Der Laufzeit-Knopf `set sleep on`
+(automatic light sleep) killt beim C6-Receiver die USB-Konsole — dauerhaft.**
+
+`sleep on` schaltet die USB-Serial/JTAG-Peripherie ab, sobald der Chip in Light
+Sleep geht. Die Konsole auf `/dev/ttyACM0` verschwindet. Weil die Einstellung in
+NVS persistiert wird (Namespace `rtcfg`, Key `cfg`, Blob-Version 3), bootet das
+Geraet anschliessend **im Light Sleep** und der USB-Port enumiert nie wieder —
+das Geraet ist ueber USB unerreichbar (Flashen **und** Konsole tot). Ursache:
+`SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP` ist fuer den C6 **nicht definiert**
+(IDF-6395 offen); die USB-Serial-JTAG-Peripherie ueberlebt Light Sleep also nicht.
+
+**Fix (umgesetzt, CI-gruen, Commit 7e34996):** Auf Builds mit USB-Serial-JTAG-Konsole
+(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`) wird Light Sleep komplett abgelehnt:
+`set sleep on` wird verworfen, ein aus NVS restauriertes `light_sleep=1` auf `0`
+gezwungen (clamp), und `esp_pm_configure()` bekommt nie `light_sleep_enable=1`.
+Zusaetzlich haelt der Empfaenger einen `ESP_PM_NO_LIGHT_SLEEP`-Lock.
+Modem-/Radio-Sleep (`radio-save`) bleibt erhalten. NVS-Blob-Version steigt
+**3 → 4**, damit ein bereits persistierter kaputter `light_sleep`-Wert beim
+naechsten Boot verworfen wird (Selbstheilung). Recovery: die BOOT-Taste (3 s)
+loescht zusaetzlich den NVS-Namespace `rtcfg`, damit ein schlechtes
+persistiertes Config-Set den Rollback nicht ueberlebt.
+
+**Messwerte** (FNB-48 USB-Leistungsmesser): ⚠️ **Die frueheren Zahlen sind
+unbelastbar** (Details/Korrektur in `docs/radio-sleep-break-even.md` § 8.3).
+Zwei Gruende: (1) `fnb48_read.py` sendete nie das **Stop-Kommando `0x84`**, der
+interne Logger des FNB-48 lief voll und lieferte Standbilder; (2) der FNB-48
+liegt **nicht** im C6-Strompfad — der C6 haengt als Geschwister am Hub, nicht
+hinter dem Messgeraet. Gegenprobe: C6 per `uhubctl -l 1-1 -p 3 -a off` abschalten
+`lsusb 303a` -> 0, Port `0000 off`) aendert die Anzeige **nicht** (~0,065 W
+= Ruheverbrauch Messgeraet/Hub). Fuer belastbare Watt-Werte muss der FNB-48
+**in Reihe** in die C6-VBUS-Leitung. **Qualitativ bleibt korrekt:** Light Sleep
+killt die USB-Konsole des C6; Radio-Sleep bleibt der sichere Hebel.
+
+**Empfohlene Bestueckung des C6-Empfaengers:** station-only (kein SoftAP) +
+`set radio-save on` mit `wake-interval 5000` / `wake-window 70`. Light Sleep
+bleibt auf dem C6 aus (USB-Konsole). Die Watt-Ersparnis ist noch zu messen.
+
+**Bergung eines bereits gebrickten C6 (ohne BOOT-Taste, erprobt):** Haengt das
+Geraet schon im USB-Bootloop (`error -71/-32`, kein `/dev/ttyACM0`), hilft kein
+Reset allein — die App startet in Light Sleep und die Peripherie stirbt vor dem
+ersten Kontakt. Rezept: Port-Power-Cycle (`uhubctl -l 1-1 -p 3 -a off` / `-a on`;
+**NICHT Port 2 = WLAN-Uplink**) und in einer engen Poll-Schleife (~1,5 ms)
+**sofort** `serial.Serial()` oeffnen, sobald `/dev/ttyACM0` erscheint, und
+`set sleep off` + `reset-config` schicken. Das tty lebt nur in einem kurzen
+Fenster bei manchen Boots (~10-20 %); sobald die Konsole einmal antwortet, ist
+der Port stabil und `esptool` synct. Danach die v4-Firmware flashen (ohne
+`storage`, damit die Historie bleibt). Skript: `/root/c6_console.py`.
+
 ## 2026-10-18 21:20 UTC · Fleet-Sub-Agent MQTT (Branch feat/mqtt-ha-live-minutes, Commit 57e010b)
 **Nachtrag 2 zu PR #32:** `main` ist erneut weitergelaufen (`#48` Sender-Link-Fix, `#27`
 Recovery-Button, u.a.), der Branch ist wieder **rebasd** auf `b2eaa51`. Konflikt nur in
@@ -621,3 +747,28 @@ CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender), PR `CLEAN`/`MERGE
 **Umsetzung (minimal, PR #55, base main):** read-only Diagnose fuer den Odroid: `print_health.py` (reiner Signal->Ursache-Klassifizierer), `diagnose_print.sh` (VERDICT/CAUSE/FIX), `BLANK-PAGES.md`, Host-Test `test_print_health.py` (24 Checks) in `run_host_tests.sh` eingehaengt.
 
 **Tests:** `./test/run_host_tests.sh` gruen; CI gruen (Host-Tests + Builds receiver/receiver-apoff/sender + Hygiene). Nur `remote-shell/**` + `test/run_host_tests.sh` beruehrt; kein Firmware-Verhalten, kein Flash-Layout, kein Datenverlust.
+
+## 2026-11-07 12:30 UTC · Odroid-Agent (Branch feat/esp32c6-receiver)
+
+**Punkt:** Nutzer stellte einen neuen ESP32-C6 an USB (Port 3, `303a:1001`) und
+wollte den Empfaenger darauf portieren/flashen; danach die Frage "laeuft er
+optimal?" und zuletzt das Werkzeug fuer die Messung.
+
+**Befund C6:** Bootet sauber (App `b39fac7`, ESP-IDF v6.1, SoftAP disabled,
+free heap ~201 KB, Watchdogs armed, `radio-save on 5000/70`). Liefert aber noch
+**nicht ueber WLAN**: `configured ssid: (none)`, `fritzbox: not connected` -
+Zugangsdaten fehlen und dieser `apoff`-Build hat den Setup-AP absichtlich aus.
+Der Empfaenger laeuft (ESP-NOW-Kanal 1, Historie bereit), nur die Dashboard-
+Zustellung braucht noch die WLAN-Zugangsdaten.
+
+**Werkzeug (Repo, PR-Stil):** `tools/fnb48_read.py` - FNIRSI FNB-48 live ueber
+`/dev/hidrawN`, **nur stdlib** (kein pyusb/hidapi/udev). Kann min/max/avg fuer
+V/A/W, Energie (Wh) + Kapazitaet (Ah), Per-Sample-CSV (`-o`) und Burst-
+Erkennung (`--burst`). Host-Test `test/test_fnb48_read.py` (20 Checks, gruen),
+in die CI einghaengt. `.gitignore`: Mess-`*.csv`/`*.cfn` ignoriert, die
+committeten `partitions.csv` re-included.
+
+**Messung C6 (60 s, 100 S/s):** Ø **69,6 mW** bei 5,195 V / 13,4 mA; Idle
+62,8 mW, alle 5,00 s ein ~130 ms Burst auf ~240 mW (radio-save-Fenster);
+Hochrechnung 1,67 Wh/Tag. Das Windows-Tool-Prinzip (jeden Sample loggen statt
+mitteln) ist damit in einem stdlib-Skript verfuegbar.

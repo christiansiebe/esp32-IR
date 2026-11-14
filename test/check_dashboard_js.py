@@ -279,6 +279,14 @@ def extract_console_script(source: str) -> str:
     return match.group(1)
 
 
+def extract_config_page(source: str) -> str:
+    """Reconstruct the WLAN configuration page from its C string literal."""
+    start = source.index("static esp_err_t config_handler")
+    marker = "</body></html>\";"
+    end = source.index(marker, start) + len(marker)
+    return c_string_contents(source[start:end])
+
+
 def main() -> int:
     node = shutil.which("node")
     if node is None:
@@ -291,6 +299,18 @@ def main() -> int:
     diag_script = extract_diag_script(source)
     sender_script = extract_sender_script(source)
     console_script = extract_console_script(source)
+    config_page = extract_config_page(source)
+
+    # Regression guard: the WLAN configuration page must offer BOTH an SSID and
+    # a password input. A form with only the SSID left a fresh device unable to
+    # join a secured network (empty password -> never associates).
+    if 'name="ssid"' not in config_page:
+        print("config page: missing SSID input")
+        return 1
+    if 'name="password"' not in config_page:
+        print("config page: missing password input")
+        return 1
+    print("config page has SSID + password inputs")
 
     workdir = tempfile.mkdtemp()
     try:

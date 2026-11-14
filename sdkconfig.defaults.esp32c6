@@ -1,0 +1,23 @@
+# ESP32-C6 target overrides.
+#
+# IDF loads this file automatically after sdkconfig.defaults for every entry in
+# SDKCONFIG_DEFAULTS (tools/cmake/kconfig.cmake appends "<file>.<target>"), so
+# only the C6-specific deltas live here and the shared knobs stay in
+# sdkconfig.defaults. That keeps the esp32 build byte-for-byte unchanged.
+
+# --- CPU clock ---
+# The C6 (single-core RISC-V) tops out at 160 MHz; its CPU-frequency choice only
+# offers 40/80/120/160 MHz. The shared sdkconfig.defaults selects the 240 MHz
+# ESP32 option (CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240), which is an unknown symbol
+# here and is ignored. Select the C6 maximum explicitly. The effective DFS
+# ceiling is CONFIG_ESPNOW_CPU_MAX_MHZ, which defaults to 160 on this target
+# (main/Kconfig.projbuild) and is what the receiver actually runs at.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+
+# --- Console / serial ---
+# The C6 has no USB-UART bridge. Its ROM bootloader and the /dev/ttyACM* the
+# board enumerates as are the USB Serial/JTAG peripheral. Make it the primary
+# console so both the logs and the interactive serial console
+# (main/serial_console.c) work over USB. With the UART0 default the C6 would
+# only mirror logs to USB as a non-blocking, input-less secondary console.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

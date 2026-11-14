@@ -23,6 +23,10 @@ store (see `AGENTS.md`, section "History backfill").
 ## Hardware
 
 - ESP32 (classic), 4 MB flash, **no PSRAM** required.
+- ESP32-C6 (single-core RISC-V, 4 MB flash) for the **receiver** role. Its top
+  clock is 160 MHz (vs 240 on the classic) and its console is the on-chip **USB
+  Serial/JTAG** (`/dev/ttyACM*`), not a UART bridge. The same source tree builds
+  it; the target-specific knobs live in `sdkconfig.defaults.esp32c6`.
 - Meter IR head on UART1 RX (GPIO16), 9600 baud 8N1.
 
 ## Build
@@ -45,8 +49,13 @@ Use the standard IDF flow (the flash bundle includes bootloader, partition
 table and app):
 
 ```bash
-idf.py -p /dev/ttyUSB0 flash monitor      # inside an IDF shell / container
+idf.py -p /dev/ttyUSB0 flash monitor      # ESP32 classic
+idf.py -p /dev/ttyACM0 flash monitor      # ESP32-C6 (USB Serial/JTAG)
 ```
+
+On the ESP32-C6 the bootloader offset is **0x0** (not 0x1000) and esptool talks
+over the USB Serial/JTAG port, so the port is `/dev/ttyACM*` and no `--before`
+reset trick is needed.
 
 **Never erase the `storage` partition.** It holds the measured minute history
 (`/powerlog/quarters.bin`, up to 29000 minutes). A full chip erase or a
@@ -96,6 +105,15 @@ guard.
 Kconfig (`main/Kconfig.projbuild`) selects the role
 (`CONFIG_ESPNOW_ROLE_SENDER` / `_RECEIVER`) and the ESP-NOW channel. Defaults
 live in `sdkconfig.defaults` plus the per-role overrides in `tools/build.sh`.
+
+At runtime the console `set` command persists its values in NVS, so they survive
+a reboot and an OTA (no reflash). For the **receiver** two radio-side knobs are
+available in addition to the CPU/sleep ones: `set txpower <0|2..20>` (Wi-Fi TX
+power in dBm) and `set beacon <0|100..6000>` (SoftAP beacon interval in TU,
+1 TU = 1024 us). `0` keeps the chip/IDF default, so the classic-ESP32 receiver
+build is unchanged until you opt in. Bench note (ESP32-C6): the idle draw is set
+by the always-on Wi-Fi radio, not the CPU — the defaults measure ~0.433 W and
+stacking every knob only reaches ~0.420 W (~3 %); see `AGENTS.md`.
 
 ## Repository notes
 
