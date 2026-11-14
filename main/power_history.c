@@ -398,7 +398,15 @@ static bool write_records(power_history_record_t *records, size_t record_count)
         if (at < updated.record_count) {
             /* Splice in: shift the newer records up and renumber them, so the
              * ring stays sorted by minute AND by sequence (the after_sequence
-             * cursor needs the latter). */
+             * cursor needs the latter). A full ring cannot grow, so the shifted
+             * topmost record would be evicted; when the insert is not at the
+             * tail that evicted record is the NEWEST minute. Dropping the
+             * incoming OLDER minute instead keeps both the newest data and the
+             * time-sorted ring (the binary-search dedupe depends on the sort).
+             * power_history_import_sorted() skips the same way. */
+            if (updated.record_count >= POWER_HISTORY_CAPACITY) {
+                continue;
+            }
             if (!shift_up_renumber(oldest_slot, updated.record_count, at)) {
                 return false;
             }
@@ -1793,10 +1801,17 @@ esp_err_t power_history_aggregate(int64_t window_start_utc, int64_t bucket_secon
                              slot * sizeof(power_history_record_t));
         if (fseek(g_history_file, offset, SEEK_SET) != 0 ||
             fread(block, sizeof(block[0]), chunk, g_history_file) != chunk) {
-            xSemaphoreGive(g_history_mutex);
-            ESP_LOGE(TAG, "Could not read persistent history records at slot %lu",
+            /* A single unreadable slot must not blank the whole graph: skip the
+             * damaged block and keep the records already aggregated, matching
+             * power_history_read()'s tolerance. A persistent SPIFFS read failure
+             * here would otherwise turn every /api/power-history request into an
+             * HTTP 500 and hide all stored values. */
+            ESP_LOGE(TAG, "Could not read persistent history records at slot %lu; "
+                          "skipping the block",
                      (unsigned long)slot);
-            return ESP_FAIL;
+            remaining -= chunk;
+            index += chunk;
+            continue;
         }
         if (power_history_aggregate_core(window_start_utc, bucket_seconds, block,
                                          chunk, sum_w, count, bucket_count) != ESP_OK) {

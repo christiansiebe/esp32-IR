@@ -221,18 +221,24 @@ void uart_sleep_maybe_sleep_idf(void)
     /* Announce the transition to the peer before the radio goes quiet. The
      * hook runs here, still in the UART task and with the NO_LIGHT_SLEEP lock
      * held, so an ESP-NOW broadcast can leave reliably before the park. */
+    bool announced = false;
     if (s_state_notify != NULL) {
         s_state_notify(true);
+        announced = true;
     }
     uart_sleep_lock(false);
     vTaskDelay(pdMS_TO_TICKS(window_ms));
     uart_sleep_lock(true);
 
-    /* A real sleep happened: tell the peer we are awake and reachable again.
-     * Only announce when the CPU actually slept (slept_ms > 0); a window that a
-     * full UART buffer or scheduler delayed is not a state transition. */
+    /* Tell the peer we are awake and reachable again. This must happen whenever
+     * we announced a sleep above - NOT only when the CPU really parked: if the
+     * park was skipped (another task held an APB/PM lock, the scheduler was
+     * delayed, ...) slept_ms stays 0, and gating the awake announcement on
+     * slept_ms > 0 left the peer stuck on "sleeping" forever. The controller
+     * feedback below is still gated on a real sleep (a window that did not park
+     * is not evidence about the read head). */
     uint32_t slept_ms = s_slept_ms - before_ms;
-    if (slept_ms > 0 && s_state_notify != NULL) {
+    if (announced && s_state_notify != NULL) {
         s_state_notify(false);
     }
 

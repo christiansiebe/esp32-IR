@@ -1,5 +1,267 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-14): C6-Receiver-Boot-Hang vor `start_webserver()` — gehaertet
+**Branch `feat/c6-mqtt-cmd`. Details: `docs/c6-receiver-boot-hang.md`.**
+- **Symptom (live, `192.168.178.105`):** Port 80 tot (`nmap` -> alle Ports
+  `closed (reset)`), Kommando-Registry leer (`help` -> `unknown command`), MQTT
+  lebt (`status=online`), Ping mit `3<->546 ms`, `esp32ir/receiver/power` steht
+  still. Kein Reboot-Loop mehr (nur ein einzelner `task-watchdog`-Reboot).
+- **Diagnose:** `app_main` haengt **vor** `start_webserver()`. Die Registry ist
+  RAM-only und wird nur am Ende von `start_webserver()` befuellt -> leere Registry
+  = Webserver nie erreicht. MQTT/Ping leben weiter, weil `mqtt_bridge_start()` im
+  `IP_EVENT_STA_GOT_IP`-Handler auf dem `sys_evt`-Task laeuft, nicht in `app_main`.
+- **Watchdog-Luecke:** `liveness_guard`, `health_task`, `web_guard` starteten
+  **alle erst nach** `start_webserver()` -> ein Hang davor war **permanent**.
+- **Korrelation:** `dmesg` zeigt den C6 (`303a:1001`, SN `10:BD:A3:88:D7:14` ==
+  MQTT-Client `ESP32_88D714`) als `ttyACM0`, dann **USB-Disconnect** ~12:17 -
+  genau als HTTP/Konsole starben. Die C6-Konsole **ist** die USB-Serial/JTAG.
+- **Umgesetzt:** `liveness_guard_start()` ganz an den Anfang von `app_main`
+  (+ `liveness_note_alive()` nach jeder Init-Phase), `web_console_register_commands()`
+  vor die Wi-Fi-Init (Konsole antwortet auch ohne Webserver -> `reboot` per USB),
+  CI-Guard „Verify the receiver boot-order guard". Host-Tests gruen.
+- **Offen:** exakt blockierende Zeile noch nicht sicher benannt; bis dahin ist der
+  Backstop die Sicherheitsleine. Rebuild+Flash via GitHub-CI.
+- **✅ Hardware-verifiziert (2026-11-14, USB-Flash):** Per `esptool` direkt auf
+  `/dev/ttyACM0` geflasht (C6FH4, MAC `10:bd:a3:88:d7:14`), App-Version
+  `v0.4.0-52-ga5ca8e7`. **Vorher** (alter Stand): Port 80 tot (`RST`), Ping ok.
+  **Nachher:** Boot-Log zeigt `Webserver available … http://192.168.4.1/` +
+  `Receiver ready …` bei **~18,7 s**; `/api` -> HTTP 200 (`v0.4.0-52-ga5ca8e7`),
+  `/api/dashboard`, `/api/sml`, `/healthz` alle **200**. Der Boot-Hang ist damit
+  auf echter Hardware behoben (nicht nur die Haertung, der Webserver kommt hoch).
+
+## NEU (2026-11-14): C6-Idle-Leistung gemessen (FNB-48) — SoftAP ist der Kostentreiber
+**Branch `feat/c6-mqtt-cmd`, FNB-48 am C6 (`/dev/hidraw0`). Details: `docs/c6-idle-power-measured.md`.**
+- **Befund:** Bei **identischen Knobs** (`cpu=80`, `radio-save=5000/30`, `ps=max`,
+  `listen=10`, Burst-Lock aus) zieht `receiver-c6` (APSTA, SoftAP an) **0,42 W**,
+  `receiver-c6-apoff` (station-only) **0,19 W**. Der **laufende Setup-SoftAP kostet
+  ~0,22 W**; ein Beacon-Intervall von 1000 TU ändert nichts.
+- **`esp_wifi_set_ps()` wirkt am APSTA-Receiver nicht:** `max`/`min`/`off` alle
+  ~0,425 W. Der ESP-NOW-Empfang läuft über `WIFI_IF_AP`, das Modem-Sleep parkt nur
+  die STA. `ps max` + Leiter sind also korrekt, aber am APSTA-Receiver **wirkungslos**.
+- **CPU:** 160→80 MHz spart ~4–8 % (0,44→0,42 W), 80→40 nichts.
+- **Burst-Lock transient:** ohne Sender hält er das Modem bis zum 60-s-Lern-Timeout
+  wach (0,40 W), danach parkt es (0,19 W). Im Sendebetrieb bleibt „an" nötig.
+- **Empfehlung:** Für minimale Idle-Leistung `receiver-c6-apoff` flashen; der SoftAP
+  ist nur für das Erst-Setup ohne FRITZ!Box-Zugang nötig.
+- **Umgesetzt (2026-11-14):** SoftAP schaltet sich nach erfolgreicher STA-Verbindung
+  automatisch ab (`ap_auto_off`, Default an am C6-Receiver; Knopf `ap_enabled`,
+  `set ap on|off`, `set ap-auto-off on|off`, Seite `/config` → POST `/api/ap`). Der
+  AP kommt beim Boot hoch (Erst-Setup + Kanal-Scan des Senders) und fällt danach weg,
+  sobald die Station eine IP hat. Ist der Sender still, holt der Link-Fallback den AP
+  zurück (Selbstheilung). Damit ist auch der Default-`receiver-c6` sparsam.
+  Persistiert als `runtime_config`-Feld (Blob **v9**, 26 B, `[24]`/`[25]`).
+- **Gefixt & geflasht (2026-11-14 abends, `v0.4.0-50-g95f3c73`):** Nutzer-Befund
+  „läuft weiter mit 0,42 W" hatte **zwei** Ursachen: (a) `65da1fd` hatte `/api/ap`
+  ergänzt und damit `max_uri_handlers` (31) gesprengt → `ESP_ERR_HTTPD_HANDLERS_FULL`
+  → `abort()` → **Boot-Crash-Loop** (SoftAP dauerhaft an, ~0,5 W); behoben durch
+  Limit 34 + CI-Guard „Verify the httpd handler budget". (b) Der Link-Fallback holte
+  den AP ohne je gehörten Sender sofort zurück; jetzt an `g_sender_mac_valid` gekoppelt.
+  Zusätzlich: Auto-off um 60 s verzögert (Sender-Kanal-Scan) und der Sender merkt sich
+  den gelernten Kanal in NVS (`metercfg/espnow_ch`). **Gemessen ohne Sender: 0,068 W**
+  (vorher 0,42 W). Details + Bootlog: `docs/c6-idle-power-measured.md`.
+- **Offen:** Verlustfreiheit unter echter Senderlast weiterhin **nicht** messbar —
+  kein Sender am Prüfstand (`crc_valid=0`, `192.168.178.70` down).
+
+## NEU (2026-11-07): `ps max` als C6-Receiver-Default + adaptive Modem-Sleep-Leiter
+**Branch `feat/c6-mqtt-cmd`, Commit `cdf3f8d`, CI grün (`v0.4.0-42-gcdf3f8d`).**
+- Wunsch: „`ps max` einschalten und es schaltet selbst um, wenn Verluste zu groß."
+  Umgesetzt: Der C6-Empfänger startet auf **`ps max`** (sparsamste Sprosse) und
+  eine adaptive Leiter (`main/ps_ladder.{c,h}`) stuft bei **echtem** ESP-NOW-
+  Transportverlust eine Sprosse herunter (`max → min → off`), nach **3 sauberen
+  Fenstern** wieder hoch – nie über die Start-Sprosse, nie auf eine zweimal
+  gescheiterte Sprosse (Anti-Oszillation). Ein ruhiges Fenster (zu wenig Frames)
+  wird **nicht** beurteilt.
+- Signal: `g_sml_transport_losses`-Delta (nur Vorwärts-Sequenzsprünge) relativ zur
+  Frame-Zahl (`g_sml_valid_telegrams + g_sml_invalid_crc_telegrams`), Fenster 60 s.
+- Persistiert: `runtime_config`-Feld `ps_ladder` (Blob **v8**, 24 Byte, `[23]`);
+  C6-Receiver-Default `ps max` + `ps_ladder=true`; klassischer ESP32 und **jeder
+  Sender** bleiben bei `ps_ladder=false`.
+- Bedienung: `set ps off|min|max` (setzt Start-/Ceiling-Sprosse, re-armt),
+  `set ps-ladder on|off`; `/api/dashboard` liefert `ps_ladder`,
+  `ps_ladder_mode`, `ps_ladder_losses`, `ps_ladder_steps_down/_up`.
+- **Geräteverifiziert (.105, C6FH4, USB):** Boot meldet „Wi-Fi PS mode set to max
+  (listen_interval=10 beacons)"; `/api/dashboard` → `wifi_ps_mode:"max"`,
+  `ps_ladder:true`, `ps_ladder_mode:"max"`; `set ps-ladder off/on` wirkt sofort.
+- Host-Test `test/test_ps_ladder.c` (33 Checks) + volle Suite grün; CI prüft die
+  Leiter-Zeichenkette im Receiver-Image (Sender-Image ausgenommen).
+- **Offen:** Verlustfreiheit von `ps max` **noch nicht** empirisch belegbar – kein
+  Sender erreichbar (`crc_valid=0`, `sender_rssi_valid=false`). Sobald ein Sender
+  sendet: `ps_ladder_steps_down` beobachten (0 = `ps max` hält).
+
+## NEU (2026-11-07): MQTT-Kommando-Kanal — Rückrichtung `<base>/cmd` → `<base>/cmd/result`
+**Branch `feat/c6-mqtt-cmd` (Basis `feat/c6-burst-lock`).**
+- Der Receiver publiziert bisher nur nach MQTT. Jetzt **abonniert** er `<base>/cmd`
+  (QoS 1, Subscribe erst nach dem Discovery-/Reboot-Publish) und schickt jede Zeile
+  durch denselben Dispatcher wie die Web-/Seriell-Konsole (`web_console_run`); die
+  Antwort geht **retained** nach `<base>/cmd/result` als
+  `{"cmd":...,"ok":...,"out":...}`. Damit ist der Empfänger auch ohne Web-UI
+  bedienbar (`status`, `config`, `set ps min`, `pull`, …).
+- **Warum ein eigener Worker:** der MQTT-Task darf nie einen Befehl ausführen —
+  ein langsamer Befehl (z. B. `pull`) würde den Keepalive blockieren und die
+  Verbindung killen. Reassembly läuft im MQTT-Task, Ausführung in `mqtt_cmd`
+  (Queue-Tiefe 1, kein Stapeln).
+- **Reassembly:** esp-mqtt liefert große Payloads in mehreren `MQTT_EVENT_DATA`-
+  Events; auf Folge-Chunks ist `topic` **NULL** (außer
+  `CONFIG_MQTT_TOPIC_PRESENT_ALL_DATA_EVENTS`) — der Handler prüft das Topic nur,
+  wenn es gesetzt ist, und setzt sonst eine laufende Reassembly fort. Reines,
+  host-getestetes Modul `main/mqtt_cmd.{c,h}` (`test/test_mqtt_cmd.c`, 22 Checks).
+- **Sicherheit:** kein Kommando ohne gültigen Broker-Login (der Kanal hängt an der
+  authentifizierten MQTT-Session; `meter`/`Strom-Meter-2026` verifiziert). Der
+  Broker-ACL erlaubt `meter` Schreiben/Lesen auf `*`.
+- **Host-Suite grün**, Build über die GitHub-CI (`receiver-c6`) steht aus.
+
+## NEU (2026-11-11): "keine Werte im Speicher" — verifizierte Diagnose + Web-500-Fix
+**Geräteverifiziert (Receiver C6 .105, Sender via /api/sender-diag):**
+- Beide Rollen empfangen/decodieren **live weiter** (Receiver `crc_valid` steigt
+  14105→14124 in 20 s, power/avg bewegen sich; Sender `sml_sent_ok`/UART-RX steigen),
+  aber die **persistente Minuten-History schreibt seit `2026-11-09T05:21` keine neuen
+  Records** (CSV endet dort). CSV-Records
+  sind diskontinuierlich (~stundenweise, sample_count=60) → Wall-Clock springt nicht
+  zuverlässig minütlich → Minuten-Bucket-Sprung-Gate (`bucket_start > g_power_bucket_start_utc`)
+  triggert NICHT. **Beweis:** der Sender (ESP-NOW-Kalibrieruhr) schreibt weiter
+  `storage_records` herauf (10036→10038), der Receiver (SNTP-`time()`) stoppt.
+  **Gefixt (Commit `3606c3b`):** Receiver bekommt eine monotone-Uhr-Fallback wie der
+  Sender — letzte bekannte gute UTC wird an einen monotinen Zeitpunkt gelatcht
+  (Store-Seed bzw. jede gültige `time()`), `current_utc_seconds()` fällt bei
+  invalider `time()` darauf zurück. Werte bleiben ≥ `POWER_HISTORY_MIN_VALID_UTC`,
+  Dedup/Valid-Logik unangetastet. Sender+Receiver-Build grün, Host-Suite grün.
+  **Deployment/on-device-Verifikation steht aus** (flashen/OTA braucht den
+  Wi-Fi/OTA-Key des Nutzers; kein USB-Serial an dieser Maschine).
+  Hinweis: Ein falscher Zeit-Fix hätte die `POWER_HISTORY_MIN_VALID_UTC`/Dedup-Logik
+  (MUST-NOT-BREAK) beschädigen können — deshalb monotone-Fallback, nicht Time-Override.
+- **Gefixt (Commit `c188526`, Web-Erreichbarkeit=Teil des MUST):** Der Haupt-Endpunkt
+  `/api/power-history` warf **HTTP 500 "History aggregation failed"**, obwohl das
+  SPIFFS-Backend ready war und Records enthielt → gespeicherte Werte im Dashboard
+  **unsichtbar**. Root-Cause: `power_history_aggregate()` brach bei *einem einzigen*
+  unlesbaren Ring-Slot hart ab (fread-Fehler → ESP_FAIL), während
+  `power_history_read()`(CSV/JSON-Snapshot) unlesbare Slots tolerierte. Fix:
+  die Aggregation überspringt beschädigte Blöcke und aggregiert die gültigen
+  Records. Sender- + Receiver-Build grün, Host-Suite (power_history/backfill/...)
+  grün, kein Verhalten an den verlustfreien Defaults/Defaults geändert.
+
+
+
+## NEU (2026-11-10): Isolierte git-Objekte sichtbar gemacht — `docs/branch-inventory.md`
+**Erledigt (nur lesend + lokale refs, nichts gepusht/committet/gelöscht):**
+- Verwaiste Commits gesichert als lokale `archive/*`-Branches:
+  `archive/sync-slot-wip` (= `1b4389f`, der frühere **sync-slot + ACK-Handshake**-Versuch,
+  lag im Git-Stash → für `git log` unsichtbar; einzige echte ungemergte Arbeit, ersetzt durch
+  burst-lock), `archive/burst-lock-dupe-8d8c90c`, `archive/reconnect-dupe-5e6b310`.
+- Vollständiges Branch-Inventar (lokal + remote, Abstand zu `origin/main`) in
+  `docs/branch-inventory.md`.
+**OFFEN:** Archiv-Refs bei Bedarf pushen; obsolete `behind=246`-Branches aufräumen (erst nach
+Freigabe).
+
+## NEU (2026-11-10/11): SENDEFENSTER-Auftrag — Konzept bereits durch burst-lock umgesetzt, `1b4389f` verworfen
+**Auftrag „SENDEFENSTER + Light-Sleep (Sender/Receiver-Koordination)"** (delegierter Chat,
+`delegated/esp32-sendfenster`). **Ergebnis der Bestandsaufnahme:** Das geforderte Konzept ist auf
+dem aktuellen Branch `feat/c6-burst-lock` **bereits vollständig umgesetzt** — der alte Wall-Clock-
+sync-slot (`ESPNOW_SYNC_SLOT_MS`, `1b4389f`) wurde bewusst durch den **burst-lock**-Ansatz ersetzt
+(lernt die Sender-Burst-Phase und hält das Modem nur um die vorhergesagte Burst-Zeit wach), siehe
+`docs/branch-inventory.md` („durch burst-lock ersetzt/nicht weiterverfolgt"). Alle vier Muss-Ziele
+sind im aktuellen Code erfüllt:
+
+1. **SENDEFENSTER:** `main/burst_lock.{c,h}` + `burst_lock_worker` (`main/main.c`) — Receiver
+   öffnet `esp_wifi_force_wakeup_acquire()`-Fenster nur um die vorhergesagte Sender-Burst.
+2. **kein SML-Verlust:** `main/tx_batch.c` (Ring, Kap. 256, älteste evict, Requeue) +
+   `uart_sleep_window.c` (nur im verifizierten ruhigen Fenster schlafen).
+3. **Web-Erreichbarkeit:** burst-lock fasst PS-Modus/AP nie an → HTTP-Dashboard erreichbar
+   (kein Timeout), nur die Modem-Wake-Phase variiert.
+4. **Reliable-ACK:** `send_sml_telegram`/`wait_for_sml_ack`/`flush_tx_batch` — Receiver quittiert
+   jede Sequenz (`sml_transport_ack_t`), Sender retried bis `SML_ACK_MAX_ATTEMPTS=4` und reiht
+   Unquittiertes wieder ein (`sml_tx_batch_requeue_front`).
+
+**Entscheidung `1b4389f` → ENDGÜLTIG VERWORFEN** (reaktivieren bringt keinen Gewinn): Der
+burst-lock liefert dasselbe Sendefenster **ohne** präzise Wall-Clock-Sync als Voraussetzung und
+ist am Gerät gemessen verlustfrei (`ps=off`+`radio-save on` 20/15 → 0,8 % ≈ Baseline, und
+`ps min`+burst-lock ≈ Baseline). Der letzte tote Überrest (`#if defined(CONFIG_ESPNOW_SYNC_SLOT_MS)`
+in `main/main.c` ohne Kconfig-Symbol) wurde entfernt (nur Dokumentation/Mehrfach-Sync-Pfad, kein
+Verhalten; Zeit-Sync bleibt stündlich).
+
+**Verifiziert (Build + Host-Tests, Branch `feat/c6-burst-lock`, HEAD `0467070`+Cleanup):**
+`send`, `receiver` (=klassischer ESP32) und `receiver-c6` (=ESP32-C6, CI-äquivalent) bauen grün,
+keine Fehler. Host-Suite grün inkl. Reliable-Ack-Reihe: `test_tx_batch` 55, `burst lock` 44,
+`sml transport ack` 11, `uart sleep window` 25, `sleep announce` 9, `liveness` 139 (alle 0
+failures). Sender-Bin enthält `adaptive sleep path compiled in`, C6-Receiver-Bin enthält
+burst-lock/ACK-Strings.
+**Hardware-Grenze (dokumentiert, nicht brechbar):** Light-Sleep ist auf dem C6-Build NICHT
+schaltbar (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG` → `runtime_config_light_sleep_allowed()==false`,
+IDF-6395); der verlustfreie C6-Stromspar-Default läuft über `radio-save`/burst-lock. Am echten
+Gerät .105 steht noch der offene Punkt oben (Sender-Telegramme `crc_valid=0`/`sender-diag` 503,
+anderer Chat flasht parallel) — unabhängig von diesem Auftrag.
+
+## NEU (2026-11-08): `set ps`/`set listen` rissen den Link ein — behoben (`07419b1`, Branch `feat/c6-burst-lock`)
+**Erledigt + am Gerät verifiziert:** `set ps` fasst den Link nicht mehr an; `set listen`
+reconnected nur bei tatsächlich geändertem `listen_interval`, out-of-band über einen
+400 ms-One-Shot-Timer (Antwort wird vorher geflusht → kein „set timed out" mehr).
+Counter `wifi_reconnects` / `wifi_reconnect_skips` in `/api/dashboard` + `status`.
+Verifiziert: `set ps off` → skip; `set listen 10` (gleich) → skip; `set listen 20` →
+genau 1 reconnect; Link durchgehend HTTP 200.
+
+**Messung (300 s, ab9–ab12):** `ps off`+`radio-save 20/15` und `ps min`+burst-lock
+beide ~16–18 % Verlust **und identisch** → Umgebungsstörung, nicht der Sleep-Modus.
+Keine Konfiguration verursachte Reboots/HTTP-Fehler. Merksatz bleibt: **nie**
+`ps min/max` **ohne** `radio-save`.
+
+**OTA-Weg:** Cloudflare-Quick-Tunnel bricht Pull-OTA ab (Rollback) → direktes
+`POST /update` mit `--data-binary @build/receiver-c6-apoff/esp32-IR.bin` nutzen.
+
+**OFFEN:** Am Gerät .105 keine Sender-Telegramme (`crc_valid=0`, „No sender MAC known yet",
+`sender-diag` 503) — Sender stumm, prüfen. C6-WLAN-Flapper (`run->init`) im Bootlog; ein
+anderer Chat flasht .105 parallel.
+
+
+
+## NEU (2026-11-08): Modem-Sleep-Wächter (ps_fallback) + Compile-/Test-Fixes – Branch `feat/nvs-web-knobs`
+**Warum:** Der C6-Empfänger hat drei Stromspar-Hebel, die je den Link zerstören
+können (Light Sleep → USB-Konsole tot; `ps min/max` → Disconnect-Sturm;
+`radio-save` → verpasste Frames). Dazu flappt die FRITZ!Box auch ohne Hebel.
+Ein Wächter, der **jeden** Disconnect zählt, würde den Sleep grundlos abschalten.
+
+- **`main/ps_fallback.{c,h}` + `ps_fallback_worker` (beide Rollen):** zählt STA-
+  Disconnects im gleitenden Fenster (Default 3/120 s, 30 s Schonfrist). Bei
+  einem Sturm fällt er **sticky** auf `WIFI_PS_NONE` + `radio-save=false` zurück
+  und persistiert das. Absichtliche Reconnects zählen nicht; `set ps` re-armt.
+- **Drei Fehler behoben (dieser Commit):**
+  1. **Compile-Bug:** `ps_fallback_worker` rief `diag_log_event()` (sender-only)
+     → **alle Empfänger-/C6-Builds scheiterten** (`'diag_log_event' used but
+     never defined`). Aufruf in `#if CONFIG_ESPNOW_ROLE_SENDER` gekapselt.
+  2. **Falsch-Positiv:** zählte auch ohne aktiven Modem-PS-Modus → jetzt nur bei
+     `ps != off` (der Wake-Window allein zählt nicht) und nur auf dem Empfänger.
+  3. **Test war immer grün:** `CHECK`-Makro in `test/test_ps_fallback.c` erhöhte
+     `g_failures` nie → gefixt.
+- **Sicherer Modem-Light-Sleep (gemessen, s. Messauftrag oben):** `ps off` +
+  `radio-save on` 20/15 (0,8 % ≈ Baseline); wenn Modem-Sleep zwingend, `ps max`
+  + `listen 10` + `radio-save on` 20/15. **Nie** `ps min/max` ohne `radio-save`.
+  Genau diesen Default setzt der Messauftrag/Fix oben; der Wächter ist das
+  Sicherheitsnetz, falls doch ein PS-Modus erzwungen wird. Light Sleep bleibt
+  am C6 aus (USB-Konsole).
+- **Verifiziert:** IDF-v6.1-Build aller Rollen gruen (`sender`, `receiver`,
+  `receiver-c6-apoff`), Host-Suite grün. Details: `docs/c6-modem-sleep-safety.md`.
+- **Offen (am Gerät):** `set ps max` + `set listen 5/10/20/30` am C6 mit der
+  FRITZ!Box messen; prüfen, ob der Wächter wie erwartet auslöst und die
+  ESP-NOW-Frames weiter ankommen.
+
+## NEU (2026-11-08): Laufzeit-NVS-Knoepfe ueber die Web-Konsole – Branch `feat/nvs-web-knobs`, PR #67
+**Ziel:** Jeder nutzerseitige NVS-Wert ist zur Laufzeit aenderbar (Safe-Fallback),
+und die kuenstlichen Wertebereiche reichen bis an die harte IDF-/SoC-Grenze, damit
+spaetere Aenderungen **kein Neukompilieren** brauchen.
+
+- **Bereiche geweitet** (`main/runtime_config.h`, Blob bleibt v6 / 22 B):
+  `retries` 0..255, `txpower` 0=Default sonst 1..20 dBm, `beacon` 0/100..60000 TU
+  (Vielfaches von 100), `wake-interval` 10..65535 ms, `wake-window` 1..65535 ms,
+  `twt-wake` 500..65535 ms, `listen` 1..65535; `cpu` bleibt 40..160 (SoC-Grenze).
+  Defaults: `listen`=**10** (war 3), `ps`=**min** (unveraendert).
+- **Neue Konsolen-Setter** (`set`): `wifi-ssid`, `wifi-pass` (-> `metercfg` +
+  Reconnect; leeres Passwort behaelt das alte) und `mqtt-uri`, `mqtt-prefix`,
+  `mqtt-user`, `mqtt-pass` (-> `mqttcfg` + Bridge-Neustart ueber
+  `mqtt_bridge_set_config`). Bei Fehler bleibt der alte Wert erhalten.
+  `mqtt-prefix` wird getrimmt persistiert.
+- **Validierung** in `main/net_config.{c,h}` (host-getestet), **Safe-Fallback**:
+  ein von der PM-/WLAN-API abgelehnter Wert faellt auf den Default zurueck und
+  wird persistiert (sichtbar in `config`).
+- **Tests:** `test/test_runtime_config.c`, `test/test_net_config.c` (neu),
+  `test/test_web_console.c` (Help-Puffer-Regression); alle Host-Suiten gruen.
 
 ## MESSUNG (2026-11-08, .105): Modem-Sleep-Kombinationen ohne Telegramm-Verluste
 **Aufbau:** `.105` = C6-Empfänger (USB-JTAG-Konsole), Sender = **klassischer ESP32**
@@ -119,9 +381,10 @@ USB-Serial/JTAG-Kabel (CPU-Wachhaltung), nicht die Assoziation.
 ob (a) die FRITZ!Box trennt, (b) die Leistung sinkt, (c) der Empfaenger weiter
 ESP-NOW-Frames sieht. Rueckweg: `set ps min` bzw. `reset-config`.
 
-**Merge-Hinweis:** `feat/c6-ap-switch` bumpt denselben `rtcfg`-Blob ebenfalls (auf v5,
-18 B, `ap_enabled`); dieser Stand ist v6 (22 B). Beim Merge die Layouts in EINE
-Version falten (Offsets bis [15] identisch).
+**Merge-Hinweis (erledigt):** `feat/c6-ap-switch` (v5, 18 B, `ap_enabled`) und der
+PS-Stand (v6, 22 B) sind in **v9 (26 B)** zusammengefuehrt: der Blob haengt
+`burst_lock` [22], `ps_ladder` [23], `ap_enabled` [24] und `ap_auto_off` [25] an;
+ein Alt-Blob anderer Groesse wird ignoriert (Defaults greifen).
 
 ## NEU (2026-11-07): C6-Receiver – `sleep on` killt die USB-Konsole (BEHOBEN, CI-gruen 7e34996)
 **Befund (reproduziert):** `set sleep on` (automatic light sleep) schaltet auf dem

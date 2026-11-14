@@ -31,7 +31,13 @@
 #define SERIAL_CONSOLE_TX_BUF 1024
 #define SERIAL_CONSOLE_TX_CHUNK 128
 #define SERIAL_CONSOLE_LINE_MAX 192
-#define SERIAL_CONSOLE_STACK 4096
+/* Holds a WEB_CONSOLE_OUT_MAX (1536) result buffer on the stack *and* runs the
+ * command handlers on top of it. 'set mqtt-*' reaches mqtt_bridge_start(), whose
+ * locals alone (esp_mqtt_client_config_t + the URI/user/pass buffers + a
+ * mqtt_topics_t of 7 topics) add several KB - at 5120 this overflowed and
+ * panicked with a stack protection fault. 12288 matches the HTTP server task,
+ * which runs the same commands safely. */
+#define SERIAL_CONSOLE_STACK 12288
 #define SERIAL_CONSOLE_PRIO 3
 
 static const char *TAG = "serial_console";
@@ -115,7 +121,7 @@ static void serial_console_task(void *arg)
             }
             line[used] = '\0';
             used = 0;
-            char out[768];
+            char out[WEB_CONSOLE_OUT_MAX];
             web_console_run(line, out, sizeof(out));
             /* \r\n so a plain terminal shows the result on its own line. */
             console_write("\r\n", 2);
