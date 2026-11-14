@@ -382,6 +382,7 @@ int main(void)
     rt.wifi_ps_mode = RUNTIME_CONFIG_PS_MAX;
     rt.listen_interval = 30;
     rt.burst_lock = true;
+    rt.ps_ladder = true;
     uint8_t blob[RUNTIME_CONFIG_BLOB_SIZE];
     runtime_config_encode(&rt, blob, sizeof(blob));
     CHECK(blob[0] == RUNTIME_CONFIG_BLOB_VERSION, "blob carries the current version");
@@ -397,7 +398,8 @@ int main(void)
               back.twt_enabled == rt.twt_enabled &&
               back.twt_wake_ms == rt.twt_wake_ms &&
               back.wifi_ps_mode == rt.wifi_ps_mode &&
-              back.burst_lock == rt.burst_lock,
+              back.burst_lock == rt.burst_lock &&
+              back.ps_ladder == rt.ps_ladder,
           "the blob roundtrip restores every knob");
     /* A wrong version or size is rejected so an old blob is ignored. */
     blob[0] = (uint8_t)(RUNTIME_CONFIG_BLOB_VERSION - 1);

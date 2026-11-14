@@ -111,11 +111,16 @@ typedef struct {
     uint16_t wake_window_ms;  /* radio-awake time per wake interval; 0 = off */
     bool twt_enabled;         /* receiver: negotiate Wi-Fi 6 TWT with the AP */
     uint16_t twt_wake_ms;     /* iTWT wake interval in ms (500..65535) */
-    uint8_t wifi_ps_mode;     /* receiver: Wi-Fi modem PS mode (0/1/2) */
+    uint8_t wifi_ps_mode;     /* receiver: Wi-Fi modem PS mode (0/1/2); with the
+                               * ladder on this is the *start/ceiling* rung */
     uint16_t listen_interval; /* receiver: beacon listen interval for PS max */
     bool burst_lock;          /* receiver: predict the sender's burst and open a
                                * short RX window around it instead of a free-running
                                * connectionless wake window (see burst_lock.c) */
+    bool ps_ladder;           /* receiver: adapt the modem PS mode down on
+                               * transport loss and back up when clean (see
+                               * ps_ladder.c). The effective mode is then the
+                               * ladder rung, not wifi_ps_mode. */
 } runtime_config_t;
 
 /* Persisted blob wire format (NVS glue in main.c does the nvs_set_blob /
@@ -135,9 +140,13 @@ typedef struct {
  * and open a short RX window around it instead of a free-running connectionless
  * wake window); the blob is 23 bytes. The v6 prefix is unchanged, so a v6 blob
  * is a different (wrong) size and is ignored by runtime_config_decode(), and the
- * device falls back to the defaults. */
-#define RUNTIME_CONFIG_BLOB_VERSION 7u
-#define RUNTIME_CONFIG_BLOB_SIZE 23u
+ * device falls back to the defaults.
+ *
+ * v8 appends the modem-sleep ladder flag at [23] (receiver: adapt the PS mode
+ * down on transport loss and back up when clean); the blob is 24 bytes. The v7
+ * prefix is unchanged, so a v7 blob is a different size and is ignored. */
+#define RUNTIME_CONFIG_BLOB_VERSION 8u
+#define RUNTIME_CONFIG_BLOB_SIZE 24u
 
 /* Encode cfg into a RUNTIME_CONFIG_BLOB_SIZE-byte blob. No-op when the buffer is
  * NULL or too small. */

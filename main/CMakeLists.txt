@@ -45,7 +45,7 @@ if(CONFIG_ESPNOW_ROLE_RECEIVER)
     list(APPEND main_srcs "mqtt_bridge.c" "mqtt_publish.c" "mqtt_events.c"
                           "mqtt_cmd.c"
                           "web_guard.c" "health_policy.c" "health_task.c"
-                          "burst_lock.c")
+                          "burst_lock.c" "ps_ladder.c")
 endif()
 if(CONFIG_ESPNOW_ROLE_SENDER)
     list(APPEND main_srcs "tx_batch.c" "uart_sleep_window.c" "uart_recovery.c")

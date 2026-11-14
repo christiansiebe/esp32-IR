@@ -50,6 +50,7 @@
 #include "json_escape.h"
 #include "link_fallback.h"
 #include "ps_fallback.h"
+#include "ps_ladder.h"
 #include "power_history.h"
 #include "energy_totals.h"
 #include "runtime_config.h"
@@ -416,6 +417,19 @@ static volatile bool g_link_fallback_active;
  * silence adds a stage instead of only logging. Kept outside the role guard
  * because it also logs counts in the shared diagnostics. */
 static volatile uint8_t g_link_fallback_stage;
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Adaptive modem-sleep ladder (receiver). Runs the station on the most frugal PS
+ * mode the ESP-NOW link can hold and steps down on transport loss, so the
+ * operator sets `ps max` and the firmware finds the frugal-but-loss-free rung on
+ * its own. The mode it returns is applied with esp_wifi_set_ps(); wifi_ps_mode
+ * in the config is then only the start/ceiling rung. */
+static ps_ladder_t g_ps_ladder;
+static portMUX_TYPE g_ps_ladder_lock = portMUX_INITIALIZER_UNLOCKED;
+/* Last transport-counter values the ladder worker saw, to feed it deltas. */
+static uint32_t g_ladder_last_losses;
+static uint32_t g_ladder_last_telegrams;
 #endif
 
 #if CONFIG_ESPNOW_PS_FALLBACK
@@ -4543,20 +4557,32 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
      * modem sleeps between wakes. Reading the live runtime config here keeps the
      * dashboard able to show the currently effective values alongside the burst
      * lock, without touching the radio. */
-    char radio_json[160] = "";
+    char radio_json[220] = "";
 #if !CONFIG_ESPNOW_ROLE_SENDER
     {
         runtime_config_t *rcfg = active_runtime_config();
         const char *ps_name = rcfg->wifi_ps_mode == 0 ? "off"
                               : rcfg->wifi_ps_mode == 2 ? "max"
                                                      : "min";
+        portENTER_CRITICAL(&g_ps_ladder_lock);
+        const char *ladder_name = ps_ladder_mode(&g_ps_ladder) == 0 ? "off"
+                                  : ps_ladder_mode(&g_ps_ladder) == 2 ? "max"
+                                                                     : "min";
+        unsigned ladder_losses = (unsigned)ps_ladder_total_losses(&g_ps_ladder);
+        unsigned ladder_down = (unsigned)ps_ladder_steps_down(&g_ps_ladder);
+        unsigned ladder_up = (unsigned)ps_ladder_steps_up(&g_ps_ladder);
+        portEXIT_CRITICAL(&g_ps_ladder_lock);
         int radio_len = snprintf(
             radio_json, sizeof(radio_json),
             ",\"radio_save\":%s,\"wake_interval_ms\":%u,\"wake_window_ms\":%u,"
-            "\"wifi_ps_mode\":\"%s\",\"listen_interval\":%u",
+            "\"wifi_ps_mode\":\"%s\",\"listen_interval\":%u,"
+            "\"ps_ladder\":%s,\"ps_ladder_mode\":\"%s\",\"ps_ladder_losses\":%u,"
+            "\"ps_ladder_steps_down\":%u,\"ps_ladder_steps_up\":%u",
             rcfg->radio_save ? "true" : "false",
             (unsigned)rcfg->wake_interval_ms, (unsigned)rcfg->wake_window_ms,
-            ps_name, (unsigned)rcfg->listen_interval);
+            ps_name, (unsigned)rcfg->listen_interval,
+            rcfg->ps_ladder ? "true" : "false", ladder_name, ladder_losses,
+            ladder_down, ladder_up);
         if (radio_len < 0 || (size_t)radio_len >= sizeof(radio_json)) {
             return ESP_FAIL;
         }
@@ -6695,6 +6721,21 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         strcmp(key, "wake-window") == 0 || strcmp(key, "window") == 0 ||
         strcmp(key, "burst-lock") == 0) {
         apply_radio_power_config();
+    }
+    /* 'set ps' sets the ladder's start/ceiling rung; the worker then adapts down
+     * from it. 'set ps-ladder on|off' enables/disables the adaptation. Both need
+     * the ladder's start updated so a later raise respects the new ceiling. */
+    if (strcmp(key, "ps") == 0 || strcmp(key, "wifi-ps") == 0 ||
+        strcmp(key, "ps-ladder") == 0 || strcmp(key, "ladder") == 0) {
+        portENTER_CRITICAL(&g_ps_ladder_lock);
+        ps_ladder_set_start(&g_ps_ladder, (ps_ladder_mode_t)cfg->wifi_ps_mode,
+                            (uint32_t)(esp_timer_get_time() / 1000));
+        portEXIT_CRITICAL(&g_ps_ladder_lock);
+        /* Apply at once: 'set ps-ladder off' must drop back to the configured
+         * mode without waiting for the next worker tick. */
+        if (strcmp(key, "ps-ladder") == 0 || strcmp(key, "ladder") == 0) {
+            apply_wifi_ps_config();
+        }
     }
     /* 'set ps' and 'set listen' both need a reconnect: listen_interval is read
      * from the station config only when the association request is built. */
@@ -9243,6 +9284,63 @@ static void ps_fallback_worker(void *arg)
 }
 #endif /* CONFIG_ESPNOW_PS_FALLBACK */
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Adaptive modem-sleep ladder worker (receiver). Every PS_LADDER_TICK_MS it
+ * feeds the ladder the delta of the transport counters and applies a changed
+ * rung. The loss counter only moves when a *forward* sequence jump is seen (a
+ * broadcast frame really was lost), so the ladder is driven by real air loss,
+ * not by a stale radio. The mode it returns is applied with esp_wifi_set_ps();
+ * a rung change costs a brief reconnect (the association request carries the
+ * listen_interval), which is why the ladder only moves on a *sustained*
+ * condition and recovers slowly. */
+#define PS_LADDER_TICK_MS 5000u
+
+static void ps_ladder_worker(void *arg)
+{
+    (void)arg;
+    /* The ladder is seeded by ps_ladder_boot_init() before the boot power-apply;
+     * the worker only observes and adapts. */
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(PS_LADDER_TICK_MS));
+        const runtime_config_t *rcfg = active_runtime_config();
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        uint32_t losses_now, frames_now;
+        portENTER_CRITICAL(&g_sml_history_lock);
+        losses_now = g_sml_transport_losses;
+        frames_now = g_sml_valid_telegrams + g_sml_invalid_crc_telegrams;
+        portEXIT_CRITICAL(&g_sml_history_lock);
+
+        ps_ladder_mode_t mode;
+        bool enabled;
+        portENTER_CRITICAL(&g_ps_ladder_lock);
+        enabled = rcfg->ps_ladder;
+        ps_ladder_set_enabled(&g_ps_ladder, enabled);
+        ps_ladder_note_loss(&g_ps_ladder, losses_now - g_ladder_last_losses);
+        ps_ladder_note_frames(&g_ps_ladder, frames_now - g_ladder_last_telegrams);
+        g_ladder_last_losses = losses_now;
+        g_ladder_last_telegrams = frames_now;
+        ps_ladder_mode_t before = ps_ladder_mode(&g_ps_ladder);
+        uint32_t window_losses = ps_ladder_window_losses(&g_ps_ladder);
+        mode = ps_ladder_poll(&g_ps_ladder, now_ms);
+        uint32_t steps_down = ps_ladder_steps_down(&g_ps_ladder);
+        uint32_t steps_up = ps_ladder_steps_up(&g_ps_ladder);
+        portEXIT_CRITICAL(&g_ps_ladder_lock);
+
+        if (!enabled || mode == before) {
+            continue;
+        }
+        static const char *const names[] = {"off", "min", "max"};
+        ESP_LOGW(TAG, "Modem-sleep ladder: rung %s -> %s (window losses %lu, steps %u/%u)",
+                 names[before], names[mode], (unsigned long)window_losses,
+                 (unsigned)steps_down, (unsigned)steps_up);
+        /* Apply through the normal path: it reads the ladder rung, re-arms the
+         * modem-sleep watchdog (a deliberate change) and reconnects when the
+         * listen_interval for the new rung needs a fresh association. */
+        wifi_ps_apply_and_reconnect();
+    }
+}
+#endif /* !CONFIG_ESPNOW_ROLE_SENDER */
+
 /* --- Global liveness watchdog --------------------------------------------
  * The per-subsystem guards (web_guard on the dashboard, link_fallback on the
  * ESP-NOW peer) each watch one path. This is the backstop for a *global* stall:
@@ -9691,6 +9789,16 @@ static void apply_wifi_ps_config(void)
     if (cfg->wifi_ps_mode > RUNTIME_CONFIG_PS_MAX) {
         mode = WIFI_PS_MIN_MODEM;
     }
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* When the adaptive ladder is on, the live mode is its rung, not the
+     * configured start: the worker steps it down on loss and back up when the
+     * link is clean. */
+    if (cfg->ps_ladder) {
+        portENTER_CRITICAL(&g_ps_ladder_lock);
+        mode = (wifi_ps_type_t)ps_ladder_mode(&g_ps_ladder);
+        portEXIT_CRITICAL(&g_ps_ladder_lock);
+    }
+#endif
 #if CONFIG_ESPNOW_PS_FALLBACK
     /* The modem-sleep watchdog latched: the mode broke the link, so never
      * re-apply it (the proven mode is WIFI_PS_NONE, radio always awake). */
@@ -10120,6 +10228,29 @@ static void burst_lock_get_stats(burst_lock_stats_t *out)
 }
 #endif
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Initialise the ladder from the active config. Called once before the boot
+ * power-apply (so apply_wifi_ps_config() reads a real rung, not the zeroed
+ * struct) and again by the worker; both use the same start value. */
+static void ps_ladder_boot_init(void)
+{
+    const runtime_config_t *cfg = active_runtime_config();
+    uint32_t start = cfg->wifi_ps_mode <= RUNTIME_CONFIG_PS_MAX
+                         ? cfg->wifi_ps_mode
+                         : RUNTIME_CONFIG_PS_MIN;
+    portENTER_CRITICAL(&g_ps_ladder_lock);
+    ps_ladder_init(&g_ps_ladder, PS_LADDER_DEFAULT_WINDOW_MS,
+                   PS_LADDER_DEFAULT_LOSS_PCT, PS_LADDER_DEFAULT_MIN_FRAMES,
+                   PS_LADDER_DEFAULT_MIN_LOSSES,
+                   PS_LADDER_DEFAULT_RECOVERY_WINDOWS, PS_LADDER_DEFAULT_FLOOR,
+                   (ps_ladder_mode_t)start, 0u);
+    ps_ladder_set_enabled(&g_ps_ladder, cfg->ps_ladder);
+    g_ladder_last_losses = g_sml_transport_losses;
+    g_ladder_last_telegrams = g_sml_valid_telegrams;
+    portEXIT_CRITICAL(&g_ps_ladder_lock);
+}
+#endif
+
 void app_main(void)
 {
     /* Capture the boot log in RAM first, so the Wi-Fi dashboard can offer it
@@ -10128,6 +10259,9 @@ void app_main(void)
     initialize_wifi_and_espnow();
     apply_power_management();
 #if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Seed the ladder before the boot power-apply reads it, so a
+     * `ps-ladder on` default takes effect from the first association. */
+    ps_ladder_boot_init();
     /* The radio-side knobs need the Wi-Fi driver started, which
      * initialize_wifi_and_espnow() has done by now. */
     apply_radio_power_config();
@@ -10293,6 +10427,12 @@ void app_main(void)
         ESP_LOGW(TAG, "Could not start the burst-lock worker");
     }
 #endif
+    /* Adaptive modem-sleep ladder: runs the station at the most frugal PS mode
+     * the link holds and steps down on transport loss. Started here (not under a
+     * config guard) so a 'set ps-ladder on' takes effect without a reboot. */
+    if (xTaskCreate(ps_ladder_worker, "ps_ladder", 3072, NULL, 2, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the modem-sleep ladder worker");
+    }
     ESP_LOGI(TAG, "Receiver ready: http://192.168.4.1/ | /sender | /diag | /log | /console | /bootlog | /config | /update");
     while (1) {
         /* Confirm the running OTA image once it has been stable for the policy

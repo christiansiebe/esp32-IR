@@ -81,7 +81,13 @@ runtime_config_t runtime_config_defaults(void)
          * 75% duty of the 20/15 wake window). It never touches the PS mode or
          * the AP, so the HTTP/MQTT/OTA control path is unaffected. So the C6
          * receiver defaults to the loss-free *and* low-power combo: station PS
-         * min + burst lock with a 150 ms window.
+         * + burst lock with a 150 ms window.
+         *
+         * The adaptive ladder goes one step further: instead of hard-coding the
+         * PS mode, it starts at the *most* frugal rung (`ps max`) and steps down
+         * to `ps min`/`off` only when a window really loses ESP-NOW frames, then
+         * climbs back once the link is clean. So the operator gets `ps max` by
+         * default and the firmware falls back on its own when losses grow.
          *
          * The classic ESP32 (and every sender) keeps the old default: there the
          * wake window is accepted but breaks the ESP-NOW link, so it must stay
@@ -91,13 +97,20 @@ runtime_config_t runtime_config_defaults(void)
         .wake_interval_ms = 20u,
         .wake_window_ms = 150u,
         .burst_lock = true,
-        .wifi_ps_mode = RUNTIME_CONFIG_PS_MIN,
+        /* Start the ladder at the frugal `ps max`; the worker steps down to
+         * `ps min`/`off` if the ESP-NOW link actually loses frames. */
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_MAX,
+        /* Adaptive ladder: start at the frugal `ps max` and step down on
+         * transport loss. Only the C6 receiver can afford `ps max` (its burst
+         * lock covers the burst), so the classic default keeps it off. */
+        .ps_ladder = true,
 #else
         .radio_save = false,
         .wake_interval_ms = 100u,
         .wake_window_ms = 70u,
         .burst_lock = false,
         .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
+        .ps_ladder = false,
 #endif
         /* Wi-Fi 6 TWT is opt-in; the wake cadence is only used once enabled. */
         .twt_enabled = false,
@@ -206,6 +219,7 @@ void runtime_config_encode(const runtime_config_t *cfg, uint8_t *blob, size_t bl
     uint16_t listen = cfg->listen_interval;
     memcpy(&blob[20], &listen, sizeof(listen));
     blob[22] = cfg->burst_lock ? 1u : 0u;
+    blob[23] = cfg->ps_ladder ? 1u : 0u;
 }
 
 bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config_t *cfg)
@@ -241,6 +255,7 @@ bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config
     memcpy(&listen, &blob[20], sizeof(listen));
     loaded.listen_interval = listen;
     loaded.burst_lock = blob[22] != 0;
+    loaded.ps_ladder = blob[23] != 0;
     *cfg = loaded;
     return true;
 }
@@ -407,6 +422,11 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
     } else if (strcmp(key, "burst-lock") == 0) {
         if (!runtime_config_parse_bool(value, &next.burst_lock)) {
             snprintf(err, err_size, "burst-lock: expected on or off\n");
+            return false;
+        }
+    } else if (strcmp(key, "ps-ladder") == 0 || strcmp(key, "ladder") == 0) {
+        if (!runtime_config_parse_bool(value, &next.ps_ladder)) {
+            snprintf(err, err_size, "ps-ladder: expected on or off\n");
             return false;
         }
     } else if (strcmp(key, "wake-interval") == 0 || strcmp(key, "wake") == 0) {
@@ -738,6 +758,7 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              "ap beacon: %s\n"
              "radio save: %s\n"
              "burst lock: %s\n"
+             "ps ladder: %s\n"
              "twt: %s\n"
              "wifi ps: %s\n"
              "listen interval: %u beacons\n",
@@ -747,7 +768,8 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
                                      ? "off"
                                      : "off (unavailable: USB Serial/JTAG console)"),
              (unsigned)cfg->espnow_retries, tx, beacon, wake,
-             cfg->burst_lock ? "on" : "off", twt, ps,
+             cfg->burst_lock ? "on" : "off", cfg->ps_ladder ? "on" : "off",
+             twt, ps,
              (unsigned)cfg->listen_interval);
 }
 

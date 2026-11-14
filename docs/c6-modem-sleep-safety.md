@@ -412,3 +412,59 @@ interner Logger läuft weiter, der Puffer füllt sich, die Live-Werte stehen.
 SIGINT/SIGTERM, via KeyboardInterrupt im `finally`) und vor jedem Start doppelt.
 Verifiziert: nach SIGTERM mitten in einer Messung liefert der nächste Lauf sofort
 wieder frische Werte (CRC ok).
+
+## Nachtrag 2026-11-07: `ps max` als Default + adaptive Leiter (`ps_ladder`)
+
+**Wunsch:** „Kannst du `ps max` einschalten und es schaltet selbst um, wenn
+Verluste zu groß?" → **`ps max` ist jetzt der C6-Receiver-Default**, und eine
+adaptive Leiter fällt automatisch auf `ps min`/`off` zurück, sobald der ESP-NOW-
+Transport wirklich Frames verliert.
+
+### Wie die Leiter arbeitet (`main/ps_ladder.{c,h}`)
+
+- **Signal:** das ESP-NOW-Transport-Verlustzähler-Delta (`g_sml_transport_losses`,
+  nur *Vorwärts*-Sequenzsprünge = ein Broadcast-Frame kam nie an) relativ zur
+  Frame-Zahl des Fensters (`g_sml_valid_telegrams + g_sml_invalid_crc_telegrams`).
+- **Fenster:** 60 s (der Sender-Burst-Zyklus). Ein Fenster mit **≥ 4 Frames**,
+  **≥ 2 Verlusten** und **≥ 20 % Verlust** kostet eine Sprosse. Ein Fenster mit
+  zu wenigen Frames wird **nicht** beurteilt (kein Funkverkehr ≠ Funkverlust).
+- **Stufen:** `max → min → off` (Default-Floor `off`). **3 saubere Fenster**
+  (~3 min) steigen eine Sprosse wieder hoch, aber **nie über die Start-Sprosse**.
+- **Keine Oszillation:** Eine Sprosse, die **zweimal** heruntergestuft wurde,
+  wird nicht mehr erklommen (Fehlerspeicher pro Sprosse). Ein explizites
+  `set ps …` **re-armt** die Leiter (löscht den Fehlerspeicher).
+- **Anwenden:** über `wifi_ps_apply_and_reconnect()` → `esp_wifi_set_ps()`; die
+  Leiter-Sprosse, nicht `wifi_ps_mode`, ist dann der Live-Modus. Jede Änderung
+  re-armt den `ps_fallback`-Wächter (bewusster Wechsel) und reconnectet, damit
+  der `listen_interval` in der neuen Assoziation ankommt.
+
+### Defaults
+
+```
+ps max + ps-ladder on + burst-lock on (150 ms) + radio-save off
+listen 10, cpu 160/40 MHz, sleep off
+```
+
+`runtime_config.c`-Default (`#if defined(CONFIG_IDF_TARGET_ESP32C6) &&
+!CONFIG_ESPNOW_ROLE_SENDER`): `wifi_ps_mode = PS_MAX`, `ps_ladder = true`. Der
+klassische ESP32 und **jeder** Sender behalten den alten Default
+(`ps_ladder = false`), weil `ps max` dort ohne Burst-Lock den Link bricht.
+
+### Bedienung
+
+- `set ps off|min|max` → setzt Start-/Ceiling-Sprosse der Leiter (re-armt).
+- `set ps-ladder on|off` → schaltet die Adaption (sofort angewandt).
+- Dashboard (`/api/status`): `ps_ladder`, `ps_ladder_mode`, `ps_ladder_losses`,
+  `ps_ladder_steps_down`, `ps_ladder_steps_up`.
+- Config-Render (`/config`): Zeile `ps ladder: on|off`.
+
+### Verifikation
+
+- Host-Test `test/test_ps_ladder.c` (33 Checks, 0 Fehler): Start, Einzelverlust,
+  50 %-Fenster, ruhiges Fenster, Floor, Aufstieg, kein Übersteigen der Start-
+  Sprosse, Streak-Bruch, Teilfenster, Disabled, `force_mode`-Clamp,
+  Anti-Oszillation (zweimal gescheitert), Re-Arm.
+- `test/test_runtime_config*.c` an Blob v8 (24 Byte, `ps_ladder` an `[23]`)
+  angepasst; volle Host-Suite grün (67 Blöcke, 0 Fehler).
+- CI prüft im Receiver-Image die Zeichenkette `Modem-sleep ladder: rung `
+  (Sender-Image muss sie **nicht** enthalten).

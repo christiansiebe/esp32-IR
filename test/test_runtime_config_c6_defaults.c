@@ -45,8 +45,8 @@ int main(void)
      * short RX window around the predicted burst instead of a free-running one.
      * It must be on, and it needs a station PS mode to park the modem. */
     CHECK(cfg.burst_lock, "C6 receiver defaults to burst-lock on");
-    CHECK(cfg.wifi_ps_mode == RUNTIME_CONFIG_PS_MIN,
-          "C6 receiver defaults to station PS min (the burst lock covers the burst)");
+    CHECK(cfg.wifi_ps_mode == RUNTIME_CONFIG_PS_MAX,
+          "C6 receiver starts the ladder at the frugal PS max");
 
     /* The free-running wake window must be OFF: the burst lock drives the radio
      * directly, and the two fight for it if both are on. */
@@ -60,9 +60,13 @@ int main(void)
     /* A round-trip through render() keeps the new defaults visible. */
     char out[512];
     runtime_config_render(&cfg, out, sizeof(out));
-    CHECK(strstr(out, "wifi ps: min") != NULL, "render reports wifi ps min");
+    CHECK(strstr(out, "wifi ps: max") != NULL, "render reports wifi ps max");
     CHECK(strstr(out, "burst lock: on") != NULL, "render reports the burst lock on");
     CHECK(strstr(out, "radio save: off") != NULL, "render reports radio-save off");
+    /* The adaptive ladder defaults on for the C6 receiver: it starts at the
+     * frugal ps max and steps down on loss. */
+    CHECK(cfg.ps_ladder, "C6 receiver defaults to the ps ladder on");
+    CHECK(strstr(out, "ps ladder: on") != NULL, "render reports the ladder on");
 
     printf("runtime config (C6 receiver defaults): %d checks, %d failures\n",
            g_checks, g_failures);
