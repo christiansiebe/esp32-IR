@@ -4384,7 +4384,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "byId('history-status').textContent=(d.clock_synced?'Netzwerkzeit synchronisiert':'Warte auf Netzwerkzeit')+"
         "' · gespeicherte Minutenwerte: '+d.record_count+' / '+d.capacity+' · letztes: '+latest+"
         "' · aktuelle Messwerte im Intervall: '+d.current_sample_count+"
-        "' · Speicher: '+(d.storage_ready?'bereit':'nicht bereit')+"
+        "' · Speicher: '+(d.busy?'kurz belegt, wird nachgeladen':(d.storage_ready?'bereit':'nicht bereit'))+"
         "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
         "if(typeof d.energy_day_wh==='number'){byId('history-day-info').textContent+=(' · heute '+fmt(d.energy_day_wh/1000,2)+' kWh · Monat '+fmt(d.energy_month_wh/1000,2)+' kWh');}"
         "}catch(e){byId('history-status').textContent='Verlauf nicht verfügbar: '+e;}"
@@ -4998,6 +4998,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     size_t record_count = 0;
     power_history_status_t status;
     bool overflow = false;
+    bool history_busy = false;
     esp_err_t err = power_history_read(after_sequence, recent_count, records,
                                        POWER_HISTORY_PAGE_SIZE, &record_count,
                                        &status, &overflow);
@@ -5012,9 +5013,13 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     } else if (err == ESP_ERR_TIMEOUT) {
         /* Writer/import holds the lock for a long in-place ring insert. Serve an
          * empty snapshot instead of blocking the HTTP task until the browser's
-         * request timeout fires; the dashboard retries on its next poll. */
+         * request timeout fires; the dashboard retries on its next poll. The
+         * `busy` flag tells the UI apart "store is empty" from "store is
+         * momentarily locked" - otherwise a full ring under backfill load looked
+         * like an empty store. */
         record_count = 0;
         status.ready = false;
+        history_busy = true;
         ESP_LOGW(TAG, "Power history busy; serving empty dataset");
     } else if (err != ESP_OK) {
         free(records);
@@ -5056,11 +5061,12 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         bool agg_busy = (agg_err == ESP_ERR_TIMEOUT);
         if (agg_busy) {
             /* Writer/import holds the lock: emit an empty (but valid) aggregated
-             * window instead of blocking the HTTP task. The dashboard retries. */
+             * window instead of blocking the HTTP task. The dashboard retries.
+             * The `busy` flag keeps that apart from a genuinely empty store. */
             status.ready = false;
             ESP_LOGW(TAG, "Power history busy; serving empty aggregation");
         }
-        char agg_header[512];
+        char agg_header[640];
         int agg_header_len = -1;
         double energy_day_wh = 0.0;
         double energy_month_wh = 0.0;
@@ -5074,15 +5080,18 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         if (agg_err == ESP_OK || agg_busy) {
             agg_header_len = snprintf(
                 agg_header, sizeof(agg_header),
-                "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
+                "{\"clock_synced\":%s,\"storage_ready\":%s,\"busy\":%s,\"current_sample_count\":%u,"
                 "\"oldest_sequence\":%lu,"
                 "\"latest_sequence\":%lu,\"record_count\":%lu,"
                 "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
+                "\"splice_batches\":%lu,\"splice_records\":%lu,\"splice_skipped\":%lu,"
+                "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
                 "\"aggregated\":true,\"window_hours\":%.2f,\"bucket_seconds\":%lld,"
                 "\"day_start_utc\":%lld,\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
                 "\"capacity\":%u,\"records\":[",
                 system_time_is_valid() ? "true" : "false",
                 status.persistent ? "true" : "false",
+                agg_busy ? "true" : "false",
                 (unsigned int)current_sample_count_agg,
                 (unsigned long)status.oldest_sequence,
                 (unsigned long)status.latest_sequence,
@@ -5090,6 +5099,11 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 (unsigned long)status.queue_drops,
                 (unsigned long)status.write_errors,
                 overflow ? "true" : "false",
+                (unsigned long)status.splice_batches,
+                (unsigned long)status.splice_records,
+                (unsigned long)status.splice_skipped,
+                (unsigned long)status.storage_used_bytes,
+                (unsigned long)status.storage_total_bytes,
                 window_hours_out,
                 (long long)bucket_seconds,
                 (long long)window_start_utc,
@@ -5153,7 +5167,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     current_sample_count = g_sml_power_sample_count;
     portEXIT_CRITICAL(&g_sml_history_lock);
 
-    char header[448];
+    char header[576];
     double energy_day_wh = 0.0;
     double energy_month_wh = 0.0;
     if (system_time_is_valid()) {
@@ -5165,14 +5179,17 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     }
     int header_len = snprintf(
         header, sizeof(header),
-        "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
+        "{\"clock_synced\":%s,\"storage_ready\":%s,\"busy\":%s,\"current_sample_count\":%u,"
         "\"oldest_sequence\":%lu,"
         "\"latest_sequence\":%lu,\"record_count\":%lu,"
         "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
+        "\"splice_batches\":%lu,\"splice_records\":%lu,\"splice_skipped\":%lu,"
+        "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
         "\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
         "\"capacity\":%u,\"records\":[",
         system_time_is_valid() ? "true" : "false",
         status.persistent ? "true" : "false",
+        history_busy ? "true" : "false",
         (unsigned int)current_sample_count,
         (unsigned long)status.oldest_sequence,
         (unsigned long)status.latest_sequence,
@@ -5180,6 +5197,11 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         (unsigned long)status.queue_drops,
         (unsigned long)status.write_errors,
         overflow ? "true" : "false",
+        (unsigned long)status.splice_batches,
+        (unsigned long)status.splice_records,
+        (unsigned long)status.splice_skipped,
+        (unsigned long)status.storage_used_bytes,
+        (unsigned long)status.storage_total_bytes,
         energy_day_wh,
         energy_month_wh,
         (unsigned int)POWER_HISTORY_CAPACITY);
@@ -6027,7 +6049,9 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         "storage: %s\n"
         "records: %u / %u\n"
         "sequence: oldest %u, latest %u\n"
-        "write errors: %u, queue drops: %u\n",
+        "write errors: %u, queue drops: %u\n"
+        "splices: %u batch(es), %u record rewrite(s), %u skipped (too deep)\n"
+        "spiffs: %u / %u bytes used\n",
         !status.ready ? "unavailable"
                       : (status.persistent ? "ready (SPIFFS)"
                                            : "RAM fallback (not persistent)"),
@@ -6035,7 +6059,12 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         (unsigned int)status.oldest_sequence,
         (unsigned int)status.latest_sequence,
         (unsigned int)status.write_errors,
-        (unsigned int)status.queue_drops);
+        (unsigned int)status.queue_drops,
+        (unsigned int)status.splice_batches,
+        (unsigned int)status.splice_records,
+        (unsigned int)status.splice_skipped,
+        (unsigned int)status.storage_used_bytes,
+        (unsigned int)status.storage_total_bytes);
     if (written < 0 || (size_t)written >= out_size) {
         snprintf(out, out_size, "history: output truncated\n");
         return;
@@ -6277,7 +6306,10 @@ static size_t simulate_render(char *out, size_t out_size)
 
     power_history_status_t st;
     power_history_get_status(&st);
-    sim_line(&cur, &rem, "history ready     : %s\n", st.ready ? "yes" : "no");
+    sim_line(&cur, &rem, "history ready     : %s\n",
+             !st.ready ? "no"
+                       : (st.persistent ? "yes (SPIFFS)"
+                                        : "yes (RAM fallback, not persistent)"));
     sim_line(&cur, &rem, "history records   : %u (written %u, dropped %u)\n",
              (unsigned)st.record_count, (unsigned)st.write_errors,
              (unsigned)st.queue_drops);
@@ -6681,6 +6713,17 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
         return;
     }
     if (strcmp(what, "storage") == 0) {
+        if (strcmp(rest, "format") == 0) {
+            /* Repair an unreadable/damaged ring: reformat the partition and
+             * recreate the file with fresh headers. The sender backfill
+             * re-imports the minute history afterwards (run 'pull'). */
+            snprintf(out, out_size, "formatting persistent storage ...\n");
+            esp_err_t ferr = power_history_format();
+            snprintf(out + strlen(out), out_size - strlen(out),
+                     "format: %s\n", ferr == ESP_OK ? "ok (empty store, run 'pull')"
+                                                    : esp_err_to_name(ferr));
+            return;
+        }
         power_history_status_t s;
         power_history_get_status(&s);
         int64_t oldest = 0;
@@ -6690,8 +6733,12 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  "storage: %s\n"
                  "  records: %u  sequences: %u..%u\n"
                  "  range: %lld..%lld UTC\n"
-                 "  queue drops: %u  write errors: %u\n",
-                 s.ready ? "ready" : "not ready", (unsigned)s.record_count,
+                 "  queue drops: %u  write errors: %u\n"
+                 "usage: test storage | test storage format\n",
+                 !s.ready ? "not ready"
+                          : (s.persistent ? "ready (SPIFFS)"
+                                          : "RAM fallback (not persistent)"),
+                 (unsigned)s.record_count,
                  (unsigned)s.oldest_sequence, (unsigned)s.latest_sequence,
                  (long long)oldest, (long long)latest,
                  (unsigned)s.queue_drops, (unsigned)s.write_errors);

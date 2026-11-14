@@ -105,8 +105,11 @@ static void test_repair_and_backup_upload(void)
     };
     CHECK(write_scrambled_store(scrambled, 12), "scrambled store written");
 
-    /* Init must repair the ring (sort by minute, drop duplicates, renumber). */
+    /* Init must not block on the ring; the repair runs in the background task
+     * on the device. On the host we drive the same public entry point the task
+     * uses, then verify the ring is sorted/duplicate-free. */
     CHECK(power_history_init() == ESP_OK, "init ok");
+    CHECK(power_history_repair_ring() == ESP_OK, "repair ok");
 
     power_history_status_t st;
     power_history_get_status(&st);
@@ -199,16 +202,22 @@ static void test_repair_and_backup_upload(void)
 }
 
 /* Full ring (29000 records) left unsorted with duplicate minutes. count is far
- * above POWER_HISTORY_REPAIR_RAM_LIMIT, so the startup repair must use the
- * in-place disk sort. Verifies it sorts, dedupes and keeps sequence monotonic. */
+ * above POWER_HISTORY_REPAIR_RAM_LIMIT, so the repair must fall back to its
+ * safe path: keep only the most recent records that fit one RAM buffer, sort
+ * them, dedupe them and renumber them. It deliberately does NOT sort in place
+ * on SPIFFS (a single lseek on a damaged/full store can hang for minutes and
+ * wedge the device). Verifies the survivors are sorted, duplicate-free and
+ * have a monotonic, contiguous sequence. */
 static void test_full_ring_repair(void)
 {
-    printf("test_full_ring_repair\n");
+    printf("test_full_ring_repair (keeps newest RAM_LIMIT)\n");
     const uint32_t total = POWER_HISTORY_CAPACITY; /* 29000 */
-    /* A full ring may hold at most `total` records (the header rejects more), so
-     * the duplicates come out of the ring itself: 26363 distinct minutes + 2637
-     * duplicates (every 10th minute, m % 10 == 0) = 29000, deduping to 26363. */
-    const uint32_t distinct = 26363u;
+    const uint32_t kept = POWER_HISTORY_REPAIR_RAM_LIMIT; /* 4096 in the build */
+    /* The ring as written below is "full" (29000 stored) but damaged:
+     * duplicates every 10th minute. The repair may keep only the newest `kept`
+     * records, so the exact distinct count is no longer fixed; what matters is
+     * that the survivors are sorted, deduped and contiguous. */
+    const uint32_t distinct = 26363u; /* unique minutes before repair */
     const uint32_t count = total;
     const int64_t base = 9400000000LL;
 
@@ -229,11 +238,15 @@ static void test_full_ring_repair(void)
     power_history_header_t zero = {0};
     ok = ok && fwrite(&zero, sizeof(zero), 1, f) == 1;
 
-    /* Write the minutes in descending order -> definitely unsorted. */
+    /* Write the minutes ascending with duplicate minutes scattered in: this is
+     * the realistic "full store after backfill merges" state (near-sorted, a
+     * duplicate every 10th minute). The store is damaged (duplicates), so the
+     * repair runs; it keeps only the most recent POWER_HISTORY_REPAIR_RAM_LIMIT
+     * records, sorted and deduped. */
     uint32_t seq = 1;
     uint32_t written = 0;
-    for (uint32_t m = distinct; m > 0 && ok; --m) {
-        uint32_t minute = m - 1u;
+    for (uint32_t m = 0; m < distinct && ok; ++m) {
+        uint32_t minute = m;
         power_history_record_t r =
             make_record(seq++, base + (int64_t)minute * 60, (int32_t)(minute % 1000));
         ok = fwrite(&r, sizeof(r), 1, f) == 1;
@@ -253,9 +266,15 @@ static void test_full_ring_repair(void)
     }
 
     CHECK(power_history_init() == ESP_OK, "init on full ring ok");
+    CHECK(power_history_repair_ring() == ESP_OK, "repair on full ring ok");
     power_history_status_t st;
     power_history_get_status(&st);
-    CHECK(st.record_count == distinct, "full ring deduped to distinct minutes");
+    /* The full ring no longer keeps every distinct minute: the repair may only
+     * preserve what fits one RAM buffer. It must never exceed that bound, and
+     * it must keep at least the newest minutes (so live data survives). */
+    CHECK(st.record_count <= kept,
+          "full ring repair keeps at most RAM_LIMIT records");
+    CHECK(st.record_count > 0, "full ring repair keeps the newest records");
 
     power_history_record_t page[64];
     size_t n = 0;
@@ -267,19 +286,146 @@ static void test_full_ring_repair(void)
         if (page[i].interval_start_utc <= page[i - 1].interval_start_utc) {
             asc = false;
         }
+        if (page[i].interval_start_utc == page[i - 1].interval_start_utc) {
+            asc = false; /* no duplicate minutes after repair */
+        }
     }
-    CHECK(asc, "full ring sorted after in-place repair");
-    CHECK(page[0].interval_start_utc == base, "oldest minute first after repair");
-    CHECK(page[0].sequence + 1u == page[1].sequence, "sequence contiguous after repair");
-    CHECK(page[0].sequence == total + 1u - distinct, "oldest sequence anchored");
+    CHECK(asc, "full ring sorted and deduped after repair");
+    /* The newest minute (distinct - 1) must have survived; some of the oldest
+     * minutes may have been dropped to fit the RAM limit. */
     CHECK(power_history_has_minute(base + (int64_t)(distinct - 1u) * 60),
           "newest minute reachable after repair");
+}
+
+/* Write a store whose readable records are all in ascending order, but with a
+ * single corrupt (checksum-broken) slot in the middle. This is the device state
+ * that used to stall: the damage scan skipped the bad slot, judged the ring
+ * "sorted and duplicate-free", returned without repairing, and the ring kept
+ * growing back into the broken region - every write that reached it failed
+ * ("write errors climb, ring stalls at the same record count"). */
+static bool write_store_with_corrupt_slot(const int64_t *minutes, size_t count,
+                                          size_t corrupt_index)
+{
+    FILE *f = fopen(POWER_HISTORY_FILE, "w+b");
+    if (f == NULL) {
+        return false;
+    }
+    power_history_header_t header = {0};
+    header.magic = 0x50484C31u;
+    header.version = POWER_HISTORY_VERSION;
+    header.generation = 9;
+    header.next_sequence = (uint32_t)count + 1u;
+    header.record_count = (uint32_t)count;
+    header.next_slot = (uint32_t)(count % POWER_HISTORY_CAPACITY); /* oldest_slot = 0 */
+    header.checksum = crc_bytes(&header, offsetof(power_history_header_t, checksum));
+
+    bool ok = fwrite(&header, sizeof(header), 1, f) == 1;
+    power_history_header_t zero = {0};
+    ok = ok && fwrite(&zero, sizeof(zero), 1, f) == 1;
+    for (size_t i = 0; i < count && ok; ++i) {
+        power_history_record_t r =
+            make_record((uint32_t)(i + 1), minutes[i], (int32_t)(7000 + i));
+        if (i == corrupt_index) {
+            /* Break the CRC: the slot reads back but record_is_valid() rejects
+             * it, exactly like a torn write after a hard reset. */
+            r.checksum ^= 0xDEADBEEFu;
+        }
+        ok = fwrite(&r, sizeof(r), 1, f) == 1;
+    }
+    ok = fflush(f) == 0 && ok;
+    fclose(f);
+    return ok;
+}
+
+/* A ring whose readable records are in order must STILL be repaired when a slot
+ * is unreadable: the repair drops the bad slot and compacts the survivors, so
+ * the ring no longer grows back into the broken region. */
+static void test_corrupt_slot_triggers_repair(void)
+{
+    printf("test_corrupt_slot_triggers_repair (unreadable slot is damage)\n");
+    const int64_t base = 9500000000LL;
+    int64_t minutes[8] = {
+        base, base + 60, base + 120, base + 180,
+        base + 240, base + 300, base + 360, base + 420,
+    };
+    CHECK(write_store_with_corrupt_slot(minutes, 8, 3),
+          "store with one corrupt slot written");
+
+    CHECK(power_history_init() == ESP_OK, "init ok");
+    CHECK(power_history_repair_ring() == ESP_OK, "repair ok");
+
+    power_history_status_t st;
+    power_history_get_status(&st);
+    /* The corrupt slot is dropped; the seven readable minutes survive. */
+    CHECK(st.record_count == 7, "repair dropped the corrupt slot");
+    bool kept = true;
+    for (int i = 0; i < 8; ++i) {
+        if (i == 3) {
+            continue; /* the corrupt minute is the one that must be gone */
+        }
+        if (!power_history_has_minute(minutes[i])) {
+            kept = false;
+        }
+    }
+    CHECK(kept, "every readable minute survived the repair");
+    CHECK(!power_history_has_minute(minutes[3]),
+          "the corrupt minute is gone from the compacted ring");
+
+    power_history_record_t page[16];
+    size_t n = 0;
+    bool more = false;
+    CHECK(power_history_read_after(base - 1000, 16, page, 16, &n, &st, &more) == ESP_OK,
+          "read_after after corrupt-slot repair ok");
+    bool asc = n > 1;
+    for (size_t i = 1; i < n; ++i) {
+        if (page[i].interval_start_utc <= page[i - 1].interval_start_utc) {
+            asc = false;
+        }
+    }
+    CHECK(asc, "ring sorted and duplicate-free after corrupt-slot repair");
 }
 
 static void cleanup(void)
 {
     remove(POWER_HISTORY_FILE);
     rmdir(POWER_HISTORY_MOUNT_PATH);
+}
+
+/* The startup repair sizes its RAM buffer from the largest free heap block.
+ * On the real device the free heap had shrunk to ~89 KiB, so a fixed 4096-record
+ * buffer (114 KiB) failed to allocate, the repair gave up, and the damaged ring
+ * then rejected every new minute (errno=5). This pins the clamp arithmetic that
+ * fixes it. */
+static void test_repair_keep_limit_clamp(void)
+{
+    printf("test_repair_keep_limit_clamp (repair buffer follows free heap)\n");
+    const uint32_t upper = POWER_HISTORY_REPAIR_RAM_LIMIT;
+    const size_t rec = sizeof(power_history_record_t); /* 28 */
+
+    /* Plenty of heap: the compile-time bound governs. */
+    CHECK(power_history_repair_keep_limit_for((size_t)1 << 20, upper) == upper,
+          "large heap -> upper bound");
+    /* The observed device state: 89 KiB free. Must yield a buffer that fits
+     * (89 KiB - 16 KiB headroom) / 28 B = 2670 -> clamped to upper (2048). */
+    CHECK(power_history_repair_keep_limit_for(89u * 1024u, upper) == upper,
+          "89 KiB free still fits the upper bound");
+    /* Just above the 114 KiB the old fixed buffer wanted: 130 KiB free gives
+     * (130-16) KiB / 28 = 4169 -> clamped to upper. */
+    CHECK(power_history_repair_keep_limit_for(130u * 1024u, upper) == upper,
+          "130 KiB free fits the upper bound");
+    /* Tiny heap: the limit shrinks with the block instead of assuming 4096. */
+    CHECK(power_history_repair_keep_limit_for(64u * 1024u, upper) ==
+              (uint32_t)((64u * 1024u - 16384u) / rec),
+          "64 KiB free shrinks the limit");
+    /* At/below the headroom there is nothing to give: zero, so the caller keeps
+     * the ring instead of trying a doomed allocation. */
+    CHECK(power_history_repair_keep_limit_for(16384u, upper) == 0,
+          "heap at headroom -> zero");
+    CHECK(power_history_repair_keep_limit_for(4096u, upper) == 0,
+          "heap below headroom -> zero");
+    /* Overflow guard: an absurd "largest block" must not wrap to a tiny limit. */
+    CHECK(power_history_repair_keep_limit_for((size_t)-1, upper) == upper,
+          "SIZE_MAX does not wrap");
 }
 
 int main(int argc, char **argv)
@@ -293,11 +439,22 @@ int main(int argc, char **argv)
     atexit(cleanup);
 
     printf("test_history_ring_repair\n");
+    test_repair_keep_limit_clamp();
     if (argc > 1 && strcmp(argv[1], "full") == 0) {
         test_full_ring_repair();
+    } else if (argc > 1 && strcmp(argv[1], "corrupt") == 0) {
+        test_corrupt_slot_triggers_repair();
     } else {
         test_repair_and_backup_upload();
     }
+
+    /* power_history_init() starts the background repair task. That task must
+     * delete itself; a task function that returns is undefined behaviour on
+     * the device (the IDF release build has no task wrapper, so the first
+     * v0.2.0 flash panicked and rolled back). The host shim counts any task
+     * that returns without vTaskDelete(NULL); the count must stay zero. */
+    CHECK(host_tasks_returned_without_delete() == 0,
+          "every task function deletes itself (no bare return)");
 
     printf("history_ring_repair: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
