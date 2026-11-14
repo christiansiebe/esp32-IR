@@ -51,6 +51,7 @@ Usage:
 import argparse
 import os
 import select
+import signal
 import struct
 import sys
 import time
@@ -118,6 +119,14 @@ def _drain(fd, duration):
             break
 
 
+def _send_stop(fd):
+    """Best-effort 0x84; never raises (fd may already be gone)."""
+    try:
+        os.write(fd, CMD_STOP)
+    except OSError:
+        pass
+
+
 def read_samples(dev, duration=1.0, keepalive=1.0, on_sample=None):
     """Send init, read the stream, stop it again, return the samples.
 
@@ -127,16 +136,31 @@ def read_samples(dev, duration=1.0, keepalive=1.0, on_sample=None):
 
     on_sample: optional callback(sample, t_rel) called for EVERY sample
     (for lossless live logging / CSV export).
+
+    The 0x84 stop is sent on every exit path - normal end, exception, and
+    SIGINT/SIGTERM - because a run that is killed without it leaves the meter's
+    internal logger running, its buffer fills up and the live values freeze.
+    That is the intermittent "freeze" seen when a long measurement is aborted.
     """
     fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
     samples = []
     crc_seen = False
     crc_ok = True
+
+    # Turn a terminating signal into KeyboardInterrupt so the finally block
+    # below still runs the stop.
+    def _on_signal(_signum, _frame):
+        raise KeyboardInterrupt
+
+    old_int = signal.signal(signal.SIGINT, _on_signal)
+    old_term = signal.signal(signal.SIGTERM, _on_signal)
     try:
-        # Stop a possibly stuck stream first and flush the FIFO.
-        os.write(fd, CMD_STOP)
-        time.sleep(0.1)
-        _drain(fd, 0.2)
+        # Stop a possibly stuck stream first and flush the FIFO. Twice, in case
+        # an earlier run died mid-stream and left the parser wedged.
+        for _ in range(2):
+            _send_stop(fd)
+            time.sleep(0.1)
+            _drain(fd, 0.2)
 
         for frame in (CMD_INIT, CMD_START, CMD_KEEPALIVE):
             os.write(fd, frame)
@@ -165,12 +189,13 @@ def read_samples(dev, duration=1.0, keepalive=1.0, on_sample=None):
                 for s in got:
                     on_sample(s, time.time() - t0)
             samples.extend(got)
-
-        # Stop the stream (0x84) and flush: otherwise the meter's internal
-        # logger keeps running and the live values freeze.
-        os.write(fd, CMD_STOP)
-        _drain(fd, 0.4)
     finally:
+        # Always stop the stream (0x84) and flush: otherwise the meter's
+        # internal logger keeps running and the live values freeze.
+        _send_stop(fd)
+        _drain(fd, 0.4)
+        signal.signal(signal.SIGINT, old_int)
+        signal.signal(signal.SIGTERM, old_term)
         os.close(fd)
     return samples, (crc_seen, crc_ok)
 
