@@ -330,6 +330,32 @@ jobs:
           test "$limit" -ge "$need" || { echo "max_uri_handlers too small"; exit 1; }
           echo "httpd handler budget is sufficient"
 
+      - name: Verify the receiver boot-order guard (liveness + console first)
+        if: startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A hang anywhere in the receiver init before start_webserver() used to
+          # be permanent: the device stayed on the WLAN and answered ping and MQTT
+          # while port 80 was dead and the console registry was empty. Two source
+          # invariants prevent that (build-only CI cannot see the runtime symptom):
+          #   1. the global liveness backstop starts BEFORE start_webserver(), so a
+          #      stall in the init reboots instead of hanging;
+          #   2. the console command set is registered BEFORE the Wi-Fi init, so
+          #      the serial console answers even if the webserver never comes up.
+          # Scope the scan to app_main(): run_sender() also calls
+          # liveness_guard_start() but is compiled out on the receiver.
+          app=$(grep -n '^void app_main(void)' main/main.c | cut -d: -f1)
+          lv=$(awk -v s="$app" 'NR>=s && /^[[:space:]]*liveness_guard_start\(\);$/ {print NR; exit}' main/main.c)
+          ws=$(awk -v s="$app" 'NR>=s && /^[[:space:]]*start_webserver\(\);$/ {print NR; exit}' main/main.c)
+          cc=$(awk -v s="$app" 'NR>=s && /^[[:space:]]*web_console_register_commands\(\);$/ {print NR; exit}' main/main.c)
+          wi=$(awk -v s="$app" 'NR>=s && /^[[:space:]]*initialize_wifi_and_espnow\(\);$/ {print NR; exit}' main/main.c)
+          echo "app_main@$app liveness@$lv start_webserver@$ws console@$cc wifi_init@$wi"
+          test -n "$lv" && test -n "$ws" && test -n "$cc" && test -n "$wi"
+          test "$lv" -lt "$ws" || { echo "liveness guard must start before start_webserver()"; exit 1; }
+          test "$cc" -lt "$wi" || { echo "console commands must register before Wi-Fi init"; exit 1; }
+          echo "receiver boot-order guard is intact"
+
       - name: Verify the receiver health watchdog is compiled in
         if: startsWith(matrix.role, 'receiver')
         shell: bash

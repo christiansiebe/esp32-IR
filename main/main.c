@@ -10688,10 +10688,31 @@ static void ps_ladder_boot_init(void)
 
 void app_main(void)
 {
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Start the global liveness backstop FIRST, before any heavy init. It used
+     * to start only after start_webserver(); every other receiver guard
+     * (health_task, web_guard) also starts late, so a hang anywhere in the init
+     * below was permanent: the device stayed on the WLAN and answered ping and
+     * MQTT (both driven by the sys_evt task) while the HTTP server and the
+     * console never came up - exactly the C6 receiver symptom "port 80 dead
+     * (RST), console command registry empty, MQTT alive, no reboot". The guard is
+     * fed as each init phase completes (liveness_note_alive below); the first
+     * feed is the 90 s min-uptime grace, so a stall in any phase now reboots to a
+     * known-good state instead of hanging forever. */
+    liveness_guard_start();
+#endif
     /* Capture the boot log in RAM first, so the Wi-Fi dashboard can offer it
      * later even when no host is attached at boot. */
     boot_log_init();
+    /* Register the console command set NOW, not only inside
+     * register_webserver_handlers() (which runs at the very end of start_webserver).
+     * The registry lives in RAM, so a boot that wedged before the webserver left
+     * the serial console answering every line with "unknown command" - the second
+     * half of the C6 receiver symptom. Idempotent, so the later call in
+     * register_webserver_handlers()/run_sender() just re-points the same entries. */
+    web_console_register_commands();
     initialize_wifi_and_espnow();
+    liveness_note_alive();
     apply_power_management();
 #if !CONFIG_ESPNOW_ROLE_SENDER
     /* Seed the ladder before the boot power-apply reads it, so a
@@ -10705,6 +10726,7 @@ void app_main(void)
      * so the long-running workers can subscribe themselves and a wedged one
      * reboots the device instead of hanging. */
     (void)task_wdt_guard_init();
+    liveness_note_alive();
     /* Seed the wall clock from the persisted value before anything starts
      * recording minutes: without it a boot that has no time source yet would
      * leave bucket_start at 0 and drop every sample until the first sync. */
@@ -10742,6 +10764,11 @@ void app_main(void)
         ESP_LOGE(TAG, "Persistent minute history is disabled: %s",
                  esp_err_to_name(history_err));
     }
+    /* Phase done: prove progress to the liveness guard started above. Each feed
+     * shortens the interval a later phase may spend blocked, so a SPIFFS/NVS call
+     * that never returns trips the guard instead of wedging the boot before the
+     * webserver and console exist. No-op until the guard task has run. */
+    liveness_note_alive();
     const esp_timer_create_args_t power_sample_timer_args = {
         .callback = power_sample_timer_callback,
         .name = "power_samples",
@@ -10771,6 +10798,7 @@ void app_main(void)
      * has minutes, so the totals are meaningful there too (the receiver's
      * dashboard is the main consumer). */
     energy_totals_start();
+    liveness_note_alive();
 
     ESP_ERROR_CHECK(esp_now_register_recv_cb(receive_callback));
 
@@ -10803,6 +10831,7 @@ void app_main(void)
      * dead) cannot be re-applied by the older image. */
     recovery_set_pre_rollback_fn(runtime_config_erase_namespace);
     (void)recovery_button_check();
+    liveness_note_alive();
     /* Receiver: do not accept the running image right away. It is confirmed
      * only after the dashboard is up and a stability window has passed; an
      * image that never comes up is rolled back to the previous OTA slot. This
@@ -10815,9 +10844,9 @@ void app_main(void)
     run_sender();
 #else
     start_webserver();
-    /* Backstop for a global stall: fed by every worker and by HTTP/console
-     * traffic, it reboots the device if nothing makes progress. */
-    liveness_guard_start();
+    /* The guard was started before the heavy init above; feed it now that the
+     * dashboard is up (its HTTP traffic feeds it from here on). */
+    liveness_note_alive();
 #if CONFIG_ESPNOW_RECEIVER_HEALTH_WATCHDOG
     /* Self-heal: reboot when the device is up but the meter data has gone silent
      * or the heap fell below the floor. web_guard covers a dead dashboard; this

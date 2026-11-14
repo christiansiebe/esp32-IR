@@ -1,5 +1,27 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-14): C6-Receiver-Boot-Hang vor `start_webserver()` — gehaertet
+**Branch `feat/c6-mqtt-cmd`. Details: `docs/c6-receiver-boot-hang.md`.**
+- **Symptom (live, `192.168.178.105`):** Port 80 tot (`nmap` -> alle Ports
+  `closed (reset)`), Kommando-Registry leer (`help` -> `unknown command`), MQTT
+  lebt (`status=online`), Ping mit `3<->546 ms`, `esp32ir/receiver/power` steht
+  still. Kein Reboot-Loop mehr (nur ein einzelner `task-watchdog`-Reboot).
+- **Diagnose:** `app_main` haengt **vor** `start_webserver()`. Die Registry ist
+  RAM-only und wird nur am Ende von `start_webserver()` befuellt -> leere Registry
+  = Webserver nie erreicht. MQTT/Ping leben weiter, weil `mqtt_bridge_start()` im
+  `IP_EVENT_STA_GOT_IP`-Handler auf dem `sys_evt`-Task laeuft, nicht in `app_main`.
+- **Watchdog-Luecke:** `liveness_guard`, `health_task`, `web_guard` starteten
+  **alle erst nach** `start_webserver()` -> ein Hang davor war **permanent**.
+- **Korrelation:** `dmesg` zeigt den C6 (`303a:1001`, SN `10:BD:A3:88:D7:14` ==
+  MQTT-Client `ESP32_88D714`) als `ttyACM0`, dann **USB-Disconnect** ~12:17 -
+  genau als HTTP/Konsole starben. Die C6-Konsole **ist** die USB-Serial/JTAG.
+- **Umgesetzt:** `liveness_guard_start()` ganz an den Anfang von `app_main`
+  (+ `liveness_note_alive()` nach jeder Init-Phase), `web_console_register_commands()`
+  vor die Wi-Fi-Init (Konsole antwortet auch ohne Webserver -> `reboot` per USB),
+  CI-Guard „Verify the receiver boot-order guard". Host-Tests gruen.
+- **Offen:** exakt blockierende Zeile noch nicht sicher benannt; bis dahin ist der
+  Backstop die Sicherheitsleine. Rebuild+Flash via GitHub-CI.
+
 ## NEU (2026-11-14): C6-Idle-Leistung gemessen (FNB-48) — SoftAP ist der Kostentreiber
 **Branch `feat/c6-mqtt-cmd`, FNB-48 am C6 (`/dev/hidraw0`). Details: `docs/c6-idle-power-measured.md`.**
 - **Befund:** Bei **identischen Knobs** (`cpu=80`, `radio-save=5000/30`, `ps=max`,
