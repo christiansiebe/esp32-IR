@@ -204,6 +204,26 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_sleep_misbehavior"
 
+# Sender sleep-state announcement: drives the real uart_sleep_maybe_sleep_idf()
+# glue against stubbed IDF calls. Pins the fix that the awake announcement
+# (state=0) must follow every announced sleep, even when the CPU never actually
+# parked (slept_ms == 0) - otherwise the receiver stays on "sleeping" forever.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DCONFIG_ESPNOW_SENDER_LIGHT_SLEEP=1 \
+    -DCONFIG_ESPNOW_CPU_MAX_MHZ=240 \
+    -DCONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=1 \
+    -DCONFIG_ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS=100 \
+    -DCONFIG_ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS=70 \
+    -DSOC_LIGHT_SLEEP_SUPPORTED=1 \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/uart_sleep_window.c" \
+    "$here/test_sleep_announce.c" \
+    -o "$out/test_sleep_announce"
+
+"$out/test_sleep_announce"
+
 # Link fallback: the peer-silence decision that returns a device to its proven
 # mode. Pure C; the transition must be sticky (no flapping) and grace-bounded.
 "$cc" -std=c11 -Wall -Wextra -O2 \
@@ -355,6 +375,20 @@ trap 'rm -rf "$out"' EXIT
 "$out/test_history_ring_repair"
 # Full ring (29000) unsorted + duplicates -> forces the in-place disk sort.
 "$out/test_history_ring_repair" full
+
+# Full ring (29000) + an OLDER backfill merge: the older minute must not evict
+# the newest one and must not unsort the ring. Own binary (init runs once).
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog-fullbackfill\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_history_full_ring_backfill.c" \
+    -lm -o "$out/test_history_full_ring_backfill"
+
+"$out/test_history_full_ring_backfill"
 
 # Last known wall clock: the record/clock math plus the real NVS store driven
 # through a file-backed NVS shim. A forked "reboot" proves the clock is seeded
