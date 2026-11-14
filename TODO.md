@@ -1,5 +1,128 @@
 # To-do – esp32-IR
 
+
+## MESSUNG (2026-11-08, .105): Modem-Sleep-Kombinationen ohne Telegramm-Verluste
+**Aufbau:** `.105` = C6-Empfänger (USB-JTAG-Konsole), Sender = **klassischer ESP32**
+(`v0.3.0-17-g9aec836`), ~60 SML-Telegramme/min. Verlust = Δ`sender.sml_sent_ok` −
+Δ`receiver.crc_valid` über 120–200-s-Fenster; Konsole per `set …` + `config`-Rücklesung.
+`average_power_w` ist der **Hauszähler (SML)**, NICHT der C6-Verbrauch — taugt hier nicht
+als Leistungsmaß.
+
+**Ergebnis (7 Läufe, je Kombi 120–200 s; Läufe 5+6 verschränkt A/B gegen Drift):**
+
+| Kombination | Verlust | Bewertung |
+|---|---|---|
+| `ps=off` + `radio-save off` (Baseline) | 2,5–13 % (7 Läufe) | Grundrauschen (WLAN-Interferenz) |
+| `ps=min` + `rs off` (**Auslieferungs-Default!**) | **90,8 / 97,5 / 96,0 %** | ✗ unbrauchbar |
+| `ps=max listen=10` + `rs off` | 91,7 % | ✗ |
+| `ps=max listen=10` + `rs 100/70` | 31–35 % | ✗ |
+| `ps=max listen=10` + `rs 50/40` | 24,2 % | ✗ |
+| `ps=max listen=10` + `rs 30/25` | 11,7 % | ~ |
+| **`ps=max listen=10` + `rs 20/15`** | **8,5–14 %** | ✓ = Baseline (verschränkt) |
+| `ps=max listen=10` + `rs 15/12` | 14,0 % | ✓ |
+| `ps=max listen=50/255` + `rs 20/15` | 11,3 / 12,0 % | ✓ (listen praktisch frei) |
+| `ps=off` + `rs 20/15` | **0,8 %** | ✓✓ praktisch verlustfrei |
+| `ps=off` + `rs 100/70` | 3,4 % | ✓ |
+| `twt on` + `ps=off` + `rs 20/15` | 4,7 % | ~ (TWT vom AP abgelehnt, ohne Effekt) |
+
+**Kernbefund:** Der **ESP-NOW-Wake-Window (`radio-save`) ist der eigentliche Hebel** —
+`ps=min`/`ps=max` **ohne** `radio-save` vernichtet den Empfang fast vollständig (der
+C6 parkt das Modem, ESP-NOW-Frames fallen ins Leere; `transport_losses` bleibt dabei
+~0, es sind echte Funklöcher). Mit `radio-save on` **und kurzem Fenster (20/15 ms)**
+verschwindet der Verlust; `ps=max`+`rs 20/15` ist im verschränkten Lauf **nicht**
+schlechter als `ps=off`. Große Fenster (100/70) kosten ~⅓. Ein zu kurzes Fenster
+(15/12) bringt nichts mehr; **20/15 ms ist der Sweet Spot**. `listen` ist mit
+`radio-save` an fast kostenlos (10→255 nur ~1 %). **TWT ist auf der FRITZ!Box 5530
+wirkungslos** (AP lehnt Setup ab), daher nicht bewertbar.
+
+**Empfehlung (stromsparend UND verlustfrei):**
+- Sicherste Kombi: **`set ps off` + `set radio-save on` + `wake-interval 20` +
+  `wake-window 15`** (0,8 % ≈ Baseline, Modem schläft trotzdem im Fenster).
+- Wenn Modem-Sleep zwingend: **`set ps max` + `set listen 10` + `radio-save on`
+  20/15** (≈ Baseline); größeres `listen` (bis 255) kostet kaum.
+- **Nie** `ps=min`/`ps=max` **ohne** `radio-save on` — das ist der 90-%-Fehler.
+- **Default ändern:** `RUNTIME_CONFIG_PS_DEFAULT` ist `min` + `radio_save=false` →
+  genau die 90-%-Kombi. Default auf `ps=off` (oder `radio_save=true` + 20/15) ziehen.
+
+**Offen/verwirrend:** `set sleep on` wird **abgelehnt** — `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`
+ist aktiv, darum `runtime_config_light_sleep_allowed()==false`. Light-Sleep ist auf diesem
+Build also gar nicht schaltbar (`light_sleep_enabled` bleibt 0). Für die Messung egal,
+aber die Konsole kostet CPU-Wachhaltung (USB-JTAG), siehe frühere 0,12–0,15-W-Notiz.
+
+## FIX (2026-11-08): C6-Receiver-Default auf verlustfreie Kombi – `f12a0e7`, CI-gruen
+**Problem:** Der ausgelieferte Default (`RUNTIME_CONFIG_PS_DEFAULT=min` + `radio_save=false`)
+ist **genau** die 90-%-Verlust-Kombi (dreimal gemessen). Schlimmer: der Branch
+`feat/esp32c6-receiver` (Basis von PR #64) hat den `set ps`-Knopf noch gar nicht und
+**hartkodiert** `esp_wifi_set_ps(WIFI_PS_MIN_MODEM)` in beiden Pfaden von
+`apply_radio_power_config()` — der Kommentar dort nennt MIN_MODEM „always awake", was
+die Messung widerlegt. Bis PR #64 gemerged ist, ist das das Auslieferungsrisiko.
+
+**Fix (`main/runtime_config.c`):** Der C6-Receiver defaultet jetzt auf die gemessen
+verlustfreie Stromspar-Kombi — ziel- und rollenabhängig:
+```c
+#if defined(CONFIG_IDF_TARGET_ESP32C6) && !CONFIG_ESPNOW_ROLE_SENDER
+        .radio_save = true,   .wake_interval_ms = 20u, .wake_window_ms = 15u,
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_OFF,
+#else   /* klassischer ESP32 + jeder Sender: alter Default unverändert */
+        .radio_save = false,  .wake_interval_ms = 100u, .wake_window_ms = 70u,
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
+#endif
+```
+Klassischer ESP32 und Sender bleiben byte-für-byte wie vorher (dort bricht das
+Wake-Window den Link). Neuer Host-Test `test/test_runtime_config_c6_defaults.c`
+(mit `-DCONFIG_IDF_TARGET_ESP32C6=1` in `run_host_tests.sh`) nagelt die Defaults
+fest; CI-Job „Host tests" lief mit **„C6 receiver defaults: 8 checks, 0 failures"**.
+
+**Verifiziert auf Hardware (.105):** Per Web-OTA auf `v0.4.0-9-g8b3181d` geflasht,
+danach `reset-config` (löscht nur den `rtcfg`-NVS-Namespace) → `config` zeigt
+**`radio-save=20/15 ps=off listen=3`**, also den *kompilierten* Default. Die alte
+Kombi ist damit auf dem Board verschwunden.
+
+**PR-Verknüpfung:** PR #64 ist `feat/c6-twt` → `feat/esp32c6-receiver`. Beim Merge
+landen Messung, Fix und der `set ps`/`listen`-Knopf gemeinsam auf dem Receiver-Branch
+und heilen die hartkodierte MIN_MODEM-Stelle.
+
+## ✅ (2026-11-08) Antwort auf die Frage: SML-Lücken = Modem-Sleep, NICHT RSSI
+**Frage:** „Warum gibt es Lücken in den SML-Telegrammen – liegt es am RSSI?“
+
+**Antwort:** Nein, nicht RSSI. Die Ursache ist der WLAN-Modem-Sleep (`WIFI_PS_MIN/MAX_MODEM`): die Station parkt für `listen_interval` Beacon-Intervalle und nimmt in dieser Zeit keine ESP-NOW-Frames an → die ~1/s-Telegramme fallen ins Schlaffenster. Der RSSI war über alle Messreihen stabil (~ −80 dBm); die Lücken treten **systematisch** mit eingeschaltetem Modem-Sleep auf, nicht streuend wie bei schwachem Feld. Quantitative Belege stehen in der MESSUNG-Tabelle oben (`ps=min` ohne `radio-save` = 90–97 % Verlust; `ps=off` = ~0,8 %).
+**Empfehlung:** Empfänger auf die verlustfreie Kombi (`ps=off` + `radio-save 20/15`), nie `ps=min/max` ohne `radio-save`. Details: `esp32ir-espnow`, `esp32ir-history`.
+
+## NEU (2026-11-08): C6-Empfänger – Laufzeit-Knopf `set ps` / `set listen` (WIFI_PS_MAX_MODEM) – CI-gruen `6a05b95`, PR #64
+**Warum:** Die FRITZ!Box 5530 Fiber **lehnt TWT ab** (`Connected AP does not support
+setup individual TWT agreement` / `ESP_ERR_NOT_SUPPORTED`, Assoc-Response
+`TWT Responder:0`). Der Messauftrag „Power-Save ohne TWT" braucht deshalb die zwei
+IDF-Modem-Sleep-Schrauben. **Ohne USB-Kabel** zieht der assoziierte C6 mit
+`WIFI_PS_MIN_MODEM` bereits ~70 mW; die frueheren 0,12–0,15 W waren das
+USB-Serial/JTAG-Kabel (CPU-Wachhaltung), nicht die Assoziation.
+
+**Knopf (Branch `feat/c6-twt`, Blob v5 → v6 / 22 Byte):**
+- `set ps off|min|max` (`wifi_ps_mode` 0/1/2, Default **1=min** = wie vorher);
+  `set listen <n>` (`wifi_sta_config_t.listen_interval`, 1..255, Default 3).
+  Alias `set wifi-ps`/`set listen-interval`. `config` zeigt jetzt immer
+  `ps=… listen=…`; `help`/Usage ergaenzt.
+- **Anwenden:** `listen_interval` wird nur **beim Association-Request** und **nur
+  mit `WIFI_PS_MAX_MODEM`** gelesen → `set ps`/`set listen` macht automatisch
+  `esp_wifi_disconnect()` → `esp_wifi_set_config` → `esp_wifi_connect()` (Reconnect).
+  PS-Modus per `esp_wifi_set_ps()` nach `esp_wifi_start()`, aus
+  `apply_radio_power_config()` re-asserted. `reset-config` → Default + Reconnect.
+- **Koexistenz `radio-save`/ESP-NOW:** zwei unabhaengige Hebel. `WIFI_PS_MAX_MODEM`
+  parkt die *Station*; ESP-NOW-RX haengt am `esp_now_set_wake_window()`. Ein grosses
+  `listen_interval` bricht ESP-NOW nicht per se, kann die ~5-s-Frames aber
+  verspaeten/verlieren. **Nur der Knopf**, keine Zwangsschaltung.
+- **Tests:** `test/test_runtime_config.c` (parse_ps, set ps/listen, clamp, render,
+  v6-Blob-Roundtrip); `runtime config: 96 Checks, 0 Fehler`, uebrige Host-Tests gruen.
+  Neuer CI-Schritt „Verify the Wi-Fi PS / listen-interval knob (receiver)".
+
+**Auftrag an den Auftraggeber (Messung am Geraet):** `set ps max`, dann
+`set listen 5/10/20/30/50` — jeweils Reconnect abwarten, Leistung messen und pruefen,
+ob (a) die FRITZ!Box trennt, (b) die Leistung sinkt, (c) der Empfaenger weiter
+ESP-NOW-Frames sieht. Rueckweg: `set ps min` bzw. `reset-config`.
+
+**Merge-Hinweis:** `feat/c6-ap-switch` bumpt denselben `rtcfg`-Blob ebenfalls (auf v5,
+18 B, `ap_enabled`); dieser Stand ist v6 (22 B). Beim Merge die Layouts in EINE
+Version falten (Offsets bis [15] identisch).
+
 ## NEU (2026-11-07): C6-Receiver – `sleep on` killt die USB-Konsole (BEHOBEN, CI-gruen 7e34996)
 **Befund (reproduziert):** `set sleep on` (automatic light sleep) schaltet auf dem
 C6 die USB-Serial/JTAG-Peripherie ab → `/dev/ttyACM0` verschwindet. Weil der Wert in
@@ -625,6 +748,13 @@ UART-Puffer lag — auch wenn der `vTaskDelay` wegen des Holds gar nicht geschla
       History-Pull) `HELD AWAKE` verschwinden; `parser_resyncs`/`gap_loss` bleiben 0.
 
 ### Versionierung + Commit-Konvention
+- [x] **REGEL (verbindlich, wiederhergestellt 2026-11-08): jede geflashte/veröffentlichte
+      Firmware bekommt einen SemVer-Tag `vX.Y.Z` auf den gebauten Commit, und der Tag wird
+      gepusht.** Der Tag MUSS Vorfahre des Build-Commits sein: `git describe --tags` liefert
+      `vX.Y.Z…`, **nie einen nackten SHA**. Ein Tag auf einem Seitenzweig ist für den Build
+      unsichtbar (C6-Fehler: `v0.3.x` lag auf `fix/sender-diag-stack` → Gerät meldete nur
+      `5c57283`). Die CI gibt eine `::warning::` aus, wenn kein Tag aufgelöst wird.
+      Details/Prüfbefehle: `VERSIONING.md` → „REGEL (verbindlich): Versionierung ist Pflicht".
 - [x] `VERSIONING.md`: SemVer-Tag `vMAJOR.MINOR.PATCH` ist die Wahrheit (erste Baseline
       `v0.1.0`); `git describe` schreibt sie in `main/build_version.h` → `fw_version()`.
       MAJOR steigt bei Wire-/Speicher-Bruch, MINOR bei neuer Funktion, PATCH bei Bugfix.

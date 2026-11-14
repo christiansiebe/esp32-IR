@@ -27,6 +27,13 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "soc/soc_caps.h"
+#if SOC_WIFI_HE_SUPPORT
+/* Wi-Fi 6 (HE) TWT API (esp_wifi_sta_twt_config / esp_wifi_sta_itwt_*). Only the
+ * HE-capable targets (the ESP32-C6) have it; the classic ESP32 compiles the TWT
+ * path out and SOC_WIFI_HE_SUPPORT is 0. */
+#include "esp_wifi_he.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -243,6 +250,15 @@ static char g_wifi_ssid[WIFI_SSID_MAX_LEN + 1];
 static char g_wifi_password[WIFI_PASSWORD_MAX_LEN + 1];
 static bool g_wifi_configured;
 static bool g_wifi_connected;
+/* Defined with the NVS glue further down; fill_station_config() (above it) needs
+ * the persisted listen_interval. */
+static runtime_config_t *active_runtime_config(void);
+#if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
+/* Receiver: is a Wi-Fi 6 TWT agreement currently active? Kept separate from the
+ * persisted twt_enabled knob so a teardown can still run after 'set twt off'
+ * has already cleared the knob. */
+static bool g_twt_active;
+#endif
 static bool g_sntp_started;
 static esp_netif_t *g_ap_netif;
 static esp_netif_t *g_sta_netif;
@@ -582,6 +598,11 @@ static void fill_station_config(wifi_config_t *config)
     memset(config, 0, sizeof(*config));
     strlcpy((char *)config->sta.ssid, g_wifi_ssid, sizeof(config->sta.ssid));
     strlcpy((char *)config->sta.password, g_wifi_password, sizeof(config->sta.password));
+    /* The driver only honours listen_interval with WIFI_PS_MAX_MODEM, and it is
+     * read when the association request is built, so a change needs a reconnect
+     * (the console 'set listen' does that). Default 3 (the IDF default when the
+     * field is 0) keeps the pre-knob behaviour on the non-HE build. */
+    config->sta.listen_interval = active_runtime_config()->listen_interval;
 }
 
 /* Last-known-wall-clock persistence; defined below (the SNTP callback needs it
@@ -890,6 +911,20 @@ static void energy_totals_start(void)
 /* Defined near apply_power_management() below; the Wi-Fi event handler and the
  * console 'set txpower|beacon|radio-save|wake-*' commands call it. */
 static void apply_radio_power_config(void);
+/* Push the persisted Wi-Fi modem PS mode (off/min/max) into the driver; defined
+ * with the other radio power knobs below. */
+static void apply_wifi_ps_config(void);
+/* Re-apply the PS mode and force a reconnect so a changed listen_interval is
+ * carried in a fresh association request; called by the console 'set ps|listen'. */
+static void wifi_ps_apply_and_reconnect(void);
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
+/* Defined near apply_radio_power_config() below; the Wi-Fi event handler and the
+ * console 'set twt|twt-wake' commands call them. TWT needs Wi-Fi 6 (HE), so the
+ * classic ESP32 compiles the whole path out. */
+static void apply_twt_config(void);
+static void twt_teardown(void);
 #endif
 
 static void wifi_event_handler(void *arg,
@@ -917,6 +952,11 @@ static void wifi_event_handler(void *arg,
          * is most reliable at connected status (the C6 family honours it). A
          * no-op when radio-save is off. */
         apply_radio_power_config();
+#if SOC_WIFI_HE_SUPPORT
+        /* Now associated, negotiate the Wi-Fi 6 TWT agreement (opt-in). A no-op
+         * when twt_enabled is off. */
+        apply_twt_config();
+#endif
 #endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *event = event_data;
@@ -933,12 +973,63 @@ static void wifi_event_handler(void *arg,
         }
 #endif
 #else
+        /* The TWT agreement died with the association; just drop the local flag
+         * (a teardown here would only return ESP_ERR_WIFI_NOT_CONNECT) so the
+         * next STA_CONNECTED sets it up again. A no-op when TWT is off. */
+#if SOC_WIFI_HE_SUPPORT
+        g_twt_active = false;
+#endif
         if (g_wifi_configured) {
             esp_err_t err = esp_wifi_connect();
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Wi-Fi reconnect failed: %s", esp_err_to_name(err));
             }
         }
+#endif
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_ITWT_SETUP) {
+#if SOC_WIFI_HE_SUPPORT
+        const wifi_event_sta_itwt_setup_t *event = event_data;
+        /* status is NOT an esp_err_t: 1 means the AP accepted the agreement, any
+         * other value is a failure reason (see esp_wifi_he_types.h and the IDF
+         * itwt example). Passing it to esp_err_to_name() logged a success as
+         * "UNKNOWN ERROR" and hid the real failures. */
+        if (event->status == 1) {
+            g_twt_active = true;
+            ESP_LOGI(TAG, "TWT setup OK: flow_id=%u wake_interval=%u*2^%u us",
+                     (unsigned)event->config.flow_id,
+                     (unsigned)event->config.wake_invl_mant,
+                     (unsigned)event->config.wake_invl_expn);
+        } else {
+            g_twt_active = false;
+            if (event->status == ESP_ERR_WIFI_TWT_SETUP_TIMEOUT) {
+                ESP_LOGW(TAG, "TWT setup timeout (no setup response frame)");
+            } else if (event->status == ESP_ERR_WIFI_TWT_SETUP_TXFAIL) {
+                ESP_LOGW(TAG, "TWT setup frame TX failed (reason %u)",
+                         (unsigned)event->reason);
+            } else if (event->status == ESP_ERR_WIFI_TWT_SETUP_REJECT) {
+                ESP_LOGW(TAG, "TWT setup rejected by the AP (does it support TWT?)");
+            } else {
+                ESP_LOGW(TAG, "TWT setup failed: status=%d reason=%u",
+                         (int)event->status, (unsigned)event->reason);
+            }
+        }
+#endif
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_ITWT_TEARDOWN) {
+#if SOC_WIFI_HE_SUPPORT
+        const wifi_event_sta_itwt_teardown_t *event = event_data;
+        ESP_LOGI(TAG, "TWT teardown: flow_id=%u status=%d", (unsigned)event->flow_id,
+                 (int)event->status);
+#endif
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_TWT_WAKEUP) {
+#if SOC_WIFI_HE_SUPPORT
+        const wifi_event_sta_twt_wakeup_t *event = event_data;
+        ESP_LOGD(TAG, "TWT wakeup: flow_id=%u", (unsigned)event->flow_id);
+#endif
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_ITWT_SUSPEND) {
+#if SOC_WIFI_HE_SUPPORT
+        const wifi_event_sta_itwt_suspend_t *event = event_data;
+        ESP_LOGI(TAG, "TWT suspend: status=%d bitmap=0x%02x", (int)event->status,
+                 (unsigned)event->flow_id_bitmap);
 #endif
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
         /* AP-only fallback (no home WLAN configured): the dashboard is reachable
@@ -5565,13 +5656,16 @@ static bool g_runtime_config_ready;
 
 #define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
 #define RUNTIME_CONFIG_NVS_KEY "cfg"
-/* v4 invalidates any v3 blob written by a build that allowed light sleep on a
- * USB Serial/JTAG-console target (the C6). A device that had booted into that
- * state carries light_sleep=1 in NVS; bumping the version makes runtime_config_load()
- * ignore the blob, so the new image falls back to the defaults (light sleep off)
- * and the USB port comes back instead of staying dead. The wire layout itself is
- * unchanged (16 bytes). */
-#define RUNTIME_CONFIG_NVS_VERSION 4u
+/* The wire layout lives in runtime_config.c (runtime_config_encode/decode) so it
+ * is host-tested; the version there is v6, which fills the byte v5 left reserved
+ * with wifi_ps_mode and appends listen_interval (20 -> 22 bytes). v5 had already
+ * appended the Wi-Fi 6 TWT knobs (twt_enabled, twt_wake_ms) to the 16-byte v4
+ * blob. An older, shorter blob is the wrong size and is ignored by
+ * runtime_config_decode(), so a device falls back to the defaults instead of
+ * misreading the new fields.
+ * NOTE: the parallel feat/c6-ap-switch branch also bumps the version to 5 (18
+ * bytes, appending ap_enabled); the two layouts must be merged into one version
+ * at merge time (offsets up to [15] are identical). */
 
 static void runtime_config_store(const runtime_config_t *cfg)
 {
@@ -5579,21 +5673,8 @@ static void runtime_config_store(const runtime_config_t *cfg)
     if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
         return;
     }
-    uint8_t blob[16];
-    blob[0] = (uint8_t)RUNTIME_CONFIG_NVS_VERSION;
-    blob[1] = cfg->light_sleep ? 1u : 0u;
-    blob[2] = (uint8_t)cfg->cpu_mhz;
-    blob[3] = (uint8_t)cfg->cpu_min_mhz;
-    uint32_t retries = cfg->espnow_retries;
-    memcpy(&blob[4], &retries, sizeof(retries));
-    blob[8] = cfg->wifi_txpower_dbm;
-    uint16_t beacon = cfg->ap_beacon_tu;
-    memcpy(&blob[9], &beacon, sizeof(beacon));
-    blob[11] = cfg->radio_save ? 1u : 0u;
-    uint16_t interval = cfg->wake_interval_ms;
-    memcpy(&blob[12], &interval, sizeof(interval));
-    uint16_t window = cfg->wake_window_ms;
-    memcpy(&blob[14], &window, sizeof(window));
+    uint8_t blob[RUNTIME_CONFIG_BLOB_SIZE];
+    runtime_config_encode(cfg, blob, sizeof(blob));
     if (nvs_set_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, sizeof(blob)) == ESP_OK) {
         (void)nvs_commit(handle);
     }
@@ -5637,31 +5718,17 @@ static void runtime_config_load(runtime_config_t *cfg)
     if (nvs_open(RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
         return;
     }
-    uint8_t blob[16];
+    uint8_t blob[RUNTIME_CONFIG_BLOB_SIZE];
     size_t len = sizeof(blob);
     esp_err_t err = nvs_get_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, &len);
     nvs_close(handle);
-    if (err != ESP_OK || len != sizeof(blob) || blob[0] != RUNTIME_CONFIG_NVS_VERSION) {
+    if (err != ESP_OK || len != sizeof(blob)) {
         return;
     }
-    runtime_config_t loaded = runtime_config_defaults();
-    loaded.light_sleep = blob[1] != 0;
-    loaded.cpu_mhz = blob[2];
-    loaded.cpu_min_mhz = blob[3];
-    uint32_t retries = 0;
-    memcpy(&retries, &blob[4], sizeof(retries));
-    loaded.espnow_retries = retries;
-    loaded.wifi_txpower_dbm = blob[8];
-    uint16_t beacon = 0;
-    memcpy(&beacon, &blob[9], sizeof(beacon));
-    loaded.ap_beacon_tu = beacon;
-    loaded.radio_save = blob[11] != 0;
-    uint16_t interval = 0;
-    memcpy(&interval, &blob[12], sizeof(interval));
-    loaded.wake_interval_ms = interval;
-    uint16_t window = 0;
-    memcpy(&window, &blob[14], sizeof(window));
-    loaded.wake_window_ms = window;
+    runtime_config_t loaded;
+    if (!runtime_config_decode(blob, len, &loaded)) {
+        return;
+    }
     runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
     *cfg = loaded;
 }
@@ -5879,8 +5946,15 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     char key[24] = {0};
     char value[32] = {0};
     if (sscanf(args, "%23s %31s", key, value) != 2) {
+        /* TWT is HE-only, so it is advertised only on the C6; the ps/listen
+         * knobs apply to every receiver (modem sleep is not HE-specific). */
+#if SOC_WIFI_HE_SUPPORT
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen> <value>\n");
+#else
+        snprintf(out, out_size,
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen> <value>\n");
+#endif
         return;
     }
     runtime_config_t *cfg = active_runtime_config();
@@ -5934,6 +6008,25 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         strcmp(key, "wake-window") == 0 || strcmp(key, "window") == 0) {
         apply_radio_power_config();
     }
+    /* 'set ps' and 'set listen' both need a reconnect: listen_interval is read
+     * from the station config only when the association request is built. */
+    if (strcmp(key, "ps") == 0 || strcmp(key, "wifi-ps") == 0 ||
+        strcmp(key, "listen") == 0 || strcmp(key, "listen-interval") == 0) {
+        wifi_ps_apply_and_reconnect();
+    }
+#if SOC_WIFI_HE_SUPPORT
+    /* TWT only takes effect once associated; a 'set' while connected re-negotiates
+     * (and 'set twt off' tears the agreement down). */
+    if (strcmp(key, "twt") == 0 || strcmp(key, "twt-enabled") == 0 ||
+        strcmp(key, "twt-wake") == 0 || strcmp(key, "twt-wake-ms") == 0) {
+        if (cfg->twt_enabled && g_wifi_connected) {
+            twt_teardown();
+            apply_twt_config();
+        } else {
+            twt_teardown();
+        }
+    }
+#endif
 #endif
     int written = snprintf(out, out_size,
                            "%s=%s%s%s\n", key, value, note,
@@ -5947,9 +6040,19 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
 {
     (void)args;
     runtime_config_t *cfg = active_runtime_config();
+#if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
+    /* Tear down an active TWT agreement before dropping to the defaults (which
+     * have TWT off); after the reset the flag is false and teardown would skip. */
+    twt_teardown();
+#endif
     runtime_config_reset(cfg);
     runtime_config_erase();
     runtime_config_apply(cfg);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Restore the default modem PS mode + listen interval and reconnect so the
+     * default interval reaches the association request. */
+    wifi_ps_apply_and_reconnect();
+#endif
 #if CONFIG_ESPNOW_ROLE_SENDER
     uart_sleep_set_pm_override((int)cfg->cpu_mhz, (int)cfg->cpu_min_mhz);
     uart_sleep_set_enabled(cfg->light_sleep);
@@ -5977,10 +6080,22 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
         snprintf(wake, sizeof(wake), " radio-save=%u/%u",
                  (unsigned)cfg->wake_interval_ms, (unsigned)cfg->wake_window_ms);
     }
-    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u%s%s\n",
+    char twt[32] = "";
+    if (cfg->twt_enabled) {
+        snprintf(twt, sizeof(twt), " twt=%ums", (unsigned)cfg->twt_wake_ms);
+    }
+    /* Always show the effective modem PS mode and listen interval: they are the
+     * levers of the FRITZ!Box tolerance test, so 'config' must report them even
+     * at their defaults. */
+    static const char *const ps_names[] = {"off", "min", "max"};
+    const char *ps = cfg->wifi_ps_mode <= RUNTIME_CONFIG_PS_MAX
+                         ? ps_names[cfg->wifi_ps_mode]
+                         : "min";
+    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on" : "off",
-             (unsigned)cfg->espnow_retries, radio, wake);
+             (unsigned)cfg->espnow_retries, radio, wake, twt, ps,
+             (unsigned)cfg->listen_interval);
 }
 
 static void web_console_register_commands(void)
@@ -5990,10 +6105,17 @@ static void web_console_register_commands(void)
                          console_cmd_test);
 #if !CONFIG_ESPNOW_ROLE_SENDER
     /* txpower/beacon only apply on the receiver (the sender has no SoftAP and
-     * drives its own radio), so only advertise them there. */
+     * drives its own radio), so only advertise them there. TWT needs Wi-Fi 6
+     * (HE), so it is only advertised on the HE-capable targets (the C6). */
+#if SOC_WIFI_HE_SUPPORT
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen",
                          console_cmd_set);
+#else
+    web_console_register("set",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen",
+                         console_cmd_set);
+#endif
 #else
     web_console_register("set", "change a runtime knob: cpu|freq|cpu-min|sleep|retries",
                          console_cmd_set);
@@ -8596,17 +8718,17 @@ static void apply_radio_power_config(void)
      * (Espressif's examples set the window first, then the interval). Only the
      * ESP32-C6 family honours the ESP-NOW wake window; on the classic ESP32 the
      * call is accepted but breaks the link, so this is opt-in (radio-save off by
-     * default). Turning it off restores the always-awake radio (WIFI_PS_MIN_MODEM
-     * + a zeroed wake window), i.e. exactly the pre-knob behaviour. */
+     * default). Turning it off zeroes the wake window again (the always-awake
+     * radio). The Wi-Fi PS *mode* itself is owned by apply_wifi_ps_config() (the
+     * 'set ps' knob), not by this function, so the two knobs do not fight. */
     if (cfg->radio_save) {
-        esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
         esp_err_t err = esp_now_set_wake_window(cfg->wake_window_ms);
         if (err == ESP_OK) {
             err = esp_wifi_connectionless_module_set_wake_interval(cfg->wake_interval_ms);
         }
-        if (ps_err != ESP_OK || err != ESP_OK) {
-            ESP_LOGW(TAG, "Could not enable radio sleep (ps=%s, window=%s)",
-                     esp_err_to_name(ps_err), esp_err_to_name(err));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Could not enable radio sleep (window=%s)",
+                     esp_err_to_name(err));
         } else {
             ESP_LOGI(TAG, "Radio sleep on: modem sleeps, ESP-NOW wakes every %u ms "
                           "for %u ms",
@@ -8614,8 +8736,164 @@ static void apply_radio_power_config(void)
         }
     } else {
         esp_err_t err = esp_now_set_wake_window(0);
-        (void)esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
         ESP_LOGI(TAG, "Radio sleep off: radio always awake (%s)", esp_err_to_name(err));
+    }
+    /* Re-assert the configured modem PS mode (off/min/max). Doing it here keeps
+     * the mode in force across a (re)association, where the wake window is
+     * re-applied; the two are independent levers. */
+    apply_wifi_ps_config();
+}
+
+/* Push the persisted Wi-Fi modem power-save mode into the driver. Must run
+ * after esp_wifi_start(): before it, esp_wifi_set_ps() returns
+ * ESP_ERR_WIFI_NOT_INIT and is silently ignored. The stored value maps 1:1 onto
+ * wifi_ps_type_t (0/1/2), so a plain cast is safe. listen_interval is *not*
+ * applied here: the driver reads it from the station config only when the
+ * association request is built, so 'set listen' (and 'set ps') performs a
+ * reconnect via wifi_ps_apply_and_reconnect().
+ *
+ * Coexistence with the ESP-NOW radio-save knob: the modem PS mode and the
+ * ESP-NOW connectionless wake window (apply_radio_power_config) are two
+ * independent levers. WIFI_PS_MAX_MODEM makes the *station* skip beacons up to
+ * listen_interval, but ESP-NOW RX is governed by esp_now_set_wake_window() /
+ * esp_wifi_connectionless_module_set_wake_interval(): a frame that arrives while
+ * the modem is parked is only delivered if it falls inside an ESP-NOW wake
+ * window. A large listen_interval therefore does not by itself break ESP-NOW,
+ * but it parks the radio for longer stretches, so a too-large interval (or a
+ * long ESP-NOW wake interval) can make the ~5 s sender frames arrive late or be
+ * missed. That is exactly what the bench test measures; this knob only exposes
+ * the value, it does not force a mode. */
+static void apply_wifi_ps_config(void)
+{
+    runtime_config_t *cfg = active_runtime_config();
+    wifi_ps_type_t mode = (wifi_ps_type_t)cfg->wifi_ps_mode;
+    if (cfg->wifi_ps_mode > RUNTIME_CONFIG_PS_MAX) {
+        mode = WIFI_PS_MIN_MODEM;
+    }
+    esp_err_t err = esp_wifi_set_ps(mode);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not set Wi-Fi PS mode %u: %s",
+                 (unsigned)cfg->wifi_ps_mode, esp_err_to_name(err));
+        return;
+    }
+    const char *name = mode == WIFI_PS_NONE ? "off"
+                       : mode == WIFI_PS_MAX_MODEM ? "max"
+                                                   : "min";
+    ESP_LOGI(TAG, "Wi-Fi PS mode set to %s (listen_interval=%u beacons)",
+             name, (unsigned)cfg->listen_interval);
+}
+
+/* Re-apply the PS mode and force a reconnect so a changed listen_interval is
+ * carried in a fresh association request (the driver reads it only then). Also
+ * refreshes the station config so fill_station_config()'s new interval is what
+ * the driver associates with. Mirrors the proven order in the web-config save
+ * path: disconnect, set_config, connect. A no-op reconnect when no WLAN is
+ * configured (the PS mode itself is still applied). */
+static void wifi_ps_apply_and_reconnect(void)
+{
+    apply_wifi_ps_config();
+    if (!g_wifi_configured) {
+        return;
+    }
+    (void)esp_wifi_disconnect(); /* ESP_ERR_WIFI_NOT_CONNECT when already idle */
+    wifi_config_t sta_config;
+    fill_station_config(&sta_config);
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+    if (err == ESP_OK) {
+        err = esp_wifi_connect();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi reconnect after a PS change failed: %s",
+                 esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi PS applied; reconnecting to carry listen_interval=%u",
+                 (unsigned)active_runtime_config()->listen_interval);
+    }
+}
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
+/* Wi-Fi 6 target wake time (iTWT), opt-in and receiver-only.
+ *
+ * Instead of waking at every DTIM beacon the associated station negotiates a
+ * longer wake cadence with the AP. The hardware measured only ~0.07 W while
+ * *unassociated*; the associated idle draw is dominated by the per-beacon wake,
+ * so a longer negotiated interval is the lever for the associated idle current.
+ *
+ * The agreement is (re)negotiated on every association and torn down on
+ * disconnect. TWT is an AP<->STA link-layer agreement and is independent of the
+ * ESP-NOW connectionless wake window (radio-save): ESP-NOW is not a scheduled
+ * traffic stream, so it is NOT covered by the TWT service period. With TWT on,
+ * the radio still wakes every twt_wake_ms and the connectionless module's own
+ * wake window still governs ESP-NOW RX inside that; the two coexist, and the
+ * sender's ~5 s ESP-NOW cadence is expected to be received at that resolution.
+ * This is documented in the PR; the end-to-end measurement is done on hardware.
+ *
+ * Bench note (2026-11-07): the FRITZ!Box 5530 Fiber rejected the individual TWT
+ * setup (see TODO.md), so on that AP twt_enabled stays ineffective and no
+ * agreement is ever active. The status handling in wifi_event_handler() reports
+ * that rejection explicitly instead of mislabelling it. */
+static void twt_teardown(void)
+{
+    if (!g_twt_active) {
+        return;
+    }
+    /* FLOW_ID_ALL: drop every flow. On a disconnect the agreement is gone with
+     * the association anyway, so a failure here is not fatal. */
+    esp_err_t err = esp_wifi_sta_itwt_teardown(FLOW_ID_ALL);
+    g_twt_active = false;
+    ESP_LOGI(TAG, "TWT teardown (all flows): %s", esp_err_to_name(err));
+}
+
+static void apply_twt_config(void)
+{
+    runtime_config_t *cfg = active_runtime_config();
+    if (!cfg->twt_enabled) {
+        return;
+    }
+    /* 1) Global TWT config: raise a wakeup event (so the log shows the cadence)
+     * and let the chip send a QoS-Null to the AP to keep the agreement alive. */
+    wifi_twt_config_t twt_config = {
+        .post_wakeup_event = true,
+        .twt_enable_keep_alive = true,
+    };
+    esp_err_t err = esp_wifi_sta_twt_config(&twt_config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "TWT config failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    /* 2) Wake interval = wake_invl_mant * 2^wake_invl_expn [us]. Split the
+     * requested millisecond cadence into a representable mantissa/exponent. */
+    uint32_t wake_us = (uint32_t)cfg->twt_wake_ms * 1000u;
+    uint8_t expn = 0;
+    uint16_t mant = 0;
+    if (!runtime_config_twt_split(wake_us, &expn, &mant)) {
+        ESP_LOGW(TAG, "TWT wake interval %u ms is not representable", (unsigned)cfg->twt_wake_ms);
+        return;
+    }
+
+    wifi_itwt_setup_config_t setup = {
+        .setup_cmd = TWT_REQUEST,
+        .trigger = 1,          /* trigger-enabled */
+        .flow_type = 0,        /* announced */
+        .flow_id = 0,          /* let the AP assign one on setup */
+        .wake_invl_expn = expn,
+        .wake_duration_unit = 0, /* 256 us */
+        .min_wake_dura = 255,  /* ~65 ms awake per service period */
+        .wake_invl_mant = mant,
+        .twt_id = 0,
+        .timeout_time_ms = 5000,
+    };
+    err = esp_wifi_sta_itwt_setup(&setup);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "TWT setup request failed: %s", esp_err_to_name(err));
+    } else {
+        /* Request sent; the AP's answer arrives as WIFI_EVENT_ITWT_SETUP, which
+         * sets g_twt_active on success. Do NOT mark it active here: a rejected
+         * setup would otherwise leave a later teardown running against nothing. */
+        ESP_LOGI(TAG, "TWT setup requested: wake every %u ms (mant %u * 2^%u)",
+                 (unsigned)cfg->twt_wake_ms, (unsigned)mant, (unsigned)expn);
     }
 }
 #endif

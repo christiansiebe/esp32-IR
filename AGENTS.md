@@ -71,6 +71,12 @@ Two firmware roles are built from one source tree.
   (`git tag -a vX.Y.Z`) give a clean version instead of a bare SHA.
 - **Versioning + commit convention: see `VERSIONING.md`.** One SemVer tag per
   firmware (`v0.1.0` is the first baseline; before it the version was `unknown`).
+  ⛔ **REGEL (verbindlich): jede geflashte/veröffentlichte Firmware bekommt einen
+  SemVer-Tag `vX.Y.Z` auf den gebauten Commit, und der Tag wird gepusht.** Der
+  Tag MUSS Vorfahre des Build-Commits sein: `git describe --tags` muss
+  `vX.Y.Z…` liefern, **keinen nackten SHA** (sonst liegt der Tag auf einem
+  Seitenzweig — genau das war der C6-Fehler, das Gerät meldete nur `5c57283`).
+  Die CI warnt, wenn kein Tag aufgelöst wird.
   The sender's `fw_version()` also travels in the counters frame
   (`espnow_diag_counters_t.fw_version`, `ESPNOW_DIAG_VERSION` 2) and is shown on
   the receiver's sender page as `sender fw:` — so the other device's build is

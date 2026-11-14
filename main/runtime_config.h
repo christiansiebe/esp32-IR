@@ -56,6 +56,39 @@
 #define RUNTIME_CONFIG_WAKE_WINDOW_MIN_MS 1u
 #define RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS 10000u
 
+/* Wi-Fi 6 target wake time (iTWT), opt-in and receiver-only. Instead of waking
+ * at every DTIM beacon the associated station negotiates a longer wake cadence
+ * with the AP; the hardware only reached 0.07 W unassociated, so an associated
+ * C6 that no longer wakes every beacon is the lever for the associated idle
+ * draw. Off by default: the AP must accept an *individual* TWT agreement. The
+ * FRITZ!Box 5530 Fiber advertises TWT in its association response but rejected
+ * the individual setup on the bench (ESP_ERR_WIFI_TWT_SETUP_REJECT /
+ * "does not support setup individual TWT agreement", see TODO.md), so on that AP
+ * the knob is currently ineffective and the modem-PS knob ('set ps') is the
+ * fallback. twt_wake_ms is the negotiated wake interval in milliseconds. */
+#define RUNTIME_CONFIG_TWT_WAKE_MIN_MS 500u
+#define RUNTIME_CONFIG_TWT_WAKE_MAX_MS 10000u
+#define RUNTIME_CONFIG_TWT_WAKE_DEFAULT_MS 5000u
+
+/* Wi-Fi modem power-save mode (receiver). 0 = off (WIFI_PS_NONE, radio always
+ * awake), 1 = min (WIFI_PS_MIN_MODEM, wake at every DTIM beacon), 2 = max
+ * (WIFI_PS_MAX_MODEM, wake only every listen_interval beacons). The values line
+ * up with wifi_ps_type_t, so the apply path is a plain cast. Default 1 (min)
+ * reproduces the pre-knob behaviour; only an explicit 'set ps max' opts into
+ * the aggressive mode that the FRITZ!Box tolerance test needs.
+ *
+ * listen_interval is in AP beacon intervals and is honoured by the driver only
+ * with WIFI_PS_MAX_MODEM. It is read when the association request is built, so a
+ * change only takes effect after a reconnect (disconnect + connect). 1..255,
+ * default 3 (the IDF default when the field is 0). */
+#define RUNTIME_CONFIG_PS_OFF 0u
+#define RUNTIME_CONFIG_PS_MIN 1u
+#define RUNTIME_CONFIG_PS_MAX 2u
+#define RUNTIME_CONFIG_PS_DEFAULT RUNTIME_CONFIG_PS_MIN
+#define RUNTIME_CONFIG_LISTEN_MIN 1u
+#define RUNTIME_CONFIG_LISTEN_MAX 255u
+#define RUNTIME_CONFIG_LISTEN_DEFAULT 3u
+
 typedef struct {
     uint32_t cpu_mhz;      /* DFS ceiling (max_freq) */
     uint32_t cpu_min_mhz;  /* DFS floor (min_freq); == cpu_mhz pins the clock */
@@ -66,7 +99,35 @@ typedef struct {
     bool radio_save;          /* receiver: park the Wi-Fi modem between wakes */
     uint16_t wake_interval_ms;/* ESP-NOW connectionless wake interval; 0 = off */
     uint16_t wake_window_ms;  /* radio-awake time per wake interval; 0 = off */
+    bool twt_enabled;         /* receiver: negotiate Wi-Fi 6 TWT with the AP */
+    uint16_t twt_wake_ms;     /* iTWT wake interval in ms (500..10000) */
+    uint8_t wifi_ps_mode;     /* receiver: Wi-Fi modem PS mode (0/1/2) */
+    uint16_t listen_interval; /* receiver: beacon listen interval for PS max */
 } runtime_config_t;
+
+/* Persisted blob wire format (NVS glue in main.c does the nvs_set_blob /
+ * nvs_get_blob around it; kept pure C so it is host-tested). v5 appended the
+ * Wi-Fi 6 TWT knobs (twt_enabled, twt_wake_ms). v6 fills the byte that v5 left
+ * reserved with wifi_ps_mode and appends listen_interval at [20..21], so the
+ * 16-bit listen interval stays aligned; the blob is 22 bytes. An old (shorter)
+ * or different-version blob is the wrong size and is ignored by
+ * runtime_config_decode(), so the caller keeps its defaults.
+ *
+ * NOTE: the parallel feat/c6-ap-switch branch also introduces this blob helper
+ * and bumps the version to 5 (18 bytes, appending ap_enabled). At merge time the
+ * two layouts must be folded into one version; the field offsets up to [15] are
+ * identical, so only the appended tail differs. */
+#define RUNTIME_CONFIG_BLOB_VERSION 6u
+#define RUNTIME_CONFIG_BLOB_SIZE 22u
+
+/* Encode cfg into a RUNTIME_CONFIG_BLOB_SIZE-byte blob. No-op when the buffer is
+ * NULL or too small. */
+void runtime_config_encode(const runtime_config_t *cfg, uint8_t *blob, size_t blob_size);
+
+/* Decode a blob into *cfg. Returns false (leaving *cfg untouched) when the blob
+ * is NULL, the wrong size, or carries a different version, so an old blob is
+ * ignored and the caller keeps its defaults. */
+bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config_t *cfg);
 
 /* Compile-time defaults (light sleep mirrors CONFIG_ESPNOW_SENDER_LIGHT_SLEEP). */
 runtime_config_t runtime_config_defaults(void);
@@ -85,6 +146,19 @@ bool runtime_config_parse_cpu_mhz_min(const char *text, uint32_t ceiling_mhz,
 
 /* Parse "on"/"off" (also 1/0, true/false) for a boolean knob. */
 bool runtime_config_parse_bool(const char *text, bool *out);
+
+/* Parse the Wi-Fi modem power-save mode: "off"/"none"/"0", "min"/"1",
+ * "max"/"2". Returns false for anything else (leaving *out untouched). */
+bool runtime_config_parse_ps(const char *text, uint8_t *out);
+
+/* Split a TWT wake interval (in microseconds) into the mantissa/exponent pair
+ * the iTWT setup frame carries, where the interval is
+ * wake_invl_mant * 2^wake_invl_expn [us]. The mantissa is chosen as large as
+ * possible (up to 65535) with the exponent as small as needed so the interval
+ * is representable; the returned pair may overshoot the request (never under)
+ * because not every microsecond count is expressible. Returns false (and leaves
+ * the outputs untouched) for a zero interval. Pure C, host-tested. */
+bool runtime_config_twt_split(uint32_t wake_us, uint8_t *expn, uint16_t *mant);
 
 /* False when the USB Serial/JTAG peripheral is the primary console (the
  * ESP32-C6, which has no USB-UART bridge). Light sleep powers that PHY down:
