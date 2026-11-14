@@ -5928,12 +5928,12 @@ static esp_err_t send_http_error_status(httpd_req_t *req,
 
 /* POST /api/reboot: restart from the web UI (auth-gated like /update). The
  * response is sent first and a short one-shot timer does the restart, so the
- * browser gets a clean reply instead of a reset connection. The restart is
- * marked deliberate so the crash journal does not log it as a crash. */
+ * browser gets a clean reply instead of a reset connection. Only the receiver
+ * registers this route; it has no crash journal (that lives on the sender), so
+ * the restart is a plain esp_restart() like console_cmd_reboot(). */
 static void reboot_timer_callback(void *arg)
 {
     (void)arg;
-    crash_journal_mark_clean_restart();
     esp_restart();
 }
 
