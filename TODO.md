@@ -1,5 +1,24 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-14): C6-Idle-Leistung gemessen (FNB-48) — SoftAP ist der Kostentreiber
+**Branch `feat/c6-mqtt-cmd`, FNB-48 am C6 (`/dev/hidraw0`). Details: `docs/c6-idle-power-measured.md`.**
+- **Befund:** Bei **identischen Knobs** (`cpu=80`, `radio-save=5000/30`, `ps=max`,
+  `listen=10`, Burst-Lock aus) zieht `receiver-c6` (APSTA, SoftAP an) **0,42 W**,
+  `receiver-c6-apoff` (station-only) **0,19 W**. Der **laufende Setup-SoftAP kostet
+  ~0,22 W**; ein Beacon-Intervall von 1000 TU ändert nichts.
+- **`esp_wifi_set_ps()` wirkt am APSTA-Receiver nicht:** `max`/`min`/`off` alle
+  ~0,425 W. Der ESP-NOW-Empfang läuft über `WIFI_IF_AP`, das Modem-Sleep parkt nur
+  die STA. `ps max` + Leiter sind also korrekt, aber am APSTA-Receiver **wirkungslos**.
+- **CPU:** 160→80 MHz spart ~4–8 % (0,44→0,42 W), 80→40 nichts.
+- **Burst-Lock transient:** ohne Sender hält er das Modem bis zum 60-s-Lern-Timeout
+  wach (0,40 W), danach parkt es (0,19 W). Im Sendebetrieb bleibt „an" nötig.
+- **Empfehlung:** Für minimale Idle-Leistung `receiver-c6-apoff` flashen; der SoftAP
+  ist nur für das Erst-Setup ohne FRITZ!Box-Zugang nötig.
+- **Kandidat:** SoftAP nach erfolgreicher STA-Verbindung automatisch abschalten
+  (Zugangsdaten persistiert) — dann bliebe auch der Default-Build sparsam.
+- **Offen:** Verlustfreiheit unter echter Senderlast weiterhin **nicht** messbar —
+  kein Sender am Prüfstand (`crc_valid=0`, `192.168.178.70` down).
+
 ## NEU (2026-11-07): `ps max` als C6-Receiver-Default + adaptive Modem-Sleep-Leiter
 **Branch `feat/c6-mqtt-cmd`, Commit `cdf3f8d`, CI grün (`v0.4.0-42-gcdf3f8d`).**
 - Wunsch: „`ps max` einschalten und es schaltet selbst um, wenn Verluste zu groß."

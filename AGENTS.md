@@ -78,6 +78,13 @@ Two firmware roles are built from one source tree.
   receiver's files, and `feat(both):` when a change touches both (e.g. the wire
   format in `espnow_diag.h`). `main/main.c` carries both roles, so split its diff
   per hunk (`git add -p`) when only one side changed.
+- **Report/measurement convention:** Versioning always stays in the old schema
+  (`git describe` / SemVer, e.g. `v0.4.0-9-g8b3181d` or `0.4.1-änderung`) — never
+  rewrite the version string into plain text. But behind *cryptic config
+  combinations* always append the plain-text state of what is set/active
+  (e.g. `radio-save on` → ESP-NOW-Wake-Intervall 20 ms / Fenster 15 ms;
+  `ps off` → WLAN-Modem-Sleep aus; `sleep off` → Light-Sleep aus). Do this in
+  every new report/measurement from now on.
 - **Diag wire version: never require an exact match.** `is_diag_request` /
   `is_diag_response` accept `ESPNOW_DIAG_VERSION_MIN..ESPNOW_DIAG_VERSION`, and
   every response echoes the request's version. Both devices are usually not
@@ -383,6 +390,26 @@ matrix entry `role: receiver-c6` (`target: esp32c6`), or locally
 - **Bootloader offset.** On the C6 the second-stage bootloader sits at **0x0**
   (not 0x1000); the partition table stays at 0x8000 and the app at 0x20000, so
   `partitions.csv` is unchanged.
+- **Power-save: drei Hebel, getrennt behandeln.** Der C6-Empfänger ist **APSTA**;
+  ESP-NOW empfängt über die **SoftAP**-Schnittstelle (`ESPNOW_IF == WIFI_IF_AP`,
+  `main/main.c`, weil `CONFIG_ESPNOW_RECEIVER_DISABLE_AP` nicht gesetzt ist).
+  Konsequenz: `esp_wifi_set_ps()` (`ps off/min/max`) parkt nur die **STA** (gegen
+  die FRITZ!Box), **nicht** den AP-ESP-NOW-Empfang. Der einzige Hebel, der den
+  ESP-NOW-Empfang wirklich parkt, ist das **Wake-Fenster** (`radio-save`,
+  `esp_now_set_wake_window`) bzw. der **burst-lock** (150-ms-Vorhersage,
+  `main/burst_lock.c`). `runtime_config.c`-Default: `ps=min` + `burst_lock=true` +
+  `radio_save=false`. Nie `ps min/max` ohne Wake-Fenster/burst-lock (≈90 %).
+  Siehe `docs/c6-modem-sleep-safety.md`, `docs/radio-sleep-break-even.md`,
+  `docs/branch-inventory.md`.
+- **Isolierte/verwaiste Commits sind gesichert.** Drei Commits lagen für
+  `git log` unsichtbar: `1b4389f` (sync-slot + ACK-Handshake, WIP, im Git-Stash),
+  `8d8c90c` (burst-lock-Duplikat), `5e6b310` (Wi-Fi-Reconnect-Duplikat). Sie
+  wurden als lokale `archive/*`-Branches gesichert
+  (`archive/sync-slot-wip`, `archive/burst-lock-dupe-8d8c90c`,
+  `archive/reconnect-dupe-5e6b310`). `1b4389f` ist die **einzige echte
+  ungemergte** Arbeit (verworfen/ersetzt durch `feat/c6-burst-lock`); die anderen
+  zwei sind inhaltlich bereits in `main`/gemergten Commits enthalten. Alle
+  Branches + Abstand zu main: `docs/branch-inventory.md`.
 
 ## Tests
 - Host tests: `./test/run_host_tests.sh` plus
@@ -873,3 +900,28 @@ dem Odroid, Key in KEY, Doku in README.md).
   esp32-channel, pollt alle 5 s). Skripte auch unter /files/odroid_agent.sh.
 - Damit ist der serielle Web-Monitor (/console, POST /api/console) und der
   OTA-Pull (POST /api/ota-pull) am echten Geraet aus dem Chat bedienbar.
+
+## mDNS/Poll-Bruecke: Power-Saving & IP-unabhaengiger Fix (2026-11-10)
+- **Der Receiver (ESP32-C6) schlaeft (Power-Saving)** und ist nur **kurz wach**.
+  `socket.gethostbyname()` / `getent` (libnss-mdns) scheitern daher haeufig mit
+  `Name or service not known`, obwohl das Geraet lebt. Zuverlaessig ist nur das
+  **periodische mDNS-Announcement** des Geraets, abrufbar per
+  `avahi-browse -rtp _http._tcp` (liefert `esp32-meter.local` + IP auch im
+  Schlaf). Der HTTP-Dashboard `/api/dashboard` antwortet waehrend des
+  Wake-Fensters.
+- **ODROID-HA-MQTT-Bruecke** `/root/esp32_mqtt_bridge.py` (Service
+  `esp32-mqtt-bridge`) pollt die ESP32-HTTP-API und publiziert mit HA-Discovery
+  auf Mosquitto (User `meter`/Pass `Strom-Meter-2026`, Prefix `esp32ir/receiver`).
+  Sie bildet den **15-min-Mittelwert `average` selbst** aus `average_power_w` –
+  die native Firmware-MQTT (`mqtt_bridge.c`, default prefix `esp32ir/receiver`)
+  publiziert nur `power/import/export/history`, KEIN `average`. Ein Wechsel auf
+  natives MQTT wuerde also `sensor.esp32_ir_stromzaehler_leistung_15_min_mittel`
+  (in automations.yaml stark genutzt) brechen. Deshalb: Bei der Poll-Bruecke
+  bleiben.
+- **Fix (angewendet 2026-11-10, `/root/esp32_mqtt_bridge.py.bak-vor-mdns-fix-20261110`):**
+  Die Bruecke loest die IP periodisch (alle 120 s) per `avahi-browse`/nss auf,
+  **cacht die IP** und meldet `status: offline` erst nach 4 Fehlschlaegen in
+  Folge (vorher flappte sie bei jedem Schlaf-Lueckchen). Live verifiziert:
+  0 Fehler seit Deploy, retained `status=online`, Werte fliessen, Entity-IDs
+  unveraendert (`esp32ir_recv_power/import/export/average`). Quellstand: lokale
+  Kopie wurde nach Test geloescht; die Produktionsdatei liegt auf dem Odroid.
