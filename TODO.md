@@ -21,6 +21,13 @@
   CI-Guard „Verify the receiver boot-order guard". Host-Tests gruen.
 - **Offen:** exakt blockierende Zeile noch nicht sicher benannt; bis dahin ist der
   Backstop die Sicherheitsleine. Rebuild+Flash via GitHub-CI.
+- **✅ Hardware-verifiziert (2026-11-14, USB-Flash):** Per `esptool` direkt auf
+  `/dev/ttyACM0` geflasht (C6FH4, MAC `10:bd:a3:88:d7:14`), App-Version
+  `v0.4.0-52-ga5ca8e7`. **Vorher** (alter Stand): Port 80 tot (`RST`), Ping ok.
+  **Nachher:** Boot-Log zeigt `Webserver available … http://192.168.4.1/` +
+  `Receiver ready …` bei **~18,7 s**; `/api` -> HTTP 200 (`v0.4.0-52-ga5ca8e7`),
+  `/api/dashboard`, `/api/sml`, `/healthz` alle **200**. Der Boot-Hang ist damit
+  auf echter Hardware behoben (nicht nur die Haertung, der Webserver kommt hoch).
 
 ## NEU (2026-11-14): C6-Idle-Leistung gemessen (FNB-48) — SoftAP ist der Kostentreiber
 **Branch `feat/c6-mqtt-cmd`, FNB-48 am C6 (`/dev/hidraw0`). Details: `docs/c6-idle-power-measured.md`.**
