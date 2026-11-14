@@ -19,6 +19,11 @@ set(main_requires
     esp_pm
     esp_timer
     esp_wifi
+    # Hardware RWDT backstop (rwdt_guard.c): the RWDT is reached through the
+    # HAL (hal/wdt_hal.h) and its timeout is derived from the RTC slow clock
+    # (soc/rtc.h), so both owning components must be visible.
+    esp_hal_wdt
+    esp_hw_support
     mdns
     nvs_flash
     spiffs
@@ -38,6 +43,7 @@ set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
               "history_csv_import.c" "history_upload.c"
               "link_fallback.c" "ps_fallback.c" "liveness_guard.c" "ota_policy.c"
               "task_wdt_policy.c" "task_wdt_guard.c"
+              "rwdt_policy.c" "rwdt_guard.c"
               "json_escape.c" "version.c"
               "wall_clock.c" "wall_clock_store.c"
               "energy_totals.c" "energy_totals_store.c")

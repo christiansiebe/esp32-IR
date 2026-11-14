@@ -69,6 +69,7 @@
 #include "crash_journal.h"
 #include "liveness_guard.h"
 #include "ota_policy.h"
+#include "rwdt_guard.h"
 #include "task_wdt_guard.h"
 #include "espnow_diag.h"
 #include "sml_transport.h"
@@ -5960,6 +5961,18 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
         return;
     }
     written += wdt;
+    rwdt_guard_status_t rwdt;
+    rwdt_guard_get_status(&rwdt);
+    int rwdt_line = snprintf(out + written, out_size - (size_t)written,
+                             "rwdt backstop: %s, timeout %u ms, %u feed(s)\n",
+                             rwdt.armed ? "armed" : "off",
+                             (unsigned)rwdt.timeout_ms,
+                             (unsigned)rwdt.feeds);
+    if (rwdt_line < 0 || (size_t)rwdt_line >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+        return;
+    }
+    written += rwdt_line;
 #if CONFIG_ESPNOW_ROLE_SENDER
     /* Application-level ACK state: whether the receiver confirms telegrams and
      * how much retransmission the link needs. "confirmed" means an ACK has been
@@ -9724,6 +9737,11 @@ static void ps_ladder_worker(void *arg)
 
 static void liveness_note_alive(void)
 {
+    /* Also feed the hardware RWDT backstop: this is the aggregate "the device
+     * made progress" signal (UART worker + every HTTP request). If it stops,
+     * the RWDT resets the chip in hardware even when a stalled flash/SPIFFS
+     * operation means no task (and no esp_restart) can run anymore. */
+    rwdt_guard_feed();
     if (g_liveness_ready) {
         liveness_feed(&g_liveness, (uint64_t)(esp_timer_get_time() / 1000));
     }
@@ -10735,6 +10753,13 @@ static void ps_ladder_boot_init(void)
 
 void app_main(void)
 {
+    /* Arm the hardware RWDT backstop before anything else. The IDF disables
+     * the bootloader's RWDT before app_main(), so without this the only
+     * watchdogs left are software ones that cannot reset a CPU stalled on a
+     * flash operation. It is fed via liveness_note_alive() at each init phase
+     * (and from the UART worker / HTTP traffic afterwards), so a hang in the
+     * init below still ends in a hardware reset. */
+    (void)rwdt_guard_init();
 #if !CONFIG_ESPNOW_ROLE_SENDER
     /* Start the global liveness backstop FIRST, before any heavy init. It used
      * to start only after start_webserver(); every other receiver guard

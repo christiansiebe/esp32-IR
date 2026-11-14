@@ -350,3 +350,41 @@ config ESPNOW_HEALTH_GRACE_S
         Uptime that must pass before any health rule may fire, so a slow boot
         (Wi-Fi association, first backfill) is not mistaken for a fault.
 
+config ESPNOW_RWDT_BACKSTOP
+    bool "Hardware RWDT backstop (reset even when no task can run)"
+    depends on SOC_RTC_WDT_SUPPORTED
+    default y if IDF_TARGET_ESP32C6
+    default n
+    help
+        Re-arm the RTC/LP watchdog (RWDT) in the application with stage 0 =
+        system reset. The RWDT is clocked by the RTC slow clock and resets the
+        chip in hardware, independent of the CPU and the flash cache. It is the
+        only watchdog that still fires when a SPIFFS/flash operation stalls the
+        CPU with the instruction cache disabled - the case where the task
+        watchdog, the interrupt watchdog and even esp_restart() can no longer
+        run, so the device hangs hard until it is power-cycled.
+
+        The RWDT is fed only on observed forward progress (from the same
+        aggregate that feeds the liveness guard). When progress stops, the feed
+        stops and the hardware reset fires after CONFIG_ESPNOW_RWDT_TIMEOUT_MS.
+        The timeout is deliberately above the liveness escalation (120 s), so a
+        working software reboot wins and the RWDT only catches a total stall.
+
+        Default on for the ESP32-C6 only (where the hard hang was observed).
+        The classic ESP32 targets keep it off by default so a working,
+        already-deployed device is not changed; enable it there explicitly.
+        The ESP32/ESP32-S2 use a different rtc_wdt_* API - this backstop uses
+        the RWDT HAL, which is the same path the bootloader takes on every
+        target, so it is not target-specific beyond the Kconfig gate.
+
+config ESPNOW_RWDT_TIMEOUT_MS
+    int "Hardware RWDT backstop timeout (ms)"
+    depends on ESPNOW_RWDT_BACKSTOP
+    range 10000 3600000
+    default 180000
+    help
+        How long the device may make no forward progress before the RWDT resets
+        it in hardware. Keep it above the liveness escalation (feed 60 s +
+        panic 30 s + reboot 30 s = 120 s) so a working software reboot is not
+        pre-empted, and below the time a hard hang may last unnoticed.
+

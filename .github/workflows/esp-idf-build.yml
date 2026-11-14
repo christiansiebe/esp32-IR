@@ -301,6 +301,22 @@ jobs:
             "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image registers workers with the task watchdog"
 
+      - name: Verify the hardware RWDT backstop (ESP32-C6)
+        if: matrix.target == 'esp32c6' && startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The C6 receiver re-arms the hardware RTC/LP watchdog (rwdt_guard.c)
+          # so a total stall - even a flash/SPIFFS hang where no task can run
+          # and esp_restart() is impossible - still resets the chip. The strings
+          # below live in rwdt_guard.c only, so grepping the built app proves the
+          # backstop is compiled into this image and not just the config flag.
+          grep -q '^CONFIG_ESPNOW_RWDT_BACKSTOP=y$' sdkconfig
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'RWDT backstop armed: stage0 system reset' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image arms the hardware RWDT backstop"
+
       - name: Verify the runtime SoftAP switch (receiver)
         if: startsWith(matrix.role, 'receiver')
         shell: bash

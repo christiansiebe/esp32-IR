@@ -713,3 +713,16 @@ ASAN_OPTIONS=detect_leaks=0 "$out/test_sml_selftest"
     -o "$out/test_virtual_day"
 
 "$out/test_virtual_day"
+
+# RWDT backstop tick arithmetic (pure): the hardware reset cannot be driven on
+# the host, but the millisecond -> stage-0 tick conversion must never shorten
+# the requested timeout (the implicit multiplier would otherwise fire early).
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/rwdt_policy.c" \
+    "$here/test_rwdt_policy.c" \
+    -o "$out/test_rwdt_policy"
+
+"$out/test_rwdt_policy"
+

@@ -1,5 +1,37 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-07): C6-Receiver — Hardware-RWDT-Backstop (Reboot nie unmoeglich)
+**Branch `feat/c6-rwdt-backstop` (Basis = geflashter Commit `4512784`).**
+- **Ziel:** Ein Hang darf **nie** permanent sein. TWDT + `liveness_guard` brauchen
+  beide laufenden Code und enden in `esp_restart()` — bei einem Flash-/SPIFFS-Stall
+  mit abgeschaltetem Cache laeuft kein Task mehr, also greift keiner von beiden.
+- **Loesung:** Der **RTC/LP-Watchdog (RWDT)** wird in der App re-armiert (Stufe 0 =
+  System-Reset). Er haengt am RTC-Slow-Clock und resettet den Chip in Hardware, ohne
+  CPU/Cache. Sein Feed (`lpwdt_ll_feed`) ist ein **reiner Registerschreibzugriff**
+  (kein Flash) und laeuft in IRAM (`wdt_hal_iram.c`).
+- **Wichtig (verifiziert):** `rtc_wdt_*` (rtc_wdt.h) gibt es **nur** auf ESP32/S2 —
+  auf dem C6 ist der Weg `hal/wdt_hal.h` (`RWDT_HAL_CONTEXT_DEFAULT()`,
+  `wdt_hal_init(WDT_RWDT)`, `wdt_hal_config_stage(WDT_STAGE0, …, RESET_SYSTEM)`).
+  Der Feed braucht **Write-Protect-disable** davor (wie `esp_task_wdt`), sonst
+  wirkt er still nicht -> Reset-Schleife.
+- **Stufe-0-Falle:** Die Hardware multipliziert den Registerwert implizit mit
+  `2^(1+EFUSE_WDT_DELAY_SEL)`. `rwdt_timeout_ticks()` rundet deshalb **auf das
+  naechste Vielfache von 16 auf**, damit der Timeout nie zu kurz wird.
+- **Feed-Politik:** gefuettert wird nur bei echtem Fortschritt — ueber
+  `liveness_note_alive()` (UART-Worker + jeder HTTP-Request + jeder Init-Abschnitt).
+  Der Timeout (Default **180 s**) liegt bewusst **ueber** der Liveness-Eskalation
+  (60+30+30 = 120 s), damit ein funktionierender Software-Reboot gewinnt und der
+  RWDT nur den totalen Stillstand faengt.
+- **Sicherheit fuer die laufenden Geraete:** per Kconfig `ESPNOW_RWDT_BACKSTOP`
+  nur **Default an fuer `IDF_TARGET_ESP32C6`**; die ESP32-Sender/Receiver bleiben
+  unveraendert (dort inert).
+- **Umgesetzt:** `main/rwdt_policy.{c,h}` (pure, host-getestet) +
+  `main/rwdt_guard.{c,h}` (IDF-Glue), Armierung an den Anfang von `app_main`,
+  Feed in `liveness_note_alive()`, Statuszeile `rwdt backstop: …` in `status`,
+  Kconfig-Knopf + CI-Guard „Verify the hardware RWDT backstop".
+- **Offen:** GitHub-CI-Build (nie auf dem Odroid), Flash auf `/dev/ttyACM0`,
+  Hardware-Nachweis (Statuszeile + Reset-Grund `ESP_RST_WDT` nach kuenstlichem Stall).
+
 ## NEU (2026-11-14): C6-Receiver-Boot-Hang vor `start_webserver()` — gehaertet
 **Branch `feat/c6-mqtt-cmd`. Details: `docs/c6-receiver-boot-hang.md`.**
 - **Symptom (live, `192.168.178.105`):** Port 80 tot (`nmap` -> alle Ports
