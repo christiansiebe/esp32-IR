@@ -30,13 +30,13 @@ set(main_requires
 # idf_component.yml and become dependencies of "main" automatically, so they do
 # not need to be named in REQUIRES (see the IDF v6 migration guide for cJSON).
 set(main_srcs "main.c" "power_history.c" "web_console.c" "serial_console.c"
-              "runtime_config.c"
+              "runtime_config.c" "net_config.c"
               "boot_policy.c" "boot_confirm.c" "recovery_button.c"
               "recovery_start.c" "boot_log.c"
               "crash_journal.c" "crash_journal_store.c"
               "mqtt_topics.c" "history_backfill.c" "history_sync.c"
               "history_csv_import.c" "history_upload.c"
-              "link_fallback.c" "liveness_guard.c" "ota_policy.c"
+              "link_fallback.c" "ps_fallback.c" "liveness_guard.c" "ota_policy.c"
               "task_wdt_policy.c" "task_wdt_guard.c"
               "json_escape.c" "version.c"
               "wall_clock.c" "wall_clock_store.c"

@@ -215,6 +215,18 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_link_fallback"
 
+# Modem-sleep fault watchdog: a storm of STA disconnects while a PS mode is in
+# force must drop to the proven mode (sticky), an intentional reconnect must not
+# count, and a stable association must clear the count. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/ps_fallback.c" \
+    "$here/test_ps_fallback.c" \
+    -o "$out/test_ps_fallback"
+
+"$out/test_ps_fallback"
+
 # Sender parser stall recovery: a wedged SML parser (bytes arriving, no telegram
 # finalised) must be reset by a timer armed by the first byte of the capture, not
 # by a telegram - the old rule left a wedge on the first telegram of a boot
@@ -494,6 +506,16 @@ python3 "$repo/remote-shell/ha/test_print_health.py"
 
 "$out/test_runtime_config_usb_console"
 
+# WLAN/MQTT configuration validators behind `set wifi-*` / `set mqtt-*`: a bad
+# SSID/URI/prefix must be rejected before it reaches NVS or the driver. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/net_config.c" \
+    "$here/test_net_config.c" \
+    -o "$out/test_net_config"
+
+"$out/test_net_config"
 # Same knobs, but built as the ESP32-C6 *receiver*: the default must be the
 # measured loss-free power-saving combo (station PS off + ESP-NOW wake window
 # 20/15), not WIFI_PS_MIN_MODEM which loses ~90% of the telegrams.

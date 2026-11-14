@@ -110,6 +110,44 @@ static void test_truncation_is_safe(void)
     CHECK(strlen(out) < sizeof(out), "output stays NUL terminated");
 }
 
+static void test_help_fits_recommended_buffer(void)
+{
+    printf("test_help_fits_recommended_buffer\n");
+    /* Mirror the device command table (main.c web_console_register_commands) so
+     * the regression that dropped the trailing lines of 'help' cannot come back:
+     * the listing must fit into WEB_CONSOLE_OUT_MAX and still contain the last
+     * command. */
+    static const char *const names[] = {
+        "help", "test", "set", "config", "reset-config", "status", "history",
+        "pull", "time", "wifi", "power", "mqtt", "reboot", "simulate",
+    };
+    static const char *const helps[] = {
+        "list available commands",
+        "run a self-test: sleep|cpu|sml|espnow|storage|nvs",
+        "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
+        "show the current test knobs",
+        "restore the default test knobs",
+        "wifi, channel, clock and heap",
+        "persistent power-history counters",
+        "pull missing sender history now (backfill)",
+        "current UTC clock and sync state",
+        "configured SSID and link state",
+        "latest power and ring sample count",
+        "MQTT bridge state",
+        "restart the device",
+        "forecast the next boot without restarting",
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        web_console_register(names[i], helps[i], empty_handler);
+    }
+    char out[WEB_CONSOLE_OUT_MAX];
+    web_console_help(out, sizeof(out));
+    CHECK(strstr(out, "help") != NULL, "help lists the first command");
+    CHECK(strstr(out, "simulate") != NULL, "help keeps the last command");
+    CHECK(strstr(out, "forecast the next boot") != NULL,
+          "help keeps the last description");
+}
+
 int main(void)
 {
     test_registration_and_lookup();
@@ -118,6 +156,7 @@ int main(void)
     test_help_lists_commands();
     test_re_registration();
     test_truncation_is_safe();
+    test_help_fits_recommended_buffer();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -9,6 +9,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* Recommended size for the result buffer a caller hands to web_console_run().
+ * The 'help' listing is the largest output; it grows with the command table, so
+ * a buffer smaller than this silently drops the trailing lines. */
+#define WEB_CONSOLE_OUT_MAX 1536
+
 /* A command writes its human-readable result into out (always NUL terminated
  * within out_size). args is the remainder of the line after the command name
  * (may be empty, never NULL). */

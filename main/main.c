@@ -49,9 +49,11 @@
 #include "history_upload.h"
 #include "json_escape.h"
 #include "link_fallback.h"
+#include "ps_fallback.h"
 #include "power_history.h"
 #include "energy_totals.h"
 #include "runtime_config.h"
+#include "net_config.h"
 #include "sml_selftest.h"
 #include "version.h"
 #include "wall_clock.h"
@@ -377,6 +379,19 @@ static volatile bool g_link_fallback_active;
 static volatile uint8_t g_link_fallback_stage;
 #endif
 
+#if CONFIG_ESPNOW_PS_FALLBACK
+/* Wi-Fi modem-sleep (power-save) fault watchdog: a storm of STA disconnects
+ * while a PS mode is in force means the mode is breaking the link, so drop to
+ * the proven mode (WIFI_PS_NONE, radio always awake). One instance per device,
+ * fed from the Wi-Fi event handler and polled by ps_fallback_worker, so the
+ * window clock lives in a lock. Declared outside the role guards: both roles
+ * can run a PS mode. */
+static ps_fallback_t g_ps_fallback;
+static portMUX_TYPE g_ps_fallback_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool g_ps_fallback_active;
+static volatile uint8_t g_ps_fallback_stage;
+#endif
+
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* sml_tx_item_t lives in tx_batch.h so the batching ring is host-testable. */
 #include "uart_sleep_window.h"
@@ -600,8 +615,8 @@ static void fill_station_config(wifi_config_t *config)
     strlcpy((char *)config->sta.password, g_wifi_password, sizeof(config->sta.password));
     /* The driver only honours listen_interval with WIFI_PS_MAX_MODEM, and it is
      * read when the association request is built, so a change needs a reconnect
-     * (the console 'set listen' does that). Default 3 (the IDF default when the
-     * field is 0) keeps the pre-knob behaviour on the non-HE build. */
+     * (the console 'set listen' does that). The default (10) keeps the pre-knob
+     * behaviour on the non-HE build. */
     config->sta.listen_interval = active_runtime_config()->listen_interval;
 }
 
@@ -919,6 +934,36 @@ static void apply_wifi_ps_config(void);
 static void wifi_ps_apply_and_reconnect(void);
 #endif
 
+#if CONFIG_ESPNOW_PS_FALLBACK
+/* Mark the next STA disconnect as an expected reconnect (a deliberate 'set ps' /
+ * 'set wifi-*' / reset-config), so the modem-sleep watchdog does not count it as
+ * a fault. Defined here so every reconnect path can use it. */
+static void ps_fallback_mark_intentional(void)
+{
+    portENTER_CRITICAL(&g_ps_fallback_lock);
+    ps_fallback_note_intentional(&g_ps_fallback);
+    portEXIT_CRITICAL(&g_ps_fallback_lock);
+}
+
+/* Clear the modem-sleep fallback latch and window: an explicit 'set ps' /
+ * reset-config is a deliberate re-arm, so the user may retry a PS mode. */
+static void ps_fallback_rearm(void)
+{
+    const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    portENTER_CRITICAL(&g_ps_fallback_lock);
+    ps_fallback_init(&g_ps_fallback, CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS,
+                     CONFIG_ESPNOW_PS_FALLBACK_THRESHOLD,
+                     CONFIG_ESPNOW_PS_FALLBACK_GRACE_MS,
+                     PS_FALLBACK_DEFAULT_STABLE_RESET_MS, now_ms);
+    portEXIT_CRITICAL(&g_ps_fallback_lock);
+    g_ps_fallback_active = false;
+    g_ps_fallback_stage = 0;
+}
+#else
+static void ps_fallback_mark_intentional(void) {}
+static void ps_fallback_rearm(void) {}
+#endif
+
 #if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
 /* Defined near apply_radio_power_config() below; the Wi-Fi event handler and the
  * console 'set twt|twt-wake' commands call them. TWT needs Wi-Fi 6 (HE), so the
@@ -938,6 +983,16 @@ static void wifi_event_handler(void *arg,
         g_wifi_connected = true;
         g_espnow_channel = event->channel;
         ESP_LOGI(TAG, "Connected to configured Wi-Fi on channel %u", event->channel);
+#if CONFIG_ESPNOW_PS_FALLBACK
+        /* Record the association start: a long, stable association clears the
+         * modem-sleep watchdog's disconnect count (the PS mode proved itself). */
+        {
+            const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+            portENTER_CRITICAL(&g_ps_fallback_lock);
+            ps_fallback_note_connected(&g_ps_fallback, now_ms);
+            portEXIT_CRITICAL(&g_ps_fallback_lock);
+        }
+#endif
 #if CONFIG_ESPNOW_ROLE_SENDER
         /* Now that the station is associated, enable the ESP-NOW connectionless
          * wake window: only at connected status does the Wi-Fi driver release
@@ -962,6 +1017,17 @@ static void wifi_event_handler(void *arg,
         const wifi_event_sta_disconnected_t *event = event_data;
         g_wifi_connected = false;
         ESP_LOGW(TAG, "Wi-Fi station disconnected (reason %u)", event->reason);
+#if CONFIG_ESPNOW_PS_FALLBACK
+        /* Feed the modem-sleep watchdog: a storm of disconnects while a PS mode
+         * is in force means the mode is breaking the link. An intentional
+         * reconnect (marked before esp_wifi_disconnect()) is not counted. */
+        {
+            const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+            portENTER_CRITICAL(&g_ps_fallback_lock);
+            ps_fallback_note_disconnect(&g_ps_fallback, now_ms);
+            portEXIT_CRITICAL(&g_ps_fallback_lock);
+        }
+#endif
 #if CONFIG_ESPNOW_ROLE_SENDER
 #if CONFIG_ESPNOW_SENDER_ASSOCIATE
         /* Re-associate with the receiver AP so Wi-Fi modem sleep keeps the APB
@@ -2063,7 +2129,11 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .cpu_freq_min_mhz = (uint8_t)(pm_config.min_freq_mhz > 0 ? pm_config.min_freq_mhz : 0),
         .light_sleep_enabled = pm_config.light_sleep_enable ? 1 : 0,
         .wifi_ps_mode = (uint8_t)wifi_ps,
-        .reserved2 = 0,
+#if CONFIG_ESPNOW_PS_FALLBACK
+        .ps_fallback_stage = g_ps_fallback_stage,
+#else
+        .ps_fallback_stage = 0,
+#endif
         .storage_records = storage.record_count,
         .storage_capacity = POWER_HISTORY_CAPACITY,
         .storage_write_errors = storage.write_errors,
@@ -5653,6 +5723,9 @@ static esp_err_t simulate_page_handler(httpd_req_t *req)
  * erases the namespace and returns to the compile-time defaults. */
 static runtime_config_t g_runtime_config;
 static bool g_runtime_config_ready;
+/* Safe-fallback bookkeeping: which knob (if any) the driver rejected and was
+ * repaired to its default. Surfaced by 'config' and reset by 'reset-config'. */
+static runtime_config_health_t g_runtime_health;
 
 #define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
 #define RUNTIME_CONFIG_NVS_KEY "cfg"
@@ -5710,8 +5783,10 @@ static void runtime_config_erase_namespace(void)
 }
 #endif
 
-/* Load the persisted knobs, clamped to what this build allows. A missing or
- * malformed blob leaves *cfg untouched (the caller keeps the defaults). */
+/* Load the persisted knobs, clamped to what this build allows. A missing blob
+ * is the normal first-boot case (silent). A blob that is present but the wrong
+ * size, wrong version or undecodable is logged and ignored, so the caller keeps
+ * the defaults instead of silently running an unexpected config. */
 static void runtime_config_load(runtime_config_t *cfg)
 {
     nvs_handle_t handle;
@@ -5722,11 +5797,25 @@ static void runtime_config_load(runtime_config_t *cfg)
     size_t len = sizeof(blob);
     esp_err_t err = nvs_get_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, &len);
     nvs_close(handle);
-    if (err != ESP_OK || len != sizeof(blob)) {
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "runtime config: NVS read failed (%s); using defaults",
+                 esp_err_to_name(err));
+        return;
+    }
+    if (len != sizeof(blob)) {
+        ESP_LOGW(TAG, "runtime config: stored blob is %u bytes, expected %u; "
+                      "using defaults",
+                 (unsigned)len, (unsigned)sizeof(blob));
         return;
     }
     runtime_config_t loaded;
     if (!runtime_config_decode(blob, len, &loaded)) {
+        ESP_LOGW(TAG, "runtime config: stored blob v%u is undecodable; using "
+                      "defaults",
+                 blob[0]);
         return;
     }
     runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
@@ -5741,6 +5830,33 @@ static runtime_config_t *active_runtime_config(void)
         g_runtime_config_ready = true;
     }
     return &g_runtime_config;
+}
+
+/* Apply the knobs and, when the PM API rejects them, fall back to the safe
+ * defaults so a rejected value is never kept. `key` names the knob being set
+ * (NULL for a whole-config apply). Persists the result either way (the value
+ * survives a reboot and an OTA). Returns true when the requested config is in
+ * effect; false when a repair happened. The health record makes the event
+ * visible in 'config'. */
+static bool runtime_config_apply_checked(runtime_config_t *cfg, const char *key)
+{
+    runtime_config_health_clear(&g_runtime_health);
+    bool ok = runtime_config_apply(cfg);
+    if (!ok) {
+        ESP_LOGW(TAG, "runtime config: apply failed for '%s'; repairing to default",
+                 key != NULL ? key : "config");
+        runtime_config_repair(cfg, key, "esp_pm_configure() rejected",
+                              &g_runtime_health);
+        if (!runtime_config_apply(cfg)) {
+            ESP_LOGE(TAG, "runtime config: apply still failed after repair; using "
+                          "full defaults");
+            runtime_config_repair(cfg, NULL, "apply failed after repair",
+                                  &g_runtime_health);
+            (void)runtime_config_apply(cfg);
+        }
+    }
+    runtime_config_store(cfg);
+    return ok;
 }
 
 /* Append NVS partition usage to out. Shared by the `test storage` console
@@ -5941,32 +6057,117 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
     snprintf(out, out_size, "unknown test '%s' (sleep, sml, espnow, storage)\n", what);
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* `set wifi-ssid <ssid>` / `set wifi-pass <pass>`: validate, persist to the
+ * metercfg namespace and reconnect (same disconnect/set_config/connect order as
+ * the /save form). An empty password keeps the stored one, so an SSID-only
+ * change cannot wipe the credential. On any error the stored values and the
+ * running connection are left untouched. */
+static void console_set_wifi_credential(const char *key, const char *value,
+                                        char *out, size_t out_size)
+{
+    char err[128] = {0};
+    char ssid[NET_CONFIG_SSID_MAX + 1] = {0};
+    char password[NET_CONFIG_WIFI_PASS_MAX + 1] = {0};
+    strlcpy(ssid, g_wifi_ssid, sizeof(ssid));
+    strlcpy(password, g_wifi_password, sizeof(password));
+
+    if (strcmp(key, "wifi-ssid") == 0) {
+        if (!net_config_validate_ssid(value, err, sizeof(err))) {
+            snprintf(out, out_size, "%s", err);
+            return;
+        }
+        strlcpy(ssid, value, sizeof(ssid));
+    } else {
+        /* An empty password means "keep the stored one". */
+        if (value[0] != '\0') {
+            if (!net_config_validate_wifi_pass(value, err, sizeof(err))) {
+                snprintf(out, out_size, "%s", err);
+                return;
+            }
+            strlcpy(password, value, sizeof(password));
+        }
+    }
+
+    esp_err_t save_err = save_wifi_credentials(ssid, password);
+    if (save_err != ESP_OK) {
+        snprintf(out, out_size, "wifi: could not persist (%s)\n",
+                 esp_err_to_name(save_err));
+        return;
+    }
+
+    ps_fallback_mark_intentional();
+    (void)esp_wifi_disconnect();
+    wifi_config_t sta_config;
+    fill_station_config(&sta_config);
+    esp_err_t err2 = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+    if (err2 == ESP_OK) {
+        err2 = esp_wifi_connect();
+    }
+    if (err2 != ESP_OK) {
+        snprintf(out, out_size, "wifi %s saved, but reconnect failed (%s)\n", key,
+                 esp_err_to_name(err2));
+        return;
+    }
+    snprintf(out, out_size, "wifi %s saved; reconnecting to \"%s\"\n", key, ssid);
+}
+#endif /* !CONFIG_ESPNOW_ROLE_SENDER */
+
 static void console_cmd_set(const char *args, char *out, size_t out_size)
 {
     char key[24] = {0};
-    char value[32] = {0};
-    if (sscanf(args, "%23s %31s", key, value) != 2) {
+    char value[NET_CONFIG_MQTT_URI_MAX + 1] = {0};
+    int parsed = sscanf(args, "%23s %160s", key, value);
+    /* A missing value is only meaningful for the "keep/clear" keys: an empty
+     * wifi-pass keeps the stored one, an empty mqtt-user/mqtt-pass clears it.
+     * Everything else needs an explicit value. */
+    bool value_missing = parsed < 2;
+    bool value_optional = value_missing &&
+                          (strcmp(key, "wifi-pass") == 0 ||
+                           strcmp(key, "mqtt-user") == 0 ||
+                           strcmp(key, "mqtt-pass") == 0);
+    if (parsed < 1 || (value_missing && !value_optional)) {
         /* TWT is HE-only, so it is advertised only on the C6; the ps/listen
          * knobs apply to every receiver (modem sleep is not HE-specific). */
-#if SOC_WIFI_HE_SUPPORT
+#if CONFIG_ESPNOW_ROLE_SENDER
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries> <value>\n");
+#elif SOC_WIFI_HE_SUPPORT
+        snprintf(out, out_size,
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #else
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #endif
         return;
     }
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* WLAN credentials and MQTT settings do not live in runtime_config: they go
+     * straight to their own NVS namespace and trigger a reconnect / bridge
+     * restart. Handled here before the runtime_config_set() fallthrough. */
+    if (strcmp(key, "wifi-ssid") == 0 || strcmp(key, "wifi-pass") == 0) {
+        console_set_wifi_credential(key, value, out, out_size);
+        return;
+    }
+    if (strncmp(key, "mqtt-", 5) == 0) {
+        char err[128] = {0};
+        (void)mqtt_bridge_set_config(key, value, err, sizeof(err));
+        snprintf(out, out_size, "%s", err);
+        return;
+    }
+#endif
+
     runtime_config_t *cfg = active_runtime_config();
-    char err[64] = {0};
+    char err[128] = {0};
     if (!runtime_config_set(cfg, key, value, CONFIG_ESPNOW_CPU_MAX_MHZ, err,
                             sizeof(err))) {
         snprintf(out, out_size, "%s", err);
         return;
     }
-    bool applied = runtime_config_apply(cfg);
-    /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only). */
-    runtime_config_store(cfg);
+    /* Apply with the safe fallback: a rejected value is dropped and the default
+     * restored (persisted) instead of being kept. */
+    bool applied = runtime_config_apply_checked(cfg, key);
 
     /* Say so when the stored value differs from what was asked for (a value
      * below the Wi-Fi minimum or off the DFS grid is snapped, not rejected). */
@@ -6031,8 +6232,16 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     int written = snprintf(out, out_size,
                            "%s=%s%s%s\n", key, value, note,
                            applied ? "" : " (hardware rejected the change)");
-    if (written > 0 && (size_t)written < out_size) {
-        runtime_config_render(cfg, out + written, out_size - (size_t)written);
+    size_t used = (written > 0 && (size_t)written < out_size) ? (size_t)written : 0;
+    if (used != 0) {
+        runtime_config_render(cfg, out + used, out_size - used);
+    }
+    /* Surface a safe-fallback repair from a radio-side apply (txpower/beacon/
+     * radio-save/ps) that happened after the PM apply above. */
+    used = strlen(out);
+    if (used < out_size) {
+        runtime_config_health_render(&g_runtime_health, out + used,
+                                     out_size - used);
     }
 }
 
@@ -6045,6 +6254,7 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
      * have TWT off); after the reset the flag is false and teardown would skip. */
     twt_teardown();
 #endif
+    runtime_config_health_clear(&g_runtime_health);
     runtime_config_reset(cfg);
     runtime_config_erase();
     runtime_config_apply(cfg);
@@ -6091,11 +6301,18 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
     const char *ps = cfg->wifi_ps_mode <= RUNTIME_CONFIG_PS_MAX
                          ? ps_names[cfg->wifi_ps_mode]
                          : "min";
-    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u\n",
-             (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
-             cfg->light_sleep ? "on" : "off",
-             (unsigned)cfg->espnow_retries, radio, wake, twt, ps,
-             (unsigned)cfg->listen_interval);
+    int used = snprintf(out, out_size,
+                        "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u\n",
+                        (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
+                        cfg->light_sleep ? "on" : "off",
+                        (unsigned)cfg->espnow_retries, radio, wake, twt, ps,
+                        (unsigned)cfg->listen_interval);
+    /* Surface a safe-fallback repair (a knob the driver rejected and that was
+     * reset to its default) so the operator sees why a value differs. */
+    if (used > 0 && (size_t)used < out_size) {
+        runtime_config_health_render(&g_runtime_health, out + used,
+                                     out_size - (size_t)used);
+    }
 }
 
 static void web_console_register_commands(void)
@@ -6106,14 +6323,16 @@ static void web_console_register_commands(void)
 #if !CONFIG_ESPNOW_ROLE_SENDER
     /* txpower/beacon only apply on the receiver (the sender has no SoftAP and
      * drives its own radio), so only advertise them there. TWT needs Wi-Fi 6
-     * (HE), so it is only advertised on the HE-capable targets (the C6). */
+     * (HE), so it is only advertised on the HE-capable targets (the C6). The
+     * wifi-/mqtt- keys persist to their own NVS namespaces and reconnect /
+     * restart the bridge. */
 #if SOC_WIFI_HE_SUPPORT
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #else
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #endif
 #else
@@ -6179,7 +6398,7 @@ static esp_err_t console_api_handler(httpd_req_t *req)
     }
     line[total] = '\0';
 
-    char result[768];
+    char result[WEB_CONSOLE_OUT_MAX];
     web_console_run(line, result, sizeof(result));
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
@@ -6809,7 +7028,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
                        "\"sender_fw_version\":\"%s\","
                        "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
-                       "\"sleep_fallback\":%u,\"fallback_stage\":%u}",
+                       "\"sleep_fallback\":%u,\"fallback_stage\":%u,"
+                       "\"ps_fallback\":%u}",
                        fw_version(),
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
@@ -6867,7 +7087,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.boot_marker_count,
                        (unsigned int)counters.boot_marker_reason,
                        (unsigned int)counters.sleep_fallback_active,
-                       (unsigned int)counters.link_fallback_stage);
+                       (unsigned int)counters.link_fallback_stage,
+                       (unsigned int)counters.ps_fallback_stage);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -7208,7 +7429,8 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
                        "\"sender_fw_version\":\"%s\","
                        "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
-                       "\"sleep_fallback\":%u,\"fallback_stage\":%u}%s%s}",
+                       "\"sleep_fallback\":%u,\"fallback_stage\":%u,"
+                       "\"ps_fallback\":%u}%s%s}",
                        mac_known ? "true" : "false",
                        (int)sender_rssi,
                        sender_rssi_valid ? "true" : "false",
@@ -7269,6 +7491,7 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        (unsigned int)counters.boot_marker_reason,
                        (unsigned int)counters.sleep_fallback_active,
                        (unsigned int)counters.link_fallback_stage,
+                       (unsigned int)counters.ps_fallback_stage,
                        crash_json[0] != '\0' ? "," : "",
                        crash_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
@@ -7993,6 +8216,7 @@ static esp_err_t save_wifi_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    ps_fallback_mark_intentional();
     (void)esp_wifi_disconnect();
     wifi_config_t sta_config;
     fill_station_config(&sta_config);
@@ -8385,6 +8609,87 @@ static void link_fallback_worker(void *arg)
 }
 #endif /* CONFIG_ESPNOW_LINK_FALLBACK */
 
+#if CONFIG_ESPNOW_PS_FALLBACK
+/* Wi-Fi modem-sleep fault watchdog. It polls the pure ps_fallback state every
+ * 5 s. When the station dropped too many times inside the window while a PS mode
+ * was in force, the mode is breaking the link: fall back to the proven mode
+ * (WIFI_PS_NONE, radio always awake), persist it, and latch (sticky until an
+ * explicit 'set ps' / reset-config, so it cannot flap). The driver-level repair
+ * in apply_wifi_ps_config() only catches a *rejected* mode; this catches a
+ * mode the driver accepts but that loses beacons on this AP. */
+static void ps_fallback_worker(void *arg)
+{
+    (void)arg;
+    const uint64_t started_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    portENTER_CRITICAL(&g_ps_fallback_lock);
+    ps_fallback_init(&g_ps_fallback, CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS,
+                     CONFIG_ESPNOW_PS_FALLBACK_THRESHOLD,
+                     CONFIG_ESPNOW_PS_FALLBACK_GRACE_MS,
+                     PS_FALLBACK_DEFAULT_STABLE_RESET_MS, started_ms);
+    portEXIT_CRITICAL(&g_ps_fallback_lock);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        if (g_ps_fallback_active) {
+            continue; /* already fell back */
+        }
+        /* Only a modem-sleep lever that can actually storm the *link* arms the
+         * watchdog. The disconnect storm comes from the station PS mode: it
+         * parks the modem so beacons/ESP-NOW frames are missed and the AP drops
+         * the association (reason 34). The ESP-NOW wake window (radio-save) only
+         * delays ESP-NOW frames - it does not drop the association, so it must
+         * not arm the watchdog (the measured loss-free C6 default is ps off +
+         * radio-save on). The sender has no runtime modem-sleep knob, so it
+         * never counts. */
+        bool lever_active = false;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        {
+            const runtime_config_t *cfg = active_runtime_config();
+            lever_active = cfg->wifi_ps_mode != RUNTIME_CONFIG_PS_OFF;
+        }
+#endif
+        if (!lever_active) {
+            continue;
+        }
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        uint64_t uptime_ms = now_ms - started_ms;
+        bool fallback;
+        portENTER_CRITICAL(&g_ps_fallback_lock);
+        fallback = ps_fallback_should_fallback(&g_ps_fallback, now_ms, uptime_ms);
+        portEXIT_CRITICAL(&g_ps_fallback_lock);
+        if (!fallback) {
+            continue;
+        }
+        g_ps_fallback_active = true;
+        g_ps_fallback_stage = 1;
+        /* Proven mode: turn modem sleep off and keep the radio awake. Persist it
+         * so the setting survives a reboot, and drop the ESP-NOW radio-save wake
+         * window too (a radio parked by either lever is the failure we saw). Only
+         * these two fields change; the rest of the user's config is untouched. */
+        runtime_config_t *cfg = active_runtime_config();
+        cfg->wifi_ps_mode = 0u; /* WIFI_PS_NONE */
+        cfg->radio_save = false;
+        (void)esp_now_set_wake_window(0);
+        esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+        runtime_config_health_note(&g_runtime_health, "ps",
+                                   "modem sleep broke the link (disconnect storm)");
+        runtime_config_store(cfg);
+        g_ps_fallback_stage = 2;
+        ESP_LOGW(TAG, "Modem-sleep fallback: %u disconnects in %u ms; Wi-Fi PS off, "
+                      "radio stays awake (err=%d)",
+                 (unsigned)ps_fallback_disconnects(&g_ps_fallback),
+                 (unsigned)CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS, (int)err);
+#if CONFIG_ESPNOW_ROLE_SENDER
+        /* The diag event ring only exists on the sender; the receiver surfaces
+         * the fallback through ESP_LOGW above and runtime_config_health_note(). */
+        diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
+                       "modem-sleep fallback: PS off after %u disconnects",
+                       (unsigned)ps_fallback_disconnects(&g_ps_fallback));
+#endif
+    }
+}
+#endif /* CONFIG_ESPNOW_PS_FALLBACK */
+
 /* --- Global liveness watchdog --------------------------------------------
  * The per-subsystem guards (web_guard on the dashboard, link_fallback on the
  * ESP-NOW peer) each watch one path. This is the backstop for a *global* stall:
@@ -8601,6 +8906,13 @@ static void run_sender(void)
         ESP_LOGW(TAG, "Could not start the link-fallback worker");
     }
 #endif
+#if CONFIG_ESPNOW_PS_FALLBACK
+    task_result = xTaskCreate(ps_fallback_worker, "ps_fallback",
+                              3072, NULL, 2, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the modem-sleep fallback worker");
+    }
+#endif
 
     /* All core sender subsystems are up (UART workers, ESP-NOW diag, time
      * sync, link fallback). This marks the OTA image as usable for the
@@ -8657,10 +8969,25 @@ static void apply_power_management(void)
     };
     esp_err_t err = esp_pm_configure(&pm);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Could not apply the CPU config (%u-%u MHz): %s",
+        /* Safe fallback at boot: a persisted value the PM API rejects must not
+         * be kept. Drop to the compile-time defaults, persist them and try once
+         * more, so the device still comes up with a usable clock. */
+        ESP_LOGW(TAG, "Could not apply the persisted CPU config (%u-%u MHz): %s; "
+                      "repairing to defaults",
                  (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
                  esp_err_to_name(err));
-        return;
+        runtime_config_repair(cfg, "cpu", "esp_pm_configure() rejected at boot",
+                              &g_runtime_health);
+        runtime_config_store(cfg);
+        pm.max_freq_mhz = (int)cfg->cpu_mhz;
+        pm.min_freq_mhz = (int)cfg->cpu_min_mhz;
+        pm.light_sleep_enable = cfg->light_sleep && allow_sleep;
+        err = esp_pm_configure(&pm);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "CPU config still rejected after repair: %s",
+                     esp_err_to_name(err));
+            return;
+        }
     }
     if (!allow_sleep) {
         static esp_pm_lock_handle_t s_no_light_sleep;
@@ -8691,8 +9018,12 @@ static void apply_radio_power_config(void)
         /* esp_wifi_set_max_tx_power takes 0.25 dBm steps. */
         esp_err_t err = esp_wifi_set_max_tx_power((int8_t)(cfg->wifi_txpower_dbm * 4));
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Could not set Wi-Fi TX power to %u dBm: %s",
+            ESP_LOGW(TAG, "Could not set Wi-Fi TX power to %u dBm (%s); "
+                          "repairing to the chip default",
                      (unsigned)cfg->wifi_txpower_dbm, esp_err_to_name(err));
+            runtime_config_repair(cfg, "txpower", "esp_wifi_set_max_tx_power() failed",
+                                  &g_runtime_health);
+            runtime_config_store(cfg);
         } else {
             ESP_LOGI(TAG, "Wi-Fi TX power set to %u dBm",
                      (unsigned)cfg->wifi_txpower_dbm);
@@ -8704,8 +9035,12 @@ static void apply_radio_power_config(void)
             ap_config.ap.beacon_interval = cfg->ap_beacon_tu;
             esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Could not set AP beacon interval to %u TU: %s",
+                ESP_LOGW(TAG, "Could not set AP beacon interval to %u TU (%s); "
+                              "repairing to the IDF default",
                          (unsigned)cfg->ap_beacon_tu, esp_err_to_name(err));
+                runtime_config_repair(cfg, "beacon", "esp_wifi_set_config() failed",
+                                      &g_runtime_health);
+                runtime_config_store(cfg);
             } else {
                 ESP_LOGI(TAG, "AP beacon interval set to %u TU", (unsigned)cfg->ap_beacon_tu);
             }
@@ -8727,8 +9062,15 @@ static void apply_radio_power_config(void)
             err = esp_wifi_connectionless_module_set_wake_interval(cfg->wake_interval_ms);
         }
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Could not enable radio sleep (window=%s)",
+            /* This is the documented "accepted but breaks the link" case on the
+             * classic ESP32: do not keep a radio-save setting the driver cannot
+             * honour, drop it (and the wake knobs) back to off and persist. */
+            ESP_LOGW(TAG, "Could not enable radio sleep (%s); repairing to off",
                      esp_err_to_name(err));
+            runtime_config_repair(cfg, "radio-save", "radio-save apply failed",
+                                  &g_runtime_health);
+            runtime_config_store(cfg);
+            (void)esp_now_set_wake_window(0);
         } else {
             ESP_LOGI(TAG, "Radio sleep on: modem sleeps, ESP-NOW wakes every %u ms "
                           "for %u ms",
@@ -8770,11 +9112,45 @@ static void apply_wifi_ps_config(void)
     if (cfg->wifi_ps_mode > RUNTIME_CONFIG_PS_MAX) {
         mode = WIFI_PS_MIN_MODEM;
     }
+#if CONFIG_ESPNOW_PS_FALLBACK
+    /* The modem-sleep watchdog latched: the mode broke the link, so never
+     * re-apply it (the proven mode is WIFI_PS_NONE, radio always awake). */
+    if (g_ps_fallback_active) {
+        mode = WIFI_PS_NONE;
+    }
+#endif
     esp_err_t err = esp_wifi_set_ps(mode);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Could not set Wi-Fi PS mode %u: %s",
+        /* Safe fallback: the driver rejected the mode, so drop it and re-apply
+         * the compile-time default (persisted) rather than leaving the device in
+         * an unknown power state. */
+        ESP_LOGW(TAG, "Could not set Wi-Fi PS mode %u (%s); repairing to default",
                  (unsigned)cfg->wifi_ps_mode, esp_err_to_name(err));
-        return;
+        runtime_config_repair(cfg, "ps", "esp_wifi_set_ps() failed",
+                              &g_runtime_health);
+        runtime_config_store(cfg);
+        mode = (wifi_ps_type_t)cfg->wifi_ps_mode;
+        err = esp_wifi_set_ps(mode);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Wi-Fi PS mode still rejected after repair: %s",
+                     esp_err_to_name(err));
+            return;
+        }
+    }
+    /* Self-check: read the live mode back and repair if it does not match the
+     * value we asked for (a driver that silently ignored the request). Only
+     * meaningful once associated: before that the driver may still report the
+     * pre-association default and a "repair" would clobber the user's setting. */
+    wifi_ps_type_t observed = WIFI_PS_NONE;
+    if (g_wifi_connected && esp_wifi_get_ps(&observed) == ESP_OK &&
+        !runtime_config_verify(cfg, (int)observed, 0, &g_runtime_health)) {
+        ESP_LOGW(TAG, "Wi-Fi PS verify mismatch (wanted %u, got %u); repairing",
+                 (unsigned)cfg->wifi_ps_mode, (unsigned)observed);
+        runtime_config_repair(cfg, "ps", "esp_wifi_get_ps() disagreed",
+                              &g_runtime_health);
+        runtime_config_store(cfg);
+        (void)esp_wifi_set_ps((wifi_ps_type_t)cfg->wifi_ps_mode);
+        mode = (wifi_ps_type_t)cfg->wifi_ps_mode;
     }
     const char *name = mode == WIFI_PS_NONE ? "off"
                        : mode == WIFI_PS_MAX_MODEM ? "max"
@@ -8791,10 +9167,16 @@ static void apply_wifi_ps_config(void)
  * configured (the PS mode itself is still applied). */
 static void wifi_ps_apply_and_reconnect(void)
 {
+    /* A deliberate PS change re-arms the modem-sleep watchdog: the user is
+     * explicitly (re)trying a mode, so a previous disconnect-storm latch must not
+     * block it. The reconnect below is then marked intentional so it is not
+     * counted as a fault. */
+    ps_fallback_rearm();
     apply_wifi_ps_config();
     if (!g_wifi_configured) {
         return;
     }
+    ps_fallback_mark_intentional();
     (void)esp_wifi_disconnect(); /* ESP_ERR_WIFI_NOT_CONNECT when already idle */
     wifi_config_t sta_config;
     fill_station_config(&sta_config);
@@ -9044,6 +9426,11 @@ void app_main(void)
                                              3072, NULL, 2, NULL);
     if (fallback_result != pdPASS) {
         ESP_LOGW(TAG, "Could not start the link-fallback worker");
+    }
+#endif
+#if CONFIG_ESPNOW_PS_FALLBACK
+    if (xTaskCreate(ps_fallback_worker, "ps_fallback", 3072, NULL, 2, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the modem-sleep fallback worker");
     }
 #endif
     ESP_LOGI(TAG, "Receiver ready: http://192.168.4.1/ | /sender | /diag | /log | /console | /bootlog | /config | /update");

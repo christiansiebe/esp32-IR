@@ -12,6 +12,7 @@
 #include "mqtt_events.h"
 #include "mqtt_publish.h"
 #include "mqtt_topics.h"
+#include "net_config.h"
 #include "version.h"
 
 static const char *TAG = "mqtt";
@@ -175,9 +176,9 @@ void mqtt_bridge_start(void)
                       journal_found;
 
     nvs_handle_t handle;
-    char uri[160] = {0};
-    char user[64] = {0};
-    char pass[96] = {0};
+    char uri[NET_CONFIG_MQTT_URI_MAX] = {0};
+    char user[NET_CONFIG_MQTT_USER_MAX + 1] = {0};
+    char pass[NET_CONFIG_MQTT_PASS_MAX + 1] = {0};
     if (nvs_open(MQTT_CONFIG_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
         size_t len = sizeof(uri);
         (void)nvs_get_str(handle, MQTT_KEY_URI, uri, &len);
@@ -296,6 +297,85 @@ void mqtt_bridge_publish_history(const power_history_record_t *record)
 bool mqtt_bridge_started(void)
 {
     return s_started;
+}
+
+/* Tear the running client down so the next mqtt_bridge_start() builds it from
+ * the (new) NVS values. A no-op when nothing is running. */
+static void mqtt_bridge_stop(void)
+{
+    if (s_client != NULL) {
+        (void)esp_mqtt_client_stop(s_client);
+        (void)esp_mqtt_client_destroy(s_client);
+        s_client = NULL;
+    }
+    s_connected = false;
+    s_started = false;
+}
+
+bool mqtt_bridge_set_config(const char *key, const char *value, char *err,
+                            size_t err_size)
+{
+    if (key == NULL || value == NULL) {
+        snprintf(err, err_size, "mqtt: missing key or value\n");
+        return false;
+    }
+
+    const char *nvs_key = NULL;
+    const char *nvs_value = value;
+    char prefix_buf[NET_CONFIG_MQTT_PREFIX_MAX] = {0};
+    if (strcmp(key, "mqtt-uri") == 0) {
+        if (!net_config_validate_mqtt_uri(value, err, err_size)) {
+            return false;
+        }
+        nvs_key = MQTT_KEY_URI;
+    } else if (strcmp(key, "mqtt-prefix") == 0) {
+        /* Persist the trimmed form: the loader stores it in an 80-byte buffer
+         * and mqtt_topics_build trims again, so a raw value that only fits after
+         * trimming would otherwise be silently dropped on the next boot. */
+        if (!net_config_normalize_mqtt_prefix(value, prefix_buf, sizeof(prefix_buf),
+                                              err, err_size)) {
+            return false;
+        }
+        nvs_key = MQTT_KEY_PREFIX;
+        nvs_value = prefix_buf;
+    } else if (strcmp(key, "mqtt-user") == 0) {
+        if (!net_config_validate_mqtt_credential(value, NET_CONFIG_MQTT_USER_MAX,
+                                                 "mqtt-user", err, err_size)) {
+            return false;
+        }
+        nvs_key = MQTT_KEY_USER;
+    } else if (strcmp(key, "mqtt-pass") == 0) {
+        if (!net_config_validate_mqtt_credential(value, NET_CONFIG_MQTT_PASS_MAX,
+                                                 "mqtt-pass", err, err_size)) {
+            return false;
+        }
+        nvs_key = MQTT_KEY_PASS;
+    } else {
+        snprintf(err, err_size, "mqtt: unknown key '%s'\n", key);
+        return false;
+    }
+
+    nvs_handle_t handle;
+    if (nvs_open(MQTT_CONFIG_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        snprintf(err, err_size, "mqtt: could not open NVS\n");
+        return false;
+    }
+    esp_err_t nvs_err = nvs_set_str(handle, nvs_key, nvs_value);
+    if (nvs_err == ESP_OK) {
+        nvs_err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (nvs_err != ESP_OK) {
+        snprintf(err, err_size, "mqtt: could not persist %s\n", key);
+        return false;
+    }
+
+    /* Rebuild the client so the new broker/credentials/prefix take effect. A
+     * URI that is now absent or invalid simply leaves MQTT disabled. */
+    mqtt_bridge_stop();
+    mqtt_bridge_start();
+    snprintf(err, err_size, "mqtt %s updated\n", key);
+    return true;
 }
 
 void mqtt_bridge_status(char *out, size_t out_size)

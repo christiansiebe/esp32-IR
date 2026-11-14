@@ -1,5 +1,55 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-08): Modem-Sleep-Wächter (ps_fallback) + Compile-/Test-Fixes – Branch `feat/nvs-web-knobs`
+**Warum:** Der C6-Empfänger hat drei Stromspar-Hebel, die je den Link zerstören
+können (Light Sleep → USB-Konsole tot; `ps min/max` → Disconnect-Sturm;
+`radio-save` → verpasste Frames). Dazu flappt die FRITZ!Box auch ohne Hebel.
+Ein Wächter, der **jeden** Disconnect zählt, würde den Sleep grundlos abschalten.
+
+- **`main/ps_fallback.{c,h}` + `ps_fallback_worker` (beide Rollen):** zählt STA-
+  Disconnects im gleitenden Fenster (Default 3/120 s, 30 s Schonfrist). Bei
+  einem Sturm fällt er **sticky** auf `WIFI_PS_NONE` + `radio-save=false` zurück
+  und persistiert das. Absichtliche Reconnects zählen nicht; `set ps` re-armt.
+- **Drei Fehler behoben (dieser Commit):**
+  1. **Compile-Bug:** `ps_fallback_worker` rief `diag_log_event()` (sender-only)
+     → **alle Empfänger-/C6-Builds scheiterten** (`'diag_log_event' used but
+     never defined`). Aufruf in `#if CONFIG_ESPNOW_ROLE_SENDER` gekapselt.
+  2. **Falsch-Positiv:** zählte auch ohne aktiven Modem-PS-Modus → jetzt nur bei
+     `ps != off` (der Wake-Window allein zählt nicht) und nur auf dem Empfänger.
+  3. **Test war immer grün:** `CHECK`-Makro in `test/test_ps_fallback.c` erhöhte
+     `g_failures` nie → gefixt.
+- **Sicherer Modem-Light-Sleep (gemessen, s. Messauftrag oben):** `ps off` +
+  `radio-save on` 20/15 (0,8 % ≈ Baseline); wenn Modem-Sleep zwingend, `ps max`
+  + `listen 10` + `radio-save on` 20/15. **Nie** `ps min/max` ohne `radio-save`.
+  Genau diesen Default setzt der Messauftrag/Fix oben; der Wächter ist das
+  Sicherheitsnetz, falls doch ein PS-Modus erzwungen wird. Light Sleep bleibt
+  am C6 aus (USB-Konsole).
+- **Verifiziert:** IDF-v6.1-Build aller Rollen gruen (`sender`, `receiver`,
+  `receiver-c6-apoff`), Host-Suite grün. Details: `docs/c6-modem-sleep-safety.md`.
+- **Offen (am Gerät):** `set ps max` + `set listen 5/10/20/30` am C6 mit der
+  FRITZ!Box messen; prüfen, ob der Wächter wie erwartet auslöst und die
+  ESP-NOW-Frames weiter ankommen.
+
+## NEU (2026-11-08): Laufzeit-NVS-Knoepfe ueber die Web-Konsole – Branch `feat/nvs-web-knobs`, PR #67
+**Ziel:** Jeder nutzerseitige NVS-Wert ist zur Laufzeit aenderbar (Safe-Fallback),
+und die kuenstlichen Wertebereiche reichen bis an die harte IDF-/SoC-Grenze, damit
+spaetere Aenderungen **kein Neukompilieren** brauchen.
+
+- **Bereiche geweitet** (`main/runtime_config.h`, Blob bleibt v6 / 22 B):
+  `retries` 0..255, `txpower` 0=Default sonst 1..20 dBm, `beacon` 0/100..60000 TU
+  (Vielfaches von 100), `wake-interval` 10..65535 ms, `wake-window` 1..65535 ms,
+  `twt-wake` 500..65535 ms, `listen` 1..65535; `cpu` bleibt 40..160 (SoC-Grenze).
+  Defaults: `listen`=**10** (war 3), `ps`=**min** (unveraendert).
+- **Neue Konsolen-Setter** (`set`): `wifi-ssid`, `wifi-pass` (-> `metercfg` +
+  Reconnect; leeres Passwort behaelt das alte) und `mqtt-uri`, `mqtt-prefix`,
+  `mqtt-user`, `mqtt-pass` (-> `mqttcfg` + Bridge-Neustart ueber
+  `mqtt_bridge_set_config`). Bei Fehler bleibt der alte Wert erhalten.
+  `mqtt-prefix` wird getrimmt persistiert.
+- **Validierung** in `main/net_config.{c,h}` (host-getestet), **Safe-Fallback**:
+  ein von der PM-/WLAN-API abgelehnter Wert faellt auf den Default zurueck und
+  wird persistiert (sichtbar in `config`).
+- **Tests:** `test/test_runtime_config.c`, `test/test_net_config.c` (neu),
+  `test/test_web_console.c` (Help-Puffer-Regression); alle Host-Suiten gruen.
 
 ## MESSUNG (2026-11-08, .105): Modem-Sleep-Kombinationen ohne Telegramm-Verluste
 **Aufbau:** `.105` = C6-Empfänger (USB-JTAG-Konsole), Sender = **klassischer ESP32**
