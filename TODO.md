@@ -21,6 +21,15 @@
   sobald die Station eine IP hat. Ist der Sender still, holt der Link-Fallback den AP
   zurück (Selbstheilung). Damit ist auch der Default-`receiver-c6` sparsam.
   Persistiert als `runtime_config`-Feld (Blob **v9**, 26 B, `[24]`/`[25]`).
+- **Gefixt & geflasht (2026-11-14 abends, `v0.4.0-50-g95f3c73`):** Nutzer-Befund
+  „läuft weiter mit 0,42 W" hatte **zwei** Ursachen: (a) `65da1fd` hatte `/api/ap`
+  ergänzt und damit `max_uri_handlers` (31) gesprengt → `ESP_ERR_HTTPD_HANDLERS_FULL`
+  → `abort()` → **Boot-Crash-Loop** (SoftAP dauerhaft an, ~0,5 W); behoben durch
+  Limit 34 + CI-Guard „Verify the httpd handler budget". (b) Der Link-Fallback holte
+  den AP ohne je gehörten Sender sofort zurück; jetzt an `g_sender_mac_valid` gekoppelt.
+  Zusätzlich: Auto-off um 60 s verzögert (Sender-Kanal-Scan) und der Sender merkt sich
+  den gelernten Kanal in NVS (`metercfg/espnow_ch`). **Gemessen ohne Sender: 0,068 W**
+  (vorher 0,42 W). Details + Bootlog: `docs/c6-idle-power-measured.md`.
 - **Offen:** Verlustfreiheit unter echter Senderlast weiterhin **nicht** messbar —
   kein Sender am Prüfstand (`crc_valid=0`, `192.168.178.70` down).
 

@@ -10,6 +10,24 @@ den **FNIRSI FNB-48** (USB-HID `0483:003a`, `/dev/hidraw0`). Messung mit
 > bereitschaft**, die Verlustfreiheit unter echter Senderlast ist damit **nicht**
 > belegt (offene Aufgabe, s. TODO).
 
+## Ergebnis nach dem Auto-off-Fix (2026-11-14, abends)
+
+Mit dem **Auto-off-Image** (`receiver-c6`, `ap_auto_off=on`) und **ohne Sender**
+schaltet der Receiver den Setup-SoftAP 60 s nach dem STA-IP ab und bleibt dann
+dauerhaft AP-los — **gemessen 0,068 W** (Ø über mehrere Zyklen 0,068–0,095 W,
+Spitzen nur in den kurzen Auto-off-Bursts), statt der **0,42 W** des
+APSTA-Dauerbetriebs. Faktor ~6. Das ist der eingebaute Zielzustand:
+`ap_auto_off` default an, der AP dient nur noch als kurzes Provisionierungs-
+Fenster (und als Kanalquelle für einen frisch startenden Sender).
+
+Der **Link-Fallback schaltet den AP nicht mehr** zurück, solange kein Sender je
+gehört wurde (`g_sender_mac_valid`), siehe Bootlog:
+
+```
+I (61732) espnow_meter: Auto-off: setup SoftAP switched off after station connect (ap_auto_off on)
+W (67302) espnow_meter: Link fallback: no sender heard since boot; setup SoftAP stays off (power saving kept)
+```
+
 ## Kernbefund: der SoftAP kostet ~0,22 W
 
 Zwei Images, **identische Laufzeit-Knobs** (`cpu=80`, `radio-save=5000/30`,
