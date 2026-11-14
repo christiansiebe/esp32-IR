@@ -310,6 +310,26 @@ jobs:
           grep -a -q 'Auto-off: setup SoftAP switched off after' "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image contains the runtime SoftAP switch"
 
+      - name: Verify the httpd handler budget
+        if: startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # max_uri_handlers must cover every registration: one slot too few
+          # makes httpd_register_uri_handler() return ESP_ERR_HTTPD_HANDLERS_FULL
+          # and the ESP_ERROR_CHECK around it abort() -> boot crash-loop, which a
+          # build-only CI cannot observe (only the device can). Count the calls
+          # in main.c (every role-specific call can be live at once on the
+          # receiver) plus the web_guard /healthz registration and require the
+          # configured limit to stay above that.
+          regs=$(grep -c 'httpd_register_uri_handler(server,' main/main.c)
+          need=$((regs + 1))
+          limit=$(grep -oP 'config\.max_uri_handlers = \K[0-9]+' main/main.c)
+          echo "registrations=$regs (+1 healthz) need>=$need, max_uri_handlers=$limit"
+          test -n "$limit"
+          test "$limit" -ge "$need" || { echo "max_uri_handlers too small"; exit 1; }
+          echo "httpd handler budget is sufficient"
+
       - name: Verify the receiver health watchdog is compiled in
         if: startsWith(matrix.role, 'receiver')
         shell: bash

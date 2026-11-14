@@ -9109,7 +9109,12 @@ static void start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 31;
+    /* Must exceed the number of httpd_register_uri_handler() calls made below.
+     * The receiver path registers the most: 31 role-specific routes plus the
+     * web_guard /healthz probe = 32. One slot too few is a boot crash-loop
+     * (ESP_ERR_HTTPD_HANDLERS_FULL -> ESP_ERROR_CHECK -> abort), which the
+     * build-time CI cannot see - only the device can. Keep headroom here. */
+    config.max_uri_handlers = 34;
     /* Handlers that keep a full history page (128 records) on their stack run
      * on this task; keep headroom so a large page cannot overflow it and abort
      * the whole HTTP server. The dashboard handler also buffers the assembled
