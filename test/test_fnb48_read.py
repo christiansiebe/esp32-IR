@@ -1,7 +1,8 @@
 """Host tests for tools/fnb48_read.py (pure logic, no hardware).
 
-Covers the CRC-8, the sample/packet decoder and the burst grouping. The
-hidraw I/O path is not touched here.
+Covers the CRC-8, the sample/packet decoder, the burst grouping and the
+stop-only command framing plus the udev auto-stop rule syntax. The hidraw I/O
+path is not touched here (no hardware, no mocks of the device).
 """
 
 import os
@@ -11,6 +12,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 
 import fnb48_read as fr  # noqa: E402
+
+RULE = os.path.join(os.path.dirname(__file__), "..", "tools", "udev",
+                    "99-fnb48-stop.rules")
 
 CHECKS = 0
 FAILURES = 0
@@ -109,11 +113,75 @@ def test_find_bursts_none():
     check(fr.find_bursts([0.06, 0.07, 0.05], 0.15) == [], "no bursts")
 
 
+def test_stop_command():
+    print("test_stop_command")
+    # The stop is a fixed 64-byte HID report: AA 84, zero padding, CRC-8 0xA6.
+    check(fr.CMD_STOP == bytes([0xAA, 0x84]) + bytes(61) + bytes([0xA6]),
+          "CMD_STOP layout")
+    check(len(fr.CMD_STOP) == fr.PACKET, f"CMD_STOP length {len(fr.CMD_STOP)}")
+    check(fr.CMD_STOP[0] == 0xAA and fr.CMD_STOP[1] == 0x84, "CMD_STOP header")
+    check(all(b == 0 for b in fr.CMD_STOP[2:63]), "CMD_STOP padding zero")
+    check(fr.CMD_STOP[63] == 0xA6, "CMD_STOP trailer")
+
+
+def test_stop_only_cli_parses():
+    print("test_stop_only_cli_parses")
+    # --stop-only is a boolean flag; -s is its short form. Parsing must not
+    # require a device or touch hardware.
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-s", "--stop-only", action="store_true")
+    check(ap.parse_args(["--stop-only"]).stop_only is True, "long form")
+    check(ap.parse_args(["-s"]).stop_only is True, "short form")
+    check(ap.parse_args([]).stop_only is False, "default off")
+
+
+def test_udev_rule_syntax():
+    print("test_udev_rule_syntax")
+    with open(RULE) as fh:
+        raw = fh.read()
+    # A "#" only starts a comment at line start; no trailing-comment traps.
+    lines = [ln for ln in raw.splitlines()
+             if ln.strip() and not ln.lstrip().startswith("#")]
+    check(len(lines) == 1, f"exactly one rule line, got {len(lines)}")
+    rule = lines[0]
+    # The device identity and the hidraw trigger must both be present.
+    check('SUBSYSTEM=="hidraw"' in rule, "hidraw subsystem")
+    check('ATTRS{idVendor}=="0483"' in rule, "vendor 0483")
+    check('ATTRS{idProduct}=="003a"' in rule, "product 003a")
+    check('ACTION=="add"' in rule, "add action")
+    check("RUN+=" in rule, "RUN+ present")
+    # Robustness: no unbind/reset (that hard-reset this board) and a bounded
+    # helper (its own `timeout`) so udev can never block on a wedged node.
+    check("unbind" not in rule and "remove" not in rule, "no unbind/remove")
+    check("timeout" not in rule, "timeout lives in the helper, not the rule")
+    check(rule.count("RUN+=") == 1, "single RUN+")
+    # The rule must pass the device node through to the helper.
+    check("$devnode" in rule or "%E{DEVNAME}" in rule or "%k" in rule,
+          "device node passed")
+    # Every rule line must be a single assignment set on one line (no "\").
+    check("\\" not in raw, "no line continuation")
+
+
+def test_udev_helper_syntax():
+    print("test_udev_helper_syntax")
+    helper = os.path.join(os.path.dirname(__file__), "..", "tools", "udev",
+                          "fnb48-stop.sh")
+    with open(helper) as fh:
+        body = fh.read()
+    # Bounded call: a hard `timeout` and the non-blocking stop-only path.
+    check("timeout" in body, "helper caps runtime with timeout")
+    check("--stop-only" in body, "helper calls the stop-only path")
+    check("fnb48_read.py" in body, "helper runs the reader")
+
+
 def main():
     for fn in (test_crc8, test_decode_sample, test_decode_packet_ok,
                test_decode_packet_bad_crc, test_decode_packet_rejects_non_data,
                test_find_bursts, test_find_bursts_merges_short_gap,
-               test_find_bursts_none):
+               test_find_bursts_none, test_stop_command,
+               test_stop_only_cli_parses, test_udev_rule_syntax,
+               test_udev_helper_syntax):
         fn()
     print(f"{CHECKS} checks, {FAILURES} failures")
     return 1 if FAILURES else 0

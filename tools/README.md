@@ -75,6 +75,37 @@ sometimes fails to bind after a hub/plug event:
 echo 1-1.1:1.0 > /sys/bus/usb/drivers/usbhid/bind
 ```
 
+### Auto-stop on plug
+
+The meter keeps an internal stream/logger running until it receives the `0x84`
+STOP. A run that is killed without it - Ctrl-C, SIGTERM, or a run on another
+host - leaves the buffer filling up, and the live values freeze. `fnb48_read.py`
+already stops on every exit path, but that cannot help when the meter is
+plugged in with a stream left running from before. Two pieces close that gap:
+
+- `--stop-only` (`-s`): open the node, send `0x84` twice (the parser can be
+  wedged) and exit - no read, no start. Useful by hand too, to un-freeze a
+  meter:
+
+  ```bash
+  python3 tools/fnb48_read.py --stop-only -d /dev/hidraw0
+  ```
+
+- `tools/udev/99-fnb48-stop.rules`: on the `add` event of the hidraw node for
+  `0483:003a`, run the bounded helper `tools/udev/fnb48-stop.sh`. The helper
+  calls `--stop-only` under a hard `timeout 5`. The rule triggers on the
+  hidraw node (not the raw USB device) and deliberately does **no** USB
+  unbind/reset - an unbind has hard-reset this board before.
+
+Install (repo artifact; it does not touch `/etc` on its own):
+
+```bash
+sudo tools/udev/install-fnb48-stop.sh    # copies rule + helper, udevadm reload
+```
+
+The rule/helper syntax and the stop-command framing are covered by
+`test/test_fnb48_read.py` (no hardware, no mocks).
+
 ## Analysing a power-history CSV
 
 `analyze_power_csv.py` checks a downloaded `/api/power-history.csv` for missing

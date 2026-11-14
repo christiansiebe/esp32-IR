@@ -1,0 +1,16 @@
+# FNIRSI FNB-48 USB power meter (0483:003a, HID, /dev/hidrawN): auto-stop.
+#
+# The meter keeps an internal stream/logger running until it gets the 0x84 STOP.
+# A run that was killed without it - possibly on another host - leaves the
+# buffer filling up, and the live values freeze. This rule sends the stop as
+# soon as the meter appears, so a fresh plug always starts from a clean state.
+#
+# Deliberately short and non-blocking:
+#   * trigger on the hidraw node (not the raw usb device) so /dev/hidrawN
+#     already exists when the helper runs,
+#   * RUN+ the bounded wrapper (its own `timeout`, non-blocking hidraw),
+#   * no USB unbind/reset - an unbind has already hard-reset this board.
+#
+# Install with tools/udev/install-fnb48-stop.sh (copies the rule to
+# /etc/udev/rules.d/ and reloads udev); nothing here runs on its own.
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="003a", RUN+="/usr/local/lib/fnb48/fnb48-stop.sh $devnode"
