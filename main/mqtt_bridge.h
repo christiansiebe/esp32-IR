@@ -34,8 +34,19 @@ void mqtt_bridge_publish_power(double watts);
 void mqtt_bridge_publish_import(double raw, int8_t scaler);
 void mqtt_bridge_publish_export(double raw, int8_t scaler);
 
+/* Publish the 15-minute mean of the live power (W) to <base>/average, retained.
+ * Mirrors the dashboard's own average so HA and the device UI agree. Cheap
+ * no-op when the bridge is not connected. */
+void mqtt_bridge_publish_average(double watts);
+
 /* Publish a finished minute record to <base>/history as JSON. */
 void mqtt_bridge_publish_history(const power_history_record_t *record);
+
+/* Publish the retained modem-sleep fallback event to <base>/event/ps_fallback
+ * so Home Assistant shows *why* the device dropped to the higher-power proven
+ * mode. Cheap no-op when the bridge is not connected. */
+void mqtt_bridge_publish_fallback_event(unsigned disconnects,
+                                        unsigned window_ms);
 
 /* True once a broker URI was loaded and the client was started. */
 bool mqtt_bridge_started(void);
@@ -43,6 +54,15 @@ bool mqtt_bridge_started(void);
 /* Load the MQTT settings from NVS (namespace "mqttcfg", keys prefix/uri/user/
  * pass). Exposed for diagnostics; mqtt_bridge_start() calls it internally. */
 bool mqtt_bridge_load_config(void);
+
+/* Persist one MQTT setting and restart the bridge so the change takes effect.
+ * key is one of "mqtt-uri", "mqtt-prefix", "mqtt-user" or "mqtt-pass"; value is
+ * validated first (net_config.c) and written to NVS only when valid. On success
+ * the running client is stopped, destroyed and re-created from the new NVS
+ * values. On failure the stored value and the running client are left untouched
+ * and a short reason is written into err. Empty user/pass clear the credential. */
+bool mqtt_bridge_set_config(const char *key, const char *value, char *err,
+                            size_t err_size);
 
 /* One-line human-readable status for the web console. */
 void mqtt_bridge_status(char *out, size_t out_size);

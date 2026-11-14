@@ -301,6 +301,68 @@ jobs:
             "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image registers workers with the task watchdog"
 
+      - name: Verify the runtime SoftAP switch (receiver)
+        if: startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The receiver ships a runtime SoftAP switch (ap_enabled / ap_auto_off,
+          # `set ap`, POST /api/ap). The strings below live only in the
+          # receiver-only code paths (apply_ap_mode's log line, the /api/ap form
+          # action, the auto-off log line), so grepping the built app proves the
+          # switch is compiled in and not just the config flag.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'SoftAP switched %s at runtime' "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'action="/api/ap"' "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Auto-off: setup SoftAP switched off after' "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image contains the runtime SoftAP switch"
+
+      - name: Verify the httpd handler budget
+        if: startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # max_uri_handlers must cover every registration: one slot too few
+          # makes httpd_register_uri_handler() return ESP_ERR_HTTPD_HANDLERS_FULL
+          # and the ESP_ERROR_CHECK around it abort() -> boot crash-loop, which a
+          # build-only CI cannot observe (only the device can). Count the calls
+          # in main.c (every role-specific call can be live at once on the
+          # receiver) plus the web_guard /healthz registration and require the
+          # configured limit to stay above that.
+          regs=$(grep -c 'httpd_register_uri_handler(server,' main/main.c)
+          need=$((regs + 1))
+          limit=$(grep -oP 'config\.max_uri_handlers = \K[0-9]+' main/main.c)
+          echo "registrations=$regs (+1 healthz) need>=$need, max_uri_handlers=$limit"
+          test -n "$limit"
+          test "$limit" -ge "$need" || { echo "max_uri_handlers too small"; exit 1; }
+          echo "httpd handler budget is sufficient"
+
+      - name: Verify the receiver boot-order guard (liveness + console first)
+        if: startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A hang anywhere in the receiver init before start_webserver() used to
+          # be permanent: the device stayed on the WLAN and answered ping and MQTT
+          # while port 80 was dead and the console registry was empty. Two source
+          # invariants prevent that (build-only CI cannot see the runtime symptom):
+          #   1. the global liveness backstop starts BEFORE start_webserver(), so a
+          #      stall in the init reboots instead of hanging;
+          #   2. the console command set is registered BEFORE the Wi-Fi init, so
+          #      the serial console answers even if the webserver never comes up.
+          # Scope the scan to app_main(): run_sender() also calls
+          # liveness_guard_start() but is compiled out on the receiver.
+          app=$(grep -n '^void app_main(void)' main/main.c | cut -d: -f1)
+          lv=$(awk -v s="$app" 'NR>=s && /^[[:space:]]*liveness_guard_start\(\);$/ {print NR; exit}' main/main.c)
+          ws=$(awk -v s="$app" 'NR>=s && /^[[:space:]]*start_webserver\(\);$/ {print NR; exit}' main/main.c)
+          cc=$(awk -v s="$app" 'NR>=s && /^[[:space:]]*web_console_register_commands\(\);$/ {print NR; exit}' main/main.c)
+          wi=$(awk -v s="$app" 'NR>=s && /^[[:space:]]*initialize_wifi_and_espnow\(\);$/ {print NR; exit}' main/main.c)
+          echo "app_main@$app liveness@$lv start_webserver@$ws console@$cc wifi_init@$wi"
+          test -n "$lv" && test -n "$ws" && test -n "$cc" && test -n "$wi"
+          test "$lv" -lt "$ws" || { echo "liveness guard must start before start_webserver()"; exit 1; }
+          test "$cc" -lt "$wi" || { echo "console commands must register before Wi-Fi init"; exit 1; }
+          echo "receiver boot-order guard is intact"
+
       - name: Verify the receiver health watchdog is compiled in
         if: startsWith(matrix.role, 'receiver')
         shell: bash
@@ -388,6 +450,21 @@ jobs:
           grep -a -q 'reconnecting to carry listen_interval=' \
             "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image contains the Wi-Fi PS / listen knob"
+
+      - name: Verify the adaptive modem-sleep ladder (receiver)
+        if: startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The adaptive ladder starts at the frugal PS mode and steps a rung
+          # down on ESP-NOW transport loss, then climbs back when clean. The
+          # string below lives in main.c's ps_ladder_worker() (receiver-only), so
+          # grepping the built app proves the module is linked in, not just the
+          # config flag. The sender image must NOT contain it.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Modem-sleep ladder: rung ' \
+            "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image runs the adaptive modem-sleep ladder"
 
       - name: Stage firmware and flash files
         shell: bash

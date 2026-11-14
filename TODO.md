@@ -1,5 +1,360 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-14): C6-Receiver-Boot-Hang vor `start_webserver()` — gehaertet
+**Branch `feat/c6-mqtt-cmd`. Details: `docs/c6-receiver-boot-hang.md`.**
+- **Symptom (live, `192.168.178.105`):** Port 80 tot (`nmap` -> alle Ports
+  `closed (reset)`), Kommando-Registry leer (`help` -> `unknown command`), MQTT
+  lebt (`status=online`), Ping mit `3<->546 ms`, `esp32ir/receiver/power` steht
+  still. Kein Reboot-Loop mehr (nur ein einzelner `task-watchdog`-Reboot).
+- **Diagnose:** `app_main` haengt **vor** `start_webserver()`. Die Registry ist
+  RAM-only und wird nur am Ende von `start_webserver()` befuellt -> leere Registry
+  = Webserver nie erreicht. MQTT/Ping leben weiter, weil `mqtt_bridge_start()` im
+  `IP_EVENT_STA_GOT_IP`-Handler auf dem `sys_evt`-Task laeuft, nicht in `app_main`.
+- **Watchdog-Luecke:** `liveness_guard`, `health_task`, `web_guard` starteten
+  **alle erst nach** `start_webserver()` -> ein Hang davor war **permanent**.
+- **Korrelation:** `dmesg` zeigt den C6 (`303a:1001`, SN `10:BD:A3:88:D7:14` ==
+  MQTT-Client `ESP32_88D714`) als `ttyACM0`, dann **USB-Disconnect** ~12:17 -
+  genau als HTTP/Konsole starben. Die C6-Konsole **ist** die USB-Serial/JTAG.
+- **Umgesetzt:** `liveness_guard_start()` ganz an den Anfang von `app_main`
+  (+ `liveness_note_alive()` nach jeder Init-Phase), `web_console_register_commands()`
+  vor die Wi-Fi-Init (Konsole antwortet auch ohne Webserver -> `reboot` per USB),
+  CI-Guard „Verify the receiver boot-order guard". Host-Tests gruen.
+- **Offen:** exakt blockierende Zeile noch nicht sicher benannt; bis dahin ist der
+  Backstop die Sicherheitsleine. Rebuild+Flash via GitHub-CI.
+- **✅ Hardware-verifiziert (2026-11-14, USB-Flash):** Per `esptool` direkt auf
+  `/dev/ttyACM0` geflasht (C6FH4, MAC `10:bd:a3:88:d7:14`), App-Version
+  `v0.4.0-52-ga5ca8e7`. **Vorher** (alter Stand): Port 80 tot (`RST`), Ping ok.
+  **Nachher:** Boot-Log zeigt `Webserver available … http://192.168.4.1/` +
+  `Receiver ready …` bei **~18,7 s**; `/api` -> HTTP 200 (`v0.4.0-52-ga5ca8e7`),
+  `/api/dashboard`, `/api/sml`, `/healthz` alle **200**. Der Boot-Hang ist damit
+  auf echter Hardware behoben (nicht nur die Haertung, der Webserver kommt hoch).
+
+## NEU (2026-11-14): C6-Idle-Leistung gemessen (FNB-48) — SoftAP ist der Kostentreiber
+**Branch `feat/c6-mqtt-cmd`, FNB-48 am C6 (`/dev/hidraw0`). Details: `docs/c6-idle-power-measured.md`.**
+- **Befund:** Bei **identischen Knobs** (`cpu=80`, `radio-save=5000/30`, `ps=max`,
+  `listen=10`, Burst-Lock aus) zieht `receiver-c6` (APSTA, SoftAP an) **0,42 W**,
+  `receiver-c6-apoff` (station-only) **0,19 W**. Der **laufende Setup-SoftAP kostet
+  ~0,22 W**; ein Beacon-Intervall von 1000 TU ändert nichts.
+- **`esp_wifi_set_ps()` wirkt am APSTA-Receiver nicht:** `max`/`min`/`off` alle
+  ~0,425 W. Der ESP-NOW-Empfang läuft über `WIFI_IF_AP`, das Modem-Sleep parkt nur
+  die STA. `ps max` + Leiter sind also korrekt, aber am APSTA-Receiver **wirkungslos**.
+- **CPU:** 160→80 MHz spart ~4–8 % (0,44→0,42 W), 80→40 nichts.
+- **Burst-Lock transient:** ohne Sender hält er das Modem bis zum 60-s-Lern-Timeout
+  wach (0,40 W), danach parkt es (0,19 W). Im Sendebetrieb bleibt „an" nötig.
+- **Empfehlung:** Für minimale Idle-Leistung `receiver-c6-apoff` flashen; der SoftAP
+  ist nur für das Erst-Setup ohne FRITZ!Box-Zugang nötig.
+- **Umgesetzt (2026-11-14):** SoftAP schaltet sich nach erfolgreicher STA-Verbindung
+  automatisch ab (`ap_auto_off`, Default an am C6-Receiver; Knopf `ap_enabled`,
+  `set ap on|off`, `set ap-auto-off on|off`, Seite `/config` → POST `/api/ap`). Der
+  AP kommt beim Boot hoch (Erst-Setup + Kanal-Scan des Senders) und fällt danach weg,
+  sobald die Station eine IP hat. Ist der Sender still, holt der Link-Fallback den AP
+  zurück (Selbstheilung). Damit ist auch der Default-`receiver-c6` sparsam.
+  Persistiert als `runtime_config`-Feld (Blob **v9**, 26 B, `[24]`/`[25]`).
+- **Gefixt & geflasht (2026-11-14 abends, `v0.4.0-50-g95f3c73`):** Nutzer-Befund
+  „läuft weiter mit 0,42 W" hatte **zwei** Ursachen: (a) `65da1fd` hatte `/api/ap`
+  ergänzt und damit `max_uri_handlers` (31) gesprengt → `ESP_ERR_HTTPD_HANDLERS_FULL`
+  → `abort()` → **Boot-Crash-Loop** (SoftAP dauerhaft an, ~0,5 W); behoben durch
+  Limit 34 + CI-Guard „Verify the httpd handler budget". (b) Der Link-Fallback holte
+  den AP ohne je gehörten Sender sofort zurück; jetzt an `g_sender_mac_valid` gekoppelt.
+  Zusätzlich: Auto-off um 60 s verzögert (Sender-Kanal-Scan) und der Sender merkt sich
+  den gelernten Kanal in NVS (`metercfg/espnow_ch`). **Gemessen ohne Sender: 0,068 W**
+  (vorher 0,42 W). Details + Bootlog: `docs/c6-idle-power-measured.md`.
+- **Offen:** Verlustfreiheit unter echter Senderlast weiterhin **nicht** messbar —
+  kein Sender am Prüfstand (`crc_valid=0`, `192.168.178.70` down).
+
+## NEU (2026-11-07): `ps max` als C6-Receiver-Default + adaptive Modem-Sleep-Leiter
+**Branch `feat/c6-mqtt-cmd`, Commit `cdf3f8d`, CI grün (`v0.4.0-42-gcdf3f8d`).**
+- Wunsch: „`ps max` einschalten und es schaltet selbst um, wenn Verluste zu groß."
+  Umgesetzt: Der C6-Empfänger startet auf **`ps max`** (sparsamste Sprosse) und
+  eine adaptive Leiter (`main/ps_ladder.{c,h}`) stuft bei **echtem** ESP-NOW-
+  Transportverlust eine Sprosse herunter (`max → min → off`), nach **3 sauberen
+  Fenstern** wieder hoch – nie über die Start-Sprosse, nie auf eine zweimal
+  gescheiterte Sprosse (Anti-Oszillation). Ein ruhiges Fenster (zu wenig Frames)
+  wird **nicht** beurteilt.
+- Signal: `g_sml_transport_losses`-Delta (nur Vorwärts-Sequenzsprünge) relativ zur
+  Frame-Zahl (`g_sml_valid_telegrams + g_sml_invalid_crc_telegrams`), Fenster 60 s.
+- Persistiert: `runtime_config`-Feld `ps_ladder` (Blob **v8**, 24 Byte, `[23]`);
+  C6-Receiver-Default `ps max` + `ps_ladder=true`; klassischer ESP32 und **jeder
+  Sender** bleiben bei `ps_ladder=false`.
+- Bedienung: `set ps off|min|max` (setzt Start-/Ceiling-Sprosse, re-armt),
+  `set ps-ladder on|off`; `/api/dashboard` liefert `ps_ladder`,
+  `ps_ladder_mode`, `ps_ladder_losses`, `ps_ladder_steps_down/_up`.
+- **Geräteverifiziert (.105, C6FH4, USB):** Boot meldet „Wi-Fi PS mode set to max
+  (listen_interval=10 beacons)"; `/api/dashboard` → `wifi_ps_mode:"max"`,
+  `ps_ladder:true`, `ps_ladder_mode:"max"`; `set ps-ladder off/on` wirkt sofort.
+- Host-Test `test/test_ps_ladder.c` (33 Checks) + volle Suite grün; CI prüft die
+  Leiter-Zeichenkette im Receiver-Image (Sender-Image ausgenommen).
+- **Offen:** Verlustfreiheit von `ps max` **noch nicht** empirisch belegbar – kein
+  Sender erreichbar (`crc_valid=0`, `sender_rssi_valid=false`). Sobald ein Sender
+  sendet: `ps_ladder_steps_down` beobachten (0 = `ps max` hält).
+
+## NEU (2026-11-07): MQTT-Kommando-Kanal — Rückrichtung `<base>/cmd` → `<base>/cmd/result`
+**Branch `feat/c6-mqtt-cmd` (Basis `feat/c6-burst-lock`).**
+- Der Receiver publiziert bisher nur nach MQTT. Jetzt **abonniert** er `<base>/cmd`
+  (QoS 1, Subscribe erst nach dem Discovery-/Reboot-Publish) und schickt jede Zeile
+  durch denselben Dispatcher wie die Web-/Seriell-Konsole (`web_console_run`); die
+  Antwort geht **retained** nach `<base>/cmd/result` als
+  `{"cmd":...,"ok":...,"out":...}`. Damit ist der Empfänger auch ohne Web-UI
+  bedienbar (`status`, `config`, `set ps min`, `pull`, …).
+- **Warum ein eigener Worker:** der MQTT-Task darf nie einen Befehl ausführen —
+  ein langsamer Befehl (z. B. `pull`) würde den Keepalive blockieren und die
+  Verbindung killen. Reassembly läuft im MQTT-Task, Ausführung in `mqtt_cmd`
+  (Queue-Tiefe 1, kein Stapeln).
+- **Reassembly:** esp-mqtt liefert große Payloads in mehreren `MQTT_EVENT_DATA`-
+  Events; auf Folge-Chunks ist `topic` **NULL** (außer
+  `CONFIG_MQTT_TOPIC_PRESENT_ALL_DATA_EVENTS`) — der Handler prüft das Topic nur,
+  wenn es gesetzt ist, und setzt sonst eine laufende Reassembly fort. Reines,
+  host-getestetes Modul `main/mqtt_cmd.{c,h}` (`test/test_mqtt_cmd.c`, 22 Checks).
+- **Sicherheit:** kein Kommando ohne gültigen Broker-Login (der Kanal hängt an der
+  authentifizierten MQTT-Session; `meter`/`Strom-Meter-2026` verifiziert). Der
+  Broker-ACL erlaubt `meter` Schreiben/Lesen auf `*`.
+- **Host-Suite grün**, Build über die GitHub-CI (`receiver-c6`) steht aus.
+
+## NEU (2026-11-11): "keine Werte im Speicher" — verifizierte Diagnose + Web-500-Fix
+**Geräteverifiziert (Receiver C6 .105, Sender via /api/sender-diag):**
+- Beide Rollen empfangen/decodieren **live weiter** (Receiver `crc_valid` steigt
+  14105→14124 in 20 s, power/avg bewegen sich; Sender `sml_sent_ok`/UART-RX steigen),
+  aber die **persistente Minuten-History schreibt seit `2026-11-09T05:21` keine neuen
+  Records** (CSV endet dort). CSV-Records
+  sind diskontinuierlich (~stundenweise, sample_count=60) → Wall-Clock springt nicht
+  zuverlässig minütlich → Minuten-Bucket-Sprung-Gate (`bucket_start > g_power_bucket_start_utc`)
+  triggert NICHT. **Beweis:** der Sender (ESP-NOW-Kalibrieruhr) schreibt weiter
+  `storage_records` herauf (10036→10038), der Receiver (SNTP-`time()`) stoppt.
+  **Gefixt (Commit `3606c3b`):** Receiver bekommt eine monotone-Uhr-Fallback wie der
+  Sender — letzte bekannte gute UTC wird an einen monotinen Zeitpunkt gelatcht
+  (Store-Seed bzw. jede gültige `time()`), `current_utc_seconds()` fällt bei
+  invalider `time()` darauf zurück. Werte bleiben ≥ `POWER_HISTORY_MIN_VALID_UTC`,
+  Dedup/Valid-Logik unangetastet. Sender+Receiver-Build grün, Host-Suite grün.
+  **Deployment/on-device-Verifikation steht aus** (flashen/OTA braucht den
+  Wi-Fi/OTA-Key des Nutzers; kein USB-Serial an dieser Maschine).
+  Hinweis: Ein falscher Zeit-Fix hätte die `POWER_HISTORY_MIN_VALID_UTC`/Dedup-Logik
+  (MUST-NOT-BREAK) beschädigen können — deshalb monotone-Fallback, nicht Time-Override.
+- **Gefixt (Commit `c188526`, Web-Erreichbarkeit=Teil des MUST):** Der Haupt-Endpunkt
+  `/api/power-history` warf **HTTP 500 "History aggregation failed"**, obwohl das
+  SPIFFS-Backend ready war und Records enthielt → gespeicherte Werte im Dashboard
+  **unsichtbar**. Root-Cause: `power_history_aggregate()` brach bei *einem einzigen*
+  unlesbaren Ring-Slot hart ab (fread-Fehler → ESP_FAIL), während
+  `power_history_read()`(CSV/JSON-Snapshot) unlesbare Slots tolerierte. Fix:
+  die Aggregation überspringt beschädigte Blöcke und aggregiert die gültigen
+  Records. Sender- + Receiver-Build grün, Host-Suite (power_history/backfill/...)
+  grün, kein Verhalten an den verlustfreien Defaults/Defaults geändert.
+
+
+
+## NEU (2026-11-10): Isolierte git-Objekte sichtbar gemacht — `docs/branch-inventory.md`
+**Erledigt (nur lesend + lokale refs, nichts gepusht/committet/gelöscht):**
+- Verwaiste Commits gesichert als lokale `archive/*`-Branches:
+  `archive/sync-slot-wip` (= `1b4389f`, der frühere **sync-slot + ACK-Handshake**-Versuch,
+  lag im Git-Stash → für `git log` unsichtbar; einzige echte ungemergte Arbeit, ersetzt durch
+  burst-lock), `archive/burst-lock-dupe-8d8c90c`, `archive/reconnect-dupe-5e6b310`.
+- Vollständiges Branch-Inventar (lokal + remote, Abstand zu `origin/main`) in
+  `docs/branch-inventory.md`.
+**OFFEN:** Archiv-Refs bei Bedarf pushen; obsolete `behind=246`-Branches aufräumen (erst nach
+Freigabe).
+
+## NEU (2026-11-10/11): SENDEFENSTER-Auftrag — Konzept bereits durch burst-lock umgesetzt, `1b4389f` verworfen
+**Auftrag „SENDEFENSTER + Light-Sleep (Sender/Receiver-Koordination)"** (delegierter Chat,
+`delegated/esp32-sendfenster`). **Ergebnis der Bestandsaufnahme:** Das geforderte Konzept ist auf
+dem aktuellen Branch `feat/c6-burst-lock` **bereits vollständig umgesetzt** — der alte Wall-Clock-
+sync-slot (`ESPNOW_SYNC_SLOT_MS`, `1b4389f`) wurde bewusst durch den **burst-lock**-Ansatz ersetzt
+(lernt die Sender-Burst-Phase und hält das Modem nur um die vorhergesagte Burst-Zeit wach), siehe
+`docs/branch-inventory.md` („durch burst-lock ersetzt/nicht weiterverfolgt"). Alle vier Muss-Ziele
+sind im aktuellen Code erfüllt:
+
+1. **SENDEFENSTER:** `main/burst_lock.{c,h}` + `burst_lock_worker` (`main/main.c`) — Receiver
+   öffnet `esp_wifi_force_wakeup_acquire()`-Fenster nur um die vorhergesagte Sender-Burst.
+2. **kein SML-Verlust:** `main/tx_batch.c` (Ring, Kap. 256, älteste evict, Requeue) +
+   `uart_sleep_window.c` (nur im verifizierten ruhigen Fenster schlafen).
+3. **Web-Erreichbarkeit:** burst-lock fasst PS-Modus/AP nie an → HTTP-Dashboard erreichbar
+   (kein Timeout), nur die Modem-Wake-Phase variiert.
+4. **Reliable-ACK:** `send_sml_telegram`/`wait_for_sml_ack`/`flush_tx_batch` — Receiver quittiert
+   jede Sequenz (`sml_transport_ack_t`), Sender retried bis `SML_ACK_MAX_ATTEMPTS=4` und reiht
+   Unquittiertes wieder ein (`sml_tx_batch_requeue_front`).
+
+**Entscheidung `1b4389f` → ENDGÜLTIG VERWORFEN** (reaktivieren bringt keinen Gewinn): Der
+burst-lock liefert dasselbe Sendefenster **ohne** präzise Wall-Clock-Sync als Voraussetzung und
+ist am Gerät gemessen verlustfrei (`ps=off`+`radio-save on` 20/15 → 0,8 % ≈ Baseline, und
+`ps min`+burst-lock ≈ Baseline). Der letzte tote Überrest (`#if defined(CONFIG_ESPNOW_SYNC_SLOT_MS)`
+in `main/main.c` ohne Kconfig-Symbol) wurde entfernt (nur Dokumentation/Mehrfach-Sync-Pfad, kein
+Verhalten; Zeit-Sync bleibt stündlich).
+
+**Verifiziert (Build + Host-Tests, Branch `feat/c6-burst-lock`, HEAD `0467070`+Cleanup):**
+`send`, `receiver` (=klassischer ESP32) und `receiver-c6` (=ESP32-C6, CI-äquivalent) bauen grün,
+keine Fehler. Host-Suite grün inkl. Reliable-Ack-Reihe: `test_tx_batch` 55, `burst lock` 44,
+`sml transport ack` 11, `uart sleep window` 25, `sleep announce` 9, `liveness` 139 (alle 0
+failures). Sender-Bin enthält `adaptive sleep path compiled in`, C6-Receiver-Bin enthält
+burst-lock/ACK-Strings.
+**Hardware-Grenze (dokumentiert, nicht brechbar):** Light-Sleep ist auf dem C6-Build NICHT
+schaltbar (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG` → `runtime_config_light_sleep_allowed()==false`,
+IDF-6395); der verlustfreie C6-Stromspar-Default läuft über `radio-save`/burst-lock. Am echten
+Gerät .105 steht noch der offene Punkt oben (Sender-Telegramme `crc_valid=0`/`sender-diag` 503,
+anderer Chat flasht parallel) — unabhängig von diesem Auftrag.
+
+## NEU (2026-11-08): `set ps`/`set listen` rissen den Link ein — behoben (`07419b1`, Branch `feat/c6-burst-lock`)
+**Erledigt + am Gerät verifiziert:** `set ps` fasst den Link nicht mehr an; `set listen`
+reconnected nur bei tatsächlich geändertem `listen_interval`, out-of-band über einen
+400 ms-One-Shot-Timer (Antwort wird vorher geflusht → kein „set timed out" mehr).
+Counter `wifi_reconnects` / `wifi_reconnect_skips` in `/api/dashboard` + `status`.
+Verifiziert: `set ps off` → skip; `set listen 10` (gleich) → skip; `set listen 20` →
+genau 1 reconnect; Link durchgehend HTTP 200.
+
+**Messung (300 s, ab9–ab12):** `ps off`+`radio-save 20/15` und `ps min`+burst-lock
+beide ~16–18 % Verlust **und identisch** → Umgebungsstörung, nicht der Sleep-Modus.
+Keine Konfiguration verursachte Reboots/HTTP-Fehler. Merksatz bleibt: **nie**
+`ps min/max` **ohne** `radio-save`.
+
+**OTA-Weg:** Cloudflare-Quick-Tunnel bricht Pull-OTA ab (Rollback) → direktes
+`POST /update` mit `--data-binary @build/receiver-c6-apoff/esp32-IR.bin` nutzen.
+
+**OFFEN:** Am Gerät .105 keine Sender-Telegramme (`crc_valid=0`, „No sender MAC known yet",
+`sender-diag` 503) — Sender stumm, prüfen. C6-WLAN-Flapper (`run->init`) im Bootlog; ein
+anderer Chat flasht .105 parallel.
+
+
+
+## NEU (2026-11-08): Modem-Sleep-Wächter (ps_fallback) + Compile-/Test-Fixes – Branch `feat/nvs-web-knobs`
+**Warum:** Der C6-Empfänger hat drei Stromspar-Hebel, die je den Link zerstören
+können (Light Sleep → USB-Konsole tot; `ps min/max` → Disconnect-Sturm;
+`radio-save` → verpasste Frames). Dazu flappt die FRITZ!Box auch ohne Hebel.
+Ein Wächter, der **jeden** Disconnect zählt, würde den Sleep grundlos abschalten.
+
+- **`main/ps_fallback.{c,h}` + `ps_fallback_worker` (beide Rollen):** zählt STA-
+  Disconnects im gleitenden Fenster (Default 3/120 s, 30 s Schonfrist). Bei
+  einem Sturm fällt er **sticky** auf `WIFI_PS_NONE` + `radio-save=false` zurück
+  und persistiert das. Absichtliche Reconnects zählen nicht; `set ps` re-armt.
+- **Drei Fehler behoben (dieser Commit):**
+  1. **Compile-Bug:** `ps_fallback_worker` rief `diag_log_event()` (sender-only)
+     → **alle Empfänger-/C6-Builds scheiterten** (`'diag_log_event' used but
+     never defined`). Aufruf in `#if CONFIG_ESPNOW_ROLE_SENDER` gekapselt.
+  2. **Falsch-Positiv:** zählte auch ohne aktiven Modem-PS-Modus → jetzt nur bei
+     `ps != off` (der Wake-Window allein zählt nicht) und nur auf dem Empfänger.
+  3. **Test war immer grün:** `CHECK`-Makro in `test/test_ps_fallback.c` erhöhte
+     `g_failures` nie → gefixt.
+- **Sicherer Modem-Light-Sleep (gemessen, s. Messauftrag oben):** `ps off` +
+  `radio-save on` 20/15 (0,8 % ≈ Baseline); wenn Modem-Sleep zwingend, `ps max`
+  + `listen 10` + `radio-save on` 20/15. **Nie** `ps min/max` ohne `radio-save`.
+  Genau diesen Default setzt der Messauftrag/Fix oben; der Wächter ist das
+  Sicherheitsnetz, falls doch ein PS-Modus erzwungen wird. Light Sleep bleibt
+  am C6 aus (USB-Konsole).
+- **Verifiziert:** IDF-v6.1-Build aller Rollen gruen (`sender`, `receiver`,
+  `receiver-c6-apoff`), Host-Suite grün. Details: `docs/c6-modem-sleep-safety.md`.
+- **Offen (am Gerät):** `set ps max` + `set listen 5/10/20/30` am C6 mit der
+  FRITZ!Box messen; prüfen, ob der Wächter wie erwartet auslöst und die
+  ESP-NOW-Frames weiter ankommen.
+
+## NEU (2026-11-08): Laufzeit-NVS-Knoepfe ueber die Web-Konsole – Branch `feat/nvs-web-knobs`, PR #67
+**Ziel:** Jeder nutzerseitige NVS-Wert ist zur Laufzeit aenderbar (Safe-Fallback),
+und die kuenstlichen Wertebereiche reichen bis an die harte IDF-/SoC-Grenze, damit
+spaetere Aenderungen **kein Neukompilieren** brauchen.
+
+- **Bereiche geweitet** (`main/runtime_config.h`, Blob bleibt v6 / 22 B):
+  `retries` 0..255, `txpower` 0=Default sonst 1..20 dBm, `beacon` 0/100..60000 TU
+  (Vielfaches von 100), `wake-interval` 10..65535 ms, `wake-window` 1..65535 ms,
+  `twt-wake` 500..65535 ms, `listen` 1..65535; `cpu` bleibt 40..160 (SoC-Grenze).
+  Defaults: `listen`=**10** (war 3), `ps`=**min** (unveraendert).
+- **Neue Konsolen-Setter** (`set`): `wifi-ssid`, `wifi-pass` (-> `metercfg` +
+  Reconnect; leeres Passwort behaelt das alte) und `mqtt-uri`, `mqtt-prefix`,
+  `mqtt-user`, `mqtt-pass` (-> `mqttcfg` + Bridge-Neustart ueber
+  `mqtt_bridge_set_config`). Bei Fehler bleibt der alte Wert erhalten.
+  `mqtt-prefix` wird getrimmt persistiert.
+- **Validierung** in `main/net_config.{c,h}` (host-getestet), **Safe-Fallback**:
+  ein von der PM-/WLAN-API abgelehnter Wert faellt auf den Default zurueck und
+  wird persistiert (sichtbar in `config`).
+- **Tests:** `test/test_runtime_config.c`, `test/test_net_config.c` (neu),
+  `test/test_web_console.c` (Help-Puffer-Regression); alle Host-Suiten gruen.
+
+## ANALYSE+INSTRUMENTIERT (2026-10-26): Empfänger-Historie friert ein (Livelock)
+**Frage (User):** „Ist die Zeitumstellung von Samstag auf Sonntag schuld?" –
+**Nein.** Und die eigentliche Ursache ist gefunden: der Backfill steckt in einem
+**Schreib-Amplifikations-Livelock**.
+
+**Zeitumstellung ist ausgeschlossen (belegt, nicht vermutet):**
+- Die Firmware rechnet **nur in UTC**: `interval_start_utc`, `timegm()`,
+  `floor_div(utc, 86400)`. `localtime`/`tzset`/`setenv("TZ")`/`"CET"` kommen im
+  ganzen Repo **nicht** vor (grep über `main/` + `components/`).
+- Uhr stimmt auf die Sekunde: Empfänger `1793047681` == Host
+  `2026-10-26 20:48:01 UTC`, **kein 3600-s-Versatz**.
+- In UTC gibt es keinen Rücksprung; ein Duplikat bräuchte lokale Zeit.
+- Der Boot ist erst **~1,25 h** alt (Bootlog-Marke ~4.500.300 ms), die Umstellung
+  (25.10. 01:00 UTC) liegt **vor** dem Boot und ~3 Tage vor dem Cursor.
+
+**Der Livelock (gemessen):**
+- `/api/history-pull`: `cursor_utc 1792720920` (22.10. 23:22 UTC), `lag 91 h`,
+  `caught_up false`, `merged_total 243` über **498 Sessions**, `last_merged 5`,
+  `last_pages 1`, `last_duration_ms 5852`, `errors 0`.
+- Ohne jede externe Anfrage (90 s Pause): `queue_drops` 263→**505**,
+  `write_errors` 20→**40**. Der Defekt läuft **von selbst**.
+- `energy_day_wh` steht konstant bei 4913.843 (kein neuer Datensatz wird
+  verbucht), obwohl ~747 W fließen.
+- Der Sender (gleicher Code `9fafed0`) hat `records 11845, write_errors 0,
+  queue_drops 0` → reiner **Empfänger**-Defekt (Backfill-/Merge-Pfad).
+
+**Mechanismus (nach Live-Messung korrigiert):** Kein Platzmangel. Jede Minute
+**unter** dem lokalen Ring-Schwanz ruft in `write_records()` den
+`shift_up_renumber()`-Zweig: er liest und schreibt **alle neueren Records**
+(fseek+fread+fwrite je 28-Byte-Satz) und hält dabei `g_history_mutex`. Über
+~11.800 Records sind das ~23.600 Datei-Syscalls **pro Minute**, mehrere Sekunden.
+In der Zeit kommt der Writer nicht an die 16-Platz-Queue → Drops; jeder Reader
+läuft in den 800-ms-Timeout (`record_count: 0`). Der Shift bricht zudem
+mittendrin mit **EIO** ab.
+
+**Live-Beweis (geflasht, `v0.1.1-19-g9fafed0-dirty`, 2026-10-26):**
+```
+E power_history: History persist failed at shift: errno=5 (I/O error), spiffs=ok used=334332/836081
+E power_history: Could not persist power-history batch
+E power_history: History queue full (16 slots); dropping minute    (alle ~10 s)
+```
+- `storage_used 334332 / 836081` = **40 % voll** → **kein** Platzproblem
+  (die frühere 88,5-%-Zahl war falsch).
+- `errno=5` = **EIO**, **nicht** ENOSPC (28). In der IDF-Quelle liefert
+  `spiffs_res_to_errno()` ENOSPC nur bei `SPIFFS_ERR_FULL`; EIO ist der
+  Sammel-Fall für alle übrigen SPIFFS-Fehler.
+- `splices: 0` — der Zähler steigt erst **nach** dem Shift, deshalb bleibt er bei
+  einem Abbruch *im* Shift auf 0. Die Stage-Angabe (`shift`) verrät den Pfad.
+- `write_errors` steigt langsam (5→6/60 s), `queue_drops` schneller (74→81/60 s).
+- **0 von 25** `/api/power-history`-Reads kamen durch (alle 800-ms-Timeout,
+  `record_count: 0`), obwohl der Bootlog `11799 of 29000` meldet.
+
+**Damit ist die Kette klar:** nicht „voller Ring → ENOSPC", sondern „teurer
+O(n)-Shift hält den Mutex sekundenlang und scheitert mit EIO". Der EIO-Grund
+selbst ist noch **nicht** bewiesen (Kandidaten: SPIFFS-Schreibfehler an einer
+noch nicht angelegten Seite bzw. GC-Grenze, oder ein echter Flash-Fehler in
+einem Block). Ein gezielter Probelauf (errno je einzelnem `write_record_idx`
+loggen) würde das klären.
+
+**Nächster Schritt (Fix, noch offen):** Den O(n)-Splice ganz vermeiden — der
+Backfill darf den Ring nicht rückwärts einsortieren müssen. Zwei Wege:
+(a) nur Minuten **oberhalb** des lokalen Schwanzes mergen (Lücken in der Mitte
+als Marker führen), oder (b) bei unsortiertem Einfügen den Datensatz verwerfen
+statt zu spließen. Beides macht einen Merge O(1) statt O(Ring) und nimmt dem
+EIO den Auslöser. Regression danach über die Konsole `history` (splice-Zähler).
+
+
+**Instrumentierung (eingebaut, host-getestet):**
+- `log_persist_failure(stage)`: nennt **Stufe** (`shift`/`splice-write`/
+  `append-write`/`flush`/`header`), `errno`+`strerror` und bei ESP32 zusätzlich
+  `esp_spiffs_info` (`used/total`). Vorher stand nur „Could not persist".
+- `power_history_status_t` um `splice_batches`, `splice_records`,
+  `storage_used_bytes`, `storage_total_bytes` erweitert; in `/api/power-history`
+  (beide JSON-Varianten), Konsole `history` und Diag sichtbar.
+- `power_history_enqueue()` unterscheidet jetzt **„store not ready" / „null
+  record" / „queue full"** statt einer Sammelmeldung.
+- Host-Shim `esp_spiffs_info` ergänzt (meldet `ESP_ERR_NOT_SUPPORTED`, Werte 0).
+- Test `test_history_backfill_merge.c`: prüft, dass ein Out-of-Order-Merge
+  `splice_batches > 0` zählt. **Host-Suite grün** (merge 67 checks).
+
+**Erwartete Live-Ausgabe (nach dem Flash):** `errno=28 (No space left on
+device)` am `shift`/`splice-write`-Pfad plus `spiffs used≈812000/917504` wäre der
+Beweis. Falls stattdessen ein anderer `errno` kommt, ist es ein I/O- statt
+Platz-Problem — die Diagnose unterscheidet das jetzt.
+
+**Nächster Schritt (noch offen):** der Fix. Naheliegend: den Backfill **nur
+vorwärts** mergen lassen (Cursor darf nie unter den Ring-Anfang fallen) bzw. den
+Merge bei vollem Ring **nicht spließen**, sondern verwerfen — dann kostet ein
+Merge O(1) statt O(Ring). Das ist ein eigener, größerer Eingriff und noch nicht
+umgesetzt.
+
+## ANALYSE (2026-10-23): Sparhebel – der größte lag in der Compiler-Optimierung
 
 ## MESSUNG (2026-11-08, .105): Modem-Sleep-Kombinationen ohne Telegramm-Verluste
 **Aufbau:** `.105` = C6-Empfänger (USB-JTAG-Konsole), Sender = **klassischer ESP32**
@@ -119,9 +474,10 @@ USB-Serial/JTAG-Kabel (CPU-Wachhaltung), nicht die Assoziation.
 ob (a) die FRITZ!Box trennt, (b) die Leistung sinkt, (c) der Empfaenger weiter
 ESP-NOW-Frames sieht. Rueckweg: `set ps min` bzw. `reset-config`.
 
-**Merge-Hinweis:** `feat/c6-ap-switch` bumpt denselben `rtcfg`-Blob ebenfalls (auf v5,
-18 B, `ap_enabled`); dieser Stand ist v6 (22 B). Beim Merge die Layouts in EINE
-Version falten (Offsets bis [15] identisch).
+**Merge-Hinweis (erledigt):** `feat/c6-ap-switch` (v5, 18 B, `ap_enabled`) und der
+PS-Stand (v6, 22 B) sind in **v9 (26 B)** zusammengefuehrt: der Blob haengt
+`burst_lock` [22], `ps_ladder` [23], `ap_enabled` [24] und `ap_auto_off` [25] an;
+ein Alt-Blob anderer Groesse wird ignoriert (Defaults greifen).
 
 ## NEU (2026-11-07): C6-Receiver – `sleep on` killt die USB-Konsole (BEHOBEN, CI-gruen 7e34996)
 **Befund (reproduziert):** `set sleep on` (automatic light sleep) schaltet auf dem
@@ -201,6 +557,353 @@ kurze (`config`) funktionierten. Ursache: der **256-B-TX-Ringpuffer** des
 USB-Serial-JTAG; `xRingbufferSend()` **verwirft** einen Schreibvorgang, der nicht ganz
 hineinpasst. Fix in `main/serial_console.c`: Ausgabe in **≤128-B-Chunks** (passen
 immer) und Ring auf **1024 B** vergrößern, wenn der Treiber selbst installiert wird.
+## OFFEN (2026-10-23): Rollback-Pfad am Gerät ist NICHT belegt
+
+Anlass: Frage „haben wir NVS und OTA-Rollback über die BOOT-Taste getestet?"
+
+**Was am echten Gerät verifiziert ist** (TODO 2026-10-21, Version `v0.1.1-4`):
+- **Config-Restore (3-s-Geste)** – über den gleichwertigen Konsolenbefehl
+  `restore-config`: `set retries 5` → committed; Restore → Reboot; danach
+  `retries=3`. **NVS-Slot `rtcfg/prev` funktioniert also am Gerät.**
+- **SPIFFS-Historie unversehrt** nach dem Restore (9390/29000, `write errors: 0`).
+- **Grenzfall ohne `prev`** (nach `reset-config`): Restore rebottet nicht, Gerät
+  bleibt erreichbar – kein Hänger.
+
+**Was NICHT am Gerät getestet ist** – nur host-getestet bzw. per Log bewiesen:
+- **Firmware-Rollback über 10-s-Halten** (echter Tastendruck am GPIO).
+- **Post-OTA-Rollback-Pfad** (`boot_confirm`): OTA → Dashboard bleibt aus →
+  Rollback in den anderen Slot. TODO 2026-10-21 sagt selbst
+  „Hardware-Verifikation offen"; `test/test_boot_confirm_trigger.c` deckt nur den
+  Kleber auf dem Host ab.
+- **Physischer Tastentest** (3 s / 10 s am Gerät) – steht laut TODO noch aus; die
+  GPIO-Anbindung ist nur syntaktisch + per Log geprüft.
+- **Sender-Taste**: Sender-Image mit Tasten-Support ist **noch nicht geflasht**
+  (Sender hängt am Messpunkt ohne USB).
+
+**Warum das vor dem Flash der Sparmaßnahmen wichtig ist:** Ein neues Image landet
+in `ESP_OTA_IMG_PENDING_VERIFY`. Kommt das Dashboard nicht hoch, muss der Rollback
+greifen – sonst bleibt nur der Weg über die Taste. Solange der Rollback am Gerät
+unbelegt ist, ist ein Flash mit unbekanntem Rückweg riskant. **Reihenfolge: erst
+Rollback am Gerät belegen (kontrolliert, mit laufendem Ersatz-Image im anderen
+Slot), dann die Sparmaßnahmen flashen.**
+
+**Code-Prüfung (host-seitig, gegen IDF v6.1 `esp_ota_ops.c`):** Die 10-s-Geste ruft
+`esp_ota_mark_app_invalid_rollback_and_reboot()` → `esp_ota_current_ota_is_workable(false)`.
+Das prüft **nicht** den aktuellen Zustand, sondern markiert den laufenden Slot als
+INVALID, sofern `esp_ota_check_rollback_is_possible()` true ist (anderer Slot hat
+ein valides Image). Die Behauptung „rollt auch ein bestätigtes Image zurück" deckt
+sich damit – **aber nur, wenn im anderen Slot ein valides Image liegt**; gibt
+`check_rollback_is_possible` false, passiert nichts (Fehlerlog, kein Reboot).
+
+
+## ERLEDIGT (2026-10-23): Flash-Diät (IPv6 + WPA3/Enterprise) – gemessen −78 KB
+
+**Auftrag (User):** (1) Lean-Config dauerhaft einbauen und verifizieren, (2) prüfen,
+ob `esp_delta_ota` zum Partitionslayout und zum ESP-NOW-Relay-Pfad passt.
+**Vorgeschichte:** 4-MB-Flash ist zu 98 % belegt (2×1,5 MB OTA + 896 KB SPIFFS),
+Empfänger füllte 84,6 % seines Slots.
+
+**Was abgeschaltet wurde** (`sdkconfig.defaults`, Abschnitt „Flash diet"):
+`CONFIG_LWIP_IPV6=n` sowie die WPA3/SAE/OWE- und Enterprise-Familie
+(`ESP_WIFI_ENABLE_WPA3_SAE`, `SAE_H2E`, `SAE_PK`, `SOFTAP_SAE_SUPPORT`,
+`ENABLE_WPA3_OWE_STA`, `WPA3_COMPATIBLE_SUPPORT`, `ENABLE_WPA3_OWE_SOFTAP`,
+`ESP_WIFI_ENTERPRISE_SUPPORT`). **Bewusst behalten:**
+`CONFIG_ESP_WIFI_MBEDTLS_CRYPTO=y` (WPA2 braucht die Crypto-APIs; wird sonst von den
+OWE-Optionen per `select` gezogen, die jetzt weg sind → deshalb explizit gepinnt) und
+`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` (Pull-OTA vertraut dem Public-CA-Bundle).
+
+**Belege:** Kein `AF_INET6`/`sockaddr_in6`/IPv6-Code in `main/`; SoftAP ist
+`WIFI_AUTH_WPA2_PSK` (`main.c:1121`), STA joint nur ein WPA2-PSK-Heim-WLAN; ESP-NOW
+nutzt CCMP (eigener Link-Layer), nicht SAE, und läuft hier unverschlüsselt
+(`peer.encrypt = false`).
+
+**Messung (beide Rollen, saubere Builds, ccache):**
+
+| Rolle | vorher | nachher | Ersparnis |
+|---|---|---|---|
+| Empfänger | 1.331.088 B (84,6 %) | **1.251.280 B (79,4 %)** | **−79.808 B (−78 KB)** |
+| Sender | 942.800 B (59,9 %) | **851.056 B (54,1 %)** | **−91.744 B (−90 KB)** |
+
+**Verifikation:** Host-Suite grün (`test/run_host_tests.sh`, EXIT 0 – u. a. sml,
+stability, virtual day, history-sync). Bootloader unverändert 0x6680 (8 % frei).
+In `sdkconfig.receiver`/`.sender` bestätigt: `# CONFIG_LWIP_IPV6 is not set`,
+`# CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT is not set`, `ESP_WIFI_MBEDTLS_CRYPTO=y`,
+`MBEDTLS_CERTIFICATE_BUNDLE=y`.
+**OFFEN (Hardware):** Noch **nicht geflasht**. Auf der Bank bestätigen, dass STA
+weiter assoziiert und ESP-NOW weiter trägt (Config-Aussage dazu steht im
+`sdkconfig.defaults`-Kommentar).
+
+## ANALYSE (2026-10-23): `esp_delta_ota` – passt, spart aber nur Transfer
+
+**Frage:** Kann Delta-OTA die Update-Größe über die schwache Funkstrecke senken?
+**Ergebnis: Ja, und zwar deutlich – aber nur die Übertragung, nicht den Flash.**
+Beide OTA-Slots müssen weiter die volle Firmware halten (sonst kein Rollback), das
+Partitionslayout bleibt also unverändert.
+
+**Machbarkeit geprüft (real, nicht aus der Doku):**
+- Komponente `espressif/esp_delta_ota` **1.1.4** aus der Registry, deklariert nur
+  `idf >= 4.3`; **eigenes Testprojekt mit IDF v6.1 baut sauber** (`EXIT=0`).
+- Footprint: **7,3 KB Flash** (`esp_delta_ota.c` 1270 B + `detools.c` 5117 B +
+  `heatshrink_decoder.c` 1083 B), **0 B statisches RAM** (Kontext/Puffer per
+  `calloc`). Chunk-Puffer im Beispiel 512 B.
+- API ist **transport-agnostisch**: `read_cb` (Patch-Basis) und `write_cb`
+  (schreibt per `esp_ota_write` in den Ziel-Slot). Der Referenz-`read_cb` liest die
+  **laufende Partition** (`esp_partition_read(current_partition, …)`), das passt zum
+  A/B-Layout. Patch-Header enthält SHA-256 der laufenden Firmware → Patch nur für
+  exakt diese Version gültig.
+- **Kein Bootloader-Umbau, keine zusätzliche Partition nötig.**
+
+**Gemessener Delta (Empfänger alt→neu, die obige Lean-Änderung als Testfall):**
+
+| | Größe | Anteil |
+|---|---|---|
+| Voll-Image (neu) | 1.251.280 B | 100 % |
+| Delta, sequentiell | **89.774 B (87,7 KB)** | **7,2 % → −92,8 %** |
+| Delta, heatshrink-komprimiert | 127.252 B (124,3 KB) | 10,2 % |
+| Gegenprobe (gleiche Datei) | 281 B | Sanity ok |
+
+Überraschung: **ohne** Kompression ist der Patch kleiner als mit heatshrink (das
+Delta ist schon dicht) – die `-c heatshrink`-Variante lohnt hier nicht.
+
+**Einordnung:** Delta-OTA ist der richtige Hebel für „schnelle, kleine Updates über
+−86 dBm", nicht für Platznot. Und es braucht einen **HTTPS- oder HTTP-Client** als
+Transport (Referenzpfad), bzw. eine Anpassung, wenn der Patch über das ESP-NOW-Relay
+laufen soll – der `feed_patch`-Callback nimmt aber beliebige Quellen.
+**Nicht umgesetzt** (nur Machbarkeit + Zahlen). Offene Entscheidung: erst Lean-Config
+flashen, dann entscheiden, ob Delta-OTA über HTTPS-Pull oder ESP-NOW kommen soll.
+
+## ERLEDIGT (2026-10-23): T1-Fix (Flash-IO im Callback) + Sender-Rollback bei Panic
+
+**Auftrag (User):** „Mach den t1 fix und den watchdog der sender rollback bei Panik
+auslöst."
+
+### T1: Flash-Zugriff aus dem Wi-Fi-Callback entfernt (Ursache des Boot-Loops)
+
+`wall_clock_mark_trusted()` (läuft im **ESP-NOW-Empfangs-** und im **SNTP-Callback**)
+machte dort Flash-IO: `boot_marker_fill → power_history_read → fread → esp_flash_read`.
+Ein Flash-Read aus dem Wi-Fi-Callback **deadlockt mit der Wi-Fi-ISR** → Interrupt-WDT
+(beobachtet: Panic alle ~66–89 s). Jetzt **setzt der Callback nur noch ein Flag**
+(`g_wall_clock_trusted_event`); `wall_clock_worker` (Task-Kontext) erledigt
+`boot_marker_on_clock_valid()` und die Persistenz. Der Worker pollt 1 s statt 60 s,
+aber `wall_clock_persist_if_due()` bleibt auf
+`WALL_CLOCK_PERSIST_INTERVAL_SECONDS` gegatet – **keine zusätzlichen Flash-Writes**.
+Dazu: die Marker-Page (128 × 28 B = 3584 B) liegt jetzt auf dem **Heap** statt auf dem
+Stack, Worker-Stack 3072 → 4096 B.
+
+### Sender-Rollback bei Panic: Liveness-Watchdog geht durch `boot_confirm_fail()`
+
+`liveness_guard_worker` (läuft auch auf dem Sender) rebootete im `LIVENESS_PANIC`-Fall
+mit einem **blanken `esp_restart()`**. Jetzt ruft er – wie `health_task` und
+`net_watchdog` – `boot_confirm_fail("liveness watchdog: stalled")`: ein **noch
+unbestätigtes** Image rollt in den vorigen Slot zurück, ein bestätigtes wird normal
+neu gestartet.
+
+**Warum das garantiert ist (im gepinnten IDF v6.1 nachgelesen, nicht aus dem
+Gedächtnis):** `bootloader_utility.c` markiert ein Image im Zustand
+`ESP_OTA_IMG_PENDING_VERIFY` bei **jedem** Reset als `ESP_OTA_IMG_ABORTED`
+(`bootloader_common_ota_select_invalid()` wertet ABORTED als ungültig) → der
+Bootloader bootet den anderen Slot. Der Sender ist seit dem Boot-Confirm-Umbau
+180 s (`CONFIG_ESPNOW_SENDER_CONFIRM_STABILITY_S`) **unbestätigt**; jeder Panic,
+Watchdog oder Reboot in diesem Fenster führt also zum Rückfall – unabhängig davon,
+wer den Reset ausgelöst hat.
+
+**Verifikation:** beide Rollen `-fsyntax-only` sauber (Sender + Empfänger, keine neuen
+Warnungen); volle Host-Suite `./test/run_host_tests.sh` grün (EXIT 0). Der echte
+Panic→Rollback-Beweis am Gerät steht noch aus (Sender ohne USB, OTA-only).
+
+## IN ARBEIT (2026-10-23): WDT-Fix `power_history.c` + Sender-WLAN-RSSI-Log
+**Auftrag (User):** (1) Watchdog-Fix in `power_history.c` bauen (behebt die Ursache
+des Boot-Loops dauerhaft), (2) Re-align-Fix auf den Sender flashen, damit die
+Historie zurückkommt; **Zusatz:** der Sender soll zusätzlich einen
+**Signalstärken-Log des WLAN „Wohnzimmer" 1×/Minute** mitschreiben, **ohne sich
+dort einzuloggen** (nur RSSI), Timing-schonend.
+
+**Befund Empfänger (live, 23.10.):** Der Boot-Loop vom 22.10. kam von einem
+kaputten History-Ring (10.197 Records, `ring_heap_sort`/`read_record_idx` ohne
+Yield → TWDT-Abort). Nach Storage-Wipe läuft der Empfänger stabil
+(`v0.1.1-9-g51a0ee4`). **Der Sender lebt wieder** (RSSI −83 dBm,
+`storage_records` ~7185) und der Backfill hat die Historie **zurückgeholt**:
+`record_count` 0 → **6622** (Backfill `merged_total` 6604, `sessions` 106,
+`cursor_utc` wandert). Der Link-Fallback-Log „no sender traffic" ist nur die
+Anlaufphase, danach kam der Sender.
+
+**⚠️ `record_count: 0` am Empfänger heißt NICHT „Speicher leer" (Befund 23.10.).**
+Am laufenden Empfänger (`v0.1.1-10-gea88af2-dirty`) meldet `/api/power-history`
+fast immer `record_count: 0` **bei `storage_ready: true`** — im Schnitt 29 von 30
+Abfragen. Der Speicher ist trotzdem voll: der **Bootlog** sagt
+`power_history: Persistent history ready: 11798 of 29000 minute records`, und ein
+seltener, sauberer Read liefert dieselben `11798`. Auch `/api/simulate` zeigt
+`history records : 0 (written 0, dropped N)` — es liest dieselbe
+`power_history_get_status()`.
+Ursache: `power_history_read()`/`_aggregate()` nehmen den Store-Lock nur mit
+`POWER_HISTORY_READ_LOCK_TIMEOUT_MS` (**800 ms**). Hält der History-Writer oder
+der Backfill-Merge den Lock (Import in einen zu **88,5 %** vollen Ring,
+`POWER_HISTORY_CAPACITY` 29000), läuft der HTTP-Read in den Timeout → Handler
+loggt `Power history busy; serving empty dataset` und antwortet mit
+`record_count: 0`. Im Bootlog: **13× „busy; serving empty"**, **0**
+Mount-/Format-Fehler. Das Dashboard zeigt deshalb „0 / 29000".
+**Folgerung:** bei „0 Records" zuerst den Bootlog
+(`Persistent history ready: N of 29000`) und `queue_drops`/`write_errors` prüfen —
+nicht die `storage`-Partition löschen. Der Wipe vom 22.10. war **Absicht**
+(Boot-Loop-Bruch), kein Defekt; der Sender-Backfill hat den Ring danach wieder
+gefüllt (Sender selbst: `storage_records` 11553, 0 Schreibfehler).
+`format_if_mount_failed = true` (`power_history.c`, `esp_vfs_spiffs_register`)
+bleibt ein **latentes** Risiko (ein fehlgeschlagener Mount formatiert still), hat
+aber nicht gefeuert — kein `formatting`/`mount failed` im Log. Der Receiver hatte
+zwischendurch einen `last reset reason: panic / exception`, passend dazu, dass
+`ea88af2` den WDT-sicheren Repair (`0b94f29`) noch **nicht** enthält.
+
+**Fix (1) – WDT im Repair-Pfad (`main/power_history.c`):** `repair_ring_if_needed()`
+läuft in `app_main` **vor** dem Webserver und war nicht am TWDT angemeldet. Ein
+großer/kaputter Ring sättigte die IDLE-Task > 120 s → TWDT → Boot-Loop.
+Eingebaut: `repair_pacer_t` mit `vTaskDelay(1)` alle
+`POWER_HISTORY_REPAIR_YIELD_STEPS` (2048) Schritte (IDLE kommt dran, WDT wird
+gefüttert) **und** Wall-Clock-Budget `POWER_HISTORY_REPAIR_BUDGET_MS` (15 s); bei
+Budget-Ablauf bricht der Repair best-effort ab und der Boot läuft weiter (nächster
+Boot versucht es erneut). Durchgefädelt in `ring_sift_down`, `ring_heap_sort`,
+`ring_compact`, `ring_renumber` sowie die Damage-Scan- und RAM-Sort-Schleife.
+Include `esp_timer.h` nur unter `#ifdef ESP_PLATFORM` (Host-Shim unverändert).
+
+**Fix (2) – Re-align:** `f8aec56` (`fix/link-realign`) ist **bereits Vorfahre von
+HEAD**; der Re-align-Code (`link_fallback_should_realign`,
+`espnow_align_channel_from_receiver_ap`, periodischer Re-Scan) ist im aktuellen
+Branch enthalten. Für den Sender ist also kein zusätzlicher Re-align-Patch nötig –
+das neue Image trägt ihn bereits.
+
+**Feature (3) – Sender-WLAN-RSSI-Log:** neues pures Modul
+`main/wifi_rssi_log.{c,h}` (due/period, Sample-Ring 60, min/max/avg, Miss-Zähler;
+host-getestet in `test/test_wifi_rssi_log.c`). Glue in `main.c`: Sender-Task
+`wifi_rssi_log_worker` (Priorität 1) scannt **1×/Minute** per
+`scan_home_ap_rssi()` nach der SSID und schreibt nur die RSSI. Der Scan ist auf den
+**aktuellen ESP-NOW-Kanal** begrenzt (`scan_config.channel = g_espnow_channel`),
+damit das Radio den Link-Kanal nicht verlässt – kein SML-Telegramm/Backfill geht
+verloren. **Kein `esp_wifi_connect`/keine Assoziation**, keine Credentials nötig.
+Kconfig: `ESPNOW_SENDER_WIFI_RSSI_LOG` (default y),
+`..._SSID` (default `"Wohnzimmer"`), `..._PERIOD_MS` (default 60000). Anzeige über
+die Sender-Konsole `wifi`.
+
+**Stand:** Host-Suite grün (u. a. `wifi rssi log: 21 checks`, Vollring-Repair
+10 checks), Sender- und Receiver-Build grün (Sender 942800 B, Receiver 1331088 B).
+**GEFLASHT + LIVE VERIFIZIERT (2026-10-23):** Beide Geräte laufen jetzt auf
+**`v0.1.1-10-gea88af2-dirty`** (OTA-Key `Cholbe123`).
+- Empfänger: `POST /update` (rohes `.bin`). Läuft auf Slot `ota_0`, `valid (confirmed)`,
+  **kein Rollback**. Historie intakt: 7252 Records, `caught_up true`, `lag 0 s`.
+- Sender: `POST /update-sender` (ESP-NOW-Relay, 942800 B in ~42 s). Meldet
+  `sender_fw_version v0.1.1-10-...`, ch 1, `storage_records` ~7264.
+- **RSSI-Log live:** Sender-Konsole `wifi` → `home wlan "Wohnzimmer": seen`,
+  `rssi: -85 dBm (min -87, max -85, avg -86; 2 ok / 0 miss)`. Kein SML-Verlust
+  (`sml_sent_ok` steigt), `last_send_status 0`.
+- **Link-Fallback live:** Bootlog zeigt `Link fallback: no sender traffic for
+  60000 ms` während des Sender-Reboots; danach kam der Sender von selbst zurück
+  (TX-Zähler steigen), der Align-/Fallback-Pfad arbeitet also.
+- **WDT-Pacer:** kein Boot-Loop, `Persistent history ready` bei ~2.5 s, TWDT armed,
+  keine `exceeded its time budget`-Warnung (Ring war nicht kaputt).
+- **Hinweis Flash-Tücke:** Die ersten `/update`-Versuche meldeten HTTP 200
+  „Firmware accepted", das Gerät rollte aber per Boot-Confirm (30 s Grace) auf den
+  alten Slot `ota_1` zurück, weil das neue Image beim ersten Boot nicht rechtzeitig
+  hochkam. Erst der dritte Upload blieb stehen — Version erst nach dem Reboot prüfen
+  (`/api` + `simulate`: Slot/State), nicht auf die 200-Antwort allein verlassen.
+
+## ERLEDIGT+GEFLASHT (2026-10-22): Socket-Erschöpfung des Empfängers (`accept (23)`)
+**Symptom (Bootlog):** `httpd_accept_conn: error in accept (23)`, `httpd_sock_err: error in
+send/recv : 104` und `web_guard: self-probe failed: ESP_ERR_HTTP_FETCH_HEADER`.
+**Ursache:** errno **23 = ENFILE** — der lwIP-Socket-Pool war leer, nicht der alte
+`web_guard`-Unterlauf. `start_webserver()` setzt `max_open_sockets = CONFIG_LWIP_MAX_SOCKETS - 3`
+(httpd behält 3 Sockets selbst), beim IDF-Default 10 also nur **7** nutzbar. Das Dashboard
+pollt mehrere Endpunkte parallel und die Web-Probe braucht eine eigene Verbindung; unter der
+Last lief der Pool leer, lwIP lehnte neue Verbindungen mit ENFILE ab (Folge: ECONNRESET 104,
+fehlgeschlagene Probe).
+**Fix (Commit `51a0ee4`, Branch `fix/receiver-socket-headroom`):** `CONFIG_LWIP_MAX_SOCKETS=16`
+in `sdkconfig.defaults` → **13** nutzbare Sockets. Kosten: `MEMP_NUM_NETCONN` ist in
+`lwipopts.h` an `CONFIG_LWIP_MAX_SOCKETS` gekoppelt, die 6 zusätzlichen netconns sind nur ein
+paar hundert Byte statisches RAM (free heap am Gerät: 84272 → 83912 B, ~360 B).
+**Verifiziert am Gerät (Empfänger, OTA geflasht):** Version **`v0.1.1-9-g51a0ee4`** läuft,
+`web probe failures 0`, kein `accept (23)` im neuen Bootlog. **Lasttest:** 16 parallele
+`GET /api/dashboard` → **16× HTTP 200** (der alte Pool hätte nur 7 bedient). ESP-NOW-Link
+weiter gesund (Sender `v0.1.1-2-gcad898c`, ch 1, `last_rx_ago` ~165 ms, `fallback_stage 0`),
+History-Pull intakt. Der Flash lief über `POST /update` (rohes `.bin`, `X-OTA-Key`) — das
+Gerät hat **kein USB**, OTA ist der einzige Weg; Netze: Auto-Rollback (30 s Grace) + BOOT-Taste.
+**Doku korrigiert:** die veraltete Notiz „`max_open_sockets` auf 10 erhöht" in `AGENTS.md` und
+`TODO.md` auf den echten Wert (`- 3`) gebracht.
+**Offen:** PR (`fix/receiver-socket-headroom` → ?) noch nicht gestellt; Branch ist gepusht.
+
+## ERLEDIGT+GEFLASHT (2026-10-21): BOOT-Taste – 3 s stellt Config zurück, 10 s Firmware-Rollback
+**Auftrag:** Eine gelötete BOOT-Taste soll zwei Rettungsaktionen auslösen; zwei Werte
+in NVS (aktueller + experimenteller Wert); zuerst nur der Empfänger.
+**Status: implementiert, host-getestet, gebaut und am Empfänger OTA-geflasht und
+live verifiziert.** Branch `feat/boot-button-config-restore` (Basis `cad898c` =
+`v0.1.1-2`, also **die laufende `fix/integration`-Linie**, nicht `main`).
+Geflashte Version: **`v0.1.1-4-g40538a9`**.
+
+**Wichtig – Befund beim Bauen:** Das „zwei Werte in NVS"-Konzept war auf der
+Basis **schon halb da**: der **Trial-Mode** (`trial/cand`, `main/trial_mode.{c,h}`,
+`set trial …`) hält den *Kandidaten* neben der committed Config (`rtcfg/cfg`) und
+verwirft ihn bei Reset selbst. Was fehlte, war der **Rückweg für ein *committed*
+`set`**: ein `set cpu-min 40` landet in NVS und wird nach jedem Reboot wieder
+angewandt – ein Reboot hilft also nicht. Deshalb:
+
+- [x] **Zweiter NVS-Slot `rtcfg/prev`**: jedes committed `set` legt **vorher** den
+      ersetzten Wert unter `prev` ab (`runtime_config_store_prev`). Genau das ist
+      der „vorherige Wert", den die Taste zurückholt.
+- [x] **`recovery_button.{c,h}` auf zwei Schwellen erweitert**: `RECOVERY_RESTORE`
+      (bei Loslassen nach ≥ `restore_ms`) und `RECOVERY_ROLLBACK` (gehalten ab
+      `rollback_ms`). Der Restore feuert **beim Loslassen**, nicht während des
+      Haltens – sonst würde ein 3-s-Halt neu starten, bevor die 10-s-Rollback
+      überhaupt erreichbar ist.
+- [x] **`recovery_start.{c,h}`**: pollt beide Fenster, ruft einen registrierten
+      Restore-Callback; die Glue kennt kein NVS. Sender-Zweig bleibt Stub
+      (`CONFIG_RECOVERY_BUTTON_GPIO=-1`).
+- [x] **Reihenfolge in `app_main` korrigiert**: die Prüfung läuft jetzt **direkt
+      nach `initialize_wifi_and_espnow()` und VOR `apply_power_management()`**
+      (der alte Aufruf bei `boot_confirm_init()` kam zu spät – ein schlechter
+      DFS-Boden hängt genau im Apply). `recovery_set_restore_fn(
+      runtime_config_restore_prev_and_reboot)` wird dort registriert.
+- [x] **Konsolenbefehl `restore-config`** (gleicher Pfad wie die Taste) für
+      Tests/Remote.
+- [x] **Kconfig**: `RECOVERY_BUTTON_HOLD_MS` → `RECOVERY_BUTTON_RESTORE_MS` (3000)
+      + `RECOVERY_BUTTON_ROLLBACK_MS` (10000). `sdkconfig.receiver*` (nicht
+      getrackt) lokal angepasst; CI zieht die Defaults.
+- [x] **Host-Test** `test/test_recovery_button.c` neu (22 Checks): 2,975 s idle,
+      3 s Restore, 10 s Rollback, „halten über 3 s verschiebt Restore aufs
+      Loslassen", Loslassen startet den Timer neu, freie Fenster, Reset.
+      Volle Host-Suite grün (`./test/run_host_tests.sh`, exit 0).
+- [x] **CI-Syntaxcheck** der Glue auf die neuen Flags umgestellt.
+- [x] **Build lokal** (`tools/build.sh receiver`, Docker `espressif/idf:v6.1`):
+      1330080 B, 15 % frei, Version `v0.1.1-4-g40538a9` im Binary.
+- [x] **OTA-Flash am Empfänger (Odroid, 192.168.178.70)** und live verifiziert:
+      - `set retries 5` → committed (`config` = `retries=5`);
+      - `restore-config` (= 3-s-Taste) → Reboot, danach `config` = **`retries=3`**;
+      - **SPIFFS-Historie unversehrt**: 9390/29000 Records, `write errors: 0`,
+        Sequence lief weiter (latest 10773) – `storage` wurde nicht angefasst;
+      - **Grenzfall ohne `prev`** (nach `reset-config`): `restore-config` rebottet
+        **nicht**, Gerät bleibt sofort erreichbar (HTTP 200) – kein Hänger.
+- [ ] **Physischer Tastentest** (echtes 3-s- und 10-s-Halten am Gerät) – steht
+      noch aus; der Code-Pfad ist über `restore-config` funktional bewiesen, die
+      GPIO-/OTA-Anbindung nur syntaktisch + per Log.
+- [x] **Sender bekommt dieselbe Taste** (`5106ab5`): Die Verdrahtung in
+      `app_main` war bereits rollen-agnostisch; nur `recovery_start.c` gatete die
+      echte Implementierung hinter `!CONFIG_ESPNOW_ROLE_SENDER`. Gate geöffnet,
+      `RECOVERY_BUTTON_GPIO`-Default ist jetzt **0 für beide Rollen** (die
+      Onboard-BOOT-Taste), `-1` schaltet weiter auf Stubs. Der Sender hat kein USB
+      und ist sonst nur per ESP-NOW erreichbar — ohne die Taste gab es für ein
+      Image, das nicht weit genug hochkommt, um das Relais-OTA anzunehmen, keinen
+      lokalen Rückweg. GPIO0 ist Strapping-Pin, wird aber erst **nach** der
+      ROM-Download-Mode-Entscheidung beobachtet; eine nicht bestückte Taste (Pin
+      hochgezogen) liest sich als „nicht gedrückt". Sender-Build grün
+      (940304 B, Button-Strings im Image), Host-Suite grün, CI-Syntaxcheck deckt
+      jetzt beide Rollen **und** den Stub ab.
+- [ ] **Sender-Flash**: noch nicht geflasht (der Sender hängt am Messpunkt ohne
+      USB; Flash über `/update-sender` vom Empfänger aus). Damit die Taste im
+      Feld wirkt, muss der Sender dieses Image bekommen.
+- [x] **Push** `feat/boot-button-config-restore` (Commit `fcff403`) – Token war
+      zwischenzeitlich wieder da (93 B).
+- [x] **CI grün** (Run `39678171966`): Build receiver / receiver-apoff / sender +
+      Host-Tests, alle `success`. Repo-Hygiene ebenfalls grün (`39678172017`).
+- [ ] **PR** öffnen (`feat/boot-button-config-restore` → `fix/integration`), sobald
+      gewünscht – der Branch ist gepusht, aber noch kein PR gestellt.
+- Hinweis: Der angestrebte Versionssprung „von `0.1.1-2` weiter" ergibt wegen der
+  **separaten** WDT-Korrektur (`f475c01`) `v0.1.1-4`, nicht `-3` – beide Commits
+  sind echte Änderungen, daher bewusst so belassen.
 
 ## OFFEN (2026-10-21): ESP-NOW-Link bleibt nach Kanalwechsel des Routers tot
 **Nutzer:** „trotz Empfänger- und Sender-Neustart kam die Verbindung nicht

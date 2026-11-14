@@ -7,12 +7,18 @@
 #include "crash_journal.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "mqtt_client.h"
 #include "nvs.h"
+#include "mqtt_cmd.h"
 #include "mqtt_events.h"
 #include "mqtt_publish.h"
 #include "mqtt_topics.h"
+#include "net_config.h"
 #include "version.h"
+#include "web_console.h"
 
 static const char *TAG = "mqtt";
 
@@ -35,6 +41,67 @@ static char s_prefix[80];
 static int s_reset_reason;
 static bool s_journal_valid;
 static crash_journal_t s_journal;
+
+/* Remote command channel (<base>/cmd). Reassembly runs on the MQTT task, but the
+ * command itself is handed to a separate worker: a slow command (e.g. 'pull')
+ * must not block the MQTT task's keepalive handling. */
+static mqtt_cmd_rx_t s_cmd_rx;
+static QueueHandle_t s_cmd_queue;
+static TaskHandle_t s_cmd_task;
+static char s_cmd_scratch[MQTT_CMD_LINE_MAX];
+
+/* Run one command line through the same dispatcher as the web/serial console and
+ * publish the answer retained to <base>/cmd/result. Runs on the cmd worker. */
+static void mqtt_cmd_run_and_publish(const char *line)
+{
+    char out[WEB_CONSOLE_OUT_MAX];
+    out[0] = '\0';
+    bool known = web_console_run(line, out, sizeof(out));
+
+    if (!s_connected) {
+        return;
+    }
+    mqtt_topics_t topics;
+    if (mqtt_topics_build(s_prefix, &topics) != 0) {
+        return;
+    }
+    char payload[MQTT_CMD_PAYLOAD_MAX];
+    if (mqtt_cmd_result_payload(line, known, out, payload, sizeof(payload)) != 0) {
+        ESP_LOGW(TAG, "command result too large to publish");
+        return;
+    }
+    esp_mqtt_client_publish(s_client, topics.cmd_result, payload, 0, 0, 1);
+}
+
+static void mqtt_cmd_worker(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        if (xQueueReceive(s_cmd_queue, s_cmd_scratch, portMAX_DELAY) == pdTRUE) {
+            mqtt_cmd_run_and_publish(s_cmd_scratch);
+        }
+    }
+}
+
+/* Create the command queue and worker once. Idempotent: set_config restarts the
+ * client but must not spawn a second worker. */
+static void mqtt_cmd_worker_ensure(void)
+{
+    if (s_cmd_queue == NULL) {
+        s_cmd_queue = xQueueCreate(1, MQTT_CMD_LINE_MAX);
+        if (s_cmd_queue == NULL) {
+            ESP_LOGW(TAG, "could not create the command queue");
+            return;
+        }
+    }
+    if (s_cmd_task == NULL) {
+        if (xTaskCreate(mqtt_cmd_worker, "mqtt_cmd", 8192, NULL, 4,
+                        &s_cmd_task) != pdPASS) {
+            s_cmd_task = NULL;
+            ESP_LOGW(TAG, "could not start the command worker");
+        }
+    }
+}
 
 /* Publish the retained reboot event to <base>/event/reboot so Home Assistant
  * can show why the device (re)started. Retained, so a late subscriber still
@@ -64,6 +131,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         if (mqtt_topics_build(s_prefix, &topics) != 0) {
             break;
         }
+        /* Mark the device available *before* the discovery/state publishes so a
+         * freshly subscribing HA sees "online" at once. Without this explicit
+         * publish only the LWT ever writes the topic, so it stays "offline" and
+         * every entity reads as unavailable. */
+        esp_mqtt_client_publish(s_client, topics.status, "online", 0, 0, 1);
+
         /* Retained discovery hub so HA sees the device as soon as it is online. */
         const char *hub =
             "{\"name\":\"ESP32-IR\",\"unique_id\":\"esp32ir_recv\","
@@ -74,11 +147,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 
         char import_topic[MQTT_TOPIC_MAX];
         char export_topic[MQTT_TOPIC_MAX];
+        char average_topic[MQTT_TOPIC_MAX];
         snprintf(import_topic, sizeof(import_topic), "%s/import", topics.base);
         snprintf(export_topic, sizeof(export_topic), "%s/export", topics.base);
+        snprintf(average_topic, sizeof(average_topic), "%s/average", topics.base);
 
         char topic[MQTT_TOPIC_MAX];
-        char value_payload[512];
+        /* Holds the discovery JSON for the longest entity: two 160-byte topics
+         * (state + availability) plus the shared device block. */
+        char value_payload[768];
         struct {
             const char *component;
             const char *name;
@@ -97,16 +174,20 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
              "total_increasing"},
             {"sensor", "Einspeisung gesamt", "export", export_topic, "kWh",
              "energy", "total_increasing"},
+            /* 15-minute mean of the live power, mirrors the dashboard's own
+             * average so HA shows the same value the device UI does. */
+            {"sensor", "Leistung 15 min Mittel", "average", average_topic, "W",
+             "power", "measurement"},
         };
         for (size_t i = 0; i < sizeof(entities) / sizeof(entities[0]); ++i) {
             char unique_id[96];
             snprintf(unique_id, sizeof(unique_id), "esp32ir_recv_%s",
                      entities[i].object_id);
-            if (mqtt_discovery_topic(s_prefix, entities[i].component,
-                                     "esp32ir_recv", entities[i].object_id,
-                                     topic, sizeof(topic)) == 0 &&
+            if (mqtt_discovery_topic(entities[i].component, "esp32ir_recv",
+                                     entities[i].object_id, topic,
+                                     sizeof(topic)) == 0 &&
                 mqtt_discovery_payload(
-                    entities[i].name, unique_id,
+                    entities[i].name, unique_id, unique_id,
                     entities[i].state_topic, entities[i].unit,
                     entities[i].device_class, entities[i].state_class,
                     topics.status, value_payload, sizeof(value_payload)) == 0) {
@@ -114,12 +195,52 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             }
         }
         mqtt_publish_reboot_event(&topics);
+
+        /* Subscribe last: the command channel is optional and must not delay the
+         * discovery/reboot publishes that Home Assistant waits for. QoS 1 so a
+         * command is not silently lost; the broker redelivers on reconnect. */
+        mqtt_cmd_rx_reset(&s_cmd_rx);
+        esp_mqtt_client_subscribe(s_client, topics.cmd, 1);
         break;
     }
     case MQTT_EVENT_DISCONNECTED:
         s_connected = false;
+        mqtt_cmd_rx_reset(&s_cmd_rx);
         ESP_LOGW(TAG, "disconnected from broker");
         break;
+    case MQTT_EVENT_DATA: {
+        esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
+        if (event == NULL) {
+            break;
+        }
+        /* Only the command topic is subscribed, but esp-mqtt leaves topic NULL on
+         * continuation chunks unless CONFIG_MQTT_TOPIC_PRESENT_ALL_DATA_EVENTS is
+         * set. So: check the topic when it is present, and otherwise continue an
+         * already-started reassembly. Anything else is ignored. */
+        if (event->topic != NULL) {
+            mqtt_topics_t topics;
+            if (mqtt_topics_build(s_prefix, &topics) != 0 ||
+                (int)strlen(topics.cmd) != event->topic_len ||
+                strncmp(topics.cmd, event->topic, (size_t)event->topic_len) != 0) {
+                break;
+            }
+        } else if (!s_cmd_rx.active) {
+            break;
+        }
+        mqtt_cmd_rx_result_t result =
+            mqtt_cmd_rx_feed(&s_cmd_rx, event->data, event->data_len,
+                             event->current_data_offset, event->total_data_len);
+        if (result == MQTT_CMD_RX_DONE && s_cmd_queue != NULL) {
+            char line[MQTT_CMD_LINE_MAX];
+            strlcpy(line, mqtt_cmd_rx_line(&s_cmd_rx), sizeof(line));
+            /* The queue holds one command: if the worker is still busy the new
+             * one is rejected (never queued twice), so a burst cannot pile up. */
+            if (xQueueSend(s_cmd_queue, line, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "command worker busy; dropping a command");
+            }
+        }
+        break;
+    }
     case MQTT_EVENT_ERROR:
         ESP_LOGW(TAG, "mqtt error");
         break;
@@ -175,9 +296,9 @@ void mqtt_bridge_start(void)
                       journal_found;
 
     nvs_handle_t handle;
-    char uri[160] = {0};
-    char user[64] = {0};
-    char pass[96] = {0};
+    char uri[NET_CONFIG_MQTT_URI_MAX] = {0};
+    char user[NET_CONFIG_MQTT_USER_MAX + 1] = {0};
+    char pass[NET_CONFIG_MQTT_PASS_MAX + 1] = {0};
     if (nvs_open(MQTT_CONFIG_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
         size_t len = sizeof(uri);
         (void)nvs_get_str(handle, MQTT_KEY_URI, uri, &len);
@@ -216,6 +337,7 @@ void mqtt_bridge_start(void)
         return;
     }
     s_started = true;
+    mqtt_cmd_worker_ensure();
     ESP_LOGI(TAG, "MQTT client started for %s", uri);
 }
 
@@ -259,6 +381,47 @@ static void publish_energy(const char *suffix, double raw, int8_t scaler)
     }
 }
 
+void mqtt_bridge_publish_average(double watts)
+{
+    if (!s_connected) {
+        return;
+    }
+    mqtt_topics_t topics;
+    if (mqtt_topics_build(s_prefix, &topics) != 0) {
+        return;
+    }
+    char topic[MQTT_TOPIC_MAX];
+    char payload[24];
+    if (snprintf(topic, sizeof(topic), "%s/average", topics.base) >=
+        (int)sizeof(topic)) {
+        return;
+    }
+    if (mqtt_power_payload(watts, payload, sizeof(payload)) == 0) {
+        esp_mqtt_client_publish(s_client, topic, payload, 0, 0, 1);
+    }
+}
+
+void mqtt_bridge_publish_fallback_event(unsigned disconnects, unsigned window_ms)
+{
+    if (!s_connected) {
+        return;
+    }
+    mqtt_topics_t topics;
+    if (mqtt_topics_build(s_prefix, &topics) != 0) {
+        return;
+    }
+    char payload[192];
+    int written = snprintf(payload, sizeof(payload),
+                           "{\"event\":\"ps_fallback\",\"disconnects\":%u,"
+                           "\"window_ms\":%u,\"reason\":\"modem sleep broke the "
+                           "link\"}",
+                           disconnects, window_ms);
+    if (written < 0 || (size_t)written >= sizeof(payload)) {
+        return;
+    }
+    esp_mqtt_client_publish(s_client, topics.event_ps_fallback, payload, 0, 0, 1);
+}
+
 void mqtt_bridge_publish_import(double raw, int8_t scaler)
 {
     publish_energy("import", raw, scaler);
@@ -296,6 +459,85 @@ void mqtt_bridge_publish_history(const power_history_record_t *record)
 bool mqtt_bridge_started(void)
 {
     return s_started;
+}
+
+/* Tear the running client down so the next mqtt_bridge_start() builds it from
+ * the (new) NVS values. A no-op when nothing is running. */
+static void mqtt_bridge_stop(void)
+{
+    if (s_client != NULL) {
+        (void)esp_mqtt_client_stop(s_client);
+        (void)esp_mqtt_client_destroy(s_client);
+        s_client = NULL;
+    }
+    s_connected = false;
+    s_started = false;
+}
+
+bool mqtt_bridge_set_config(const char *key, const char *value, char *err,
+                            size_t err_size)
+{
+    if (key == NULL || value == NULL) {
+        snprintf(err, err_size, "mqtt: missing key or value\n");
+        return false;
+    }
+
+    const char *nvs_key = NULL;
+    const char *nvs_value = value;
+    char prefix_buf[NET_CONFIG_MQTT_PREFIX_MAX] = {0};
+    if (strcmp(key, "mqtt-uri") == 0) {
+        if (!net_config_validate_mqtt_uri(value, err, err_size)) {
+            return false;
+        }
+        nvs_key = MQTT_KEY_URI;
+    } else if (strcmp(key, "mqtt-prefix") == 0) {
+        /* Persist the trimmed form: the loader stores it in an 80-byte buffer
+         * and mqtt_topics_build trims again, so a raw value that only fits after
+         * trimming would otherwise be silently dropped on the next boot. */
+        if (!net_config_normalize_mqtt_prefix(value, prefix_buf, sizeof(prefix_buf),
+                                              err, err_size)) {
+            return false;
+        }
+        nvs_key = MQTT_KEY_PREFIX;
+        nvs_value = prefix_buf;
+    } else if (strcmp(key, "mqtt-user") == 0) {
+        if (!net_config_validate_mqtt_credential(value, NET_CONFIG_MQTT_USER_MAX,
+                                                 "mqtt-user", err, err_size)) {
+            return false;
+        }
+        nvs_key = MQTT_KEY_USER;
+    } else if (strcmp(key, "mqtt-pass") == 0) {
+        if (!net_config_validate_mqtt_credential(value, NET_CONFIG_MQTT_PASS_MAX,
+                                                 "mqtt-pass", err, err_size)) {
+            return false;
+        }
+        nvs_key = MQTT_KEY_PASS;
+    } else {
+        snprintf(err, err_size, "mqtt: unknown key '%s'\n", key);
+        return false;
+    }
+
+    nvs_handle_t handle;
+    if (nvs_open(MQTT_CONFIG_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        snprintf(err, err_size, "mqtt: could not open NVS\n");
+        return false;
+    }
+    esp_err_t nvs_err = nvs_set_str(handle, nvs_key, nvs_value);
+    if (nvs_err == ESP_OK) {
+        nvs_err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (nvs_err != ESP_OK) {
+        snprintf(err, err_size, "mqtt: could not persist %s\n", key);
+        return false;
+    }
+
+    /* Rebuild the client so the new broker/credentials/prefix take effect. A
+     * URI that is now absent or invalid simply leaves MQTT disabled. */
+    mqtt_bridge_stop();
+    mqtt_bridge_start();
+    snprintf(err, err_size, "mqtt %s updated\n", key);
+    return true;
 }
 
 void mqtt_bridge_status(char *out, size_t out_size)
