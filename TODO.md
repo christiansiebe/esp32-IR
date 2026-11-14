@@ -1,5 +1,31 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-07): `ps max` als C6-Receiver-Default + adaptive Modem-Sleep-Leiter
+**Branch `feat/c6-mqtt-cmd`, Commit `cdf3f8d`, CI grün (`v0.4.0-42-gcdf3f8d`).**
+- Wunsch: „`ps max` einschalten und es schaltet selbst um, wenn Verluste zu groß."
+  Umgesetzt: Der C6-Empfänger startet auf **`ps max`** (sparsamste Sprosse) und
+  eine adaptive Leiter (`main/ps_ladder.{c,h}`) stuft bei **echtem** ESP-NOW-
+  Transportverlust eine Sprosse herunter (`max → min → off`), nach **3 sauberen
+  Fenstern** wieder hoch – nie über die Start-Sprosse, nie auf eine zweimal
+  gescheiterte Sprosse (Anti-Oszillation). Ein ruhiges Fenster (zu wenig Frames)
+  wird **nicht** beurteilt.
+- Signal: `g_sml_transport_losses`-Delta (nur Vorwärts-Sequenzsprünge) relativ zur
+  Frame-Zahl (`g_sml_valid_telegrams + g_sml_invalid_crc_telegrams`), Fenster 60 s.
+- Persistiert: `runtime_config`-Feld `ps_ladder` (Blob **v8**, 24 Byte, `[23]`);
+  C6-Receiver-Default `ps max` + `ps_ladder=true`; klassischer ESP32 und **jeder
+  Sender** bleiben bei `ps_ladder=false`.
+- Bedienung: `set ps off|min|max` (setzt Start-/Ceiling-Sprosse, re-armt),
+  `set ps-ladder on|off`; `/api/dashboard` liefert `ps_ladder`,
+  `ps_ladder_mode`, `ps_ladder_losses`, `ps_ladder_steps_down/_up`.
+- **Geräteverifiziert (.105, C6FH4, USB):** Boot meldet „Wi-Fi PS mode set to max
+  (listen_interval=10 beacons)"; `/api/dashboard` → `wifi_ps_mode:"max"`,
+  `ps_ladder:true`, `ps_ladder_mode:"max"`; `set ps-ladder off/on` wirkt sofort.
+- Host-Test `test/test_ps_ladder.c` (33 Checks) + volle Suite grün; CI prüft die
+  Leiter-Zeichenkette im Receiver-Image (Sender-Image ausgenommen).
+- **Offen:** Verlustfreiheit von `ps max` **noch nicht** empirisch belegbar – kein
+  Sender erreichbar (`crc_valid=0`, `sender_rssi_valid=false`). Sobald ein Sender
+  sendet: `ps_ladder_steps_down` beobachten (0 = `ps max` hält).
+
 ## NEU (2026-11-07): MQTT-Kommando-Kanal — Rückrichtung `<base>/cmd` → `<base>/cmd/result`
 **Branch `feat/c6-mqtt-cmd` (Basis `feat/c6-burst-lock`).**
 - Der Receiver publiziert bisher nur nach MQTT. Jetzt **abonniert** er `<base>/cmd`
