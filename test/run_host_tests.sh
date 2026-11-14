@@ -512,6 +512,25 @@ python3 "$repo/remote-shell/ha/test_print_health.py"
 
 "$out/test_runtime_config_usb_console"
 
+# Same USB-console target, but built as the ESP32-C6 *sender*: the adaptive
+# light-sleep feature is compiled in (CONFIG_ESPNOW_SENDER_LIGHT_SLEEP=y) yet the
+# USB Serial/JTAG console forbids the park, so the default must be off and the
+# ceiling must stay the 80 MHz sender default. This is the sender-side twin of
+# the brick regression covered above.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DCONFIG_IDF_TARGET_ESP32C6=1 \
+    -DCONFIG_ESPNOW_ROLE_SENDER=1 \
+    -DCONFIG_ESPNOW_SENDER_LIGHT_SLEEP=1 \
+    -DCONFIG_ESPNOW_CPU_MAX_MHZ=80 \
+    -DCONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=1 \
+    -I"$repo/main" \
+    "$repo/main/runtime_config.c" \
+    "$here/test_runtime_config_c6_sender.c" \
+    -o "$out/test_runtime_config_c6_sender"
+
+"$out/test_runtime_config_c6_sender"
+
 # Same knobs, but built as the ESP32-C6 *receiver*: the default must be the
 # measured loss-free power-saving combo (station PS off + ESP-NOW wake window
 # 20/15), not WIFI_PS_MIN_MODEM which loses ~90% of the telegrams.

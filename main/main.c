@@ -8561,8 +8561,13 @@ static void run_sender(void)
 
 #if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
     if (uart_sleep_init_idf()) {
-        ESP_LOGI(TAG, "Adaptive sender light sleep enabled (initial window %u ms)",
-                 (unsigned)uart_sleep_default_cfg().initial_ms);
+        if (runtime_config_light_sleep_allowed()) {
+            ESP_LOGI(TAG, "Adaptive sender light sleep enabled (initial window %u ms)",
+                     (unsigned)uart_sleep_default_cfg().initial_ms);
+        } else {
+            ESP_LOGW(TAG, "Sender light sleep unavailable: the USB Serial/JTAG "
+                          "console would be lost; keeping DFS only");
+        }
     } else {
         ESP_LOGW(TAG, "Adaptive sender light sleep requested but not available "
                       "on this target; keeping DFS only");

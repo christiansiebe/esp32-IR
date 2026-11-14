@@ -38,7 +38,11 @@ static uint32_t snap_cpu_mhz(uint32_t mhz);
 runtime_config_t runtime_config_defaults(void)
 {
     runtime_config_t cfg = {
-#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP
+        /* A USB Serial/JTAG-console build (ESP32-C6) must never default light
+         * sleep on: it powers the PHY down and loses /dev/ttyACM* for good.
+         * The preprocessor gate keeps the classic sender byte-for-byte as it
+         * was (CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG is undefined there -> 0). */
+#if CONFIG_ESPNOW_SENDER_LIGHT_SLEEP && !CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
         .light_sleep = true,
 #else
         .light_sleep = false,
