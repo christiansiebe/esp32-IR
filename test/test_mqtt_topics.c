@@ -62,16 +62,16 @@ static void test_obis(void)
 static void test_discovery(void)
 {
     char out[MQTT_TOPIC_MAX];
-    CHECK(mqtt_discovery_topic("esp32ir/receiver", "sensor", "esp32ir_recv",
+    CHECK(mqtt_discovery_topic("sensor", "esp32ir_recv",
                                "power", out, sizeof(out)) == 0,
           "discovery topic ok");
     CHECK(strcmp(out,
-                 "esp32ir/receiver/homeassistant/sensor/esp32ir_recv/power/"
-                 "config") == 0,
+                 "homeassistant/sensor/esp32ir_recv/power/config") == 0,
           "discovery topic spelling");
 
     char payload[512];
     CHECK(mqtt_discovery_payload("Leistung", "esp32ir_recv_power",
+                                 "esp32ir_recv_power",
                                  "esp32ir/receiver/power", "W", "power",
                                  "measurement", "esp32ir/receiver/status",
                                  payload, sizeof(payload)) == 0,
@@ -90,18 +90,24 @@ static void test_discovery(void)
           "payload is a JSON object");
     CHECK(strstr(payload, ",,") == NULL, "no empty JSON field");
 
-    /* Optional fields omitted entirely. */
-    char minimal[256];
+    /* Optional fields omitted entirely (device block is always appended). */
+    char minimal[512];
     CHECK(mqtt_discovery_payload("Import", "esp32ir_recv_import",
+                                 "esp32ir_recv_import",
                                  "esp32ir/receiver/sensor/1/obis/1-0:1.8.0*255/"
                                  "value",
                                  "kWh", NULL, "total_increasing", NULL, minimal,
                                  sizeof(minimal)) == 0,
           "minimal payload ok");
     CHECK(strstr(minimal, "device_class") == NULL, "omitted field absent");
+    CHECK(strstr(minimal, "\"object_id\":\"esp32ir_recv_import\"") != NULL,
+          "object_id present");
+    CHECK(strstr(minimal, "\"device\":{\"identifiers\":[\"esp32ir_meter\"]") !=
+              NULL,
+          "device block present");
 
     char small[8];
-    CHECK(mqtt_discovery_payload("Leistung", "id", "topic", "W", "power",
+    CHECK(mqtt_discovery_payload("Leistung", "id", "id", "topic", "W", "power",
                                  "measurement", "status", small,
                                  sizeof(small)) == -1,
           "payload overflow rejected");

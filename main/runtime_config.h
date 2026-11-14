@@ -37,12 +37,16 @@
  * power and how often the AP beacons. 0 means "leave the chip/IDF default
  * alone"; a positive value is clamped into the ranges below. TX power is in dBm
  * (esp_wifi_set_max_tx_power takes 0.25 dBm steps, so it is scaled on apply);
- * the beacon interval is in IDF time units (1 TU = 1024 us) and must be a
- * multiple of 100. */
-#define RUNTIME_CONFIG_TXPOWER_MIN_DBM 2u
+ * the beacon interval is in IDF time units (1 TU = 1024 us, so 60000 TU = the
+ * ~61 s maximum the uint16 field holds) and must be a multiple of 100.
+ *
+ * The bounds track the hard IDF/SoC limits rather than a hand-picked "sane"
+ * window: 1 dBm is the documented minimum of the 0.25 dBm TX-power scale, and
+ * 20 dBm is the chip maximum. The beacon interval is a uint16 TU count. */
+#define RUNTIME_CONFIG_TXPOWER_MIN_DBM 1u
 #define RUNTIME_CONFIG_TXPOWER_MAX_DBM 20u
 #define RUNTIME_CONFIG_BEACON_MIN_TU 100u
-#define RUNTIME_CONFIG_BEACON_MAX_TU 6000u
+#define RUNTIME_CONFIG_BEACON_MAX_TU 60000u
 
 /* Receiver radio sleep (opt-in). The Wi-Fi modem parks between wake windows and
  * the ESP-NOW connectionless module is told how often to wake and for how long
@@ -52,9 +56,14 @@
  * ESP-NOW wake window - on the classic ESP32 the API is accepted but breaks the
  * link, which is why this is receiver-only and off by default. */
 #define RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS 10u
-#define RUNTIME_CONFIG_WAKE_INTERVAL_MAX_MS 10000u
+#define RUNTIME_CONFIG_WAKE_INTERVAL_MAX_MS 65535u
 #define RUNTIME_CONFIG_WAKE_WINDOW_MIN_MS 1u
-#define RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS 10000u
+#define RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS 65535u
+
+/* Per-frame ESP-NOW send attempts. The value is only stored/displayed today
+ * (no send loop consumes it yet), so the ceiling is simply the 8-bit range a
+ * future uint8 consumer would accept. */
+#define RUNTIME_CONFIG_RETRIES_MAX 255u
 
 /* Wi-Fi 6 target wake time (iTWT), opt-in and receiver-only. Instead of waking
  * at every DTIM beacon the associated station negotiates a longer wake cadence
@@ -67,7 +76,7 @@
  * the knob is currently ineffective and the modem-PS knob ('set ps') is the
  * fallback. twt_wake_ms is the negotiated wake interval in milliseconds. */
 #define RUNTIME_CONFIG_TWT_WAKE_MIN_MS 500u
-#define RUNTIME_CONFIG_TWT_WAKE_MAX_MS 10000u
+#define RUNTIME_CONFIG_TWT_WAKE_MAX_MS 65535u
 #define RUNTIME_CONFIG_TWT_WAKE_DEFAULT_MS 5000u
 
 /* Wi-Fi modem power-save mode (receiver). 0 = off (WIFI_PS_NONE, radio always
@@ -79,15 +88,16 @@
  *
  * listen_interval is in AP beacon intervals and is honoured by the driver only
  * with WIFI_PS_MAX_MODEM. It is read when the association request is built, so a
- * change only takes effect after a reconnect (disconnect + connect). 1..255,
- * default 3 (the IDF default when the field is 0). */
+ * change only takes effect after a reconnect (disconnect + connect). The field
+ * is a uint16 in the association request, so the full 1..65535 range is
+ * reachable; the default is 10. */
 #define RUNTIME_CONFIG_PS_OFF 0u
 #define RUNTIME_CONFIG_PS_MIN 1u
 #define RUNTIME_CONFIG_PS_MAX 2u
 #define RUNTIME_CONFIG_PS_DEFAULT RUNTIME_CONFIG_PS_MIN
 #define RUNTIME_CONFIG_LISTEN_MIN 1u
-#define RUNTIME_CONFIG_LISTEN_MAX 255u
-#define RUNTIME_CONFIG_LISTEN_DEFAULT 3u
+#define RUNTIME_CONFIG_LISTEN_MAX 65535u
+#define RUNTIME_CONFIG_LISTEN_DEFAULT 10u
 
 typedef struct {
     uint32_t cpu_mhz;      /* DFS ceiling (max_freq) */
@@ -100,9 +110,22 @@ typedef struct {
     uint16_t wake_interval_ms;/* ESP-NOW connectionless wake interval; 0 = off */
     uint16_t wake_window_ms;  /* radio-awake time per wake interval; 0 = off */
     bool twt_enabled;         /* receiver: negotiate Wi-Fi 6 TWT with the AP */
-    uint16_t twt_wake_ms;     /* iTWT wake interval in ms (500..10000) */
-    uint8_t wifi_ps_mode;     /* receiver: Wi-Fi modem PS mode (0/1/2) */
+    uint16_t twt_wake_ms;     /* iTWT wake interval in ms (500..65535) */
+    uint8_t wifi_ps_mode;     /* receiver: Wi-Fi modem PS mode (0/1/2); with the
+                               * ladder on this is the *start/ceiling* rung */
     uint16_t listen_interval; /* receiver: beacon listen interval for PS max */
+    bool burst_lock;          /* receiver: predict the sender's burst and open a
+                               * short RX window around it instead of a free-running
+                               * connectionless wake window (see burst_lock.c) */
+    bool ps_ladder;           /* receiver: adapt the modem PS mode down on
+                               * transport loss and back up when clean (see
+                               * ps_ladder.c). The effective mode is then the
+                               * ladder rung, not wifi_ps_mode. */
+    bool ap_enabled;          /* receiver: run the "ESP32-IR-Meter" setup SoftAP
+                               * (the sender scans for it to learn the channel) */
+    bool ap_auto_off;         /* receiver: switch the SoftAP off automatically
+                               * once the station is connected to the home WLAN,
+                               * reclaiming the ~0.22 W the running AP costs */
 } runtime_config_t;
 
 /* Persisted blob wire format (NVS glue in main.c does the nvs_set_blob /
@@ -113,12 +136,22 @@ typedef struct {
  * or different-version blob is the wrong size and is ignored by
  * runtime_config_decode(), so the caller keeps its defaults.
  *
- * NOTE: the parallel feat/c6-ap-switch branch also introduces this blob helper
- * and bumps the version to 5 (18 bytes, appending ap_enabled). At merge time the
- * two layouts must be folded into one version; the field offsets up to [15] are
- * identical, so only the appended tail differs. */
-#define RUNTIME_CONFIG_BLOB_VERSION 6u
-#define RUNTIME_CONFIG_BLOB_SIZE 22u
+ * v7 appends the burst-lock flag at [22] (receiver: predict the sender's burst
+ * and open a short RX window around it instead of a free-running connectionless
+ * wake window); the blob is 23 bytes. The v6 prefix is unchanged, so a v6 blob
+ * is a different (wrong) size and is ignored by runtime_config_decode(), and the
+ * device falls back to the defaults.
+ *
+ * v8 appends the modem-sleep ladder flag at [23] (receiver: adapt the PS mode
+ * down on transport loss and back up when clean); the blob is 24 bytes. The v7
+ * prefix is unchanged, so a v7 blob is a different size and is ignored.
+ *
+ * v9 appends the SoftAP knobs at [24] and [25] (receiver: ap_enabled runs the
+ * "ESP32-IR-Meter" setup SoftAP; ap_auto_off drops it once the station is
+ * connected); the blob is 26 bytes. The v8 prefix is unchanged, so a v8 blob is
+ * a different size and is ignored by runtime_config_decode(). */
+#define RUNTIME_CONFIG_BLOB_VERSION 9u
+#define RUNTIME_CONFIG_BLOB_SIZE 26u
 
 /* Encode cfg into a RUNTIME_CONFIG_BLOB_SIZE-byte blob. No-op when the buffer is
  * NULL or too small. */
@@ -160,14 +193,18 @@ bool runtime_config_parse_ps(const char *text, uint8_t *out);
  * the outputs untouched) for a zero interval. Pure C, host-tested. */
 bool runtime_config_twt_split(uint32_t wake_us, uint8_t *expn, uint16_t *mant);
 
-/* False when the USB Serial/JTAG peripheral is the primary console (the
- * ESP32-C6, which has no USB-UART bridge). Light sleep powers that PHY down:
- * the /dev/ttyACM* console disappears and, because the light-sleep flag is
- * persisted, the next boot never re-enumerates the port -- the device becomes
- * unreachable over USB (no console, no flash). IDF offers no light-sleep
- * keep-alive for this peripheral (SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP is
- * not defined on the C6, IDF-6395), so light sleep is refused whenever this is
- * false. Modem/radio sleep (the radio-save knob) is unaffected. */
+/* Whether this build may use light sleep. Light sleep powers the USB PHY down,
+ * and the ESP32-C6's USB Serial/JTAG peripheral has no keep-alive for it
+ * (SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP is not defined on the C6, IDF-6395).
+ *
+ * The C6 receiver enables CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION, so the IDF holds
+ * a ESP_PM_NO_LIGHT_SLEEP lock while a USB host is connected and drops it when
+ * the cable unplugs: the console and esptool keep working at boot, and steady
+ * state can sleep. Allowed is true in that configuration. It stays false (and
+ * light sleep is refused) only for a USB-Serial/JTAG build that lacks that
+ * connection-monitor protection, where sleep would silently strand the only
+ * console/flash path. Modem/radio sleep (the radio-save / burst-lock knobs) is
+ * unaffected by this guard. */
 bool runtime_config_light_sleep_allowed(void);
 
 /* Set one knob by name. Returns true when the name is known and the value was
@@ -175,11 +212,57 @@ bool runtime_config_light_sleep_allowed(void);
 bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *value,
                         uint32_t ceiling_mhz, char *err, size_t err_size);
 
+/* --- Safe fallback / self-repair -------------------------------------------
+ * A knob the hardware or the Wi-Fi/PM driver rejects must not be kept: the
+ * value is dropped, the safe compile-time default is applied, and the failure
+ * is surfaced in 'config'. The bookkeeping is pure C so it is host-tested
+ * (test_runtime_config.c). */
+
+#define RUNTIME_CONFIG_HEALTH_REASON_MAX 96
+#define RUNTIME_CONFIG_HEALTH_KEY_MAX 24
+
+typedef struct {
+    bool error;                 /* a repair happened and is still the last event */
+    char key[RUNTIME_CONFIG_HEALTH_KEY_MAX];  /* knob that was repaired */
+    char reason[RUNTIME_CONFIG_HEALTH_REASON_MAX]; /* human-readable cause */
+    uint32_t repairs;           /* repairs since boot */
+} runtime_config_health_t;
+
+/* Reset the health record to "all good". */
+void runtime_config_health_clear(runtime_config_health_t *health);
+
+/* Record a repair: sets error/reason/key and bumps repairs. */
+void runtime_config_health_note(runtime_config_health_t *health, const char *key,
+                                const char *reason);
+
+/* Fallback after a failed apply or a verify mismatch. Records the failure for
+ * `key` and resets it in *cfg to its compile-time default: only that field when
+ * the key is known, the whole config when key is NULL/"config"/unknown. Returns
+ * true when a change was made (so the caller re-applies and persists the safe
+ * value). */
+bool runtime_config_repair(runtime_config_t *cfg, const char *key,
+                           const char *reason, runtime_config_health_t *health);
+
+/* Verify the observed live state against the desired cfg. observed_ps is the
+ * value esp_wifi_get_ps() returned (or -1 when the driver is not up);
+ * observed_pm_max_mhz is the max_freq_mhz esp_pm_get_configuration() reports (or
+ * 0 when PM is not configured). A mismatch records the failure (health->key
+ * "ps"/"cpu") and returns false; a match, or an unavailable observation, returns
+ * true and leaves health untouched. Pure, so the self-check is host-tested. */
+bool runtime_config_verify(const runtime_config_t *cfg, int observed_ps,
+                           int observed_pm_max_mhz,
+                           runtime_config_health_t *health);
+
+/* One-line "last apply error: <reason> (repaired to default)" for 'config', or
+ * an empty string when there is no pending error. */
+void runtime_config_health_render(const runtime_config_health_t *health, char *out,
+                                  size_t out_size);
+
 /* Clamp every field into the range the current build allows: the CPU ceiling to
  * [80, min(CPU_MAX_MHZ, ceiling_mhz)] snapped to a real DFS step, the floor to
- * [40, ceiling], and the retries to 0..10. Used when a persisted config is
- * loaded back, so an image built with a different ceiling cannot restore an
- * out-of-range clock. */
+ * [40, ceiling], and every radio knob to its hard IDF/SoC range. Used when a
+ * persisted config is loaded back, so an image built with a different ceiling
+ * cannot restore an out-of-range clock. */
 void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz);
 
 /* Render the current values into out. */

@@ -125,7 +125,10 @@ typedef struct __attribute__((packed)) {
     uint8_t cpu_freq_min_mhz;   /* configured DFS minimum (idle) */
     uint8_t light_sleep_enabled;/* DFS config allows light sleep in idle */
     uint8_t wifi_ps_mode;       /* Wi-Fi power save (modem sleep): 0=off,1=min,2=max */
-    uint8_t reserved2;
+    /* Modem-sleep fallback stage: 0 = none, 1 = tripped, 2 = proven mode applied.
+     * Reuses the reserved byte, so the struct keeps its size and no wire-version
+     * bump is needed (same pattern as sleep_fallback_active/link_fallback_stage). */
+    uint8_t ps_fallback_stage;
     uint32_t storage_records;   /* minute records currently stored */
     uint32_t storage_capacity;  /* ring capacity */
     uint32_t storage_write_errors;

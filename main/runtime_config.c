@@ -21,10 +21,29 @@
 #ifndef CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 #define CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG 0
 #endif
+/* The apoff build ships station-only: the persisted default flips ap_enabled
+ * off (and ap_auto_off becomes moot). Host builds and the plain receiver default
+ * to the AP build (SoftAP on). */
+#ifndef CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+#define CONFIG_ESPNOW_RECEIVER_DISABLE_AP 0
+#endif
+/* The C6 receiver enables CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION: the IDF holds a
+ * ESP_PM_NO_LIGHT_SLEEP lock as long as the USB Serial/JTAG host is connected,
+ * and drops it when the host unplugs. That gives "USB only while plugged in" for
+ * free. Host builds leave it unset, which below resolves to the safe "block". */
+#ifndef CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION
+#define CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION 0
+#endif
 
 bool runtime_config_light_sleep_allowed(void)
 {
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    /* A USB-Serial/JTAG console build may light-sleep only if the IDF protects
+     * the port: with USJ_NO_AUTO_LS_ON_CONNECTION the USB host itself holds the
+     * NO_LIGHT_SLEEP lock while connected (so the console & esptool work at
+     * boot), and releases it once the cable is unplugged (so steady-state sleep
+     * kicks in). Without that protection light sleep would silently strand the
+     * only console/flash path (IDF-6395), so keep it blocked. */
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG && !CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION
     return false;
 #else
     return true;
@@ -54,25 +73,70 @@ runtime_config_t runtime_config_defaults(void)
          * on .105 (C6 receiver, classic sender, ~60 telegrams/min) showed the
          * station PS modes park the modem so hard that min/max *without* the
          * ESP-NOW wake window lose ~90% of the telegrams (transport_losses
-         * stays ~0 - they are genuine radio gaps, not link errors). With the
-         * wake window on and a short 20/15 ms window the loss vanishes (0.8%,
-         * i.e. the ambient baseline) while the modem still sleeps 15 of every
-         * 20 ms. So the C6 receiver defaults to the loss-free power-saving
-         * combo: station PS off, ESP-NOW wake window on 20/15.
+         * stays ~0 - they are genuine radio gaps, not link errors). The
+         * driver's own wake window fixes that but drifts against the sender's
+         * burst, so a window short enough to save power drops bursts.
+         *
+         * The burst lock removes the drift: it learns the burst period and holds
+         * the modem awake only around the predicted burst, so the station can
+         * actually sleep (ps min) in between. Measured on .105 (300 s windows,
+         * interleaved): ps min + burst lock + radio-save off tracks the
+         * always-awake baseline within the ambient noise (3.3-5.4% vs 4.7-6.0%;
+         * the residual is 2.4 GHz interference, present even with the radio
+         * never parked), while the modem is awake only ~15% of the time (vs the
+         * 75% duty of the 20/15 wake window). It never touches the PS mode or
+         * the AP, so the HTTP/MQTT/OTA control path is unaffected. So the C6
+         * receiver defaults to the loss-free *and* low-power combo: station PS
+         * + burst lock with a 150 ms window.
+         *
+         * The adaptive ladder goes one step further: instead of hard-coding the
+         * PS mode, it starts at the *most* frugal rung (`ps max`) and steps down
+         * to `ps min`/`off` only when a window really loses ESP-NOW frames, then
+         * climbs back once the link is clean. So the operator gets `ps max` by
+         * default and the firmware falls back on its own when losses grow.
          *
          * The classic ESP32 (and every sender) keeps the old default: there the
          * wake window is accepted but breaks the ESP-NOW link, so it must stay
          * off and 100/70 mirrors the sender's proven values. */
 #if defined(CONFIG_IDF_TARGET_ESP32C6) && !CONFIG_ESPNOW_ROLE_SENDER
-        .radio_save = true,
+        .radio_save = false,
         .wake_interval_ms = 20u,
-        .wake_window_ms = 15u,
-        .wifi_ps_mode = RUNTIME_CONFIG_PS_OFF,
+        .wake_window_ms = 150u,
+        .burst_lock = true,
+        /* Start the ladder at the frugal `ps max`; the worker steps down to
+         * `ps min`/`off` if the ESP-NOW link actually loses frames. */
+        .wifi_ps_mode = RUNTIME_CONFIG_PS_MAX,
+        /* Adaptive ladder: start at the frugal `ps max` and step down on
+         * transport loss. Only the C6 receiver can afford `ps max` (its burst
+         * lock covers the burst), so the classic default keeps it off. */
+        .ps_ladder = true,
+        /* SoftAP: up at boot (provisioning page + the sender's channel scan),
+         * but auto-off once the station is connected. Measured 2026-11-14: the
+         * running AP costs ~0.22 W (APSTA 0.42 W vs station-only 0.19 W), so
+         * dropping it after provisioning is the single largest idle saving. The
+         * apoff build ships station-only from the start. */
+#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+        .ap_enabled = false,
+        .ap_auto_off = false,
+#else
+        .ap_enabled = true,
+        .ap_auto_off = true,
+#endif
 #else
         .radio_save = false,
         .wake_interval_ms = 100u,
         .wake_window_ms = 70u,
+        .burst_lock = false,
         .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
+        .ps_ladder = false,
+        /* Keep the classic receiver's AP behaviour unchanged (the power win was
+         * measured on the C6); only the apoff build flips it off. */
+#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+        .ap_enabled = false,
+#else
+        .ap_enabled = true,
+#endif
+        .ap_auto_off = false,
 #endif
         /* Wi-Fi 6 TWT is opt-in; the wake cadence is only used once enabled. */
         .twt_enabled = false,
@@ -180,6 +244,10 @@ void runtime_config_encode(const runtime_config_t *cfg, uint8_t *blob, size_t bl
     blob[19] = cfg->wifi_ps_mode;
     uint16_t listen = cfg->listen_interval;
     memcpy(&blob[20], &listen, sizeof(listen));
+    blob[22] = cfg->burst_lock ? 1u : 0u;
+    blob[23] = cfg->ps_ladder ? 1u : 0u;
+    blob[24] = cfg->ap_enabled ? 1u : 0u;
+    blob[25] = cfg->ap_auto_off ? 1u : 0u;
 }
 
 bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config_t *cfg)
@@ -214,6 +282,10 @@ bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config
     uint16_t listen = 0;
     memcpy(&listen, &blob[20], sizeof(listen));
     loaded.listen_interval = listen;
+    loaded.burst_lock = blob[22] != 0;
+    loaded.ps_ladder = blob[23] != 0;
+    loaded.ap_enabled = blob[24] != 0;
+    loaded.ap_auto_off = blob[25] != 0;
     *cfg = loaded;
     return true;
 }
@@ -342,8 +414,9 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
     } else if (strcmp(key, "retries") == 0 || strcmp(key, "espnow-retries") == 0) {
         char *end = NULL;
         unsigned long v = strtoul(value, &end, 10);
-        if (end == value || *end != '\0' || v > 10) {
-            snprintf(err, err_size, "retries: expected 0..10\n");
+        if (end == value || *end != '\0' || v > RUNTIME_CONFIG_RETRIES_MAX) {
+            snprintf(err, err_size, "retries: expected 0..%u\n",
+                     (unsigned)RUNTIME_CONFIG_RETRIES_MAX);
             return false;
         }
         next.espnow_retries = (uint32_t)v;
@@ -374,6 +447,16 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
     } else if (strcmp(key, "radio-save") == 0 || strcmp(key, "radio-ps") == 0) {
         if (!runtime_config_parse_bool(value, &next.radio_save)) {
             snprintf(err, err_size, "radio-save: expected on or off\n");
+            return false;
+        }
+    } else if (strcmp(key, "burst-lock") == 0) {
+        if (!runtime_config_parse_bool(value, &next.burst_lock)) {
+            snprintf(err, err_size, "burst-lock: expected on or off\n");
+            return false;
+        }
+    } else if (strcmp(key, "ps-ladder") == 0 || strcmp(key, "ladder") == 0) {
+        if (!runtime_config_parse_bool(value, &next.ps_ladder)) {
+            snprintf(err, err_size, "ps-ladder: expected on or off\n");
             return false;
         }
     } else if (strcmp(key, "wake-interval") == 0 || strcmp(key, "wake") == 0) {
@@ -439,11 +522,25 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             return false;
         }
         next.listen_interval = (uint16_t)v;
+    } else if (strcmp(key, "ap") == 0 || strcmp(key, "ap-enabled") == 0) {
+        /* The "AP only off while the station is connected" safety rule is
+         * enforced where the mode is actually switched (main.c apply_ap_mode()),
+         * not here: this parser is pure C with no view of the link state. */
+        if (!runtime_config_parse_bool(value, &next.ap_enabled)) {
+            snprintf(err, err_size, "ap: expected on or off\n");
+            return false;
+        }
+    } else if (strcmp(key, "ap-auto-off") == 0 || strcmp(key, "ap-auto") == 0) {
+        if (!runtime_config_parse_bool(value, &next.ap_auto_off)) {
+            snprintf(err, err_size, "ap-auto-off: expected on or off\n");
+            return false;
+        }
     } else {
         snprintf(err, err_size,
                  "unknown key '%s' (cpu, freq, cpu-min, sleep, retries, txpower, "
-                 "beacon, radio-save, wake-interval, wake-window, twt, twt-wake, "
-                 "ps, listen)\n",
+                 "beacon, radio-save, burst-lock, wake-interval, wake-window, twt, "
+                 "twt-wake, ps, listen, ap, ap-auto-off, wifi-ssid, wifi-pass, "
+                 "mqtt-uri, mqtt-prefix, mqtt-user, mqtt-pass)\n",
                  key);
         return false;
     }
@@ -489,8 +586,8 @@ void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz)
     if (!runtime_config_light_sleep_allowed()) {
         cfg->light_sleep = false;
     }
-    if (cfg->espnow_retries > 10u) {
-        cfg->espnow_retries = 10u;
+    if (cfg->espnow_retries > RUNTIME_CONFIG_RETRIES_MAX) {
+        cfg->espnow_retries = RUNTIME_CONFIG_RETRIES_MAX;
     }
     if (cfg->wifi_txpower_dbm > RUNTIME_CONFIG_TXPOWER_MAX_DBM) {
         cfg->wifi_txpower_dbm = RUNTIME_CONFIG_TXPOWER_MAX_DBM;
@@ -502,42 +599,159 @@ void runtime_config_clamp(runtime_config_t *cfg, uint32_t ceiling_mhz)
         cfg->ap_beacon_tu = 0u;
     }
     /* The wake interval is the master: clamp it first, then pull the window
-     * inside it so the radio really sleeps (a window >= interval keeps it on). */
+     * inside it so the radio really sleeps (a window >= interval keeps it on).
+     * The uint16 fields are already <= their maximum by construction, so only
+     * the lower bound and the interval/window relation are enforced here. */
     if (cfg->wake_interval_ms != 0u &&
-        (cfg->wake_interval_ms < RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS ||
-         cfg->wake_interval_ms > RUNTIME_CONFIG_WAKE_INTERVAL_MAX_MS)) {
+        cfg->wake_interval_ms < RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS) {
         cfg->wake_interval_ms = RUNTIME_CONFIG_WAKE_INTERVAL_MIN_MS;
     }
     if (cfg->wake_window_ms < RUNTIME_CONFIG_WAKE_WINDOW_MIN_MS) {
         cfg->wake_window_ms = RUNTIME_CONFIG_WAKE_WINDOW_MIN_MS;
     }
-    if (cfg->wake_window_ms > RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS) {
-        cfg->wake_window_ms = RUNTIME_CONFIG_WAKE_WINDOW_MAX_MS;
-    }
     if (cfg->wake_interval_ms != 0u && cfg->wake_window_ms > cfg->wake_interval_ms) {
         cfg->wake_window_ms = cfg->wake_interval_ms;
     }
-    /* The TWT wake interval is clamped to the supported range; a value below the
-     * minimum is raised (a shorter cadence than the AP/DTIM allows is pointless),
-     * an out-of-range one reset to the default. */
+    /* The TWT wake interval: a value below the minimum is raised (a shorter
+     * cadence than the AP/DTIM allows is pointless). */
     if (cfg->twt_wake_ms < RUNTIME_CONFIG_TWT_WAKE_MIN_MS) {
         cfg->twt_wake_ms = RUNTIME_CONFIG_TWT_WAKE_MIN_MS;
     }
-    if (cfg->twt_wake_ms > RUNTIME_CONFIG_TWT_WAKE_MAX_MS) {
-        cfg->twt_wake_ms = RUNTIME_CONFIG_TWT_WAKE_MAX_MS;
-    }
     /* An out-of-range PS mode falls back to the default (min modem); the listen
-     * interval is clamped into the 1..255 the association request carries. A
-     * persisted 0 (IDF's "use the default 3") is raised to the explicit default
-     * so 'config' always reports a concrete value. */
+     * interval is clamped into the uint16 the association request carries. A
+     * persisted 0 (IDF's "use the default") is raised to the explicit default so
+     * 'config' always reports a concrete value. */
     if (cfg->wifi_ps_mode > RUNTIME_CONFIG_PS_MAX) {
         cfg->wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT;
     }
     if (cfg->listen_interval < RUNTIME_CONFIG_LISTEN_MIN) {
         cfg->listen_interval = RUNTIME_CONFIG_LISTEN_MIN;
     }
-    if (cfg->listen_interval > RUNTIME_CONFIG_LISTEN_MAX) {
-        cfg->listen_interval = RUNTIME_CONFIG_LISTEN_MAX;
+}
+
+void runtime_config_health_clear(runtime_config_health_t *health)
+{
+    if (health == NULL) {
+        return;
+    }
+    health->error = false;
+    health->key[0] = '\0';
+    health->reason[0] = '\0';
+    health->repairs = 0;
+}
+
+void runtime_config_health_note(runtime_config_health_t *health, const char *key,
+                                const char *reason)
+{
+    if (health == NULL) {
+        return;
+    }
+    health->error = true;
+    snprintf(health->key, sizeof(health->key), "%s", key != NULL ? key : "");
+    snprintf(health->reason, sizeof(health->reason), "%s",
+             reason != NULL ? reason : "apply failed");
+    ++health->repairs;
+}
+
+/* Set one field of *cfg back to its compile-time default. Returns false when the
+ * key is unknown (the caller then repairs the whole config). */
+static bool repair_field(runtime_config_t *cfg, const char *key)
+{
+    runtime_config_t defaults = runtime_config_defaults();
+    if (strcmp(key, "cpu") == 0 || strcmp(key, "cpu-mhz") == 0 ||
+        strcmp(key, "freq") == 0 || strcmp(key, "freq-mhz") == 0) {
+        cfg->cpu_mhz = defaults.cpu_mhz;
+    } else if (strcmp(key, "cpu-min") == 0 || strcmp(key, "cpu-min-mhz") == 0) {
+        cfg->cpu_min_mhz = defaults.cpu_min_mhz;
+    } else if (strcmp(key, "sleep") == 0 || strcmp(key, "light-sleep") == 0) {
+        cfg->light_sleep = defaults.light_sleep;
+    } else if (strcmp(key, "retries") == 0 || strcmp(key, "espnow-retries") == 0) {
+        cfg->espnow_retries = defaults.espnow_retries;
+    } else if (strcmp(key, "txpower") == 0 || strcmp(key, "wifi-txpower") == 0) {
+        cfg->wifi_txpower_dbm = defaults.wifi_txpower_dbm;
+    } else if (strcmp(key, "beacon") == 0 || strcmp(key, "beacon-tu") == 0) {
+        cfg->ap_beacon_tu = defaults.ap_beacon_tu;
+    } else if (strcmp(key, "radio-save") == 0 || strcmp(key, "radio-ps") == 0) {
+        cfg->radio_save = defaults.radio_save;
+    } else if (strcmp(key, "wake-interval") == 0 || strcmp(key, "wake") == 0) {
+        cfg->wake_interval_ms = defaults.wake_interval_ms;
+    } else if (strcmp(key, "wake-window") == 0 || strcmp(key, "window") == 0) {
+        cfg->wake_window_ms = defaults.wake_window_ms;
+    } else if (strcmp(key, "twt") == 0 || strcmp(key, "twt-enabled") == 0) {
+        cfg->twt_enabled = defaults.twt_enabled;
+    } else if (strcmp(key, "twt-wake") == 0 || strcmp(key, "twt-wake-ms") == 0) {
+        cfg->twt_wake_ms = defaults.twt_wake_ms;
+    } else if (strcmp(key, "ps") == 0 || strcmp(key, "wifi-ps") == 0) {
+        cfg->wifi_ps_mode = defaults.wifi_ps_mode;
+    } else if (strcmp(key, "listen") == 0 || strcmp(key, "listen-interval") == 0) {
+        cfg->listen_interval = defaults.listen_interval;
+    } else if (strcmp(key, "ap") == 0 || strcmp(key, "ap-enabled") == 0) {
+        cfg->ap_enabled = defaults.ap_enabled;
+    } else if (strcmp(key, "ap-auto-off") == 0 || strcmp(key, "ap-auto") == 0) {
+        cfg->ap_auto_off = defaults.ap_auto_off;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool runtime_config_repair(runtime_config_t *cfg, const char *key,
+                           const char *reason, runtime_config_health_t *health)
+{
+    if (cfg == NULL) {
+        return false;
+    }
+    runtime_config_t defaults = runtime_config_defaults();
+    if (key == NULL || strcmp(key, "config") == 0 || !repair_field(cfg, key)) {
+        *cfg = defaults;
+        runtime_config_health_note(health, key != NULL ? key : "config",
+                                   reason != NULL ? reason : "apply failed");
+        return true;
+    }
+    runtime_config_health_note(health, key, reason != NULL ? reason : "apply failed");
+    return true;
+}
+
+bool runtime_config_verify(const runtime_config_t *cfg, int observed_ps,
+                           int observed_pm_max_mhz, runtime_config_health_t *health)
+{
+    if (cfg == NULL) {
+        return true;
+    }
+    /* The modem PS mode is only observable once the Wi-Fi driver is up; -1 means
+     * "not available" and is not a mismatch. A SoftAP receiver keeps the driver
+     * in APSTA, so get_ps() is meaningful there too. */
+    if (observed_ps >= 0 && observed_ps != (int)cfg->wifi_ps_mode) {
+        runtime_config_health_note(health, "ps", "esp_wifi_get_ps() disagreed");
+        return false;
+    }
+    /* esp_pm_get_configuration() reports the configured ceiling, not the live
+     * (DFS-stepped) clock, so a mismatch means the config never took effect. 0
+     * means PM is not configured (e.g. the host build) and is skipped. */
+    if (observed_pm_max_mhz > 0 &&
+        observed_pm_max_mhz != (int)cfg->cpu_mhz) {
+        runtime_config_health_note(health, "cpu", "esp_pm_get_configuration() disagreed");
+        return false;
+    }
+    return true;
+}
+
+void runtime_config_health_render(const runtime_config_health_t *health, char *out,
+                                  size_t out_size)
+{
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (health == NULL || !health->error) {
+        return;
+    }
+    if (health->key[0] != '\0') {
+        snprintf(out, out_size, "last apply error: %s [%s] (repaired to default)\n",
+                 health->reason, health->key);
+    } else {
+        snprintf(out, out_size, "last apply error: %s (repaired to default)\n",
+                 health->reason);
     }
 }
 
@@ -590,16 +804,24 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              "wifi txpower: %s\n"
              "ap beacon: %s\n"
              "radio save: %s\n"
+             "burst lock: %s\n"
+             "ps ladder: %s\n"
              "twt: %s\n"
              "wifi ps: %s\n"
-             "listen interval: %u beacons\n",
+             "listen interval: %u beacons\n"
+             "setup ap: %s\n"
+             "ap auto-off: %s\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on"
                               : (runtime_config_light_sleep_allowed()
                                      ? "off"
                                      : "off (unavailable: USB Serial/JTAG console)"),
-             (unsigned)cfg->espnow_retries, tx, beacon, wake, twt, ps,
-             (unsigned)cfg->listen_interval);
+             (unsigned)cfg->espnow_retries, tx, beacon, wake,
+             cfg->burst_lock ? "on" : "off", cfg->ps_ladder ? "on" : "off",
+             twt, ps,
+             (unsigned)cfg->listen_interval,
+             cfg->ap_enabled ? "on" : "off",
+             cfg->ap_auto_off ? "on" : "off");
 }
 
 #ifdef ESP_PLATFORM
@@ -636,7 +858,18 @@ bool runtime_config_apply(const runtime_config_t *cfg)
          * port would never come back (IDF-6395). */
         .light_sleep_enable = cfg->light_sleep && runtime_config_light_sleep_allowed(),
     };
-    return esp_pm_configure(&pm) == ESP_OK;
+    if (esp_pm_configure(&pm) != ESP_OK) {
+        return false;
+    }
+    /* Self-check: read the configured ceiling back. esp_pm_get_configuration()
+     * reports the configured max_freq, so a mismatch means the request never
+     * took effect; returning false lets the caller repair to the default. */
+    esp_pm_config_t observed = {0};
+    if (esp_pm_get_configuration(&observed) == ESP_OK &&
+        observed.max_freq_mhz != max_mhz) {
+        return false;
+    }
+    return true;
 }
 
 #else /* host build: no power management to apply */

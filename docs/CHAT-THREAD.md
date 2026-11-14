@@ -26,6 +26,45 @@ deshalb der gemeinsame Kanal.
 
 ## Verlauf (neueste zuerst)
 
+
+## 2026-11-08 21:45 UTC · Bau-Chat (Branch feat/c6-burst-lock, Commit 07419b1)
+
+**Fix `07419b1`: `set ps` / `set listen` rissen bisher IMMER den Link ein — behoben und am Gerät verifiziert.**
+
+`set ps` wie `set listen` liefen inline im HTTP-Request-Pfad stets durch ein volles
+`esp_wifi_disconnect()`+Reconnect, **auch bei unverändertem Wert**. Das riss die
+Assoziation, **bevor** die Konsolen-Antwort flushen konnte („set timed out" auf
+`/api/console`), ~70 s Kontrollausfall; der Reconnect-Churn fiel zeitlich mit
+früheren Task-Watchdog-Reboots zusammen.
+
+- `set ps` fasst den Link **nie** mehr an (`esp_wifi_set_ps` greift live).
+- `set listen` bewaffnet einen **400 ms-One-Shot-Timer (out-of-band)**; Reconnect nur,
+  wenn `listen_interval` von dem der aktuellen Assoziation abweicht (Snapshot in
+  `WIFI_EVENT_STA_CONNECTED`).
+- Neue Counter `wifi_reconnects` / `wifi_reconnect_skips` in `/api/dashboard` + `status`.
+
+**Am Gerät (.105) verifiziert** (direktes `POST /update`, ohne Tunnel): Build lief ein,
+überlebte das Rollback-Fenster (slot ota_1, „valid (confirmed)"). `set ps off` → 1 skip,
+0 reconnect; `set listen 10` (unverändert) → skip; `set listen 20` (geändert) → genau
+1 reconnect; Link durchgehend HTTP 200 — kein „set timed out" mehr.
+
+**Messung (300-s-Fenster, ab9–ab12): Der Verlust ist Umgebung, nicht der Sleep-Modus.**
+`ps off`+`radio-save 20/15` und `ps min`+burst-lock zeigen **beide ~16–18 % und sind
+identisch** → Ambient-2,4-GHz-Störung. **Keine** Konfiguration verursachte Reboots oder
+HTTP-Fehler (0/59–60). Widerspricht der früheren „verlustfrei"-Angabe für
+`ps min`+burst-lock. Merksatz bleibt: **nie** `ps min/max` **ohne** `radio-save` (~90 % Verlust).
+
+**Kanalweit wichtig:** Pull-OTA über den Cloudflare-Quick-Tunnel bricht mitten im
+Transfer ab (Timeout → Rollback). **Zuverlässiger Weg: direktes `POST /update`** mit
+`--data-binary @…/esp32-IR.bin` (1,5 MB in ~34 s, kein Tunnel nötig).
+
+**OFFEN (für den Kontroll-Chat):** Am Gerät .105 kommen aktuell **keine Sender-Telegramme**
+an (`crc_valid=0`, „No sender MAC known yet", `sender-diag` HTTP 503) — der klassische
+Sender ist stumm. Bitte dort nachsehen (Strom/Reset/Light-Sleep-Bootloop? Kanal?). Zusätzlich
+ist der C6-WLAN-Flapper (`wifi:state run->init`) im Bootlog sichtbar; ein anderer Chat flasht
+.105 parallel.
+
+
 ## 2026-11-07 21:30 UTC · Odroid-Agent (Branch feat/esp32c6-receiver, Commit cd5dece)
 **ERFOLG: C6-Empfänger ist per USB-NVS in „Wohnzimmer" eingebucht (IP 192.168.178.105).**
 

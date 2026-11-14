@@ -242,6 +242,65 @@ config ESPNOW_LINK_REALIGN_MS
         re-aligns. Set 0 to disable the periodic re-align (boot-time scan only).
         The receiver has no channel to chase and ignores this.
 
+config ESPNOW_PS_FALLBACK
+    bool "Both roles: drop Wi-Fi modem sleep when it storms STA disconnects"
+    default y
+    help
+        Wi-Fi modem sleep (WIFI_PS_MIN/MAX_MODEM) is the strongest idle-current
+        lever on the C6, but it is link-risky: the driver parks the radio between
+        DTIM beacons and on some APs the station then loses beacons and
+        re-associates over and over. This watchdog counts STA disconnects in a
+        sliding window and, when too many happen (past the uptime grace), drops
+        to the proven mode (WIFI_PS_NONE, radio always awake), persists it and
+        latches it for the rest of the session so it cannot flap. A deliberate
+        'set ps' / 'set wifi-*' reconnect is excluded. This is separate from
+        CONFIG_ESPNOW_LINK_FALLBACK (the ESP-NOW peer watchdog) and from the
+        driver-level repair in apply_wifi_ps_config() (a *rejected* mode).
+
+config ESPNOW_PS_FALLBACK_WINDOW_MS
+    int "Modem-sleep watchdog: sliding window for the disconnect count (ms)"
+    depends on ESPNOW_PS_FALLBACK
+    range 10000 3600000
+    default 60000
+    help
+        Disconnects are counted inside this window; older ones age out. Keep it
+        short enough that an isolated ambient burst (the FRITZ!Box mesh's odd
+        reason-34 re-association) is over by the next window, so it cannot
+        accumulate towards a false trip.
+
+config ESPNOW_PS_FALLBACK_THRESHOLD
+    int "Modem-sleep watchdog: disconnects in the window that trip the fault"
+    depends on ESPNOW_PS_FALLBACK
+    range 2 100
+    default 20
+    help
+        How many disconnects inside one window mean this window is part of a
+        storm. A real modem-sleep storm drops the association several times a
+        second (dozens in a 60 s window); the ambient rate of this environment
+        peaks around a dozen a minute and never reaches this.
+
+config ESPNOW_PS_FALLBACK_SUSTAIN_WINDOWS
+    int "Modem-sleep watchdog: consecutive over-threshold windows to trip"
+    depends on ESPNOW_PS_FALLBACK
+    range 1 100
+    default 3
+    help
+        A single over-threshold window is only a candidate. The fault latches
+        only after this many consecutive windows are each over the threshold,
+        i.e. the storm *sustains*. An intermittent ambient storm is over by the
+        next window and never sustains; a real modem-sleep fault keeps the link
+        down and is confirmed within a few minutes. Set 1 to keep the old
+        single-window behaviour.
+
+config ESPNOW_PS_FALLBACK_GRACE_MS
+    int "Modem-sleep watchdog: grace after boot before a fault may fire (ms)"
+    depends on ESPNOW_PS_FALLBACK
+    range 0 600000
+    default 30000
+    help
+        Uptime that must pass before the fault may fire, so a slow boot (Wi-Fi
+        association, first backfill) is not mistaken for a PS problem.
+
 config ESPNOW_RECEIVER_HEALTH_WATCHDOG
     bool "Receiver: self-healing health watchdog (reboot on stale data / low heap)"
     depends on ESPNOW_ROLE_RECEIVER

@@ -21,3 +21,15 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 # (main/serial_console.c) work over USB. With the UART0 default the C6 would
 # only mirror logs to USB as a non-blocking, input-less secondary console.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# --- Default event loop (sys_evt) stack ---
+# mDNS init, SNTP init and mqtt_bridge_start() all run on the default event loop
+# task inside the IP_EVENT_STA_GOT_IP handler. In the APSTA build mDNS starts
+# earlier (WIFI_EVENT_AP_START), so the GOT_IP handler stays small. In the
+# station-only build (CONFIG_ESPNOW_RECEIVER_DISABLE_AP=y, role receiver-c6-apoff)
+# there is no AP_START, so the whole chain lands on that one handler and
+# overflows the IDF default of 2304 bytes -> "Guru Meditation: Stack protection
+# fault" in task "sys_evt" right after "SNTP time synchronization started",
+# rebooting in a loop. That is why the station-only (power-saving) build never
+# came up. 4 KB gives the handler headroom.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096

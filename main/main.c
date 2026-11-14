@@ -49,9 +49,12 @@
 #include "history_upload.h"
 #include "json_escape.h"
 #include "link_fallback.h"
+#include "ps_fallback.h"
+#include "ps_ladder.h"
 #include "power_history.h"
 #include "energy_totals.h"
 #include "runtime_config.h"
+#include "net_config.h"
 #include "sml_selftest.h"
 #include "version.h"
 #include "wall_clock.h"
@@ -61,6 +64,7 @@
 #if !CONFIG_ESPNOW_ROLE_SENDER
 #include "mqtt_bridge.h"
 #include "health_task.h"
+#include "burst_lock.h"
 #endif
 #include "crash_journal.h"
 #include "liveness_guard.h"
@@ -74,6 +78,15 @@
 #include "uart_recovery.h"
 #endif
 
+/* Burst-locked receive window is receiver-only and uses the Wi-Fi
+ * force-wakeup API, which only the newer (HE-capable) targets ship; our
+ * receiver build for it is the ESP32-C6. */
+#if !CONFIG_ESPNOW_ROLE_SENDER && defined(CONFIG_IDF_TARGET_ESP32C6)
+#define BURST_LOCK_SUPPORTED 1
+#else
+#define BURST_LOCK_SUPPORTED 0
+#endif
+
 static const char *TAG = "espnow_meter";
 
 /* Boot-log API payload: slightly larger than the ring in boot_log.c (6144) so a
@@ -85,14 +98,21 @@ static const char *TAG = "espnow_meter";
  * falls back to this value; both roles must agree). */
 #define ESPNOW_CHANNEL       CONFIG_ESPNOW_CHANNEL
 
-/* Wi-Fi interface ESP-NOW runs on. The sender uses its station interface; the
- * receiver uses its SoftAP interface, or its station interface when the AP is
- * disabled. Used for every receiver-side peer (diag/OTA targets and the broadcast
- * peer) so the interface never has to be hard-coded per call site. */
-#if CONFIG_ESPNOW_ROLE_SENDER || CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+/* Receiver setup SoftAP identity. The sender scans for this SSID to learn the
+ * ESP-NOW channel, so scan_receiver_ap_channel() shares the same string. */
+#define AP_SSID              "ESP32-IR-Meter"
+#define AP_PASSWORD          "12345678"
+
+/* Wi-Fi interface ESP-NOW runs on. The sender uses its station interface. The
+ * receiver uses its SoftAP interface while the AP is up (the AP keeps beaconing
+ * on its own channel and the sender discovers it by scanning), and its station
+ * interface once the AP is switched off - at runtime via the persisted knob or
+ * at compile time via CONFIG_ESPNOW_RECEIVER_DISABLE_AP. The interface is never
+ * hard-coded per call site; g_ap_enabled mirrors the live SoftAP state. */
+#if CONFIG_ESPNOW_ROLE_SENDER
 #define ESPNOW_IF            WIFI_IF_STA
 #else
-#define ESPNOW_IF            WIFI_IF_AP
+#define ESPNOW_IF            (g_ap_enabled ? WIFI_IF_AP : WIFI_IF_STA)
 #endif
 /* mDNS name of the receiver dashboard (http://esp32-meter.local/). ESP-NOW is a
  * link-layer protocol with no IP, so the sender has no network identity and only
@@ -141,6 +161,18 @@ static const char *TAG = "espnow_meter";
 /* Most telegrams handed to ESP-NOW in a single send phase; the rest wait for
  * the next cycle. Normal arrival is ~1/s so a 5 s window has ~5 to send. */
 #define SML_TX_BURST 32
+/* How long the send phase waits for a telegram's receiver ACK before repeating
+ * it. The receiver answers immediately (its radio is awake for the whole burst),
+ * so 80 ms is generous; it is deliberately shorter than the receiver's window
+ * extension so a retransmit still lands inside the open window. */
+#define SML_ACK_TIMEOUT_MS 80
+/* Attempts per telegram per send phase (first try + retransmits). A telegram
+ * that stays unconfirmed after this is left at the head of the ring and retried
+ * in the next cycle rather than dropped. */
+#define SML_ACK_MAX_ATTEMPTS 4
+/* Pause before a retransmit; keeps the retry cadence (this + SML_ACK_TIMEOUT_MS)
+ * below the receiver's burst-lock extension threshold. */
+#define SML_ACK_RETRY_BACKOFF_MS 10
 #define METER_MAGIC          0x48425A31u
 #define METER_VERSION        1u
 #define SML_VALUE_HISTORY_COUNT 256
@@ -175,6 +207,11 @@ static const char *TAG = "espnow_meter";
 #define WIFI_CONFIG_NAMESPACE "metercfg"
 #define WIFI_SSID_KEY          "wifi_ssid"
 #define WIFI_PASSWORD_KEY      "wifi_pass"
+/* Sender: the last receiver-AP channel it learned. Persisted so a sender reboot
+ * while the receiver's setup AP is auto-off still starts on the right channel
+ * instead of the fixed CONFIG_ESPNOW_CHANNEL (which would leave the two sides on
+ * different channels until someone re-enables the AP). */
+#define WIFI_ESPNOW_CHANNEL_KEY "espnow_ch"
 #define WIFI_SSID_MAX_LEN      32
 #define WIFI_PASSWORD_MAX_LEN  64
 
@@ -262,7 +299,37 @@ static bool g_twt_active;
 static bool g_sntp_started;
 static esp_netif_t *g_ap_netif;
 static esp_netif_t *g_sta_netif;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Receiver: is the setup SoftAP currently up? Drives ESPNOW_IF (WIFI_IF_AP vs
+ * WIFI_IF_STA) and the /config page. Set from the persisted ap_enabled knob at
+ * boot and by apply_ap_mode() at runtime. */
+static bool g_ap_enabled = true;
+/* One-shot timer that drops the setup SoftAP a little after the station gets an
+ * IP (see ap_auto_off_timer_cb). The delay matters: the sender learns its
+ * ESP-NOW channel by scanning for this AP, so if both boards reboot together the
+ * AP must stay up long enough for the sender's scan loop (~30 s) to see it. The
+ * AP costs ~0.22 W, so a minute of overlap is cheap insurance. */
+static esp_timer_handle_t g_ap_auto_off_timer;
+#define AP_AUTO_OFF_DELAY_MS 60000u
+#endif
 static uint8_t g_espnow_channel = ESPNOW_CHANNEL;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* The listen_interval the current association was built with, and whether it is
+ * known yet. The driver reads listen_interval only when the association request
+ * is built, so a 'set listen' needs a reconnect - but only when the value
+ * actually differs. Tracking it here keeps a redundant 'set' from dropping the
+ * link (and the HTTP response that is still in flight) for nothing. */
+static volatile uint16_t g_wifi_assoc_listen;
+static volatile bool g_wifi_assoc_listen_valid;
+/* Reconnect accounting: how often a 'set ps|listen' actually forced a link
+ * re-establishment, and how often it was skipped because nothing needed it. The
+ * skip count is the one that shows the fix working (it used to always reconnect). */
+static uint32_t g_wifi_reconnects;
+static uint32_t g_wifi_reconnect_skips;
+/* One-shot timer that performs a needed reconnect out of the HTTP request path,
+ * so the console response is flushed before the link drops. */
+static esp_timer_handle_t g_wifi_reconnect_timer;
+#endif
 /* Wire layout for the crash-journal diagnostic section. Kept here (next to the
  * journal it mirrors) and outside the role guards so the receiver can decode it
  * too. */
@@ -377,15 +444,48 @@ static volatile bool g_link_fallback_active;
 static volatile uint8_t g_link_fallback_stage;
 #endif
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Adaptive modem-sleep ladder (receiver). Runs the station on the most frugal PS
+ * mode the ESP-NOW link can hold and steps down on transport loss, so the
+ * operator sets `ps max` and the firmware finds the frugal-but-loss-free rung on
+ * its own. The mode it returns is applied with esp_wifi_set_ps(); wifi_ps_mode
+ * in the config is then only the start/ceiling rung. */
+static ps_ladder_t g_ps_ladder;
+static portMUX_TYPE g_ps_ladder_lock = portMUX_INITIALIZER_UNLOCKED;
+/* Last transport-counter values the ladder worker saw, to feed it deltas. */
+static uint32_t g_ladder_last_losses;
+static uint32_t g_ladder_last_telegrams;
+#endif
+
+#if CONFIG_ESPNOW_PS_FALLBACK
+/* Wi-Fi modem-sleep (power-save) fault watchdog: a storm of STA disconnects
+ * while a PS mode is in force means the mode is breaking the link, so drop to
+ * the proven mode (WIFI_PS_NONE, radio always awake). One instance per device,
+ * fed from the Wi-Fi event handler and polled by ps_fallback_worker, so the
+ * window clock lives in a lock. Declared outside the role guards: both roles
+ * can run a PS mode. */
+static ps_fallback_t g_ps_fallback;
+static portMUX_TYPE g_ps_fallback_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool g_ps_fallback_active;
+static volatile uint8_t g_ps_fallback_stage;
+#endif
+
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* sml_tx_item_t lives in tx_batch.h so the batching ring is host-testable. */
 #include "uart_sleep_window.h"
 
 static SemaphoreHandle_t g_send_done;
 static SemaphoreHandle_t g_sleep_send_done;
+/* Serializes the broadcast ESP-NOW senders (SML telegrams, the sleep-state
+ * announcement, the broadcast time-sync request). They all target broadcast_mac
+ * and share the single g_sleep_announce_in_flight flag / g_send_done semaphore,
+ * so without this lock a concurrent SML send's confirmation could be routed to
+ * the sleep path (or vice versa) and be counted as the wrong send's result. */
+static SemaphoreHandle_t g_broadcast_tx_mutex;
 /* set only around the sleep-state announcement send, so the broadcast send
  * callback can route the confirmation to g_sleep_send_done and not confuse the
- * SML send path. */
+ * SML send path. Held under g_broadcast_tx_mutex, which is what makes the single
+ * flag unambiguous. */
 static volatile bool g_sleep_announce_in_flight;
 static esp_now_send_status_t g_last_send_status;
 static QueueHandle_t g_espnow_ota_rx_queue;
@@ -408,6 +508,24 @@ static uint32_t g_sml_sent_ok;
 static uint32_t g_sml_send_fail;
 static uint32_t g_sml_last_sequence;
 static uint32_t g_diag_requests;
+/* Application-level delivery confirmation. The receiver unicasts an ACK per
+ * telegram (see sml_transport_ack_t); the send phase waits for it and repeats
+ * the telegram when it does not arrive, so a lost broadcast is recovered instead
+ * of only being noticed later as a sequence gap. g_sml_ack_highest is a
+ * monotonic high-water mark (all send paths are in order), so a stale ACK for an
+ * older sequence can never satisfy a newer one. */
+static SemaphoreHandle_t g_sml_ack_sem;
+static volatile uint32_t g_sml_ack_highest;
+/* Set once any ACK has been seen this session. Until then a telegram that stays
+ * unacked is treated as "the peer does not acknowledge" and falls back to
+ * best-effort delivery (see flush_tx_batch), so a sender talking to an older,
+ * non-ACKing receiver can never wedge on its head telegram. Cleared never: once
+ * the receiver has proven it ACKs, strict confirmation stays on for the session
+ * and transient losses are simply retransmitted. */
+static volatile bool g_sml_ack_seen;
+static uint32_t g_sml_retransmits;
+static uint32_t g_sml_ack_timeouts;
+static uint32_t g_sml_unacked;
 /* UART receive-gap diagnosis. The IR read head produces bursts of bytes
  * separated by silent gaps, so gaps themselves are normal; what matters is
  * whether a gap happens while a telegram is still being parsed. */
@@ -470,7 +588,41 @@ static uint32_t g_sml_invalid_crc_telegrams;
 static uint32_t g_sml_transport_gaps;     /* total out-of-order packets seen */
 static uint32_t g_sml_transport_losses;   /* forward jumps: broadcast(s) lost */
 static uint32_t g_sml_transport_reorders; /* retried older packets (recovered) */
+static uint32_t g_sml_transport_duplicates; /* exact retransmits (lost ACK) dropped */
 static uint32_t g_sml_last_transport_sequence;
+#if BURST_LOCK_SUPPORTED
+/* Burst-locked receive window (see burst_lock.h). The receiver watches when the
+ * sender's bursts arrive, predicts the next one and wakes the modem only around
+ * it instead of a free-running wake window that drifts against the burst. */
+static burst_lock_t g_burst_lock;
+static portMUX_TYPE g_burst_lock_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool g_burst_lock_enabled;
+/* Count of in-flight ESP-NOW request/response exchanges (sender diag, history
+ * backfill, OTA relay). While > 0 the worker keeps the radio up so a response is
+ * never missed because the modem was parked. */
+static volatile int g_burst_lock_hold;
+/* Cumulative time the modem was held awake by the burst lock, so the dashboard
+ * can show the actual awake duty instead of only the configured window. */
+static uint32_t g_burst_lock_awake_ms;
+static uint32_t g_burst_lock_awake_since_ms;
+
+/* Snapshot of the burst-lock state for the console/dashboard. `awake_pct` is the
+ * share of uptime the modem spent held awake by the lock, i.e. the real cost of
+ * the prediction (0 when the lock is off or never held). */
+typedef struct {
+    bool enabled;
+    bool locked;
+    uint32_t period_ms;
+    uint32_t window_ms;
+    uint32_t awake_ms;
+    uint32_t bursts;
+    uint32_t locks;
+    uint32_t unlocks;
+    uint32_t window_hits;
+    uint32_t window_misses;
+    uint32_t awake_pct;
+} burst_lock_stats_t;
+#endif
 static sml_value_record_t g_sml_latest_values[3];
 static bool g_sml_latest_value_valid[3];
 static rssi_record_t g_rssi_history[RSSI_HISTORY_COUNT];
@@ -528,6 +680,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req);
 static esp_err_t power_history_csv_handler(httpd_req_t *req);
 static esp_err_t db_refresh_handler(httpd_req_t *req);
 static esp_err_t power_history_upload_handler(httpd_req_t *req);
+static esp_err_t reboot_handler(httpd_req_t *req);
 static void history_backfill_request_full(void);
 static esp_err_t send_http_error_status(httpd_req_t *req, const char *status,
                                         const char *message);
@@ -593,6 +746,42 @@ static esp_err_t save_wifi_credentials(const char *ssid, const char *password)
     return err;
 }
 
+#if CONFIG_ESPNOW_ROLE_SENDER
+/* Remember the receiver-AP channel across reboots. While the receiver's setup AP
+ * is auto-off (the power-saving default) the sender cannot re-learn the channel
+ * by scanning, so a sender reboot would otherwise fall back to the fixed
+ * CONFIG_ESPNOW_CHANNEL and sit on the wrong channel. Best effort: a missing key
+ * just leaves the compile-time default in place. */
+static void load_espnow_channel(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(WIFI_CONFIG_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return;
+    }
+    uint8_t channel = 0;
+    if (nvs_get_u8(handle, WIFI_ESPNOW_CHANNEL_KEY, &channel) == ESP_OK &&
+        channel >= 1 && channel <= 13) {
+        g_espnow_channel = channel;
+    }
+    nvs_close(handle);
+}
+
+static void save_espnow_channel(uint8_t channel)
+{
+    if (channel < 1 || channel > 13) {
+        return;
+    }
+    nvs_handle_t handle;
+    if (nvs_open(WIFI_CONFIG_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    if (nvs_set_u8(handle, WIFI_ESPNOW_CHANNEL_KEY, channel) == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+}
+#endif
+
 static void fill_station_config(wifi_config_t *config)
 {
     memset(config, 0, sizeof(*config));
@@ -600,8 +789,8 @@ static void fill_station_config(wifi_config_t *config)
     strlcpy((char *)config->sta.password, g_wifi_password, sizeof(config->sta.password));
     /* The driver only honours listen_interval with WIFI_PS_MAX_MODEM, and it is
      * read when the association request is built, so a change needs a reconnect
-     * (the console 'set listen' does that). Default 3 (the IDF default when the
-     * field is 0) keeps the pre-knob behaviour on the non-HE build. */
+     * (the console 'set listen' does that). The default (10) keeps the pre-knob
+     * behaviour on the non-HE build. */
     config->sta.listen_interval = active_runtime_config()->listen_interval;
 }
 
@@ -660,6 +849,50 @@ static int64_t g_wall_clock_last_saved_utc;
  * seeded clock is valid but not trusted, so the offline gap is still marked
  * with the real time once a sync arrives. */
 static bool g_wall_clock_trusted;
+
+/* Monotonic-clock fallback for the minute recorder on the receiver.
+ *
+ * The receiver is the only continuous recorder (the sender hands its minutes
+ * over after the fact), and it records straight from time(). If the wall clock
+ * never becomes valid on a boot - SNTP keeps failing (the known C6 WLAN/NTP
+ * flapper) and there is no fresh store value - time() stays below the 2024
+ * sanity bound and every sample of that boot is silently dropped (the exact
+ * failure wall_clock.h documents). The sender is immune because it derives its
+ * clock from an ESP-NOW-calibrated offset that advances with uptime.
+ *
+ * This mirrors that: a last-known-good UTC is latched to a monotonic instant,
+ * and current_utc_seconds() on the receiver falls back to that offset while
+ * time() is still invalid. The stored/synced real time keeps refreshing the
+ * baseline, so once SNTP lands the fallback moves onto the true clock. Values
+ * stay above POWER_HISTORY_MIN_VALID_UTC, so the dedup/validity logic is
+ * untouched. */
+static int64_t g_clock_mono_base_utc; /* 0 = no baseline yet */
+static uint64_t g_clock_mono_base_us;  /* esp_timer instant for g_clock_mono_base_utc */
+
+static void clock_mono_set_base(int64_t utc_seconds)
+{
+    if (!wall_clock_utc_is_sane(utc_seconds)) {
+        return;
+    }
+    g_clock_mono_base_utc = utc_seconds;
+    g_clock_mono_base_us = (uint64_t)esp_timer_get_time();
+}
+
+/* Receiver-only: a wall clock derived from the monotonic timer and the last
+ * known-good UTC, so the minute recorder keeps writing during a boot where the
+ * wall clock has not become valid yet. Returns 0 when there is no baseline. */
+#if !CONFIG_ESPNOW_ROLE_SENDER
+static int64_t clock_mono_now_utc(void)
+{
+    if (g_clock_mono_base_utc == 0) {
+        return 0;
+    }
+    int64_t elapsed_s = (int64_t)(((uint64_t)esp_timer_get_time() -
+                                   g_clock_mono_base_us) / 1000000ULL);
+    int64_t utc = g_clock_mono_base_utc + elapsed_s;
+    return wall_clock_utc_is_sane(utc) ? utc : 0;
+}
+#endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* Defined with the sender diagnostics / boot-marker block further down. */
@@ -735,6 +968,9 @@ static int64_t wall_clock_seed_from_store(void)
         return 0;
     }
 #endif
+    /* Latch the same value as the monotonic baseline so the minute recorder can
+     * keep advancing even if the wall clock is subsequently lost before sync. */
+    clock_mono_set_base(stored);
     portENTER_CRITICAL(&g_wall_clock_lock);
     g_wall_clock_last_saved_utc = stored;
     g_wall_clock_trusted = false;
@@ -911,12 +1147,61 @@ static void energy_totals_start(void)
 /* Defined near apply_power_management() below; the Wi-Fi event handler and the
  * console 'set txpower|beacon|radio-save|wake-*' commands call it. */
 static void apply_radio_power_config(void);
+#if BURST_LOCK_SUPPORTED
+/* Receiver burst-locked receive window; defined near app_main() below. */
+static void apply_burst_lock_config(void);
+/* Keep the radio awake across an ESP-NOW request/response exchange. */
+static void burst_lock_hold_awake(void);
+static void burst_lock_release_awake(void);
+static void burst_lock_get_stats(burst_lock_stats_t *out);
+#endif
+/* Apply the persisted CPU/light-sleep knobs (esp_pm_configure); defined below,
+ * re-run by the receiver's link-fallback self-heal when it disables light sleep. */
+static void apply_power_management(void);
 /* Push the persisted Wi-Fi modem PS mode (off/min/max) into the driver; defined
  * with the other radio power knobs below. */
 static void apply_wifi_ps_config(void);
 /* Re-apply the PS mode and force a reconnect so a changed listen_interval is
  * carried in a fresh association request; called by the console 'set ps|listen'. */
 static void wifi_ps_apply_and_reconnect(void);
+/* Turn the setup SoftAP on or off at runtime (persisted ap_enabled knob, the
+ * /config page and the console 'set ap'); defined with the other radio knobs
+ * below. Refuses an off while the station is not connected. */
+static bool apply_ap_mode(bool enable, char *err, size_t err_size);
+/* Push the SoftAP parameters into the driver; shared by the boot path and
+ * apply_ap_mode(). */
+static esp_err_t configure_ap(void);
+#endif
+
+#if CONFIG_ESPNOW_PS_FALLBACK
+/* Mark the next STA disconnect as an expected reconnect (a deliberate 'set ps' /
+ * 'set wifi-*' / reset-config), so the modem-sleep watchdog does not count it as
+ * a fault. Defined here so every reconnect path can use it. */
+static void ps_fallback_mark_intentional(void)
+{
+    portENTER_CRITICAL(&g_ps_fallback_lock);
+    ps_fallback_note_intentional(&g_ps_fallback);
+    portEXIT_CRITICAL(&g_ps_fallback_lock);
+}
+
+/* Clear the modem-sleep fallback latch and window: an explicit 'set ps' /
+ * reset-config is a deliberate re-arm, so the user may retry a PS mode. */
+static void ps_fallback_rearm(void)
+{
+    const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    portENTER_CRITICAL(&g_ps_fallback_lock);
+    ps_fallback_init(&g_ps_fallback, CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS,
+                     CONFIG_ESPNOW_PS_FALLBACK_THRESHOLD,
+                     CONFIG_ESPNOW_PS_FALLBACK_SUSTAIN_WINDOWS,
+                     CONFIG_ESPNOW_PS_FALLBACK_GRACE_MS,
+                     PS_FALLBACK_DEFAULT_STABLE_RESET_MS, now_ms);
+    portEXIT_CRITICAL(&g_ps_fallback_lock);
+    g_ps_fallback_active = false;
+    g_ps_fallback_stage = 0;
+}
+#else
+static void ps_fallback_mark_intentional(void) {}
+static void ps_fallback_rearm(void) {}
 #endif
 
 #if !CONFIG_ESPNOW_ROLE_SENDER && SOC_WIFI_HE_SUPPORT
@@ -925,6 +1210,27 @@ static void wifi_ps_apply_and_reconnect(void);
  * classic ESP32 compiles the whole path out. */
 static void apply_twt_config(void);
 static void twt_teardown(void);
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Deferred auto-off: runs AP_AUTO_OFF_DELAY_MS after the station got its IP, so
+ * a co-rebooting sender still finds the setup AP during its channel scan.
+ * apply_ap_mode() enforces the "station connected" rule and is a no-op if the AP
+ * is already off (e.g. 'set ap off' or the apoff build). */
+static void ap_auto_off_timer_cb(void *arg)
+{
+    (void)arg;
+    if (g_ap_enabled) {
+        char ap_err[96] = {0};
+        if (apply_ap_mode(false, ap_err, sizeof(ap_err))) {
+            ESP_LOGI(TAG, "Auto-off: setup SoftAP switched off after station "
+                          "connect (ap_auto_off on)");
+        } else {
+            ESP_LOGW(TAG, "Auto-off: could not switch the setup SoftAP off: %s",
+                     ap_err);
+        }
+    }
+}
 #endif
 
 static void wifi_event_handler(void *arg,
@@ -937,7 +1243,23 @@ static void wifi_event_handler(void *arg,
         const wifi_event_sta_connected_t *event = event_data;
         g_wifi_connected = true;
         g_espnow_channel = event->channel;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        /* Snapshot the listen_interval this association was built with, so a
+         * later 'set listen' can tell whether a reconnect is actually needed. */
+        g_wifi_assoc_listen = active_runtime_config()->listen_interval;
+        g_wifi_assoc_listen_valid = true;
+#endif
         ESP_LOGI(TAG, "Connected to configured Wi-Fi on channel %u", event->channel);
+#if CONFIG_ESPNOW_PS_FALLBACK
+        /* Record the association start: a long, stable association clears the
+         * modem-sleep watchdog's disconnect count (the PS mode proved itself). */
+        {
+            const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+            portENTER_CRITICAL(&g_ps_fallback_lock);
+            ps_fallback_note_connected(&g_ps_fallback, now_ms);
+            portEXIT_CRITICAL(&g_ps_fallback_lock);
+        }
+#endif
 #if CONFIG_ESPNOW_ROLE_SENDER
         /* Now that the station is associated, enable the ESP-NOW connectionless
          * wake window: only at connected status does the Wi-Fi driver release
@@ -962,6 +1284,17 @@ static void wifi_event_handler(void *arg,
         const wifi_event_sta_disconnected_t *event = event_data;
         g_wifi_connected = false;
         ESP_LOGW(TAG, "Wi-Fi station disconnected (reason %u)", event->reason);
+#if CONFIG_ESPNOW_PS_FALLBACK
+        /* Feed the modem-sleep watchdog: a storm of disconnects while a PS mode
+         * is in force means the mode is breaking the link. An intentional
+         * reconnect (marked before esp_wifi_disconnect()) is not counted. */
+        {
+            const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+            portENTER_CRITICAL(&g_ps_fallback_lock);
+            ps_fallback_note_disconnect(&g_ps_fallback, now_ms);
+            portEXIT_CRITICAL(&g_ps_fallback_lock);
+        }
+#endif
 #if CONFIG_ESPNOW_ROLE_SENDER
 #if CONFIG_ESPNOW_SENDER_ASSOCIATE
         /* Re-associate with the receiver AP so Wi-Fi modem sleep keeps the APB
@@ -1057,6 +1390,21 @@ static void wifi_event_handler(void *arg,
         }
 #if !CONFIG_ESPNOW_ROLE_SENDER
         mqtt_bridge_start();
+        /* Auto-off: the station now has an IP, so the setup SoftAP is no longer
+         * the only way in. Dropping it reclaims the ~0.22 W a running AP costs
+         * (measured 2026-11-14). Arm a one-shot delay rather than dropping it
+         * right here: the sender learns its ESP-NOW channel by scanning for this
+         * AP, so after a co-reboot the AP must outlive the sender's scan loop
+         * (~30 s). apply_ap_mode() enforces the "station connected" safety rule;
+         * if the sender later cannot find the AP, the link fallback brings it
+         * back (only if the sender had been heard - see link_fallback_worker). */
+        const runtime_config_t *got_cfg = active_runtime_config();
+        if (got_cfg->ap_auto_off && g_ap_enabled && g_ap_auto_off_timer != NULL) {
+            if (esp_timer_start_once(g_ap_auto_off_timer,
+                                     (uint64_t)AP_AUTO_OFF_DELAY_MS * 1000) != ESP_OK) {
+                ESP_LOGW(TAG, "Auto-off: could not arm the setup-AP drop timer");
+            }
+        }
 #endif
     }
 }
@@ -1065,7 +1413,7 @@ static void wifi_event_handler(void *arg,
 static uint8_t scan_receiver_ap_channel(void)
 {
     wifi_scan_config_t scan_config = {
-        .ssid = (uint8_t *)"ESP32-IR-Meter",
+        .ssid = (uint8_t *)AP_SSID,
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
         .show_hidden = false,
     };
@@ -1084,7 +1432,7 @@ static uint8_t scan_receiver_ap_channel(void)
     }
 
     for (uint16_t i = 0; i < count; ++i) {
-        if (strcmp((const char *)records[i].ssid, "ESP32-IR-Meter") == 0) {
+        if (strcmp((const char *)records[i].ssid, AP_SSID) == 0) {
             return records[i].primary;
         }
     }
@@ -1102,6 +1450,7 @@ static uint8_t espnow_align_channel_from_receiver_ap(void)
     }
     g_espnow_channel = detected;
     ESP_ERROR_CHECK(esp_wifi_set_channel(g_espnow_channel, WIFI_SECOND_CHAN_NONE));
+    save_espnow_channel(g_espnow_channel);
     ESP_LOGI(TAG, "Using receiver AP channel %u for ESP-NOW", g_espnow_channel);
     return detected;
 }
@@ -1137,6 +1486,25 @@ static bool ota_target_is_safe(const esp_partition_t *target)
     }
     return true;
 }
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Push the SoftAP parameters into the driver. Shared by the boot path and
+ * apply_ap_mode(), so a beacon/txpower re-apply cannot silently drop the AP's
+ * identity. Returns the driver result so the runtime path can back out instead
+ * of aborting the device on a failed re-enable. */
+static esp_err_t configure_ap(void)
+{
+    wifi_config_t ap_config = {0};
+    memcpy(ap_config.ap.ssid, AP_SSID, sizeof(AP_SSID));
+    ap_config.ap.ssid_len = strlen(AP_SSID);
+    ap_config.ap.channel = ESPNOW_CHANNEL;
+    memcpy(ap_config.ap.password, AP_PASSWORD, sizeof(AP_PASSWORD));
+    ap_config.ap.max_connection = 4;
+    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    ap_config.ap.ssid_hidden = 0;
+    return esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+}
+#endif
 
 static void initialize_wifi_and_espnow(void)
 {
@@ -1186,28 +1554,47 @@ static void initialize_wifi_and_espnow(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                wifi_event_handler, NULL));
     ESP_ERROR_CHECK(load_wifi_credentials());
-#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
-    /* Station-only: no SoftAP. The dashboard is reachable over the home WLAN;
-     * ESP-NOW runs on the station interface. The sender can no longer discover
-     * the channel from the AP, so both roles must share CONFIG_ESPNOW_CHANNEL. */
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_LOGI(TAG, "SoftAP disabled (CONFIG_ESPNOW_RECEIVER_DISABLE_AP); "
-                  "dashboard only reachable over the configured WLAN");
-#else
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-    wifi_config_t ap_config = {0};
-    memcpy(ap_config.ap.ssid, "ESP32-IR-Meter", sizeof("ESP32-IR-Meter"));
-    ap_config.ap.ssid_len = strlen("ESP32-IR-Meter");
-    ap_config.ap.channel = ESPNOW_CHANNEL;
-    memcpy(ap_config.ap.password, "12345678", sizeof("12345678"));
-    ap_config.ap.max_connection = 4;
-    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    ap_config.ap.ssid_hidden = 0;
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* Start on the channel we last saw the receiver AP on. If the receiver's
+     * setup AP is auto-off, the scan below finds nothing and this is what keeps
+     * us from parking on the fixed CONFIG_ESPNOW_CHANNEL. */
+    load_espnow_channel();
 #endif
+    /* Boot the SoftAP from the persisted ap_enabled knob (default: on for the
+     * AP build, off for the apoff build). ESP-NOW runs on the AP interface
+     * while it is up, so this must be decided before esp_now_init() below;
+     * g_ap_enabled then drives ESPNOW_IF for every peer. */
+    runtime_config_t *boot_cfg = active_runtime_config();
+    g_ap_enabled = boot_cfg->ap_enabled;
+    if (g_ap_enabled) {
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+        ESP_ERROR_CHECK(configure_ap());
+        ESP_LOGI(TAG, "SoftAP enabled: SSID=%s, channel=%u", AP_SSID,
+                 (unsigned)g_espnow_channel);
+    } else {
+        /* Station-only: no SoftAP. The dashboard is reachable over the home
+         * WLAN and ESP-NOW runs on the station interface. The sender can no
+         * longer discover the channel from the AP, so both roles must share
+         * CONFIG_ESPNOW_CHANNEL. */
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_LOGI(TAG, "SoftAP disabled; dashboard only reachable over the "
+                      "configured WLAN (ESP-NOW on the station interface)");
+    }
     wifi_config_t sta_config;
     fill_station_config(&sta_config);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Deferred setup-AP auto-off, armed from the STA_GOT_IP handler. Created
+     * before esp_wifi_start() so the handler (which can fire as soon as the
+     * station associates) always finds a valid handle. */
+    const esp_timer_create_args_t ap_auto_off_timer_args = {
+        .callback = ap_auto_off_timer_cb,
+        .name = "ap_auto_off",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&ap_auto_off_timer_args,
+                                     &g_ap_auto_off_timer));
 #endif
 
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -1273,11 +1660,11 @@ static void initialize_wifi_and_espnow(void)
 #endif
     wifi_interface_t espnow_interface = WIFI_IF_STA;
 #else
-#if !CONFIG_ESPNOW_RECEIVER_DISABLE_AP
-    ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP,
-                                          WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G |
-                                          WIFI_PROTOCOL_11N));
-#endif
+    if (g_ap_enabled) {
+        ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP,
+                                              WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G |
+                                              WIFI_PROTOCOL_11N));
+    }
     if (g_wifi_configured) {
         ESP_ERROR_CHECK(esp_wifi_connect());
     } else {
@@ -1312,13 +1699,13 @@ static void initialize_wifi_and_espnow(void)
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
-#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
-    ESP_LOGI(TAG, "Receiver ready on ESP-NOW channel %u (SoftAP disabled)",
-             g_espnow_channel);
-#else
-    ESP_LOGI(TAG, "AP started: SSID=ESP32-IR-Meter, channel=%u, IP=192.168.4.1",
-             g_espnow_channel);
-#endif
+    if (g_ap_enabled) {
+        ESP_LOGI(TAG, "AP started: SSID=%s, channel=%u, IP=192.168.4.1",
+                 AP_SSID, g_espnow_channel);
+    } else {
+        ESP_LOGI(TAG, "Receiver ready on ESP-NOW channel %u (SoftAP disabled)",
+                 g_espnow_channel);
+    }
 #endif
 }
 
@@ -2063,7 +2450,11 @@ static void build_diag_counters_response(const espnow_diag_request_item_t *reque
         .cpu_freq_min_mhz = (uint8_t)(pm_config.min_freq_mhz > 0 ? pm_config.min_freq_mhz : 0),
         .light_sleep_enabled = pm_config.light_sleep_enable ? 1 : 0,
         .wifi_ps_mode = (uint8_t)wifi_ps,
-        .reserved2 = 0,
+#if CONFIG_ESPNOW_PS_FALLBACK
+        .ps_fallback_stage = g_ps_fallback_stage,
+#else
+        .ps_fallback_stage = 0,
+#endif
         .storage_records = storage.record_count,
         .storage_capacity = POWER_HISTORY_CAPACITY,
         .storage_write_errors = storage.write_errors,
@@ -2327,14 +2718,6 @@ static void espnow_diag_worker(void *arg)
 
 static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_status_t status)
 {
-    /* The sleep-state announcement goes to the broadcast address too, so it
-     * would release the SML send semaphore. Distinguish it with a flag set by
-     * send_sleep_state_packet() just before its send. The flag is read before
-     * the callback can race us: the callback runs on the Wi-Fi task while the
-     * UART task still owns the flag's critical section around esp_now_send. */
-    const bool was_sleep_announce = g_sleep_announce_in_flight;
-    g_sleep_announce_in_flight = false;
-
     if (status != ESP_NOW_SEND_SUCCESS) {
         ESP_LOGW(TAG, "ESP-NOW send callback reported a failure");
     } else {
@@ -2350,13 +2733,25 @@ static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_statu
     if (tx_info == NULL || tx_info->des_addr == NULL) {
         return;
     }
+    const bool is_broadcast =
+        memcmp(tx_info->des_addr, broadcast_mac, ESP_NOW_ETH_ALEN) == 0;
+    /* The sleep-state announcement is a broadcast too. Distinguish it from an
+     * SML broadcast with a flag consulted only for broadcast confirmations, so a
+     * concurrent unicast send's callback is never misrouted (it falls through to
+     * the diagnostic branch). The broadcast senders are serialized by
+     * g_broadcast_tx_mutex, so at most one broadcast confirmation is in flight
+     * and the single flag is unambiguous. */
+    const bool was_sleep_announce = is_broadcast && g_sleep_announce_in_flight;
+    if (is_broadcast) {
+        g_sleep_announce_in_flight = false;
+    }
     if (was_sleep_announce) {
         if (g_sleep_send_done != NULL) {
             xSemaphoreGive(g_sleep_send_done);
         }
         return;
     }
-    if (memcmp(tx_info->des_addr, broadcast_mac, ESP_NOW_ETH_ALEN) == 0) {
+    if (is_broadcast) {
         g_last_send_status = status;
         if (g_send_done != NULL) {
             xSemaphoreGive(g_send_done);
@@ -2373,7 +2768,12 @@ static void send_callback(const esp_now_send_info_t *tx_info, esp_now_send_statu
 
 /* Ask the receiver for its wall clock: once on boot, then hourly. The receiver
  * is the only side with an NTP-synced clock, so the sender cannot do this
- * itself. Between calibrations the sender keeps its own esp_timer offset. */
+ * itself. Between calibrations the sender keeps its own esp_timer offset.
+ *
+ * The sender reaches the receiver with the burst-lock receive window (which
+ * adapts to the actual burst, not a fixed wall-clock slot), so the clock only
+ * needs time-stamping accuracy - hourly is plenty; 5 s drift tolerance is not
+ * needed here. */
 #define TIME_SYNC_INTERVAL_US (60LL * 60LL * 1000000LL)
 
 static void time_sync_worker(void *arg)
@@ -2416,8 +2816,21 @@ static void time_sync_worker(void *arg)
         g_utc_valid = false; /* response must arrive before the next send */
         portEXIT_CRITICAL(&g_time_sync_lock);
 
-        if (esp_now_send(destination, (const uint8_t *)&request,
-                         sizeof(request)) != ESP_OK) {
+        /* Serialize with the other broadcast senders: a broadcast time-sync
+         * request shares broadcast_mac and the send-completion semaphore, so it
+         * must not overlap the SML/sleep-announce sends. */
+        if (g_broadcast_tx_mutex != NULL) {
+            xSemaphoreTake(g_broadcast_tx_mutex, portMAX_DELAY);
+        }
+        if (g_send_done != NULL) {
+            xSemaphoreTake(g_send_done, 0);
+        }
+        esp_err_t ts_err = esp_now_send(destination, (const uint8_t *)&request,
+                                        sizeof(request));
+        if (g_broadcast_tx_mutex != NULL) {
+            xSemaphoreGive(g_broadcast_tx_mutex);
+        }
+        if (ts_err != ESP_OK) {
             ESP_LOGW(TAG, "Time-sync request send failed");
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
@@ -2540,6 +2953,19 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 #endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
+    uint32_t ack_sequence;
+    if (sml_transport_ack_parse(data, data_len, &ack_sequence)) {
+        /* The receiver confirmed this telegram. Advance the high-water mark and
+         * wake the send phase so it stops repeating it. */
+        g_sml_ack_seen = true;
+        if (ack_sequence > g_sml_ack_highest) {
+            g_sml_ack_highest = ack_sequence;
+        }
+        if (g_sml_ack_sem != NULL) {
+            xSemaphoreGive(g_sml_ack_sem);
+        }
+        return;
+    }
     if (is_espnow_ota_packet(data, data_len)) {
         if (g_espnow_ota_rx_queue == NULL || data_len > ESP_NOW_MAX_DATA_LEN) {
             ESP_LOGE(TAG, "Sender OTA receiver is unavailable or packet is oversized");
@@ -2768,16 +3194,40 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         ESP_LOGW(TAG, "Dropped SML transport packet with sequence zero");
         return;
     }
+    /* Confirm receipt so the sender can stop retransmitting this sequence. Sent
+     * unicast (the sender's MAC is known from src_addr) and for *any* well-formed
+     * telegram - a duplicate or a bad-CRC telegram still arrived, so a retry
+     * would only burn airtime. Best-effort: a lost ACK just makes the sender
+     * repeat, which is harmless because the receiver de-duplicates by sequence. */
+    if (add_espnow_peer(info->src_addr, ESPNOW_IF) == ESP_OK) {
+        sml_transport_ack_t ack;
+        sml_transport_ack_build(&ack, packet.header.sequence);
+        (void)esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
+    }
     if (info->rx_ctrl != NULL) {
         record_rssi_sample(info->rx_ctrl->rssi);
+    }
+    /* Deduplicate an exact retransmit. When the ACK for a telegram is lost the
+     * sender repeats that same sequence; counting or storing it again would
+     * inflate crc_valid and double-record a value. The sequence is assigned
+     * monotonically per packet, so an equal sequence is always a repeat. Only
+     * equality is filtered - a *smaller* sequence (a reorder) and a large
+     * backward jump (the sender rebooted and restarted at 1) both fall through
+     * and are handled as before, so a sender reboot cannot wedge the receiver. */
+    if (packet.header.sequence == g_sml_last_transport_sequence) {
+        portENTER_CRITICAL(&g_sml_history_lock);
+        ++g_sml_transport_duplicates;
+        portEXIT_CRITICAL(&g_sml_history_lock);
+        return;
     }
     if (g_sml_last_transport_sequence != 0 &&
         packet.header.sequence != g_sml_last_transport_sequence + 1) {
         /* The sequence is assigned per packet by the sender and a not-yet-sent
          * packet can be re-queued with its OLD (smaller) sequence (retry), so
          * there are two very different cases:
-         *   - backward/duplicate (<=): a retry or reorder that was recovered,
-         *     NOT data loss; nothing to reset.
+         *   - backward (<): a retry or reorder that was recovered (an exact
+         *     duplicate was already returned above), NOT data loss; nothing to
+         *     reset.
          *   - forward jump (>): a broadcast packet (or several) really was lost
          *     over the air; the 60 s power average is then incomplete, so its
          *     accumulator is reset. Recovered data still flows in via backfill. */
@@ -2796,6 +3246,23 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
         portEXIT_CRITICAL(&g_sml_history_lock);
     }
     g_sml_last_transport_sequence = packet.header.sequence;
+#if BURST_LOCK_SUPPORTED
+    if (g_burst_lock_enabled) {
+        portENTER_CRITICAL(&g_burst_lock_lock);
+        (void)burst_lock_note_frame(&g_burst_lock,
+                                    (uint32_t)(esp_timer_get_time() / 1000ULL));
+        portEXIT_CRITICAL(&g_burst_lock_lock);
+    }
+#endif
+    /* A live SML packet from the sender is proof it is awake and reachable
+     * right now, so clear any stale "sleeping" state: if the sender's awake
+     * announcement was lost, or its park was skipped after it announced
+     * "sleeping", the data itself is the authoritative wake signal. */
+    portENTER_CRITICAL(&g_sender_mac_lock);
+    if (g_sender_sleep_state != 0u) {
+        g_sender_sleep_state = 0u;
+    }
+    portEXIT_CRITICAL(&g_sender_mac_lock);
     memcpy(packet.values, data + sizeof(packet.header),
            packet.header.value_count * sizeof(packet.values[0]));
 
@@ -2837,7 +3304,14 @@ static int64_t current_utc_seconds(void)
 #if CONFIG_ESPNOW_ROLE_SENDER
     return (int64_t)(event_wall_ms() / 1000);
 #else
-    return (int64_t)time(NULL);
+    int64_t t = (int64_t)time(NULL);
+    if (t >= WALL_CLOCK_MIN_UTC) {
+        /* Fresh wall clock: latch it as the monotonic baseline so the recorder
+         * keeps advancing even if time() is later lost before the next sync. */
+        clock_mono_set_base(t);
+        return t;
+    }
+    return clock_mono_now_utc();
 #endif
 }
 
@@ -2933,13 +3407,20 @@ static void power_sample_timer_callback(void *arg)
     power_history_record_t completed_interval = {0};
     bool enqueue_completed_interval = false;
     double live_watts = 0.0;
+    double live_average = 0.0;
     bool have_live_power = false;
+    bool have_live_average = false;
 
     portENTER_CRITICAL(&g_sml_history_lock);
     if (g_sml_latest_power_valid &&
         now_us - g_sml_latest_power_received_us <= POWER_SAMPLE_STALE_US) {
         live_watts = g_sml_latest_power_w;
         have_live_power = true;
+        if (g_sml_power_sample_count != 0) {
+            live_average = g_sml_power_sample_sum_w /
+                           (double)g_sml_power_sample_count;
+            have_live_average = true;
+        }
         append_power_sample_locked(now_us, g_sml_latest_power_w);
         if (wall_clock >= 1704067200) {
             int64_t bucket_start = ((int64_t)wall_clock /
@@ -2994,6 +3475,11 @@ static void power_sample_timer_callback(void *arg)
     if (have_live_power && g_sml_latest_power_received_us != g_last_published_power_us) {
         g_last_published_power_us = g_sml_latest_power_received_us;
         mqtt_bridge_publish_power(live_watts);
+        /* Republish the 15-minute mean alongside the live value so HA's
+         * "Leistung 15 min Mittel" tracks the dashboard without its own poll. */
+        if (have_live_average) {
+            mqtt_bridge_publish_average(live_average);
+        }
     }
     if (enqueue_completed_interval) {
         mqtt_bridge_publish_history(&completed_interval);
@@ -3161,8 +3647,27 @@ void sml_adapter_telegram_callback(uint64_t timestamp_us, bool crc_valid,
     }
 }
 
-/* Returns true only when ESP-NOW confirmed the delivery, so the caller can put
- * an unconfirmed telegram back into the batch ring and retry it. */
+/* Wait up to `timeout_ms` for the receiver to acknowledge `sequence` (or any
+ * later one - a monotonic high-water mark covers ours). Returns true on
+ * confirmation. */
+static bool wait_for_sml_ack(uint32_t sequence, uint32_t timeout_ms)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    for (;;) {
+        if (g_sml_ack_highest >= sequence) {
+            return true;
+        }
+        TickType_t now = xTaskGetTickCount();
+        if ((int32_t)(deadline - now) <= 0) {
+            return g_sml_ack_highest >= sequence;
+        }
+        (void)xSemaphoreTake(g_sml_ack_sem, deadline - now);
+    }
+}
+
+/* Transmit one telegram and wait for the receiver's application-level ACK.
+ * Returns true only when the receiver confirmed it, so the caller can repeat an
+ * unconfirmed telegram instead of treating "handed to ESP-NOW" as delivered. */
 static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
 {
     sml_transport_packet_t packet = {
@@ -3186,9 +3691,22 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
 
     size_t packet_length = sizeof(packet.header) +
                            item->value_count * sizeof(packet.values[0]);
+    /* Serialize with the other broadcast senders so the single
+     * g_sleep_announce_in_flight flag unambiguously identifies our send. */
+    if (g_broadcast_tx_mutex != NULL) {
+        xSemaphoreTake(g_broadcast_tx_mutex, portMAX_DELAY);
+    }
+    /* Drop a stale completion token (e.g. the confirmation of an earlier
+     * broadcast that timed out) so the wait below observes only THIS send. */
+    if (g_send_done != NULL) {
+        xSemaphoreTake(g_send_done, 0);
+    }
     esp_err_t err = esp_now_send(broadcast_mac, (const uint8_t *)&packet,
                                  packet_length);
     if (err != ESP_OK) {
+        if (g_broadcast_tx_mutex != NULL) {
+            xSemaphoreGive(g_broadcast_tx_mutex);
+        }
         portENTER_CRITICAL(&g_uart_stats_lock);
         ++g_sml_send_fail;
         portEXIT_CRITICAL(&g_uart_stats_lock);
@@ -3198,6 +3716,9 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
         return false;
     }
     if (xSemaphoreTake(g_send_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        if (g_broadcast_tx_mutex != NULL) {
+            xSemaphoreGive(g_broadcast_tx_mutex);
+        }
         portENTER_CRITICAL(&g_uart_stats_lock);
         ++g_sml_send_fail;
         portEXIT_CRITICAL(&g_uart_stats_lock);
@@ -3205,6 +3726,9 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
         diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "sml send timeout seq=%lu",
                        (unsigned long)sequence);
         return false;
+    }
+    if (g_broadcast_tx_mutex != NULL) {
+        xSemaphoreGive(g_broadcast_tx_mutex);
     }
     if (g_last_send_status != ESP_NOW_SEND_SUCCESS) {
         portENTER_CRITICAL(&g_uart_stats_lock);
@@ -3214,6 +3738,14 @@ static bool send_sml_telegram(uint32_t sequence, const sml_tx_item_t *item)
                  (unsigned long)sequence);
         diag_log_event(ESPNOW_DIAG_LEVEL_WARN, "sml send unconfirmed seq=%lu",
                        (unsigned long)sequence);
+        return false;
+    }
+    /* The broadcast left our radio, but only the receiver's ACK proves it
+     * arrived. Wait for it before declaring the telegram delivered. */
+    if (!wait_for_sml_ack(sequence, SML_ACK_TIMEOUT_MS)) {
+        portENTER_CRITICAL(&g_uart_stats_lock);
+        ++g_sml_unacked;
+        portEXIT_CRITICAL(&g_uart_stats_lock);
         return false;
     }
     portENTER_CRITICAL(&g_uart_stats_lock);
@@ -3248,6 +3780,12 @@ static void send_sleep_state_packet(bool sleeping)
         .window_ms = uart_sleep_window_ms(),
         .uptime_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
     };
+    /* Serialize with the SML/time-sync broadcast senders: only one broadcast
+     * confirmation may be in flight, otherwise the shared flag would misroute
+     * it. */
+    if (g_broadcast_tx_mutex != NULL) {
+        xSemaphoreTake(g_broadcast_tx_mutex, portMAX_DELAY);
+    }
     /* Consume a stale confirmation (e.g. a previous timeout) so the wait below
      * observes only the confirmation of THIS send. */
     if (g_sleep_send_done != NULL) {
@@ -3258,6 +3796,9 @@ static void send_sleep_state_packet(bool sleeping)
                                  sizeof(packet));
     if (err != ESP_OK) {
         g_sleep_announce_in_flight = false;
+        if (g_broadcast_tx_mutex != NULL) {
+            xSemaphoreGive(g_broadcast_tx_mutex);
+        }
         ESP_LOGD(TAG, "Sleep-state announce send failed: %s", esp_err_to_name(err));
         return;
     }
@@ -3269,6 +3810,9 @@ static void send_sleep_state_packet(bool sleeping)
         ESP_LOGW(TAG, "Sleep-state announce delivery not confirmed within 20 ms");
     }
     g_sleep_announce_in_flight = false;
+    if (g_broadcast_tx_mutex != NULL) {
+        xSemaphoreGive(g_broadcast_tx_mutex);
+    }
 }
 #endif /* CONFIG_ESPNOW_ROLE_SENDER */
 
@@ -3452,9 +3996,12 @@ static void flush_tx_batch(void)
 {
     /* One send phase: drain up to SML_TX_BURST telegrams oldest-first. The
      * sequence is the ring's own, so it stays contiguous across eviction and
-     * the receiver can reconcile gaps. An unconfirmed delivery is put back at
-     * the head and the phase stops, so the telegram is retried next cycle
-     * instead of being dropped (ESP-NOW is connectionless and unreliable). */
+     * the receiver can reconcile gaps. Each telegram is retransmitted until the
+     * receiver ACKs it (up to SML_ACK_MAX_ATTEMPTS) so a lost broadcast is
+     * recovered rather than only noticed later as a sequence gap. A telegram
+     * that stays unconfirmed is put back at the head and the phase stops, so it
+     * is retried next cycle instead of being dropped (ESP-NOW is connectionless
+     * and unreliable). */
     for (uint32_t sent = 0; sent < SML_TX_BURST; ++sent) {
         sml_tx_item_t item;
         uint32_t sequence;
@@ -3464,10 +4011,41 @@ static void flush_tx_batch(void)
         if (!have) {
             break;
         }
-        if (!send_sml_telegram(sequence, &item)) {
+        bool delivered = false;
+        for (uint32_t attempt = 0; attempt < SML_ACK_MAX_ATTEMPTS; ++attempt) {
+            if (send_sml_telegram(sequence, &item)) {
+                delivered = true;
+                break;
+            }
+            if (attempt + 1u < SML_ACK_MAX_ATTEMPTS) {
+                portENTER_CRITICAL(&g_uart_stats_lock);
+                ++g_sml_retransmits;
+                portEXIT_CRITICAL(&g_uart_stats_lock);
+                vTaskDelay(pdMS_TO_TICKS(SML_ACK_RETRY_BACKOFF_MS));
+            }
+        }
+        if (!delivered) {
             portENTER_CRITICAL(&g_uart_stats_lock);
-            (void)sml_tx_batch_requeue_front(&g_sml_tx_batch, &item, sequence);
+            ++g_sml_ack_timeouts;
+            /* Never seen an ACK this session: the peer does not acknowledge (an
+             * older receiver build). Fall back to best-effort delivery so the
+             * ring keeps draining instead of wedging on this telegram; a real
+             * loss is still reconciled by sequence at the receiver. */
+            bool best_effort = !g_sml_ack_seen;
+            if (best_effort) {
+                ++g_sml_sent_ok;
+                sml_tx_batch_mark_sent(&g_sml_tx_batch, sequence);
+            } else {
+                (void)sml_tx_batch_requeue_front(&g_sml_tx_batch, &item, sequence);
+            }
             portEXIT_CRITICAL(&g_uart_stats_lock);
+            if (best_effort) {
+                continue;
+            }
+            diag_log_event(ESPNOW_DIAG_LEVEL_WARN,
+                           "sml unacked after %u tries seq=%lu",
+                           (unsigned)SML_ACK_MAX_ATTEMPTS,
+                           (unsigned long)sequence);
             break;
         }
     }
@@ -3638,6 +4216,9 @@ static esp_err_t root_handler(httpd_req_t *req)
         "sequence,interval_start_ms,average_w,sample_count,reason. Fehlende Minuten werden "
         "ergänzt, bereits vorhandene übersprungen; vorhandene Daten werden nicht überschrieben.</small></p>"
         "<p id=\"db-status\" role=\"status\"></p>"
+        "<p><button type=\"button\" id=\"reboot\" class=\"action\">Gerät neu starten</button> "
+        "startet den Empfänger neu (OTA-Key erforderlich, wie beim Firmware-Update). "
+        "Nach dem Neustart lädt diese Seite in ein paar Sekunden wieder.</p>"
         "</section>"
         "<script>"
         "const byId=id=>document.getElementById(id);"
@@ -3666,8 +4247,13 @@ static esp_err_t root_handler(httpd_req_t *req)
         "byId('meter-status').textContent='SML CRC gültig: '+d.crc_valid+"
         "' · CRC fehlerhaft: '+d.crc_invalid+"
         "' · Funkpakete verloren: '+d.transport_losses+' (rückgewonnen/Reorder: '+d.transport_reorders+')'+"
+        "' · Duplikate: '+(d.transport_duplicates!==undefined?d.transport_duplicates:'?')+"
+        "' · Empfang: '+(d.sender_rssi_valid?d.sender_rssi_dbm+' dBm':'?')+"
         "' · CPU: '+d.cpu_freq_mhz+' MHz (DFS '+d.cpu_freq_min_mhz+'-'+d.cpu_freq_max_mhz+' MHz)'+"
         "' · Sleep: '+(d.sleep_state?'leicht':'wach')+(d.light_sleep_enabled?' (aktiv)':' (aus)')+"
+        "' · PS: '+(d.wifi_ps_mode||'?')+"
+        "' · Fenster: '+(d.wake_window_ms!==undefined&&d.radio_save?('ESPNOW '+d.wake_window_ms+' ms/'+d.wake_interval_ms+' ms wach/schlaf'):(d.burst_lock?'burst-lock '+d.burst_window_ms+' ms':(d.radio_save?'ESPNOW '+d.wake_window_ms+' ms':'kein Fenster')))+"
+        "' · Zuverlässigkeit: '+(d.burst_bursts>0?(d.burst_reliability_pct+'% ('+d.burst_window_hits+'/'+(d.burst_window_hits+d.burst_window_misses)+' Fenster)'):'—')+"
         "' · FW: '+(d.version||'?');"
         "}catch(e){byId('meter-status').textContent='Verbindung zum Zähler fehlgeschlagen: '+e;}"
         "setTimeout(updateMeter,1000);}updateMeter();"
@@ -3801,8 +4387,8 @@ static esp_err_t root_handler(httpd_req_t *req)
         "byId('history-resolution').textContent=(live&&d.aggregated&&d.bucket_seconds)?(' (1 Balken = '+Math.round(Number(d.bucket_seconds)/60)+' Min)'):(live?'':(' (1 Balken = 15 Min)'));"
         "byId('history-status').textContent=(d.clock_synced?'Netzwerkzeit synchronisiert':'Warte auf Netzwerkzeit')+"
         "' · gespeicherte Minutenwerte: '+d.record_count+' / '+d.capacity+' · letztes: '+latest+"
-        "' · aktuelle Messwerte im Intervall: '+d.current_sample_count+"
-        "' · Speicher: '+(d.storage_ready?'bereit':'nicht bereit')+"
+        "' · Messwerte im Live-Ring (15 min): '+d.current_sample_count+"
+        "' · Speicher: '+(d.busy?'kurz belegt, wird nachgeladen':(d.storage_ready?'bereit':'nicht bereit'))+"
         "' · Schreibfehler: '+d.write_errors+' · Warteschlangenverluste: '+d.queue_drops;"
         "if(typeof d.energy_day_wh==='number'){byId('history-day-info').textContent+=(' · heute '+fmt(d.energy_day_wh/1000,2)+' kWh · Monat '+fmt(d.energy_month_wh/1000,2)+' kWh');}"
         "}catch(e){byId('history-status').textContent='Verlauf nicht verfügbar: '+e;}"
@@ -3846,6 +4432,17 @@ static esp_err_t root_handler(httpd_req_t *req)
         "clearTimeout(historyTimer);historyTimer=setTimeout(updateHistory,1500);"
         "}catch(e){s.textContent='Upload fehlgeschlagen: '+e;}});"
         "byId('history-day').addEventListener('change',()=>{setLive(false);redraw();});"
+        "byId('reboot').addEventListener('click',async()=>{"
+        "const s=byId('db-status');"
+        "const key=prompt('OTA-Key (wie beim Firmware-Update):');"
+        "if(!key){return;}"
+        "s.textContent='Starte neu…';"
+        "try{const r=await fetch('/api/reboot',{method:'POST',cache:'no-store',"
+        "headers:{'X-OTA-Key':key}});"
+        "if(!r.ok)throw new Error('HTTP '+r.status);"
+        "s.textContent='Neustart läuft – Seite in ein paar Sekunden neu laden…';"
+        "setTimeout(()=>location.reload(),8000);"
+        "}catch(e){s.textContent='Neustart fehlgeschlagen: '+e;}});"
         "function shiftDay(delta){const base=byId('history-day').value?Date.parse(byId('history-day').value+'T00:00:00Z'):Date.now();"
         "const next=new Date(base+delta*86400000);byId('history-day').value=dayISO(next);setLive(false);redraw();}"
         "function toggleCompare(){if(historyCompare){historyCompare=null;}else{const base=byId('history-day').value?Date.parse(byId('history-day').value+'T00:00:00Z'):Date.now();"
@@ -3929,6 +4526,7 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
     uint32_t transport_gaps;
     uint32_t transport_losses;
     uint32_t transport_reorders;
+    uint32_t transport_duplicates;
     portENTER_CRITICAL(&g_sml_history_lock);
     latest_sequence = g_sml_latest_value_sequence;
     valid_telegrams = g_sml_valid_telegrams;
@@ -3936,6 +4534,7 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
     transport_gaps = g_sml_transport_gaps;
     transport_losses = g_sml_transport_losses;
     transport_reorders = g_sml_transport_reorders;
+    transport_duplicates = g_sml_transport_duplicates;
     size_t oldest_index = (g_sml_value_history_next +
                            SML_VALUE_HISTORY_COUNT -
                            g_sml_value_history_count) % SML_VALUE_HISTORY_COUNT;
@@ -3961,6 +4560,7 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
                               "\"overflow\":%s,\"crc_valid\":%lu,"
                               "\"crc_invalid\":%lu,\"transport_gaps\":%lu,"
                               "\"transport_losses\":%lu,\"transport_reorders\":%lu,"
+                              "\"transport_duplicates\":%lu,"
                               "\"values\":[",
                               (unsigned long)oldest_sequence,
                               (unsigned long)latest_sequence,
@@ -3969,7 +4569,8 @@ static esp_err_t sml_api_handler(httpd_req_t *req)
                               (unsigned long)invalid_crc_telegrams,
                               (unsigned long)transport_gaps,
                               (unsigned long)transport_losses,
-                              (unsigned long)transport_reorders);
+                              (unsigned long)transport_reorders,
+                              (unsigned long)transport_duplicates);
     if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
         return ESP_FAIL;
     }
@@ -4011,6 +4612,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     uint32_t transport_gaps;
     uint32_t transport_losses;
     uint32_t transport_reorders;
+    uint32_t transport_duplicates;
     double power_sum;
     size_t power_count = 0;
     uint64_t power_reference_us = 0;
@@ -4024,6 +4626,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     transport_gaps = g_sml_transport_gaps;
     transport_losses = g_sml_transport_losses;
     transport_reorders = g_sml_transport_reorders;
+    transport_duplicates = g_sml_transport_duplicates;
 
     power_sum = g_sml_power_sample_sum_w;
     power_count = g_sml_power_sample_count;
@@ -4059,7 +4662,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
         }
     }
 
-    char payload[896];
+    char payload[1400];
     char average_json[48] = "null";
     if (power_count != 0) {
         int average_len = snprintf(average_json, sizeof(average_json),
@@ -4075,15 +4678,103 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     int pm_max_freq_mhz = pm_config.max_freq_mhz;
     int pm_min_freq_mhz = pm_config.min_freq_mhz;
     int pm_current_freq_mhz = esp_clk_cpu_freq() / 1000000;
+    /* Burst-lock duty is receiver-only (C6); on other targets the field is
+     * simply omitted so the JSON stays valid. Sized for the fixed keys plus the
+     * widest possible 32-bit values. */
+    char burst_json[320] = "";
+#if BURST_LOCK_SUPPORTED
+    {
+        burst_lock_stats_t bl;
+        burst_lock_get_stats(&bl);
+        /* Reliability = how often an opened wake window actually caught a burst
+         * (a frame arrived in it). Undefined (100%) before any window has closed. */
+        uint32_t served = bl.window_hits + bl.window_misses;
+        uint32_t reliability_pct =
+            served != 0u ? (uint32_t)((uint64_t)bl.window_hits * 100u / served)
+                         : 100u;
+        int burst_len = snprintf(
+            burst_json, sizeof(burst_json),
+            ",\"burst_lock\":%s,\"burst_locked\":%s,\"burst_period_ms\":%u,"
+            "\"burst_window_ms\":%u,\"burst_awake_ms\":%u,"
+            "\"burst_awake_pct\":%u,\"burst_bursts\":%u,\"burst_window_hits\":%u,"
+            "\"burst_window_misses\":%u,\"burst_reliability_pct\":%u,"
+            "\"burst_unlocks\":%u",
+            bl.enabled ? "true" : "false", bl.locked ? "true" : "false",
+            (unsigned)bl.period_ms, (unsigned)bl.window_ms,
+            (unsigned)bl.awake_ms, (unsigned)bl.awake_pct,
+            (unsigned)bl.bursts, (unsigned)bl.window_hits,
+            (unsigned)bl.window_misses, (unsigned)reliability_pct,
+            (unsigned)bl.unlocks);
+        if (burst_len < 0 || (size_t)burst_len >= sizeof(burst_json)) {
+            return ESP_FAIL;
+        }
+    }
+#endif
+    /* Radio-side sleep-window configuration: the classic ESP-NOW connectionless
+     * wake window (radio_save) and the station PS mode that governs how long the
+     * modem sleeps between wakes. Reading the live runtime config here keeps the
+     * dashboard able to show the currently effective values alongside the burst
+     * lock, without touching the radio. */
+    char radio_json[384] = "";
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    {
+        runtime_config_t *rcfg = active_runtime_config();
+        const char *ps_name = rcfg->wifi_ps_mode == 0 ? "off"
+                              : rcfg->wifi_ps_mode == 2 ? "max"
+                                                     : "min";
+        portENTER_CRITICAL(&g_ps_ladder_lock);
+        const char *ladder_name = ps_ladder_mode(&g_ps_ladder) == 0 ? "off"
+                                  : ps_ladder_mode(&g_ps_ladder) == 2 ? "max"
+                                                                     : "min";
+        unsigned ladder_losses = (unsigned)ps_ladder_total_losses(&g_ps_ladder);
+        unsigned ladder_down = (unsigned)ps_ladder_steps_down(&g_ps_ladder);
+        unsigned ladder_up = (unsigned)ps_ladder_steps_up(&g_ps_ladder);
+        portEXIT_CRITICAL(&g_ps_ladder_lock);
+        int radio_len = snprintf(
+            radio_json, sizeof(radio_json),
+            ",\"radio_save\":%s,\"wake_interval_ms\":%u,\"wake_window_ms\":%u,"
+            "\"wifi_ps_mode\":\"%s\",\"listen_interval\":%u,"
+            "\"ps_ladder\":%s,\"ps_ladder_mode\":\"%s\",\"ps_ladder_losses\":%u,"
+            "\"ps_ladder_steps_down\":%u,\"ps_ladder_steps_up\":%u,"
+            "\"ap_enabled\":%s,\"ap_auto_off\":%s",
+            rcfg->radio_save ? "true" : "false",
+            (unsigned)rcfg->wake_interval_ms, (unsigned)rcfg->wake_window_ms,
+            ps_name, (unsigned)rcfg->listen_interval,
+            rcfg->ps_ladder ? "true" : "false", ladder_name, ladder_losses,
+            ladder_down, ladder_up,
+            g_ap_enabled ? "true" : "false",
+            rcfg->ap_auto_off ? "true" : "false");
+        if (radio_len < 0 || (size_t)radio_len >= sizeof(radio_json)) {
+            return ESP_FAIL;
+        }
+    }
+#endif
+    /* Wi-Fi reconnect accounting (receiver-only): a growing "skipped" count is
+     * the fix working - a 'set ps|listen' that changed nothing no longer drops
+     * the link. */
+    char wifi_json[128] = "";
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    {
+        int wifi_len = snprintf(wifi_json, sizeof(wifi_json),
+                                ",\"wifi_reconnects\":%u,\"wifi_reconnect_skips\":%u",
+                                (unsigned)g_wifi_reconnects,
+                                (unsigned)g_wifi_reconnect_skips);
+        if (wifi_len < 0 || (size_t)wifi_len >= sizeof(wifi_json)) {
+            return ESP_FAIL;
+        }
+    }
+#endif
     int len = snprintf(payload, sizeof(payload),
                        "{\"version\":\"%s\",\"import\":%s,\"export\":%s,\"power\":%s,"
                        "\"average_power_w\":%s,\"average_samples\":%u,"
                        "\"average_duration_s\":%llu,\"crc_valid\":%lu,"
                        "\"crc_invalid\":%lu,\"transport_gaps\":%lu,"
                        "\"transport_losses\":%lu,\"transport_reorders\":%lu,"
+                       "\"transport_duplicates\":%lu,"
+                       "\"sender_rssi_dbm\":%d,\"sender_rssi_valid\":%s,"
                        "\"cpu_freq_mhz\":%d,\"cpu_freq_max_mhz\":%d,"
                        "\"cpu_freq_min_mhz\":%d,\"sleep_state\":%u,"
-                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu}",
+                       "\"light_sleep_enabled\":%u,\"uptime_sleep_ms\":%lu%s%s%s}",
                        fw_version(),
                        readings[0], readings[1], readings[2],
                        average_json,
@@ -4094,12 +4785,18 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
                        (unsigned long)transport_gaps,
                        (unsigned long)transport_losses,
                        (unsigned long)transport_reorders,
+                       (unsigned long)transport_duplicates,
+                       (int)g_sender_rssi_dbm,
+                       g_sender_rssi_valid ? "true" : "false",
                        pm_current_freq_mhz,
                        pm_max_freq_mhz,
                        pm_min_freq_mhz,
                        (unsigned int)g_sleep_state,
                        (unsigned int)(pm_config.light_sleep_enable ? 1 : 0),
-                       (unsigned long)g_sleep_accumulated_ms);
+                       (unsigned long)g_sleep_accumulated_ms,
+                       burst_json,
+                       wifi_json,
+                       radio_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
         return ESP_FAIL;
     }
@@ -4316,6 +5013,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     size_t record_count = 0;
     power_history_status_t status;
     bool overflow = false;
+    bool history_busy = false;
     esp_err_t err = power_history_read(after_sequence, recent_count, records,
                                        POWER_HISTORY_PAGE_SIZE, &record_count,
                                        &status, &overflow);
@@ -4330,9 +5028,13 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     } else if (err == ESP_ERR_TIMEOUT) {
         /* Writer/import holds the lock for a long in-place ring insert. Serve an
          * empty snapshot instead of blocking the HTTP task until the browser's
-         * request timeout fires; the dashboard retries on its next poll. */
+         * request timeout fires; the dashboard retries on its next poll. The
+         * `busy` flag tells the UI apart "store is empty" from "store is
+         * momentarily locked" - otherwise a full ring under backfill load looked
+         * like an empty store. */
         record_count = 0;
         status.ready = false;
+        history_busy = true;
         ESP_LOGW(TAG, "Power history busy; serving empty dataset");
     } else if (err != ESP_OK) {
         free(records);
@@ -4374,11 +5076,12 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         bool agg_busy = (agg_err == ESP_ERR_TIMEOUT);
         if (agg_busy) {
             /* Writer/import holds the lock: emit an empty (but valid) aggregated
-             * window instead of blocking the HTTP task. The dashboard retries. */
+             * window instead of blocking the HTTP task. The dashboard retries.
+             * The `busy` flag keeps that apart from a genuinely empty store. */
             status.ready = false;
             ESP_LOGW(TAG, "Power history busy; serving empty aggregation");
         }
-        char agg_header[512];
+        char agg_header[640];
         int agg_header_len = -1;
         double energy_day_wh = 0.0;
         double energy_month_wh = 0.0;
@@ -4392,15 +5095,18 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         if (agg_err == ESP_OK || agg_busy) {
             agg_header_len = snprintf(
                 agg_header, sizeof(agg_header),
-                "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
+                "{\"clock_synced\":%s,\"storage_ready\":%s,\"busy\":%s,\"current_sample_count\":%u,"
                 "\"oldest_sequence\":%lu,"
                 "\"latest_sequence\":%lu,\"record_count\":%lu,"
                 "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
+                "\"splice_batches\":%lu,\"splice_records\":%lu,\"splice_skipped\":%lu,"
+                "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
                 "\"aggregated\":true,\"window_hours\":%.2f,\"bucket_seconds\":%lld,"
                 "\"day_start_utc\":%lld,\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
                 "\"capacity\":%u,\"records\":[",
                 system_time_is_valid() ? "true" : "false",
                 status.persistent ? "true" : "false",
+                agg_busy ? "true" : "false",
                 (unsigned int)current_sample_count_agg,
                 (unsigned long)status.oldest_sequence,
                 (unsigned long)status.latest_sequence,
@@ -4408,6 +5114,11 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 (unsigned long)status.queue_drops,
                 (unsigned long)status.write_errors,
                 overflow ? "true" : "false",
+                (unsigned long)status.splice_batches,
+                (unsigned long)status.splice_records,
+                (unsigned long)status.splice_skipped,
+                (unsigned long)status.storage_used_bytes,
+                (unsigned long)status.storage_total_bytes,
                 window_hours_out,
                 (long long)bucket_seconds,
                 (long long)window_start_utc,
@@ -4471,7 +5182,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     current_sample_count = g_sml_power_sample_count;
     portEXIT_CRITICAL(&g_sml_history_lock);
 
-    char header[448];
+    char header[576];
     double energy_day_wh = 0.0;
     double energy_month_wh = 0.0;
     if (system_time_is_valid()) {
@@ -4483,14 +5194,17 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
     }
     int header_len = snprintf(
         header, sizeof(header),
-        "{\"clock_synced\":%s,\"storage_ready\":%s,\"current_sample_count\":%u,"
+        "{\"clock_synced\":%s,\"storage_ready\":%s,\"busy\":%s,\"current_sample_count\":%u,"
         "\"oldest_sequence\":%lu,"
         "\"latest_sequence\":%lu,\"record_count\":%lu,"
         "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
+        "\"splice_batches\":%lu,\"splice_records\":%lu,\"splice_skipped\":%lu,"
+        "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
         "\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
         "\"capacity\":%u,\"records\":[",
         system_time_is_valid() ? "true" : "false",
         status.persistent ? "true" : "false",
+        history_busy ? "true" : "false",
         (unsigned int)current_sample_count,
         (unsigned long)status.oldest_sequence,
         (unsigned long)status.latest_sequence,
@@ -4498,6 +5212,11 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         (unsigned long)status.queue_drops,
         (unsigned long)status.write_errors,
         overflow ? "true" : "false",
+        (unsigned long)status.splice_batches,
+        (unsigned long)status.splice_records,
+        (unsigned long)status.splice_skipped,
+        (unsigned long)status.storage_used_bytes,
+        (unsigned long)status.storage_total_bytes,
         energy_day_wh,
         energy_month_wh,
         (unsigned int)POWER_HISTORY_CAPACITY);
@@ -5207,6 +5926,41 @@ static esp_err_t send_http_error_status(httpd_req_t *req,
     return httpd_resp_sendstr(req, message);
 }
 
+/* POST /api/reboot: restart from the web UI (auth-gated like /update). The
+ * response is sent first and a short one-shot timer does the restart, so the
+ * browser gets a clean reply instead of a reset connection. Only the receiver
+ * registers this route; it has no crash journal (that lives on the sender), so
+ * the restart is a plain esp_restart() like console_cmd_reboot(). */
+static void reboot_timer_callback(void *arg)
+{
+    (void)arg;
+    esp_restart();
+}
+
+static esp_err_t reboot_handler(httpd_req_t *req)
+{
+    if (!ota_key_is_valid(req)) {
+        return send_http_error_status(req, "401 Unauthorized",
+                                      "X-OTA-Key missing or wrong");
+    }
+    liveness_note_alive();
+    const esp_timer_create_args_t timer_args = {
+        .callback = reboot_timer_callback,
+        .name = "web_reboot",
+    };
+    esp_timer_handle_t timer = NULL;
+    if (esp_timer_create(&timer_args, &timer) != ESP_OK) {
+        return send_http_error_status(req, "500 Internal Server Error",
+                                      "could not schedule the restart");
+    }
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    esp_err_t err = httpd_resp_sendstr(
+        req, "rebooting in 500 ms - reload the page in a few seconds\n");
+    /* The reply is out; a failure to arm the timer leaves the device running. */
+    (void)esp_timer_start_once(timer, 500 * 1000);
+    return err;
+}
+
 /* --- Web debug console -----------------------------------------------------
  * A browser alternative to the serial console. Commands are executed against
  * the live device state; output is plain text. All handlers run in the HTTP
@@ -5256,6 +6010,26 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
         return;
     }
     written += wdt;
+#if CONFIG_ESPNOW_ROLE_SENDER
+    /* Application-level ACK state: whether the receiver confirms telegrams and
+     * how much retransmission the link needs. "confirmed" means an ACK has been
+     * seen this session (strict delivery); "best effort" means the peer never
+     * acknowledged, so the sender falls back to blind sends. */
+    int ack = snprintf(
+        out + written, out_size - (size_t)written,
+        "sml ack: %s, sent %u, failed %u, retransmits %u, timeouts %u, "
+        "unacked %u, pending %u, missing %u\n",
+        g_sml_ack_seen ? "confirmed" : "best effort",
+        (unsigned)g_sml_sent_ok, (unsigned)g_sml_send_fail,
+        (unsigned)g_sml_retransmits, (unsigned)g_sml_ack_timeouts,
+        (unsigned)g_sml_unacked, (unsigned)sml_tx_batch_count(&g_sml_tx_batch),
+        (unsigned)sml_tx_batch_missing(&g_sml_tx_batch));
+    if (ack < 0 || (size_t)ack >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+        return;
+    }
+    written += ack;
+#endif
 #if !CONFIG_ESPNOW_ROLE_SENDER
     int extra = snprintf(
         out + written, out_size - (size_t)written,
@@ -5279,6 +6053,32 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
         (unsigned)probe_fails);
     if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
         snprintf(out, out_size, "status: output truncated\n");
+        return;
+    }
+    written += extra;
+#if BURST_LOCK_SUPPORTED
+    burst_lock_stats_t bl;
+    burst_lock_get_stats(&bl);
+    extra = snprintf(
+        out + written, out_size - (size_t)written,
+        "burst lock: %s, %s, period %u ms, window %u ms\n"
+        "burst lock duty: awake %u ms (%u%%), bursts %u, locks %u, "
+        "hits %u, misses %u, unlocks %u\n",
+        bl.enabled ? "on" : "off", bl.locked ? "locked" : "learning",
+        (unsigned)bl.period_ms, (unsigned)bl.window_ms, (unsigned)bl.awake_ms,
+        (unsigned)bl.awake_pct, (unsigned)bl.bursts, (unsigned)bl.locks,
+        (unsigned)bl.window_hits, (unsigned)bl.window_misses,
+        (unsigned)bl.unlocks);
+    if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
+    }
+#endif
+    extra = snprintf(
+        out + written, out_size - (size_t)written,
+        "wifi reconnect: %u done, %u skipped (listen_interval unchanged)\n",
+        (unsigned)g_wifi_reconnects, (unsigned)g_wifi_reconnect_skips);
+    if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
+        snprintf(out, out_size, "status: output truncated\n");
     }
 #endif
 }
@@ -5299,7 +6099,9 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         "storage: %s\n"
         "records: %u / %u\n"
         "sequence: oldest %u, latest %u\n"
-        "write errors: %u, queue drops: %u\n",
+        "write errors: %u, queue drops: %u\n"
+        "splices: %u batch(es), %u record rewrite(s), %u skipped (too deep)\n"
+        "spiffs: %u / %u bytes used\n",
         !status.ready ? "unavailable"
                       : (status.persistent ? "ready (SPIFFS)"
                                            : "RAM fallback (not persistent)"),
@@ -5307,7 +6109,12 @@ static void console_cmd_history(const char *args, char *out, size_t out_size)
         (unsigned int)status.oldest_sequence,
         (unsigned int)status.latest_sequence,
         (unsigned int)status.write_errors,
-        (unsigned int)status.queue_drops);
+        (unsigned int)status.queue_drops,
+        (unsigned int)status.splice_batches,
+        (unsigned int)status.splice_records,
+        (unsigned int)status.splice_skipped,
+        (unsigned int)status.storage_used_bytes,
+        (unsigned int)status.storage_total_bytes);
     if (written < 0 || (size_t)written >= out_size) {
         snprintf(out, out_size, "history: output truncated\n");
         return;
@@ -5368,6 +6175,31 @@ static void console_cmd_time(const char *args, char *out, size_t out_size)
     }
     snprintf(out, out_size, "clock: %ld (valid=%s)\n", (long)now,
              system_time_is_valid() ? "yes" : "no");
+}
+
+/* `sntp resync`: tear the SNTP client down and start it again so a stalled sync
+ * (e.g. the home router restarted) is retried without rebooting the device. */
+static void console_cmd_sntp(const char *args, char *out, size_t out_size)
+{
+    if (args != NULL && args[0] != '\0' && strcmp(args, "resync") != 0) {
+        snprintf(out, out_size, "usage: sntp resync\n");
+        return;
+    }
+    if (g_sntp_started) {
+        esp_netif_sntp_deinit();
+        g_sntp_started = false;
+    }
+    esp_sntp_config_t sntp_config =
+        ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    sntp_config.wait_for_sync = false;
+    sntp_config.sync_cb = time_sync_notification;
+    esp_err_t err = esp_netif_sntp_init(&sntp_config);
+    if (err != ESP_OK) {
+        snprintf(out, out_size, "sntp resync failed: %s\n", esp_err_to_name(err));
+        return;
+    }
+    g_sntp_started = true;
+    snprintf(out, out_size, "sntp: client restarted (resync requested)\n");
 }
 
 static void console_cmd_wifi(const char *args, char *out, size_t out_size)
@@ -5549,7 +6381,10 @@ static size_t simulate_render(char *out, size_t out_size)
 
     power_history_status_t st;
     power_history_get_status(&st);
-    sim_line(&cur, &rem, "history ready     : %s\n", st.ready ? "yes" : "no");
+    sim_line(&cur, &rem, "history ready     : %s\n",
+             !st.ready ? "no"
+                       : (st.persistent ? "yes (SPIFFS)"
+                                        : "yes (RAM fallback, not persistent)"));
     sim_line(&cur, &rem, "history records   : %u (written %u, dropped %u)\n",
              (unsigned)st.record_count, (unsigned)st.write_errors,
              (unsigned)st.queue_drops);
@@ -5653,6 +6488,9 @@ static esp_err_t simulate_page_handler(httpd_req_t *req)
  * erases the namespace and returns to the compile-time defaults. */
 static runtime_config_t g_runtime_config;
 static bool g_runtime_config_ready;
+/* Safe-fallback bookkeeping: which knob (if any) the driver rejected and was
+ * repaired to its default. Surfaced by 'config' and reset by 'reset-config'. */
+static runtime_config_health_t g_runtime_health;
 
 #define RUNTIME_CONFIG_NVS_NAMESPACE "rtcfg"
 #define RUNTIME_CONFIG_NVS_KEY "cfg"
@@ -5710,8 +6548,10 @@ static void runtime_config_erase_namespace(void)
 }
 #endif
 
-/* Load the persisted knobs, clamped to what this build allows. A missing or
- * malformed blob leaves *cfg untouched (the caller keeps the defaults). */
+/* Load the persisted knobs, clamped to what this build allows. A missing blob
+ * is the normal first-boot case (silent). A blob that is present but the wrong
+ * size, wrong version or undecodable is logged and ignored, so the caller keeps
+ * the defaults instead of silently running an unexpected config. */
 static void runtime_config_load(runtime_config_t *cfg)
 {
     nvs_handle_t handle;
@@ -5722,11 +6562,25 @@ static void runtime_config_load(runtime_config_t *cfg)
     size_t len = sizeof(blob);
     esp_err_t err = nvs_get_blob(handle, RUNTIME_CONFIG_NVS_KEY, blob, &len);
     nvs_close(handle);
-    if (err != ESP_OK || len != sizeof(blob)) {
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "runtime config: NVS read failed (%s); using defaults",
+                 esp_err_to_name(err));
+        return;
+    }
+    if (len != sizeof(blob)) {
+        ESP_LOGW(TAG, "runtime config: stored blob is %u bytes, expected %u; "
+                      "using defaults",
+                 (unsigned)len, (unsigned)sizeof(blob));
         return;
     }
     runtime_config_t loaded;
     if (!runtime_config_decode(blob, len, &loaded)) {
+        ESP_LOGW(TAG, "runtime config: stored blob v%u is undecodable; using "
+                      "defaults",
+                 blob[0]);
         return;
     }
     runtime_config_clamp(&loaded, CONFIG_ESPNOW_CPU_MAX_MHZ);
@@ -5741,6 +6595,33 @@ static runtime_config_t *active_runtime_config(void)
         g_runtime_config_ready = true;
     }
     return &g_runtime_config;
+}
+
+/* Apply the knobs and, when the PM API rejects them, fall back to the safe
+ * defaults so a rejected value is never kept. `key` names the knob being set
+ * (NULL for a whole-config apply). Persists the result either way (the value
+ * survives a reboot and an OTA). Returns true when the requested config is in
+ * effect; false when a repair happened. The health record makes the event
+ * visible in 'config'. */
+static bool runtime_config_apply_checked(runtime_config_t *cfg, const char *key)
+{
+    runtime_config_health_clear(&g_runtime_health);
+    bool ok = runtime_config_apply(cfg);
+    if (!ok) {
+        ESP_LOGW(TAG, "runtime config: apply failed for '%s'; repairing to default",
+                 key != NULL ? key : "config");
+        runtime_config_repair(cfg, key, "esp_pm_configure() rejected",
+                              &g_runtime_health);
+        if (!runtime_config_apply(cfg)) {
+            ESP_LOGE(TAG, "runtime config: apply still failed after repair; using "
+                          "full defaults");
+            runtime_config_repair(cfg, NULL, "apply failed after repair",
+                                  &g_runtime_health);
+            (void)runtime_config_apply(cfg);
+        }
+    }
+    runtime_config_store(cfg);
+    return ok;
 }
 
 /* Append NVS partition usage to out. Shared by the `test storage` console
@@ -5907,6 +6788,17 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
         return;
     }
     if (strcmp(what, "storage") == 0) {
+        if (strcmp(rest, "format") == 0) {
+            /* Repair an unreadable/damaged ring: reformat the partition and
+             * recreate the file with fresh headers. The sender backfill
+             * re-imports the minute history afterwards (run 'pull'). */
+            snprintf(out, out_size, "formatting persistent storage ...\n");
+            esp_err_t ferr = power_history_format();
+            snprintf(out + strlen(out), out_size - strlen(out),
+                     "format: %s\n", ferr == ESP_OK ? "ok (empty store, run 'pull')"
+                                                    : esp_err_to_name(ferr));
+            return;
+        }
         power_history_status_t s;
         power_history_get_status(&s);
         int64_t oldest = 0;
@@ -5916,8 +6808,12 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  "storage: %s\n"
                  "  records: %u  sequences: %u..%u\n"
                  "  range: %lld..%lld UTC\n"
-                 "  queue drops: %u  write errors: %u\n",
-                 s.ready ? "ready" : "not ready", (unsigned)s.record_count,
+                 "  queue drops: %u  write errors: %u\n"
+                 "usage: test storage | test storage format\n",
+                 !s.ready ? "not ready"
+                          : (s.persistent ? "ready (SPIFFS)"
+                                          : "RAM fallback (not persistent)"),
+                 (unsigned)s.record_count,
                  (unsigned)s.oldest_sequence, (unsigned)s.latest_sequence,
                  (long long)oldest, (long long)latest,
                  (unsigned)s.queue_drops, (unsigned)s.write_errors);
@@ -5941,32 +6837,117 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
     snprintf(out, out_size, "unknown test '%s' (sleep, sml, espnow, storage)\n", what);
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* `set wifi-ssid <ssid>` / `set wifi-pass <pass>`: validate, persist to the
+ * metercfg namespace and reconnect (same disconnect/set_config/connect order as
+ * the /save form). An empty password keeps the stored one, so an SSID-only
+ * change cannot wipe the credential. On any error the stored values and the
+ * running connection are left untouched. */
+static void console_set_wifi_credential(const char *key, const char *value,
+                                        char *out, size_t out_size)
+{
+    char err[128] = {0};
+    char ssid[NET_CONFIG_SSID_MAX + 1] = {0};
+    char password[NET_CONFIG_WIFI_PASS_MAX + 1] = {0};
+    strlcpy(ssid, g_wifi_ssid, sizeof(ssid));
+    strlcpy(password, g_wifi_password, sizeof(password));
+
+    if (strcmp(key, "wifi-ssid") == 0) {
+        if (!net_config_validate_ssid(value, err, sizeof(err))) {
+            snprintf(out, out_size, "%s", err);
+            return;
+        }
+        strlcpy(ssid, value, sizeof(ssid));
+    } else {
+        /* An empty password means "keep the stored one". */
+        if (value[0] != '\0') {
+            if (!net_config_validate_wifi_pass(value, err, sizeof(err))) {
+                snprintf(out, out_size, "%s", err);
+                return;
+            }
+            strlcpy(password, value, sizeof(password));
+        }
+    }
+
+    esp_err_t save_err = save_wifi_credentials(ssid, password);
+    if (save_err != ESP_OK) {
+        snprintf(out, out_size, "wifi: could not persist (%s)\n",
+                 esp_err_to_name(save_err));
+        return;
+    }
+
+    ps_fallback_mark_intentional();
+    (void)esp_wifi_disconnect();
+    wifi_config_t sta_config;
+    fill_station_config(&sta_config);
+    esp_err_t err2 = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+    if (err2 == ESP_OK) {
+        err2 = esp_wifi_connect();
+    }
+    if (err2 != ESP_OK) {
+        snprintf(out, out_size, "wifi %s saved, but reconnect failed (%s)\n", key,
+                 esp_err_to_name(err2));
+        return;
+    }
+    snprintf(out, out_size, "wifi %s saved; reconnecting to \"%s\"\n", key, ssid);
+}
+#endif /* !CONFIG_ESPNOW_ROLE_SENDER */
+
 static void console_cmd_set(const char *args, char *out, size_t out_size)
 {
     char key[24] = {0};
-    char value[32] = {0};
-    if (sscanf(args, "%23s %31s", key, value) != 2) {
+    char value[NET_CONFIG_MQTT_URI_MAX + 1] = {0};
+    int parsed = sscanf(args, "%23s %160s", key, value);
+    /* A missing value is only meaningful for the "keep/clear" keys: an empty
+     * wifi-pass keeps the stored one, an empty mqtt-user/mqtt-pass clears it.
+     * Everything else needs an explicit value. */
+    bool value_missing = parsed < 2;
+    bool value_optional = value_missing &&
+                          (strcmp(key, "wifi-pass") == 0 ||
+                           strcmp(key, "mqtt-user") == 0 ||
+                           strcmp(key, "mqtt-pass") == 0);
+    if (parsed < 1 || (value_missing && !value_optional)) {
         /* TWT is HE-only, so it is advertised only on the C6; the ps/listen
          * knobs apply to every receiver (modem sleep is not HE-specific). */
-#if SOC_WIFI_HE_SUPPORT
+#if CONFIG_ESPNOW_ROLE_SENDER
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries> <value>\n");
+#elif SOC_WIFI_HE_SUPPORT
+        snprintf(out, out_size,
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #else
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #endif
         return;
     }
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* WLAN credentials and MQTT settings do not live in runtime_config: they go
+     * straight to their own NVS namespace and trigger a reconnect / bridge
+     * restart. Handled here before the runtime_config_set() fallthrough. */
+    if (strcmp(key, "wifi-ssid") == 0 || strcmp(key, "wifi-pass") == 0) {
+        console_set_wifi_credential(key, value, out, out_size);
+        return;
+    }
+    if (strncmp(key, "mqtt-", 5) == 0) {
+        char err[128] = {0};
+        (void)mqtt_bridge_set_config(key, value, err, sizeof(err));
+        snprintf(out, out_size, "%s", err);
+        return;
+    }
+#endif
+
     runtime_config_t *cfg = active_runtime_config();
-    char err[64] = {0};
+    char err[128] = {0};
     if (!runtime_config_set(cfg, key, value, CONFIG_ESPNOW_CPU_MAX_MHZ, err,
                             sizeof(err))) {
         snprintf(out, out_size, "%s", err);
         return;
     }
-    bool applied = runtime_config_apply(cfg);
-    /* Persist so the value survives a reboot and an OTA (NVS, not RAM-only). */
-    runtime_config_store(cfg);
+    /* Apply with the safe fallback: a rejected value is dropped and the default
+     * restored (persisted) instead of being kept. */
+    bool applied = runtime_config_apply_checked(cfg, key);
 
     /* Say so when the stored value differs from what was asked for (a value
      * below the Wi-Fi minimum or off the DFS grid is snapped, not rejected). */
@@ -6005,14 +6986,43 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         strcmp(key, "beacon") == 0 || strcmp(key, "beacon-tu") == 0 ||
         strcmp(key, "radio-save") == 0 || strcmp(key, "radio-ps") == 0 ||
         strcmp(key, "wake-interval") == 0 || strcmp(key, "wake") == 0 ||
-        strcmp(key, "wake-window") == 0 || strcmp(key, "window") == 0) {
+        strcmp(key, "wake-window") == 0 || strcmp(key, "window") == 0 ||
+        strcmp(key, "burst-lock") == 0) {
         apply_radio_power_config();
+    }
+    /* 'set ps' sets the ladder's start/ceiling rung; the worker then adapts down
+     * from it. 'set ps-ladder on|off' enables/disables the adaptation. Both need
+     * the ladder's start updated so a later raise respects the new ceiling. */
+    if (strcmp(key, "ps") == 0 || strcmp(key, "wifi-ps") == 0 ||
+        strcmp(key, "ps-ladder") == 0 || strcmp(key, "ladder") == 0) {
+        portENTER_CRITICAL(&g_ps_ladder_lock);
+        ps_ladder_set_start(&g_ps_ladder, (ps_ladder_mode_t)cfg->wifi_ps_mode,
+                            (uint32_t)(esp_timer_get_time() / 1000));
+        portEXIT_CRITICAL(&g_ps_ladder_lock);
+        /* Apply at once: 'set ps-ladder off' must drop back to the configured
+         * mode without waiting for the next worker tick. */
+        if (strcmp(key, "ps-ladder") == 0 || strcmp(key, "ladder") == 0) {
+            apply_wifi_ps_config();
+        }
     }
     /* 'set ps' and 'set listen' both need a reconnect: listen_interval is read
      * from the station config only when the association request is built. */
     if (strcmp(key, "ps") == 0 || strcmp(key, "wifi-ps") == 0 ||
         strcmp(key, "listen") == 0 || strcmp(key, "listen-interval") == 0) {
         wifi_ps_apply_and_reconnect();
+    }
+    /* 'set ap' actually switches the SoftAP (the knob alone does nothing at
+     * runtime). Refuse-and-roll-back on failure so the persisted state always
+     * matches the live radio - e.g. 'set ap off' before the station is connected
+     * is rejected and the knob stays on. 'set ap-auto-off' needs no apply. */
+    if (strcmp(key, "ap") == 0 || strcmp(key, "ap-enabled") == 0) {
+        char ap_err[128] = {0};
+        if (!apply_ap_mode(cfg->ap_enabled, ap_err, sizeof(ap_err))) {
+            cfg->ap_enabled = g_ap_enabled;
+            runtime_config_store(cfg);
+            snprintf(out, out_size, "%s\n", ap_err);
+            return;
+        }
     }
 #if SOC_WIFI_HE_SUPPORT
     /* TWT only takes effect once associated; a 'set' while connected re-negotiates
@@ -6031,8 +7041,16 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
     int written = snprintf(out, out_size,
                            "%s=%s%s%s\n", key, value, note,
                            applied ? "" : " (hardware rejected the change)");
-    if (written > 0 && (size_t)written < out_size) {
-        runtime_config_render(cfg, out + written, out_size - (size_t)written);
+    size_t used = (written > 0 && (size_t)written < out_size) ? (size_t)written : 0;
+    if (used != 0) {
+        runtime_config_render(cfg, out + used, out_size - used);
+    }
+    /* Surface a safe-fallback repair from a radio-side apply (txpower/beacon/
+     * radio-save/ps) that happened after the PM apply above. */
+    used = strlen(out);
+    if (used < out_size) {
+        runtime_config_health_render(&g_runtime_health, out + used,
+                                     out_size - used);
     }
 }
 
@@ -6045,10 +7063,28 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
      * have TWT off); after the reset the flag is false and teardown would skip. */
     twt_teardown();
 #endif
+    runtime_config_health_clear(&g_runtime_health);
     runtime_config_reset(cfg);
     runtime_config_erase();
     runtime_config_apply(cfg);
 #if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Re-arm the radio-side knobs directly. The reconnect below does NOT do it:
+     * wifi_ps_apply_and_reconnect() only reconnects for a changed
+     * listen_interval, so the WIFI_EVENT_STA_CONNECTED re-apply that normally
+     * arms the burst lock / wake window may not fire. Without this, a reset that
+     * re-enables burst-lock leaves the worker disabled while ps=min parks the
+     * modem with no wake window (the silent ~90% loss case). */
+    apply_radio_power_config();
+    /* Bring the SoftAP back in line with the reset defaults (best effort: an
+     * off while the station is not connected is refused, so the device is never
+     * stranded - it just keeps the AP it has). */
+    if (cfg->ap_enabled != g_ap_enabled) {
+        char ap_err[96] = {0};
+        if (!apply_ap_mode(cfg->ap_enabled, ap_err, sizeof(ap_err))) {
+            ESP_LOGW(TAG, "reset-config: setup SoftAP left %s: %s",
+                     g_ap_enabled ? "on" : "off", ap_err);
+        }
+    }
     /* Restore the default modem PS mode + listen interval and reconnect so the
      * default interval reaches the association request. */
     wifi_ps_apply_and_reconnect();
@@ -6075,10 +7111,15 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
         snprintf(radio, sizeof(radio), " txpwr=%u beacon=%u",
                  (unsigned)cfg->wifi_txpower_dbm, (unsigned)cfg->ap_beacon_tu);
     }
-    char wake[32] = "";
+    char wake[48] = "";
     if (cfg->radio_save) {
         snprintf(wake, sizeof(wake), " radio-save=%u/%u",
                  (unsigned)cfg->wake_interval_ms, (unsigned)cfg->wake_window_ms);
+    }
+    if (cfg->burst_lock) {
+        size_t used = strlen(wake);
+        snprintf(wake + used, sizeof(wake) - used, " burst-lock=on/%ums",
+                 (unsigned)cfg->wake_window_ms);
     }
     char twt[32] = "";
     if (cfg->twt_enabled) {
@@ -6091,11 +7132,25 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
     const char *ps = cfg->wifi_ps_mode <= RUNTIME_CONFIG_PS_MAX
                          ? ps_names[cfg->wifi_ps_mode]
                          : "min";
-    snprintf(out, out_size, "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u\n",
-             (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
-             cfg->light_sleep ? "on" : "off",
-             (unsigned)cfg->espnow_retries, radio, wake, twt, ps,
-             (unsigned)cfg->listen_interval);
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    char ap[48];
+    snprintf(ap, sizeof(ap), " ap=%s ap-auto-off=%s",
+             g_ap_enabled ? "on" : "off", cfg->ap_auto_off ? "on" : "off");
+#else
+    const char *ap = "";
+#endif
+    int used = snprintf(out, out_size,
+                        "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u%s\n",
+                        (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
+                        cfg->light_sleep ? "on" : "off",
+                        (unsigned)cfg->espnow_retries, radio, wake, twt, ps,
+                        (unsigned)cfg->listen_interval, ap);
+    /* Surface a safe-fallback repair (a knob the driver rejected and that was
+     * reset to its default) so the operator sees why a value differs. */
+    if (used > 0 && (size_t)used < out_size) {
+        runtime_config_health_render(&g_runtime_health, out + used,
+                                     out_size - (size_t)used);
+    }
 }
 
 static void web_console_register_commands(void)
@@ -6106,14 +7161,16 @@ static void web_console_register_commands(void)
 #if !CONFIG_ESPNOW_ROLE_SENDER
     /* txpower/beacon only apply on the receiver (the sender has no SoftAP and
      * drives its own radio), so only advertise them there. TWT needs Wi-Fi 6
-     * (HE), so it is only advertised on the HE-capable targets (the C6). */
+     * (HE), so it is only advertised on the HE-capable targets (the C6). The
+     * wifi-/mqtt- keys persist to their own NVS namespaces and reconnect /
+     * restart the bridge. */
 #if SOC_WIFI_HE_SUPPORT
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|twt|twt-wake|ps|listen",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #else
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|ps|listen",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #endif
 #else
@@ -6134,6 +7191,8 @@ static void web_console_register_commands(void)
 #endif
     web_console_register("time", "current UTC clock and sync state",
                          console_cmd_time);
+    web_console_register("sntp", "restart the SNTP client: sntp resync",
+                         console_cmd_sntp);
     web_console_register("wifi", "configured SSID and link state",
                          console_cmd_wifi);
 #if !CONFIG_ESPNOW_ROLE_SENDER
@@ -6179,7 +7238,7 @@ static esp_err_t console_api_handler(httpd_req_t *req)
     }
     line[total] = '\0';
 
-    char result[768];
+    char result[WEB_CONSOLE_OUT_MAX];
     web_console_run(line, result, sizeof(result));
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
@@ -6282,11 +7341,20 @@ static esp_err_t sender_diag_exchange_once(const void *payload, size_t payload_l
         return err;
     }
 
+#if BURST_LOCK_SUPPORTED
+    /* Keep the modem awake for the whole request/response round trip so the
+     * reply is not lost to a parked radio. */
+    burst_lock_hold_awake();
+#endif
+
     while (xQueueReceive(g_diag_response_queue, &(espnow_ota_rx_item_t){0}, 0) == pdTRUE) {
     }
 
     err = esp_now_send(sender_mac, (const uint8_t *)payload, payload_len);
     if (err != ESP_OK) {
+#if BURST_LOCK_SUPPORTED
+        burst_lock_release_awake();
+#endif
         return err;
     }
 
@@ -6308,8 +7376,14 @@ static esp_err_t sender_diag_exchange_once(const void *payload, size_t payload_l
         }
         memcpy(response, item.data, item.length);
         *response_len = item.length;
+#if BURST_LOCK_SUPPORTED
+        burst_lock_release_awake();
+#endif
         return ESP_OK;
     }
+#if BURST_LOCK_SUPPORTED
+    burst_lock_release_awake();
+#endif
     return ESP_ERR_TIMEOUT;
 }
 
@@ -6809,7 +7883,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
                        "\"sender_fw_version\":\"%s\","
                        "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
-                       "\"sleep_fallback\":%u,\"fallback_stage\":%u}",
+                       "\"sleep_fallback\":%u,\"fallback_stage\":%u,"
+                       "\"ps_fallback\":%u}",
                        fw_version(),
                        (unsigned long long)counters.uptime_ms,
                        (unsigned long long)counters.uart_rx_bytes,
@@ -6867,7 +7942,8 @@ static esp_err_t sender_diag_api_handler(httpd_req_t *req)
                        (unsigned long)counters.boot_marker_count,
                        (unsigned int)counters.boot_marker_reason,
                        (unsigned int)counters.sleep_fallback_active,
-                       (unsigned int)counters.link_fallback_stage);
+                       (unsigned int)counters.link_fallback_stage,
+                       (unsigned int)counters.ps_fallback_stage);
     } else if (header.flags & ESPNOW_DIAG_SECTION_EVENTS) {
         size_t offset = sizeof(header) + 2;
         uint8_t total = response[sizeof(header)];
@@ -7208,7 +8284,8 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        "\"wifi_ps_mode\":%u,\"build_profile\":%u,"
                        "\"sender_fw_version\":\"%s\","
                        "\"boot_marker_count\":%lu,\"boot_marker_reason\":%u,"
-                       "\"sleep_fallback\":%u,\"fallback_stage\":%u}%s%s}",
+                       "\"sleep_fallback\":%u,\"fallback_stage\":%u,"
+                       "\"ps_fallback\":%u}%s%s}",
                        mac_known ? "true" : "false",
                        (int)sender_rssi,
                        sender_rssi_valid ? "true" : "false",
@@ -7269,6 +8346,7 @@ static esp_err_t sender_status_api_handler(httpd_req_t *req)
                        (unsigned int)counters.boot_marker_reason,
                        (unsigned int)counters.sleep_fallback_active,
                        (unsigned int)counters.link_fallback_stage,
+                       (unsigned int)counters.ps_fallback_stage,
                        crash_json[0] != '\0' ? "," : "",
                        crash_json);
     if (len < 0 || (size_t)len >= sizeof(payload)) {
@@ -7542,9 +8620,22 @@ static esp_err_t relay_sender_firmware(httpd_req_t *req)
             expected = sizeof(chunk);
         }
         size_t received_total = 0;
+        int timeouts = 0;
         while (received_total < expected) {
             int received = httpd_req_recv(req, (char *)chunk + received_total,
                                           expected - received_total);
+            if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+                /* Same parked-modem tolerance as the receiver upload: a slow
+                 * client is not a failed transfer. */
+                if (++timeouts > 30) {
+                    err = ESP_FAIL;
+                    ESP_LOGE(TAG, "Sender firmware upload stalled");
+                    goto abort_transfer;
+                }
+                liveness_note_alive();
+                continue;
+            }
+            timeouts = 0;
             if (received <= 0) {
                 err = ESP_FAIL;
                 ESP_LOGE(TAG, "Sender firmware HTTP upload interrupted");
@@ -7823,9 +8914,25 @@ static esp_err_t ota_update_handler(httpd_req_t *req)
 
     uint8_t buffer[1024];
     size_t remaining = (size_t)req->content_len;
+    int timeouts = 0;
     while (remaining > 0) {
         size_t amount = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
         int received = httpd_req_recv(req, (char *)buffer, amount);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            /* A parked modem (ps=min) can stall the TCP stream for longer than
+             * the socket timeout; treat that as "no data yet", not a failure,
+             * or an otherwise healthy upload aborts mid-image. Bounded so a
+             * dead peer cannot wedge the handler forever. */
+            if (++timeouts > 30) {
+                esp_ota_abort(ota_handle);
+                httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT,
+                                    "Firmware upload stalled");
+                return ESP_FAIL;
+            }
+            liveness_note_alive();
+            continue;
+        }
+        timeouts = 0;
         if (received <= 0) {
             esp_ota_abort(ota_handle);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Firmware upload interrupted");
@@ -7896,10 +9003,32 @@ static bool decode_form_value(const char *source, char *destination, size_t capa
 
 static esp_err_t config_handler(httpd_req_t *req)
 {
-    static const char page[] =
+    /* The setup-AP switch is receiver-only. A <select> (not a checkbox) is used
+     * so the browser always sends an explicit ap=on|off - an unchecked checkbox
+     * would be omitted entirely and could be misread. The current state is
+     * preselected and spelled out below the control. */
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    const bool ap_on = g_ap_enabled;
+    char ap_section[512];
+    snprintf(ap_section, sizeof(ap_section),
+             "<form method=\"post\" action=\"/api/ap\">"
+             "<label>Setup-AP (%s)</label>"
+             "<select name=\"ap\"><option value=\"on\"%s>an</option>"
+             "<option value=\"off\"%s>aus</option></select>"
+             "<p class=\"note\">Aktuell: <b>%s</b>. Der AP darf nur abgeschaltet "
+             "werden, solange die Station mit einem WLAN verbunden ist. Mit "
+             "&bdquo;automatisch&ldquo; schaltet sich der AP nach dem Verbinden "
+             "selbst ab (spart ~0,22 W).</p>"
+             "<button type=\"submit\">Setup-AP übernehmen</button></form>",
+             AP_SSID, ap_on ? " selected" : "", ap_on ? "" : " selected",
+             ap_on ? "an" : "aus");
+#else
+    const char *ap_section = "";
+#endif
+    static const char page_template[] =
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>WLAN</title>"
         "<style>body{font-family:Arial;margin:24px;background:#10151f;color:#e5edf7}"
-        "input{display:block;margin:8px 0 16px;padding:8px;width:280px}"
+        "input,select{display:block;margin:8px 0 16px;padding:8px;width:280px}"
         ".note{color:#9fb4c8;font-size:0.85rem;max-width:420px}</style></head>"
         "<body><h1>FRITZ!Box WLAN</h1><p class=\"note\">SSID und Passwort des "
         "2,4-GHz-WLANs eintragen. Passwort leer lassen, um ein bereits "
@@ -7911,11 +9040,95 @@ static esp_err_t config_handler(httpd_req_t *req)
         "<label>WLAN-Passwort</label><input name=\"password\" type=\"password\" "
         "maxlength=\"64\" autocomplete=\"off\">"
         "<button type=\"submit\">Speichern und verbinden</button></form>"
+        "%s"
         "<p><a href=\"/\">Zurück zum Zähler</a></p></body></html>";
+    char page[2048];
+    int n = snprintf(page, sizeof(page), page_template, ap_section);
+    if (n < 0 || (size_t)n >= sizeof(page)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Config page too long");
+        return ESP_FAIL;
+    }
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req, page);
 }
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* POST /api/ap: apply the setup-AP switch (form field ap=on|off). The AP is
+ * switched and persisted only when apply_ap_mode() accepts it; an off while the
+ * station is not connected is refused with HTTP 400 so the device is never
+ * stranded. A missing field is treated as "off" (the page always sends one). */
+static esp_err_t ap_switch_handler(httpd_req_t *req)
+{
+    char body[64];
+    if (req->content_len == 0 || req->content_len >= sizeof(body)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid form size");
+        return ESP_FAIL;
+    }
+    size_t received = 0;
+    while (received < req->content_len) {
+        int count = httpd_req_recv(req, body + received, req->content_len - received);
+        if (count <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Could not read form");
+            return ESP_FAIL;
+        }
+        received += (size_t)count;
+    }
+    body[received] = '\0';
+
+    bool want_ap = false; /* absent ap field -> off (the <select> always sends one) */
+    char *field = body;
+    while (field != NULL) {
+        char *next = strchr(field, '&');
+        if (next != NULL) {
+            *next++ = '\0';
+        }
+        char *equals = strchr(field, '=');
+        if (equals == NULL) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Malformed form field");
+            return ESP_FAIL;
+        }
+        *equals++ = '\0';
+        if (strcmp(field, "ap") == 0) {
+            if (strcmp(equals, "on") == 0) {
+                want_ap = true;
+            } else if (strcmp(equals, "off") == 0) {
+                want_ap = false;
+            } else {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid ap value");
+                return ESP_FAIL;
+            }
+        }
+        field = next;
+    }
+
+    char err[96] = {0};
+    if (!apply_ap_mode(want_ap, err, sizeof(err))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        char fail[384];
+        snprintf(fail, sizeof(fail),
+                 "<!doctype html><html><body><p>%s</p>"
+                 "<p><a href=\"/config\">Zurück zur WLAN-Seite</a></p></body></html>",
+                 err);
+        return httpd_resp_sendstr(req, fail);
+    }
+
+    runtime_config_t *cfg = active_runtime_config();
+    cfg->ap_enabled = want_ap;
+    runtime_config_store(cfg);
+
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    char ok[256];
+    snprintf(ok, sizeof(ok),
+             "<!doctype html><html><body><p>Setup-AP ist jetzt <b>%s</b>.</p>"
+             "<p><a href=\"/config\">Zurück zur WLAN-Seite</a></p></body></html>",
+             want_ap ? "an" : "aus");
+    return httpd_resp_sendstr(req, ok);
+}
+#endif
 
 static esp_err_t save_wifi_handler(httpd_req_t *req)
 {
@@ -7993,6 +9206,7 @@ static esp_err_t save_wifi_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    ps_fallback_mark_intentional();
     (void)esp_wifi_disconnect();
     wifi_config_t sta_config;
     fill_station_config(&sta_config);
@@ -8019,11 +9233,19 @@ static void start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 31;
+    /* Must exceed the number of httpd_register_uri_handler() calls made below.
+     * The receiver path registers the most: the role-specific routes plus the
+     * web_guard /healthz probe and the /api/reboot button = 33. One slot too few
+     * is a boot crash-loop (ESP_ERR_HTTPD_HANDLERS_FULL -> ESP_ERROR_CHECK ->
+     * abort), which the build-time CI cannot see - only the device can. Keep
+     * headroom here. */
+    config.max_uri_handlers = 35;
     /* Handlers that keep a full history page (128 records) on their stack run
      * on this task; keep headroom so a large page cannot overflow it and abort
-     * the whole HTTP server. */
-    config.stack_size = 8192;
+     * the whole HTTP server. The dashboard handler also buffers the assembled
+     * JSON payload plus per-block sub-buffers on this stack, so allocate enough
+     * for both at their worst simultaneous depth. */
+    config.stack_size = 12288;
     config.lru_purge_enable = true;
     /* httpd reserves 3 sockets for itself, so asking for more than
      * CONFIG_LWIP_MAX_SOCKETS - 3 makes httpd_start() return ESP_ERR_INVALID_ARG;
@@ -8145,6 +9367,11 @@ static void register_webserver_handlers(httpd_handle_t server)
         .method = HTTP_POST,
         .handler = power_history_upload_handler,
     };
+    httpd_uri_t reboot_api = {
+        .uri = "/api/reboot",
+        .method = HTTP_POST,
+        .handler = reboot_handler,
+    };
 #endif
     httpd_uri_t log_page = {
         .uri = "/log",
@@ -8178,6 +9405,13 @@ static void register_webserver_handlers(httpd_handle_t server)
         .method = HTTP_GET,
         .handler = config_handler,
     };
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    httpd_uri_t ap_uri = {
+        .uri = "/api/ap",
+        .method = HTTP_POST,
+        .handler = ap_switch_handler,
+    };
+#endif
     httpd_uri_t save = {
         .uri = "/save",
         .method = HTTP_POST,
@@ -8234,9 +9468,13 @@ static void register_webserver_handlers(httpd_handle_t server)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &sender_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &db_refresh));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_history_upload));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &reboot_api));
 #endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config_uri));
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &ap_uri));
+#endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &save));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &console_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &console_api));
@@ -8378,12 +9616,183 @@ static void link_fallback_worker(void *arg)
         /* Receiver: no sender traffic. A hung receiver is already covered by
          * web_guard, so only surface it here for the dashboard. */
         g_link_fallback_stage = 1;
+        /* Self-heal the auto-off ONLY if the sender was heard at least once:
+         * that proves the auto-off works in this setup (same channel), so a
+         * later silence is a real link loss worth spending the ~0.22 W to fix.
+         * If the sender was never heard, the auto-off either moved us off a
+         * channel the sender cannot scan (it falls back to the fixed
+         * CONFIG_ESPNOW_CHANNEL) or there is simply no sender yet - re-enabling
+         * the AP would not bring a sender back and would only give up the power
+         * saving. The AP then stays off, which is the low-power state. */
+        bool sender_heard;
+        portENTER_CRITICAL(&g_sender_mac_lock);
+        sender_heard = g_sender_mac_valid;
+        portEXIT_CRITICAL(&g_sender_mac_lock);
+        if (!g_ap_enabled && sender_heard) {
+            char ap_err[96] = {0};
+            if (apply_ap_mode(true, ap_err, sizeof(ap_err))) {
+                ESP_LOGW(TAG, "Link fallback: sender silent, setup SoftAP "
+                              "brought back so the sender can find the channel");
+            } else {
+                ESP_LOGW(TAG, "Link fallback: could not re-enable the setup "
+                              "SoftAP: %s", ap_err);
+            }
+        } else if (!g_ap_enabled) {
+            ESP_LOGW(TAG, "Link fallback: no sender heard since boot; setup "
+                          "SoftAP stays off (power saving kept)");
+        }
         ESP_LOGW(TAG, "Link fallback: no sender traffic for %u ms",
                  (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
 #endif
     }
 }
 #endif /* CONFIG_ESPNOW_LINK_FALLBACK */
+
+#if CONFIG_ESPNOW_PS_FALLBACK
+/* Wi-Fi modem-sleep fault watchdog. It polls the pure ps_fallback state every
+ * 5 s. When the station dropped too many times inside the window while a PS mode
+ * was in force, the mode is breaking the link: fall back to the proven mode
+ * (WIFI_PS_NONE, radio always awake), persist it, and latch (sticky until an
+ * explicit 'set ps' / reset-config, so it cannot flap). The driver-level repair
+ * in apply_wifi_ps_config() only catches a *rejected* mode; this catches a
+ * mode the driver accepts but that loses beacons on this AP. */
+static void ps_fallback_worker(void *arg)
+{
+    (void)arg;
+    const uint64_t started_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    portENTER_CRITICAL(&g_ps_fallback_lock);
+    ps_fallback_init(&g_ps_fallback, CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS,
+                     CONFIG_ESPNOW_PS_FALLBACK_THRESHOLD,
+                     CONFIG_ESPNOW_PS_FALLBACK_SUSTAIN_WINDOWS,
+                     CONFIG_ESPNOW_PS_FALLBACK_GRACE_MS,
+                     PS_FALLBACK_DEFAULT_STABLE_RESET_MS, started_ms);
+    portEXIT_CRITICAL(&g_ps_fallback_lock);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        if (g_ps_fallback_active) {
+            continue; /* already fell back */
+        }
+        /* Only a modem-sleep lever that can actually storm the *link* arms the
+         * watchdog. The disconnect storm comes from the station PS mode: it
+         * parks the modem so beacons/ESP-NOW frames are missed and the AP drops
+         * the association (reason 34). The ESP-NOW wake window (radio-save) only
+         * delays ESP-NOW frames - it does not drop the association, so it must
+         * not arm the watchdog (the measured loss-free C6 default is ps off +
+         * radio-save on). The sender has no runtime modem-sleep knob, so it
+         * never counts. */
+        bool lever_active = false;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        {
+            const runtime_config_t *cfg = active_runtime_config();
+            lever_active = cfg->wifi_ps_mode != RUNTIME_CONFIG_PS_OFF;
+        }
+#endif
+        if (!lever_active) {
+            continue;
+        }
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        uint64_t uptime_ms = now_ms - started_ms;
+        bool fallback;
+        portENTER_CRITICAL(&g_ps_fallback_lock);
+        fallback = ps_fallback_should_fallback(&g_ps_fallback, now_ms, uptime_ms);
+        portEXIT_CRITICAL(&g_ps_fallback_lock);
+        if (!fallback) {
+            continue;
+        }
+        g_ps_fallback_active = true;
+        g_ps_fallback_stage = 1;
+        /* Proven mode: turn modem sleep off and keep the radio awake. Persist it
+         * so the setting survives a reboot, and drop the ESP-NOW radio-save wake
+         * window too (a radio parked by either lever is the failure we saw). Only
+         * these two fields change; the rest of the user's config is untouched. */
+        runtime_config_t *cfg = active_runtime_config();
+        cfg->wifi_ps_mode = 0u; /* WIFI_PS_NONE */
+        cfg->radio_save = false;
+        (void)esp_now_set_wake_window(0);
+        esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+        runtime_config_health_note(&g_runtime_health, "ps",
+                                   "modem sleep broke the link (disconnect storm)");
+        runtime_config_store(cfg);
+        g_ps_fallback_stage = 2;
+#if CONFIG_ESPNOW_ROLE_SENDER
+        /* The diag event ring only exists on the sender; the receiver surfaces
+         * the fallback through ESP_LOGW above and runtime_config_health_note(). */
+        diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
+                       "modem-sleep fallback: PS off after %u disconnects",
+                       (unsigned)ps_fallback_disconnects(&g_ps_fallback));
+#else
+        /* Tell Home Assistant why the idle current just went up (the watchdog
+         * dropped to the proven PS-off mode and persisted it). The MQTT bridge
+         * is receiver-only, so this stays out of the sender build. */
+        mqtt_bridge_publish_fallback_event(
+            ps_fallback_disconnects(&g_ps_fallback),
+            (unsigned)CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS);
+#endif
+        ESP_LOGW(TAG, "Modem-sleep fallback: %u disconnects in %u ms; Wi-Fi PS off, "
+                      "radio stays awake (err=%d)",
+                 (unsigned)ps_fallback_disconnects(&g_ps_fallback),
+                 (unsigned)CONFIG_ESPNOW_PS_FALLBACK_WINDOW_MS, (int)err);
+    }
+}
+#endif /* CONFIG_ESPNOW_PS_FALLBACK */
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Adaptive modem-sleep ladder worker (receiver). Every PS_LADDER_TICK_MS it
+ * feeds the ladder the delta of the transport counters and applies a changed
+ * rung. The loss counter only moves when a *forward* sequence jump is seen (a
+ * broadcast frame really was lost), so the ladder is driven by real air loss,
+ * not by a stale radio. The mode it returns is applied with esp_wifi_set_ps();
+ * a rung change costs a brief reconnect (the association request carries the
+ * listen_interval), which is why the ladder only moves on a *sustained*
+ * condition and recovers slowly. */
+#define PS_LADDER_TICK_MS 5000u
+
+static void ps_ladder_worker(void *arg)
+{
+    (void)arg;
+    /* The ladder is seeded by ps_ladder_boot_init() before the boot power-apply;
+     * the worker only observes and adapts. */
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(PS_LADDER_TICK_MS));
+        const runtime_config_t *rcfg = active_runtime_config();
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        uint32_t losses_now, frames_now;
+        portENTER_CRITICAL(&g_sml_history_lock);
+        losses_now = g_sml_transport_losses;
+        frames_now = g_sml_valid_telegrams + g_sml_invalid_crc_telegrams;
+        portEXIT_CRITICAL(&g_sml_history_lock);
+
+        ps_ladder_mode_t mode;
+        bool enabled;
+        portENTER_CRITICAL(&g_ps_ladder_lock);
+        enabled = rcfg->ps_ladder;
+        ps_ladder_set_enabled(&g_ps_ladder, enabled);
+        ps_ladder_note_loss(&g_ps_ladder, losses_now - g_ladder_last_losses);
+        ps_ladder_note_frames(&g_ps_ladder, frames_now - g_ladder_last_telegrams);
+        g_ladder_last_losses = losses_now;
+        g_ladder_last_telegrams = frames_now;
+        ps_ladder_mode_t before = ps_ladder_mode(&g_ps_ladder);
+        uint32_t window_losses = ps_ladder_window_losses(&g_ps_ladder);
+        mode = ps_ladder_poll(&g_ps_ladder, now_ms);
+        uint32_t steps_down = ps_ladder_steps_down(&g_ps_ladder);
+        uint32_t steps_up = ps_ladder_steps_up(&g_ps_ladder);
+        portEXIT_CRITICAL(&g_ps_ladder_lock);
+
+        if (!enabled || mode == before) {
+            continue;
+        }
+        static const char *const names[] = {"off", "min", "max"};
+        ESP_LOGW(TAG, "Modem-sleep ladder: rung %s -> %s (window losses %lu, steps %u/%u)",
+                 names[before], names[mode], (unsigned long)window_losses,
+                 (unsigned)steps_down, (unsigned)steps_up);
+        /* Apply through the normal path: it reads the ladder rung, re-arms the
+         * modem-sleep watchdog (a deliberate change) and reconnects when the
+         * listen_interval for the new rung needs a fresh association. */
+        wifi_ps_apply_and_reconnect();
+    }
+}
+#endif /* !CONFIG_ESPNOW_ROLE_SENDER */
 
 /* --- Global liveness watchdog --------------------------------------------
  * The per-subsystem guards (web_guard on the dashboard, link_fallback on the
@@ -8535,6 +9944,16 @@ static void run_sender(void)
         ESP_LOGE(TAG, "Could not create sleep-state announce semaphore");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
+    g_sml_ack_sem = xSemaphoreCreateBinary();
+    if (g_sml_ack_sem == NULL) {
+        ESP_LOGE(TAG, "Could not create SML ACK semaphore");
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+    g_broadcast_tx_mutex = xSemaphoreCreateMutex();
+    if (g_broadcast_tx_mutex == NULL) {
+        ESP_LOGE(TAG, "Could not create broadcast TX mutex");
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
 #if CONFIG_ESPNOW_ROLE_SENDER
     uart_sleep_set_state_notify(send_sleep_state_packet);
 #endif
@@ -8601,6 +10020,13 @@ static void run_sender(void)
         ESP_LOGW(TAG, "Could not start the link-fallback worker");
     }
 #endif
+#if CONFIG_ESPNOW_PS_FALLBACK
+    task_result = xTaskCreate(ps_fallback_worker, "ps_fallback",
+                              3072, NULL, 2, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the modem-sleep fallback worker");
+    }
+#endif
 
     /* All core sender subsystems are up (UART workers, ESP-NOW diag, time
      * sync, link fallback). This marks the OTA image as usable for the
@@ -8657,10 +10083,25 @@ static void apply_power_management(void)
     };
     esp_err_t err = esp_pm_configure(&pm);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Could not apply the CPU config (%u-%u MHz): %s",
+        /* Safe fallback at boot: a persisted value the PM API rejects must not
+         * be kept. Drop to the compile-time defaults, persist them and try once
+         * more, so the device still comes up with a usable clock. */
+        ESP_LOGW(TAG, "Could not apply the persisted CPU config (%u-%u MHz): %s; "
+                      "repairing to defaults",
                  (unsigned)cfg->cpu_min_mhz, (unsigned)cfg->cpu_mhz,
                  esp_err_to_name(err));
-        return;
+        runtime_config_repair(cfg, "cpu", "esp_pm_configure() rejected at boot",
+                              &g_runtime_health);
+        runtime_config_store(cfg);
+        pm.max_freq_mhz = (int)cfg->cpu_mhz;
+        pm.min_freq_mhz = (int)cfg->cpu_min_mhz;
+        pm.light_sleep_enable = cfg->light_sleep && allow_sleep;
+        err = esp_pm_configure(&pm);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "CPU config still rejected after repair: %s",
+                     esp_err_to_name(err));
+            return;
+        }
     }
     if (!allow_sleep) {
         static esp_pm_lock_handle_t s_no_light_sleep;
@@ -8691,8 +10132,12 @@ static void apply_radio_power_config(void)
         /* esp_wifi_set_max_tx_power takes 0.25 dBm steps. */
         esp_err_t err = esp_wifi_set_max_tx_power((int8_t)(cfg->wifi_txpower_dbm * 4));
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Could not set Wi-Fi TX power to %u dBm: %s",
+            ESP_LOGW(TAG, "Could not set Wi-Fi TX power to %u dBm (%s); "
+                          "repairing to the chip default",
                      (unsigned)cfg->wifi_txpower_dbm, esp_err_to_name(err));
+            runtime_config_repair(cfg, "txpower", "esp_wifi_set_max_tx_power() failed",
+                                  &g_runtime_health);
+            runtime_config_store(cfg);
         } else {
             ESP_LOGI(TAG, "Wi-Fi TX power set to %u dBm",
                      (unsigned)cfg->wifi_txpower_dbm);
@@ -8704,8 +10149,12 @@ static void apply_radio_power_config(void)
             ap_config.ap.beacon_interval = cfg->ap_beacon_tu;
             esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Could not set AP beacon interval to %u TU: %s",
+                ESP_LOGW(TAG, "Could not set AP beacon interval to %u TU (%s); "
+                              "repairing to the IDF default",
                          (unsigned)cfg->ap_beacon_tu, esp_err_to_name(err));
+                runtime_config_repair(cfg, "beacon", "esp_wifi_set_config() failed",
+                                      &g_runtime_health);
+                runtime_config_store(cfg);
             } else {
                 ESP_LOGI(TAG, "AP beacon interval set to %u TU", (unsigned)cfg->ap_beacon_tu);
             }
@@ -8720,15 +10169,31 @@ static void apply_radio_power_config(void)
      * call is accepted but breaks the link, so this is opt-in (radio-save off by
      * default). Turning it off zeroes the wake window again (the always-awake
      * radio). The Wi-Fi PS *mode* itself is owned by apply_wifi_ps_config() (the
-     * 'set ps' knob), not by this function, so the two knobs do not fight. */
-    if (cfg->radio_save) {
+     * 'set ps' knob), not by this function, so the two knobs do not fight.
+     *
+     * The burst lock supersedes the free-running wake window: it drives the
+     * radio with esp_wifi_force_wakeup_acquire/release around the *predicted*
+     * burst, so the driver-scheduled wake window must be off or the two fight
+     * for the radio (see burst_lock_worker). */
+    bool burst_lock_on = false;
+#if BURST_LOCK_SUPPORTED
+    burst_lock_on = cfg->burst_lock;
+#endif
+    if (cfg->radio_save && !burst_lock_on) {
         esp_err_t err = esp_now_set_wake_window(cfg->wake_window_ms);
         if (err == ESP_OK) {
             err = esp_wifi_connectionless_module_set_wake_interval(cfg->wake_interval_ms);
         }
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Could not enable radio sleep (window=%s)",
+            /* This is the documented "accepted but breaks the link" case on the
+             * classic ESP32: do not keep a radio-save setting the driver cannot
+             * honour, drop it (and the wake knobs) back to off and persist. */
+            ESP_LOGW(TAG, "Could not enable radio sleep (%s); repairing to off",
                      esp_err_to_name(err));
+            runtime_config_repair(cfg, "radio-save", "radio-save apply failed",
+                                  &g_runtime_health);
+            runtime_config_store(cfg);
+            (void)esp_now_set_wake_window(0);
         } else {
             ESP_LOGI(TAG, "Radio sleep on: modem sleeps, ESP-NOW wakes every %u ms "
                           "for %u ms",
@@ -8736,12 +10201,119 @@ static void apply_radio_power_config(void)
         }
     } else {
         esp_err_t err = esp_now_set_wake_window(0);
-        ESP_LOGI(TAG, "Radio sleep off: radio always awake (%s)", esp_err_to_name(err));
+        if (burst_lock_on) {
+            ESP_LOGI(TAG, "Radio sleep off: the burst lock drives the radio");
+        } else {
+            ESP_LOGI(TAG, "Radio sleep off: radio always awake (%s)", esp_err_to_name(err));
+        }
     }
     /* Re-assert the configured modem PS mode (off/min/max). Doing it here keeps
      * the mode in force across a (re)association, where the wake window is
      * re-applied; the two are independent levers. */
     apply_wifi_ps_config();
+#if BURST_LOCK_SUPPORTED
+    apply_burst_lock_config();
+#endif
+}
+
+/* Move the receiver's ESP-NOW peers onto `interface`. The peers follow the
+ * SoftAP: they live on WIFI_IF_AP while the AP is up and must move to
+ * WIFI_IF_STA when it is switched off (and back when it returns). Without this,
+ * a plain esp_wifi_set_mode(WIFI_MODE_STA) tears the AP interface down under the
+ * registered peers and every exchange (diag, history backfill, OTA target,
+ * broadcast) silently stops - the failure that made the earlier runtime AP-drop
+ * a no-go (04add16 reverted in 71409c8). esp_now_add_peer() is a no-op for an
+ * existing MAC, so each peer is deleted first. */
+static void espnow_migrate_peers(wifi_interface_t interface)
+{
+    (void)esp_now_del_peer(broadcast_mac);
+    esp_now_peer_info_t peer = {0};
+    memcpy(peer.peer_addr, broadcast_mac, ESP_NOW_ETH_ALEN);
+    peer.channel = 0;
+    peer.ifidx = interface;
+    peer.encrypt = false;
+    (void)esp_now_add_peer(&peer);
+
+    uint8_t sender_mac[ESP_NOW_ETH_ALEN];
+    portENTER_CRITICAL(&g_sender_mac_lock);
+    bool sender_known = g_sender_mac_valid;
+    memcpy(sender_mac, g_sender_mac, ESP_NOW_ETH_ALEN);
+    portEXIT_CRITICAL(&g_sender_mac_lock);
+    if (sender_known) {
+        (void)esp_now_del_peer(sender_mac);
+        (void)add_espnow_peer(sender_mac, interface);
+    }
+    if (esp_now_is_peer_exist(g_espnow_ota_sender_mac)) {
+        (void)esp_now_del_peer(g_espnow_ota_sender_mac);
+        (void)add_espnow_peer(g_espnow_ota_sender_mac, interface);
+    }
+}
+
+/* Turn the setup SoftAP on or off at runtime. The persisted ap_enabled knob, the
+ * /config page / `set ap` console command and the ap_auto_off path all funnel
+ * through here.
+ *
+ * Safety: switching the AP *off* is refused while the station is not connected,
+ * because the AP is then the only way back to the dashboard - the device would
+ * be unreachable. Switching it on is always allowed. Returns false (and leaves
+ * the state unchanged) when refused or when the driver rejects the mode. */
+static bool apply_ap_mode(bool enable, char *err, size_t err_size)
+{
+    if (enable == g_ap_enabled) {
+        return true; /* already in the requested state */
+    }
+    if (!enable && !g_wifi_connected) {
+        if (err != NULL && err_size > 0) {
+            snprintf(err, err_size,
+                     "AP off refused: the station is not connected to a WLAN, so "
+                     "the device would become unreachable");
+        }
+        return false;
+    }
+
+    esp_err_t mode_err;
+    if (enable) {
+        /* The apoff build never created the AP netif (no SoftAP at boot), so a
+         * runtime enable must create it here - otherwise the AP comes up with
+         * no IP/DHCP server and 192.168.4.1 is unreachable. Cheap and only paid
+         * on the first enable. */
+        if (g_ap_netif == NULL) {
+            g_ap_netif = esp_netif_create_default_wifi_ap();
+            if (g_ap_netif == NULL) {
+                if (err != NULL && err_size > 0) {
+                    snprintf(err, err_size, "AP on failed: no AP network interface");
+                }
+                return false;
+            }
+        }
+        mode_err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+        if (mode_err == ESP_OK) {
+            mode_err = configure_ap();
+        }
+    } else {
+        mode_err = esp_wifi_set_mode(WIFI_MODE_STA);
+    }
+    if (mode_err != ESP_OK) {
+        if (err != NULL && err_size > 0) {
+            snprintf(err, err_size, "AP %s failed: %s", enable ? "on" : "off",
+                     esp_err_to_name(mode_err));
+        }
+        return false;
+    }
+
+    g_ap_enabled = enable;
+    /* ESP-NOW rides the AP interface while the AP is up; move the peers to
+     * whichever interface is now active so the link survives the switch. */
+    espnow_migrate_peers(ESPNOW_IF);
+    if (enable) {
+        /* configure_ap() wrote a fresh (default) AP config, which resets the
+         * persisted beacon interval; re-apply the radio knobs so a runtime
+         * enable matches a boot-time enable. */
+        apply_radio_power_config();
+    }
+    ESP_LOGW(TAG, "SoftAP switched %s at runtime (ESP-NOW on %s)",
+             enable ? "on" : "off", enable ? "WIFI_IF_AP" : "WIFI_IF_STA");
+    return true;
 }
 
 /* Push the persisted Wi-Fi modem power-save mode into the driver. Must run
@@ -8770,11 +10342,60 @@ static void apply_wifi_ps_config(void)
     if (cfg->wifi_ps_mode > RUNTIME_CONFIG_PS_MAX) {
         mode = WIFI_PS_MIN_MODEM;
     }
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* When the adaptive ladder is on, the live mode is its rung, not the
+     * configured start: the worker steps it down on loss and back up when the
+     * link is clean. */
+    if (cfg->ps_ladder) {
+        portENTER_CRITICAL(&g_ps_ladder_lock);
+        mode = (wifi_ps_type_t)ps_ladder_mode(&g_ps_ladder);
+        portEXIT_CRITICAL(&g_ps_ladder_lock);
+    }
+#endif
+#if CONFIG_ESPNOW_PS_FALLBACK
+    /* The modem-sleep watchdog latched: the mode broke the link, so never
+     * re-apply it (the proven mode is WIFI_PS_NONE, radio always awake). */
+    if (g_ps_fallback_active) {
+        mode = WIFI_PS_NONE;
+    }
+#endif
     esp_err_t err = esp_wifi_set_ps(mode);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Could not set Wi-Fi PS mode %u: %s",
+        /* Safe fallback: the driver rejected the mode, so drop it and re-apply
+         * the compile-time default (persisted) rather than leaving the device in
+         * an unknown power state. */
+        ESP_LOGW(TAG, "Could not set Wi-Fi PS mode %u (%s); repairing to default",
                  (unsigned)cfg->wifi_ps_mode, esp_err_to_name(err));
-        return;
+        runtime_config_repair(cfg, "ps", "esp_wifi_set_ps() failed",
+                              &g_runtime_health);
+        runtime_config_store(cfg);
+        mode = (wifi_ps_type_t)cfg->wifi_ps_mode;
+        err = esp_wifi_set_ps(mode);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Wi-Fi PS mode still rejected after repair: %s",
+                     esp_err_to_name(err));
+            return;
+        }
+    }
+    /* Self-check: read the live mode back and repair if it does not match the
+     * value we asked for (a driver that silently ignored the request). Only
+     * meaningful once associated: before that the driver may still report the
+     * pre-association default and a "repair" would clobber the user's setting.
+     * Compare against the *requested* mode, not cfg->wifi_ps_mode: with the
+     * adaptive ladder the live mode is the rung, so verifying against the start
+     * value would see a false mismatch and "repair" every step away. */
+    wifi_ps_type_t observed = WIFI_PS_NONE;
+    runtime_config_t expected = *cfg;
+    expected.wifi_ps_mode = (uint8_t)mode;
+    if (g_wifi_connected && esp_wifi_get_ps(&observed) == ESP_OK &&
+        !runtime_config_verify(&expected, (int)observed, 0, &g_runtime_health)) {
+        ESP_LOGW(TAG, "Wi-Fi PS verify mismatch (wanted %u, got %u); repairing",
+                 (unsigned)mode, (unsigned)observed);
+        runtime_config_repair(cfg, "ps", "esp_wifi_get_ps() disagreed",
+                              &g_runtime_health);
+        runtime_config_store(cfg);
+        (void)esp_wifi_set_ps((wifi_ps_type_t)cfg->wifi_ps_mode);
+        mode = (wifi_ps_type_t)cfg->wifi_ps_mode;
     }
     const char *name = mode == WIFI_PS_NONE ? "off"
                        : mode == WIFI_PS_MAX_MODEM ? "max"
@@ -8783,18 +10404,18 @@ static void apply_wifi_ps_config(void)
              name, (unsigned)cfg->listen_interval);
 }
 
-/* Re-apply the PS mode and force a reconnect so a changed listen_interval is
- * carried in a fresh association request (the driver reads it only then). Also
- * refreshes the station config so fill_station_config()'s new interval is what
- * the driver associates with. Mirrors the proven order in the web-config save
- * path: disconnect, set_config, connect. A no-op reconnect when no WLAN is
- * configured (the PS mode itself is still applied). */
-static void wifi_ps_apply_and_reconnect(void)
+/* Perform the deferred reconnect so a changed listen_interval reaches a fresh
+ * association request. Runs from g_wifi_reconnect_timer, i.e. after the HTTP
+ * response that requested the change has been flushed: an inline
+ * esp_wifi_disconnect() tore the link down before the reply was sent, which is
+ * why a 'set ps' / 'set listen' looked like a timeout on the console page. */
+static void wifi_reconnect_timer_cb(void *arg)
 {
-    apply_wifi_ps_config();
+    (void)arg;
     if (!g_wifi_configured) {
         return;
     }
+    ps_fallback_mark_intentional();
     (void)esp_wifi_disconnect(); /* ESP_ERR_WIFI_NOT_CONNECT when already idle */
     wifi_config_t sta_config;
     fill_station_config(&sta_config);
@@ -8803,11 +10424,45 @@ static void wifi_ps_apply_and_reconnect(void)
         err = esp_wifi_connect();
     }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Wi-Fi reconnect after a PS change failed: %s",
+        ESP_LOGW(TAG, "Wi-Fi reconnect to carry listen_interval failed: %s",
                  esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "Wi-Fi PS applied; reconnecting to carry listen_interval=%u",
+        ++g_wifi_reconnects;
+        ESP_LOGI(TAG, "Wi-Fi reconnecting to carry listen_interval=%u",
                  (unsigned)active_runtime_config()->listen_interval);
+    }
+}
+
+/* Apply the Wi-Fi PS mode, and reconnect only when the listen_interval differs
+ * from the one the current association was built with. The PS mode takes effect
+ * live (esp_wifi_set_ps), so a pure 'set ps' never touches the link; an
+ * unchanged 'set listen' is a no-op. Only a real change schedules the deferred
+ * reconnect above. */
+static void wifi_ps_apply_and_reconnect(void)
+{
+    /* A deliberate PS change re-arms the modem-sleep watchdog: the user is
+     * explicitly (re)trying a mode, so a previous disconnect-storm latch must not
+     * block it. A scheduled reconnect is then marked intentional so it is not
+     * counted as a fault. */
+    ps_fallback_rearm();
+    apply_wifi_ps_config();
+    if (!g_wifi_configured) {
+        return;
+    }
+    const uint16_t wanted = active_runtime_config()->listen_interval;
+    if (g_wifi_assoc_listen_valid && g_wifi_assoc_listen == wanted) {
+        ++g_wifi_reconnect_skips;
+        ESP_LOGI(TAG, "listen_interval=%u unchanged; link left up", (unsigned)wanted);
+        return;
+    }
+    if (g_wifi_reconnect_timer == NULL) {
+        return;
+    }
+    /* (Re)arm the one-shot: a burst of 'set listen' calls coalesces into one
+     * reconnect, and the HTTP reply is flushed before the link drops. */
+    (void)esp_timer_stop(g_wifi_reconnect_timer);
+    if (esp_timer_start_once(g_wifi_reconnect_timer, 400 * 1000) != ESP_OK) {
+        wifi_reconnect_timer_cb(NULL);
     }
 }
 #endif
@@ -8898,14 +10553,302 @@ static void apply_twt_config(void)
 }
 #endif
 
+#if BURST_LOCK_SUPPORTED
+/* Hold the radio up across an ESP-NOW request/response exchange (sender diag,
+ * history backfill, OTA relay). Nested/nested-safe; the worker keeps the modem
+ * awake while the count is non-zero. */
+static void burst_lock_hold_awake(void)
+{
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    ++g_burst_lock_hold;
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+}
+
+static void burst_lock_release_awake(void)
+{
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    if (g_burst_lock_hold > 0) {
+        --g_burst_lock_hold;
+    }
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+}
+
+/* Poll cadence while awake and waiting to (re)learn the burst period. */
+#define BURST_LOCK_IDLE_POLL_MS 50u
+/* Idle cadence once the learn window has expired with no sender in range: the
+ * radio is parked and only a re-learn trigger is awaited, so 20 wakeups/s are
+ * pointless. The next frame (e.g. on a DTIM wake) is noted in the receive
+ * callback, not by this poll, so the slower cadence does not lose a burst. */
+#define BURST_LOCK_SETTLED_POLL_MS 500u
+/* While the period is not yet learned the radio is held awake so the first
+ * burst is not missed. That must be bounded: with no sender in range the lock
+ * never forms, and an unbounded hold pins the radio awake forever - measured
+ * ~0.39 W held vs ~0.15 W parked. After this long without a lock the worker
+ * parks the radio and only keeps observing; the next frame that still arrives
+ * (e.g. on a DTIM wake) re-learns the lock. A sender that is actually present
+ * sends within a few seconds, so this never delays its first lock. */
+#define BURST_LOCK_LEARN_TIMEOUT_MS 60000u
+/* Never sleep longer than this in one step, so a config change is noticed
+ * promptly. */
+#define BURST_LOCK_MAX_SLEEP_MS 1000u
+/* A receive window below this would clip a burst once the phase jitter is
+ * added, so the configured wake window is floored here. */
+#define BURST_LOCK_WINDOW_MIN_MS 80u
+/* Hard cap on how long one window may stay open while frames keep landing, so a
+ * stuck sender cannot hold the receiver's radio awake indefinitely. Sized for a
+ * full SML_TX_BURST drained with retransmits at ~90 ms per telegram. */
+#define BURST_LOCK_MAX_WINDOW_MS 4000u
+
+/* Acquire/release the forced modem wakeup while keeping the awake-time total in
+ * g_burst_lock_awake_ms, so the dashboard can report the real awake duty. */
+static void burst_lock_awake_hold(bool *held)
+{
+    if (*held) {
+        return;
+    }
+    (void)esp_wifi_force_wakeup_acquire();
+    *held = true;
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    g_burst_lock_awake_since_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+}
+
+static void burst_lock_awake_release(bool *held)
+{
+    if (!*held) {
+        return;
+    }
+    (void)esp_wifi_force_wakeup_release();
+    *held = false;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    if (g_burst_lock_awake_since_ms != 0) {
+        g_burst_lock_awake_ms += now_ms - g_burst_lock_awake_since_ms;
+        g_burst_lock_awake_since_ms = 0;
+    }
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+}
+
+/* Receiver burst-locked receive window.
+ *
+ * The sender drains its ring once per SML_TX_CYCLE_MS as a short burst (a few
+ * frames a few ms apart). A station in modem PS (ps=min/max) only wakes for the
+ * DTIM beacons, so a burst that is not beacon-aligned is missed whole - that is
+ * the ~90% loss measured on the bench with PS on and no ESP-NOW wake window.
+ * The driver's own connectionless wake window fixes that but drifts against the
+ * burst, so a window short enough to save power also drops bursts.
+ *
+ * This worker removes the drift: it learns the burst period from the arrivals
+ * (burst_lock.c) and holds the radio awake with esp_wifi_force_wakeup_acquire()
+ * for a short window around the *predicted* burst, releasing it (back to the
+ * configured PS mode) in between. It never touches the PS mode or the AP, so the
+ * association, the SoftAP and the HTTP/MQTT control path keep working; it only
+ * adds receive time exactly where the meter data lands. While the lock is not
+ * yet learned the radio is held awake so nothing is missed during learning. */
+static void burst_lock_worker(void *arg)
+{
+    (void)arg;
+    bool held = false;
+    uint32_t learn_since_ms = 0;
+    for (;;) {
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        bool enabled = g_burst_lock_enabled;
+        bool locked;
+        int32_t wait_ms;
+        portENTER_CRITICAL(&g_burst_lock_lock);
+        locked = burst_lock_locked(&g_burst_lock);
+        wait_ms = burst_lock_wait_ms(&g_burst_lock, now_ms);
+        bool hold = g_burst_lock_hold > 0;
+        portEXIT_CRITICAL(&g_burst_lock_lock);
+
+        if (!enabled) {
+            burst_lock_awake_release(&held);
+            learn_since_ms = 0;
+            vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_SETTLED_POLL_MS));
+            continue;
+        }
+        if (!locked) {
+            /* Stay awake to observe bursts until the period is known - but only
+             * for a bounded time, so a missing sender cannot pin the radio
+             * awake forever (see BURST_LOCK_LEARN_TIMEOUT_MS). */
+            if (learn_since_ms == 0u) {
+                learn_since_ms = now_ms;
+            }
+            bool learning = (uint32_t)(now_ms - learn_since_ms) <
+                            BURST_LOCK_LEARN_TIMEOUT_MS;
+            if (hold || learning) {
+                burst_lock_awake_hold(&held);
+            } else {
+                burst_lock_awake_release(&held);
+            }
+            vTaskDelay(pdMS_TO_TICKS(burst_lock_idle_poll_ms(
+                false, hold, learning, BURST_LOCK_IDLE_POLL_MS,
+                BURST_LOCK_SETTLED_POLL_MS)));
+            continue;
+        }
+        learn_since_ms = 0;
+        if (hold) {
+            /* Serve an in-flight ESP-NOW exchange before parking again. */
+            burst_lock_awake_hold(&held);
+            vTaskDelay(pdMS_TO_TICKS(BURST_LOCK_IDLE_POLL_MS));
+            continue;
+        }
+        if (wait_ms > 0) {
+            /* Between bursts: let the modem return to its PS mode. */
+            burst_lock_awake_release(&held);
+            uint32_t sleep_ms = (uint32_t)wait_ms;
+            if (sleep_ms > BURST_LOCK_MAX_SLEEP_MS) {
+                sleep_ms = BURST_LOCK_MAX_SLEEP_MS;
+            }
+            vTaskDelay(pdMS_TO_TICKS(sleep_ms));
+            continue;
+        }
+        /* Window opens: wake the modem, hold it through the predicted burst,
+         * then release it back to the PS mode. The window is extended while
+         * frames keep landing so a burst that now spans the sender's ACK round
+         * trips is covered end to end. */
+        burst_lock_awake_hold(&held);
+        portENTER_CRITICAL(&g_burst_lock_lock);
+        burst_lock_window_open(&g_burst_lock);
+        uint32_t window_ms = g_burst_lock.window_ms;
+        portEXIT_CRITICAL(&g_burst_lock_lock);
+        uint32_t open_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        for (;;) {
+            vTaskDelay(pdMS_TO_TICKS(window_ms));
+            portENTER_CRITICAL(&g_burst_lock_lock);
+            bool extend = burst_lock_window_should_extend(
+                &g_burst_lock, open_ms,
+                (uint32_t)(esp_timer_get_time() / 1000ULL),
+                BURST_LOCK_MAX_WINDOW_MS);
+            portEXIT_CRITICAL(&g_burst_lock_lock);
+            if (!extend) {
+                break;
+            }
+        }
+        portENTER_CRITICAL(&g_burst_lock_lock);
+        burst_lock_window_close(&g_burst_lock);
+        portEXIT_CRITICAL(&g_burst_lock_lock);
+        burst_lock_awake_release(&held);
+    }
+}
+
+/* Push the burst-lock knob into the running worker. Enabling it (re)seeds the
+ * predictor from the configured wake window; disabling it releases the radio
+ * back to whatever PS mode is configured. */
+static void apply_burst_lock_config(void)
+{
+    const runtime_config_t *cfg = active_runtime_config();
+    bool want = cfg->burst_lock;
+    if (!want) {
+        if (g_burst_lock_enabled) {
+            portENTER_CRITICAL(&g_burst_lock_lock);
+            g_burst_lock_enabled = false;
+            /* Drop the learned state too, so a disabled lock does not report a
+             * stale "locked" (and a later re-enable starts from a clean seed). */
+            burst_lock_forget(&g_burst_lock);
+            portEXIT_CRITICAL(&g_burst_lock_lock);
+            ESP_LOGI(TAG, "Burst lock off");
+        }
+        return;
+    }
+    uint32_t window = cfg->wake_window_ms;
+    if (window < BURST_LOCK_WINDOW_MIN_MS) {
+        window = BURST_LOCK_WINDOW_MIN_MS;
+    }
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    /* Frames within a burst are a few ms apart; 1000 ms cleanly separates one
+     * burst from the next. The window is opened a third of its length early to
+     * absorb the wake latency and the phase jitter. */
+    burst_lock_init(&g_burst_lock, 1000u, window, window / 3u, 3u);
+    g_burst_lock_enabled = true;
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+    ESP_LOGI(TAG, "Burst lock on: predicting the sender burst, %u ms window",
+             (unsigned)window);
+}
+
+/* Snapshot of the burst-lock state (type declared up with the globals). */
+static void burst_lock_get_stats(burst_lock_stats_t *out)
+{
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    uint32_t uptime_ms = now_ms;
+    memset(out, 0, sizeof(*out));
+    portENTER_CRITICAL(&g_burst_lock_lock);
+    out->enabled = g_burst_lock_enabled;
+    out->locked = burst_lock_locked(&g_burst_lock);
+    out->period_ms = g_burst_lock.period_ms;
+    out->window_ms = g_burst_lock.window_ms;
+    out->bursts = g_burst_lock.bursts;
+    out->locks = g_burst_lock.locks;
+    out->unlocks = g_burst_lock.unlocks;
+    out->window_hits = g_burst_lock.window_hits;
+    out->window_misses = g_burst_lock.window_misses;
+    uint32_t awake = g_burst_lock_awake_ms;
+    if (g_burst_lock_awake_since_ms != 0) {
+        awake += now_ms - g_burst_lock_awake_since_ms;
+    }
+    out->awake_ms = awake;
+    portEXIT_CRITICAL(&g_burst_lock_lock);
+    if (uptime_ms != 0) {
+        out->awake_pct = (uint32_t)((uint64_t)awake * 100u / uptime_ms);
+    }
+}
+#endif
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Initialise the ladder from the active config. Called once before the boot
+ * power-apply (so apply_wifi_ps_config() reads a real rung, not the zeroed
+ * struct) and again by the worker; both use the same start value. */
+static void ps_ladder_boot_init(void)
+{
+    const runtime_config_t *cfg = active_runtime_config();
+    uint32_t start = cfg->wifi_ps_mode <= RUNTIME_CONFIG_PS_MAX
+                         ? cfg->wifi_ps_mode
+                         : RUNTIME_CONFIG_PS_MIN;
+    portENTER_CRITICAL(&g_ps_ladder_lock);
+    ps_ladder_init(&g_ps_ladder, PS_LADDER_DEFAULT_WINDOW_MS,
+                   PS_LADDER_DEFAULT_LOSS_PCT, PS_LADDER_DEFAULT_MIN_FRAMES,
+                   PS_LADDER_DEFAULT_MIN_LOSSES,
+                   PS_LADDER_DEFAULT_RECOVERY_WINDOWS, PS_LADDER_DEFAULT_FLOOR,
+                   (ps_ladder_mode_t)start, 0u);
+    ps_ladder_set_enabled(&g_ps_ladder, cfg->ps_ladder);
+    g_ladder_last_losses = g_sml_transport_losses;
+    g_ladder_last_telegrams = g_sml_valid_telegrams;
+    portEXIT_CRITICAL(&g_ps_ladder_lock);
+}
+#endif
+
 void app_main(void)
 {
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Start the global liveness backstop FIRST, before any heavy init. It used
+     * to start only after start_webserver(); every other receiver guard
+     * (health_task, web_guard) also starts late, so a hang anywhere in the init
+     * below was permanent: the device stayed on the WLAN and answered ping and
+     * MQTT (both driven by the sys_evt task) while the HTTP server and the
+     * console never came up - exactly the C6 receiver symptom "port 80 dead
+     * (RST), console command registry empty, MQTT alive, no reboot". The guard is
+     * fed as each init phase completes (liveness_note_alive below); the first
+     * feed is the 90 s min-uptime grace, so a stall in any phase now reboots to a
+     * known-good state instead of hanging forever. */
+    liveness_guard_start();
+#endif
     /* Capture the boot log in RAM first, so the Wi-Fi dashboard can offer it
      * later even when no host is attached at boot. */
     boot_log_init();
+    /* Register the console command set NOW, not only inside
+     * register_webserver_handlers() (which runs at the very end of start_webserver).
+     * The registry lives in RAM, so a boot that wedged before the webserver left
+     * the serial console answering every line with "unknown command" - the second
+     * half of the C6 receiver symptom. Idempotent, so the later call in
+     * register_webserver_handlers()/run_sender() just re-points the same entries. */
+    web_console_register_commands();
     initialize_wifi_and_espnow();
+    liveness_note_alive();
     apply_power_management();
 #if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Seed the ladder before the boot power-apply reads it, so a
+     * `ps-ladder on` default takes effect from the first association. */
+    ps_ladder_boot_init();
     /* The radio-side knobs need the Wi-Fi driver started, which
      * initialize_wifi_and_espnow() has done by now. */
     apply_radio_power_config();
@@ -8914,6 +10857,7 @@ void app_main(void)
      * so the long-running workers can subscribe themselves and a wedged one
      * reboots the device instead of hanging. */
     (void)task_wdt_guard_init();
+    liveness_note_alive();
     /* Seed the wall clock from the persisted value before anything starts
      * recording minutes: without it a boot that has no time source yet would
      * leave bucket_start at 0 and drop every sample until the first sync. */
@@ -8951,6 +10895,11 @@ void app_main(void)
         ESP_LOGE(TAG, "Persistent minute history is disabled: %s",
                  esp_err_to_name(history_err));
     }
+    /* Phase done: prove progress to the liveness guard started above. Each feed
+     * shortens the interval a later phase may spend blocked, so a SPIFFS/NVS call
+     * that never returns trips the guard instead of wedging the boot before the
+     * webserver and console exist. No-op until the guard task has run. */
+    liveness_note_alive();
     const esp_timer_create_args_t power_sample_timer_args = {
         .callback = power_sample_timer_callback,
         .name = "power_samples",
@@ -8958,6 +10907,17 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_create(&power_sample_timer_args,
                                      &g_power_sample_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(g_power_sample_timer, 1000000));
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Deferred Wi-Fi reconnect for a changed listen_interval: created here so it
+     * exists before the web console can issue a 'set ps|listen'. */
+    const esp_timer_create_args_t wifi_reconnect_timer_args = {
+        .callback = wifi_reconnect_timer_cb,
+        .name = "wifi_reconnect",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&wifi_reconnect_timer_args,
+                                     &g_wifi_reconnect_timer));
+#endif
 
     /* Refresh the persisted wall clock on both roles so a reboot without a fresh
      * sync can always seed from it (a crash/power cut must not lose the time). */
@@ -8969,6 +10929,7 @@ void app_main(void)
      * has minutes, so the totals are meaningful there too (the receiver's
      * dashboard is the main consumer). */
     energy_totals_start();
+    liveness_note_alive();
 
     ESP_ERROR_CHECK(esp_now_register_recv_cb(receive_callback));
 
@@ -9001,6 +10962,7 @@ void app_main(void)
      * dead) cannot be re-applied by the older image. */
     recovery_set_pre_rollback_fn(runtime_config_erase_namespace);
     (void)recovery_button_check();
+    liveness_note_alive();
     /* Receiver: do not accept the running image right away. It is confirmed
      * only after the dashboard is up and a stability window has passed; an
      * image that never comes up is rolled back to the previous OTA slot. This
@@ -9013,9 +10975,9 @@ void app_main(void)
     run_sender();
 #else
     start_webserver();
-    /* Backstop for a global stall: fed by every worker and by HTTP/console
-     * traffic, it reboots the device if nothing makes progress. */
-    liveness_guard_start();
+    /* The guard was started before the heavy init above; feed it now that the
+     * dashboard is up (its HTTP traffic feeds it from here on). */
+    liveness_note_alive();
 #if CONFIG_ESPNOW_RECEIVER_HEALTH_WATCHDOG
     /* Self-heal: reboot when the device is up but the meter data has gone silent
      * or the heap fell below the floor. web_guard covers a dead dashboard; this
@@ -9046,6 +11008,26 @@ void app_main(void)
         ESP_LOGW(TAG, "Could not start the link-fallback worker");
     }
 #endif
+#if CONFIG_ESPNOW_PS_FALLBACK
+    if (xTaskCreate(ps_fallback_worker, "ps_fallback", 3072, NULL, 2, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the modem-sleep fallback worker");
+    }
+#endif
+#if BURST_LOCK_SUPPORTED
+    /* Burst-locked receive window: predicts the sender's burst and drives the
+     * modem with the force-wakeup API around it. Runs even when the knob is off
+     * (it then holds the radio up and waits) so a 'set burst-lock on' takes
+     * effect without a reboot. */
+    if (xTaskCreate(burst_lock_worker, "burst_lock", 3072, NULL, 4, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the burst-lock worker");
+    }
+#endif
+    /* Adaptive modem-sleep ladder: runs the station at the most frugal PS mode
+     * the link holds and steps down on transport loss. Started here (not under a
+     * config guard) so a 'set ps-ladder on' takes effect without a reboot. */
+    if (xTaskCreate(ps_ladder_worker, "ps_ladder", 3072, NULL, 2, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "Could not start the modem-sleep ladder worker");
+    }
     ESP_LOGI(TAG, "Receiver ready: http://192.168.4.1/ | /sender | /diag | /log | /console | /bootlog | /config | /update");
     while (1) {
         /* Confirm the running OTA image once it has been stable for the policy

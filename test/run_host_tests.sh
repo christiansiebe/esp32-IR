@@ -53,6 +53,22 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_reboot_persistence"
 
+# Storage recovery: proves the background repair brings a RAM-only store back to
+# a persistent one (formatting as the last resort) when the history file cannot
+# be opened. The obstacle is a directory at the file path (fopen fails on it),
+# removed before the repair retry. Scratch mount point under the build tmp dir.
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog-recovery\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_storage_recovery.c" \
+    -lm -o "$out/test_storage_recovery"
+
+"$out/test_storage_recovery"
+
 # Post-OTA rollback decision (receiver). Pure, host-testable logic: replays boot
 # scenarios tick by tick and asserts confirm / rollback / nothing. No ESP-IDF;
 # the production glue (boot_confirm.c) that calls the OTA API is not part of the
@@ -159,6 +175,18 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_mqtt_events"
 
+# MQTT remote command channel: chunk reassembly (esp-mqtt can split a payload
+# across MQTT_EVENT_DATA events) and the JSON result payload.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/mqtt_cmd.c" \
+    "$repo/main/json_escape.c" \
+    "$here/test_mqtt_cmd.c" \
+    -o "$out/test_mqtt_cmd"
+
+"$out/test_mqtt_cmd"
+
 # Sender-side batching ring + backfill arithmetic (no radio): batching,
 # oldest-eviction and the gap count the receiver reconciles against.
 "$cc" -std=c11 -Wall -Wextra -O2 \
@@ -169,6 +197,27 @@ trap 'rm -rf "$out"' EXIT
     -o "$out/test_tx_batch"
 
 "$out/test_tx_batch"
+
+# Receiver burst-locked wake window (main/burst_lock.c). Pure C: burst
+# detection, period learning, the wake prediction and the re-learn fallback.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/burst_lock.c" \
+    "$here/test_burst_lock.c" \
+    -o "$out/test_burst_lock"
+
+"$out/test_burst_lock"
+
+# Receiver application-level ACK (sml_transport_ack_t): the header-only
+# build/parse pair the sender waits on and the receiver sends. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/components/sml_transport/include" \
+    "$here/test_sml_transport_ack.c" \
+    -o "$out/test_sml_transport_ack"
+
+"$out/test_sml_transport_ack"
 
 # Adaptive sender light-sleep window (main/uart_sleep_window.h). Pure C: the
 # min-gap cap and the back-off must never let the window clip a telegram.
@@ -204,6 +253,26 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_sleep_misbehavior"
 
+# Sender sleep-state announcement: drives the real uart_sleep_maybe_sleep_idf()
+# glue against stubbed IDF calls. Pins the fix that the awake announcement
+# (state=0) must follow every announced sleep, even when the CPU never actually
+# parked (slept_ms == 0) - otherwise the receiver stays on "sleeping" forever.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DCONFIG_ESPNOW_SENDER_LIGHT_SLEEP=1 \
+    -DCONFIG_ESPNOW_CPU_MAX_MHZ=240 \
+    -DCONFIG_ESPNOW_SENDER_ESPNOW_POWER_SAVE=1 \
+    -DCONFIG_ESPNOW_SENDER_ESPNOW_WAKE_INTERVAL_MS=100 \
+    -DCONFIG_ESPNOW_SENDER_ESPNOW_WAKE_WINDOW_MS=70 \
+    -DSOC_LIGHT_SLEEP_SUPPORTED=1 \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/uart_sleep_window.c" \
+    "$here/test_sleep_announce.c" \
+    -o "$out/test_sleep_announce"
+
+"$out/test_sleep_announce"
+
 # Link fallback: the peer-silence decision that returns a device to its proven
 # mode. Pure C; the transition must be sticky (no flapping) and grace-bounded.
 "$cc" -std=c11 -Wall -Wextra -O2 \
@@ -214,6 +283,30 @@ trap 'rm -rf "$out"' EXIT
     -o "$out/test_link_fallback"
 
 "$out/test_link_fallback"
+
+# Modem-sleep fault watchdog: a storm of STA disconnects while a PS mode is in
+# force must drop to the proven mode (sticky), an intentional reconnect must not
+# count, and a stable association must clear the count. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/ps_fallback.c" \
+    "$here/test_ps_fallback.c" \
+    -o "$out/test_ps_fallback"
+
+"$out/test_ps_fallback"
+
+# Adaptive modem-sleep ladder: start frugal (ps max), step a rung down when a
+# window loses too many ESP-NOW frames, climb back after a run of clean windows,
+# never below the floor or above the start. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/ps_ladder.c" \
+    "$here/test_ps_ladder.c" \
+    -o "$out/test_ps_ladder"
+
+"$out/test_ps_ladder"
 
 # Sender parser stall recovery: a wedged SML parser (bytes arriving, no telegram
 # finalised) must be reset by a timer armed by the first byte of the capture, not
@@ -355,6 +448,22 @@ trap 'rm -rf "$out"' EXIT
 "$out/test_history_ring_repair"
 # Full ring (29000) unsorted + duplicates -> forces the in-place disk sort.
 "$out/test_history_ring_repair" full
+# Readable-but-unsorted is not required: one corrupt slot must still repair.
+"$out/test_history_ring_repair" corrupt
+
+# Full ring (29000) + an OLDER backfill merge: the older minute must not evict
+# the newest one and must not unsort the ring. Own binary (init runs once).
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog-fullbackfill\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_history_full_ring_backfill.c" \
+    -lm -o "$out/test_history_full_ring_backfill"
+
+"$out/test_history_full_ring_backfill"
 
 # Last known wall clock: the record/clock math plus the real NVS store driven
 # through a file-backed NVS shim. A forked "reboot" proves the clock is seeded
@@ -494,6 +603,30 @@ python3 "$repo/remote-shell/ha/test_print_health.py"
 
 "$out/test_runtime_config_usb_console"
 
+# Same USB Serial/JTAG-console target, but with the IDF connection monitor
+# (CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION) that the C6 receiver runs: the port is
+# protected, so light sleep becomes allowed and `set sleep on` works again.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DCONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=1 \
+    -DCONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=1 \
+    -I"$repo/main" \
+    "$repo/main/runtime_config.c" \
+    "$here/test_runtime_config_usb_connected.c" \
+    -o "$out/test_runtime_config_usb_connected"
+
+"$out/test_runtime_config_usb_connected"
+
+# WLAN/MQTT configuration validators behind `set wifi-*` / `set mqtt-*`: a bad
+# SSID/URI/prefix must be rejected before it reaches NVS or the driver. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/net_config.c" \
+    "$here/test_net_config.c" \
+    -o "$out/test_net_config"
+
+"$out/test_net_config"
 # Same knobs, but built as the ESP32-C6 *receiver*: the default must be the
 # measured loss-free power-saving combo (station PS off + ESP-NOW wake window
 # 20/15), not WIFI_PS_MIN_MODEM which loses ~90% of the telegrams.
@@ -506,6 +639,19 @@ python3 "$repo/remote-shell/ha/test_print_health.py"
     -o "$out/test_runtime_config_c6_defaults"
 
 "$out/test_runtime_config_c6_defaults"
+
+# Same C6 receiver defaults, but built as the apoff variant (station-only): the
+# SoftAP must default off. Same source, CONFIG_ESPNOW_RECEIVER_DISABLE_AP=1.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DCONFIG_IDF_TARGET_ESP32C6=1 \
+    -DCONFIG_ESPNOW_RECEIVER_DISABLE_AP=1 \
+    -I"$repo/main" \
+    "$repo/main/runtime_config.c" \
+    "$here/test_runtime_config_c6_defaults.c" \
+    -o "$out/test_runtime_config_c6_defaults_apoff"
+
+"$out/test_runtime_config_c6_defaults_apoff"
 
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.
