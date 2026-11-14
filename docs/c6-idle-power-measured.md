@@ -90,6 +90,25 @@ Zwei Erkenntnisse:
 - `ps max` + Leiter bleiben korrekt und schaden nicht; sie sind am APSTA-Receiver
   nur **wirkungslos** für die Idle-Leistung.
 
+## Umgesetzt (2026-11-14): automatischer SoftAP-Abschalter
+
+Der SoftAP ist jetzt **kein Dauerläufer** mehr, sondern ein Setup-Fenster:
+
+- Neuer persistierter Knopf **`ap_enabled`** (SoftAP an/aus) und **`ap_auto_off`**
+  (nach STA-Verbindung automatisch abschalten). Blob **v9**, 26 B (`[24]`/`[25]`).
+- **Default am C6-Receiver:** `ap_enabled=true`, `ap_auto_off=true` → der AP ist
+  beim Boot da (Erst-Setup + Kanal-Scan des Senders) und fällt weg, sobald die
+  Station eine IP hat. Der klassische ESP32-Empfänger bleibt unverändert
+  (`ap_auto_off=false`); der `apoff`-Build startet station-only (`ap_enabled=false`).
+- **Bedienung:** `set ap on|off`, `set ap-auto-off on|off`; Seite `/config`
+  (Select + „Setup-AP übernehmen" → POST `/api/ap`); `/api/dashboard` liefert
+  `ap_enabled`/`ap_auto_off`.
+- **Sicherheit:** Der AP lässt sich nur abschalten, solange die Station verbunden
+  ist (sonst HTTP 400 / Konsolenfehler, der Knopf wird zurückgerollt). ESP-NOW-Peers
+  werden beim Umschalten von `WIFI_IF_AP` auf `WIFI_IF_STA` migriert, damit der Link
+  den Wechsel überlebt. Ist der Sender still, holt der Link-Fallback den AP zurück
+  (Selbstheilung) — das kostet die ~0,22 W wieder, hat aber Vorrang.
+
 ## Reproduzieren
 
 ```sh

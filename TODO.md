@@ -14,8 +14,13 @@
   wach (0,40 W), danach parkt es (0,19 W). Im Sendebetrieb bleibt „an" nötig.
 - **Empfehlung:** Für minimale Idle-Leistung `receiver-c6-apoff` flashen; der SoftAP
   ist nur für das Erst-Setup ohne FRITZ!Box-Zugang nötig.
-- **Kandidat:** SoftAP nach erfolgreicher STA-Verbindung automatisch abschalten
-  (Zugangsdaten persistiert) — dann bliebe auch der Default-Build sparsam.
+- **Umgesetzt (2026-11-14):** SoftAP schaltet sich nach erfolgreicher STA-Verbindung
+  automatisch ab (`ap_auto_off`, Default an am C6-Receiver; Knopf `ap_enabled`,
+  `set ap on|off`, `set ap-auto-off on|off`, Seite `/config` → POST `/api/ap`). Der
+  AP kommt beim Boot hoch (Erst-Setup + Kanal-Scan des Senders) und fällt danach weg,
+  sobald die Station eine IP hat. Ist der Sender still, holt der Link-Fallback den AP
+  zurück (Selbstheilung). Damit ist auch der Default-`receiver-c6` sparsam.
+  Persistiert als `runtime_config`-Feld (Blob **v9**, 26 B, `[24]`/`[25]`).
 - **Offen:** Verlustfreiheit unter echter Senderlast weiterhin **nicht** messbar —
   kein Sender am Prüfstand (`crc_valid=0`, `192.168.178.70` down).
 
@@ -332,9 +337,10 @@ USB-Serial/JTAG-Kabel (CPU-Wachhaltung), nicht die Assoziation.
 ob (a) die FRITZ!Box trennt, (b) die Leistung sinkt, (c) der Empfaenger weiter
 ESP-NOW-Frames sieht. Rueckweg: `set ps min` bzw. `reset-config`.
 
-**Merge-Hinweis:** `feat/c6-ap-switch` bumpt denselben `rtcfg`-Blob ebenfalls (auf v5,
-18 B, `ap_enabled`); dieser Stand ist v6 (22 B). Beim Merge die Layouts in EINE
-Version falten (Offsets bis [15] identisch).
+**Merge-Hinweis (erledigt):** `feat/c6-ap-switch` (v5, 18 B, `ap_enabled`) und der
+PS-Stand (v6, 22 B) sind in **v9 (26 B)** zusammengefuehrt: der Blob haengt
+`burst_lock` [22], `ps_ladder` [23], `ap_enabled` [24] und `ap_auto_off` [25] an;
+ein Alt-Blob anderer Groesse wird ignoriert (Defaults greifen).
 
 ## NEU (2026-11-07): C6-Receiver – `sleep on` killt die USB-Konsole (BEHOBEN, CI-gruen 7e34996)
 **Befund (reproduziert):** `set sleep on` (automatic light sleep) schaltet auf dem

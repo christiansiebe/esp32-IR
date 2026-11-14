@@ -121,6 +121,11 @@ typedef struct {
                                * transport loss and back up when clean (see
                                * ps_ladder.c). The effective mode is then the
                                * ladder rung, not wifi_ps_mode. */
+    bool ap_enabled;          /* receiver: run the "ESP32-IR-Meter" setup SoftAP
+                               * (the sender scans for it to learn the channel) */
+    bool ap_auto_off;         /* receiver: switch the SoftAP off automatically
+                               * once the station is connected to the home WLAN,
+                               * reclaiming the ~0.22 W the running AP costs */
 } runtime_config_t;
 
 /* Persisted blob wire format (NVS glue in main.c does the nvs_set_blob /
@@ -131,11 +136,6 @@ typedef struct {
  * or different-version blob is the wrong size and is ignored by
  * runtime_config_decode(), so the caller keeps its defaults.
  *
- * NOTE: the parallel feat/c6-ap-switch branch also introduces this blob helper
- * and bumps the version to 5 (18 bytes, appending ap_enabled). At merge time the
- * two layouts must be folded into one version; the field offsets up to [15] are
- * identical, so only the appended tail differs.
- *
  * v7 appends the burst-lock flag at [22] (receiver: predict the sender's burst
  * and open a short RX window around it instead of a free-running connectionless
  * wake window); the blob is 23 bytes. The v6 prefix is unchanged, so a v6 blob
@@ -144,9 +144,14 @@ typedef struct {
  *
  * v8 appends the modem-sleep ladder flag at [23] (receiver: adapt the PS mode
  * down on transport loss and back up when clean); the blob is 24 bytes. The v7
- * prefix is unchanged, so a v7 blob is a different size and is ignored. */
-#define RUNTIME_CONFIG_BLOB_VERSION 8u
-#define RUNTIME_CONFIG_BLOB_SIZE 24u
+ * prefix is unchanged, so a v7 blob is a different size and is ignored.
+ *
+ * v9 appends the SoftAP knobs at [24] and [25] (receiver: ap_enabled runs the
+ * "ESP32-IR-Meter" setup SoftAP; ap_auto_off drops it once the station is
+ * connected); the blob is 26 bytes. The v8 prefix is unchanged, so a v8 blob is
+ * a different size and is ignored by runtime_config_decode(). */
+#define RUNTIME_CONFIG_BLOB_VERSION 9u
+#define RUNTIME_CONFIG_BLOB_SIZE 26u
 
 /* Encode cfg into a RUNTIME_CONFIG_BLOB_SIZE-byte blob. No-op when the buffer is
  * NULL or too small. */

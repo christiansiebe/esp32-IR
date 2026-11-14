@@ -68,6 +68,19 @@ int main(void)
     CHECK(cfg.ps_ladder, "C6 receiver defaults to the ps ladder on");
     CHECK(strstr(out, "ps ladder: on") != NULL, "render reports the ladder on");
 
+    /* SoftAP defaults: on at boot (provisioning page + the sender's channel
+     * scan) but auto-off once the station is connected - measured 2026-11-14,
+     * the running AP costs ~0.22 W (APSTA 0.42 W vs station-only 0.19 W). */
+#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+    CHECK(!cfg.ap_enabled, "the apoff build defaults the SoftAP off");
+    CHECK(!cfg.ap_auto_off, "the apoff build leaves ap_auto_off off (no AP to drop)");
+#else
+    CHECK(cfg.ap_enabled, "the AP build defaults the SoftAP on");
+    CHECK(cfg.ap_auto_off, "the AP build defaults ap_auto_off on");
+    CHECK(strstr(out, "setup ap: on") != NULL, "render reports the setup AP on");
+    CHECK(strstr(out, "ap auto-off: on") != NULL, "render reports ap auto-off on");
+#endif
+
     printf("runtime config (C6 receiver defaults): %d checks, %d failures\n",
            g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

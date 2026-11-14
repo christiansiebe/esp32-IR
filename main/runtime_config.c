@@ -21,6 +21,12 @@
 #ifndef CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 #define CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG 0
 #endif
+/* The apoff build ships station-only: the persisted default flips ap_enabled
+ * off (and ap_auto_off becomes moot). Host builds and the plain receiver default
+ * to the AP build (SoftAP on). */
+#ifndef CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+#define CONFIG_ESPNOW_RECEIVER_DISABLE_AP 0
+#endif
 /* The C6 receiver enables CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION: the IDF holds a
  * ESP_PM_NO_LIGHT_SLEEP lock as long as the USB Serial/JTAG host is connected,
  * and drops it when the host unplugs. That gives "USB only while plugged in" for
@@ -104,6 +110,18 @@ runtime_config_t runtime_config_defaults(void)
          * transport loss. Only the C6 receiver can afford `ps max` (its burst
          * lock covers the burst), so the classic default keeps it off. */
         .ps_ladder = true,
+        /* SoftAP: up at boot (provisioning page + the sender's channel scan),
+         * but auto-off once the station is connected. Measured 2026-11-14: the
+         * running AP costs ~0.22 W (APSTA 0.42 W vs station-only 0.19 W), so
+         * dropping it after provisioning is the single largest idle saving. The
+         * apoff build ships station-only from the start. */
+#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+        .ap_enabled = false,
+        .ap_auto_off = false,
+#else
+        .ap_enabled = true,
+        .ap_auto_off = true,
+#endif
 #else
         .radio_save = false,
         .wake_interval_ms = 100u,
@@ -111,6 +129,14 @@ runtime_config_t runtime_config_defaults(void)
         .burst_lock = false,
         .wifi_ps_mode = RUNTIME_CONFIG_PS_DEFAULT,
         .ps_ladder = false,
+        /* Keep the classic receiver's AP behaviour unchanged (the power win was
+         * measured on the C6); only the apoff build flips it off. */
+#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+        .ap_enabled = false,
+#else
+        .ap_enabled = true,
+#endif
+        .ap_auto_off = false,
 #endif
         /* Wi-Fi 6 TWT is opt-in; the wake cadence is only used once enabled. */
         .twt_enabled = false,
@@ -220,6 +246,8 @@ void runtime_config_encode(const runtime_config_t *cfg, uint8_t *blob, size_t bl
     memcpy(&blob[20], &listen, sizeof(listen));
     blob[22] = cfg->burst_lock ? 1u : 0u;
     blob[23] = cfg->ps_ladder ? 1u : 0u;
+    blob[24] = cfg->ap_enabled ? 1u : 0u;
+    blob[25] = cfg->ap_auto_off ? 1u : 0u;
 }
 
 bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config_t *cfg)
@@ -256,6 +284,8 @@ bool runtime_config_decode(const uint8_t *blob, size_t blob_size, runtime_config
     loaded.listen_interval = listen;
     loaded.burst_lock = blob[22] != 0;
     loaded.ps_ladder = blob[23] != 0;
+    loaded.ap_enabled = blob[24] != 0;
+    loaded.ap_auto_off = blob[25] != 0;
     *cfg = loaded;
     return true;
 }
@@ -492,12 +522,25 @@ bool runtime_config_set(runtime_config_t *cfg, const char *key, const char *valu
             return false;
         }
         next.listen_interval = (uint16_t)v;
+    } else if (strcmp(key, "ap") == 0 || strcmp(key, "ap-enabled") == 0) {
+        /* The "AP only off while the station is connected" safety rule is
+         * enforced where the mode is actually switched (main.c apply_ap_mode()),
+         * not here: this parser is pure C with no view of the link state. */
+        if (!runtime_config_parse_bool(value, &next.ap_enabled)) {
+            snprintf(err, err_size, "ap: expected on or off\n");
+            return false;
+        }
+    } else if (strcmp(key, "ap-auto-off") == 0 || strcmp(key, "ap-auto") == 0) {
+        if (!runtime_config_parse_bool(value, &next.ap_auto_off)) {
+            snprintf(err, err_size, "ap-auto-off: expected on or off\n");
+            return false;
+        }
     } else {
         snprintf(err, err_size,
                  "unknown key '%s' (cpu, freq, cpu-min, sleep, retries, txpower, "
                  "beacon, radio-save, burst-lock, wake-interval, wake-window, twt, "
-                 "twt-wake, ps, listen, wifi-ssid, wifi-pass, mqtt-uri, mqtt-prefix, "
-                 "mqtt-user, mqtt-pass)\n",
+                 "twt-wake, ps, listen, ap, ap-auto-off, wifi-ssid, wifi-pass, "
+                 "mqtt-uri, mqtt-prefix, mqtt-user, mqtt-pass)\n",
                  key);
         return false;
     }
@@ -642,6 +685,10 @@ static bool repair_field(runtime_config_t *cfg, const char *key)
         cfg->wifi_ps_mode = defaults.wifi_ps_mode;
     } else if (strcmp(key, "listen") == 0 || strcmp(key, "listen-interval") == 0) {
         cfg->listen_interval = defaults.listen_interval;
+    } else if (strcmp(key, "ap") == 0 || strcmp(key, "ap-enabled") == 0) {
+        cfg->ap_enabled = defaults.ap_enabled;
+    } else if (strcmp(key, "ap-auto-off") == 0 || strcmp(key, "ap-auto") == 0) {
+        cfg->ap_auto_off = defaults.ap_auto_off;
     } else {
         return false;
     }
@@ -761,7 +808,9 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              "ps ladder: %s\n"
              "twt: %s\n"
              "wifi ps: %s\n"
-             "listen interval: %u beacons\n",
+             "listen interval: %u beacons\n"
+             "setup ap: %s\n"
+             "ap auto-off: %s\n",
              (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
              cfg->light_sleep ? "on"
                               : (runtime_config_light_sleep_allowed()
@@ -770,7 +819,9 @@ void runtime_config_render(const runtime_config_t *cfg, char *out, size_t out_si
              (unsigned)cfg->espnow_retries, tx, beacon, wake,
              cfg->burst_lock ? "on" : "off", cfg->ps_ladder ? "on" : "off",
              twt, ps,
-             (unsigned)cfg->listen_interval);
+             (unsigned)cfg->listen_interval,
+             cfg->ap_enabled ? "on" : "off",
+             cfg->ap_auto_off ? "on" : "off");
 }
 
 #ifdef ESP_PLATFORM

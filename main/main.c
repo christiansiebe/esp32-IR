@@ -98,14 +98,21 @@ static const char *TAG = "espnow_meter";
  * falls back to this value; both roles must agree). */
 #define ESPNOW_CHANNEL       CONFIG_ESPNOW_CHANNEL
 
-/* Wi-Fi interface ESP-NOW runs on. The sender uses its station interface; the
- * receiver uses its SoftAP interface, or its station interface when the AP is
- * disabled. Used for every receiver-side peer (diag/OTA targets and the broadcast
- * peer) so the interface never has to be hard-coded per call site. */
-#if CONFIG_ESPNOW_ROLE_SENDER || CONFIG_ESPNOW_RECEIVER_DISABLE_AP
+/* Receiver setup SoftAP identity. The sender scans for this SSID to learn the
+ * ESP-NOW channel, so scan_receiver_ap_channel() shares the same string. */
+#define AP_SSID              "ESP32-IR-Meter"
+#define AP_PASSWORD          "12345678"
+
+/* Wi-Fi interface ESP-NOW runs on. The sender uses its station interface. The
+ * receiver uses its SoftAP interface while the AP is up (the AP keeps beaconing
+ * on its own channel and the sender discovers it by scanning), and its station
+ * interface once the AP is switched off - at runtime via the persisted knob or
+ * at compile time via CONFIG_ESPNOW_RECEIVER_DISABLE_AP. The interface is never
+ * hard-coded per call site; g_ap_enabled mirrors the live SoftAP state. */
+#if CONFIG_ESPNOW_ROLE_SENDER
 #define ESPNOW_IF            WIFI_IF_STA
 #else
-#define ESPNOW_IF            WIFI_IF_AP
+#define ESPNOW_IF            (g_ap_enabled ? WIFI_IF_AP : WIFI_IF_STA)
 #endif
 /* mDNS name of the receiver dashboard (http://esp32-meter.local/). ESP-NOW is a
  * link-layer protocol with no IP, so the sender has no network identity and only
@@ -287,6 +294,12 @@ static bool g_twt_active;
 static bool g_sntp_started;
 static esp_netif_t *g_ap_netif;
 static esp_netif_t *g_sta_netif;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Receiver: is the setup SoftAP currently up? Drives ESPNOW_IF (WIFI_IF_AP vs
+ * WIFI_IF_STA) and the /config page. Set from the persisted ap_enabled knob at
+ * boot and by apply_ap_mode() at runtime. */
+static bool g_ap_enabled = true;
+#endif
 static uint8_t g_espnow_channel = ESPNOW_CHANNEL;
 #if !CONFIG_ESPNOW_ROLE_SENDER
 /* The listen_interval the current association was built with, and whether it is
@@ -1102,6 +1115,13 @@ static void apply_wifi_ps_config(void);
 /* Re-apply the PS mode and force a reconnect so a changed listen_interval is
  * carried in a fresh association request; called by the console 'set ps|listen'. */
 static void wifi_ps_apply_and_reconnect(void);
+/* Turn the setup SoftAP on or off at runtime (persisted ap_enabled knob, the
+ * /config page and the console 'set ap'); defined with the other radio knobs
+ * below. Refuses an off while the station is not connected. */
+static bool apply_ap_mode(bool enable, char *err, size_t err_size);
+/* Push the SoftAP parameters into the driver; shared by the boot path and
+ * apply_ap_mode(). */
+static esp_err_t configure_ap(void);
 #endif
 
 #if CONFIG_ESPNOW_PS_FALLBACK
@@ -1300,6 +1320,23 @@ static void wifi_event_handler(void *arg,
         }
 #if !CONFIG_ESPNOW_ROLE_SENDER
         mqtt_bridge_start();
+        /* Auto-off: the station now has an IP, so the setup SoftAP is no longer
+         * the only way in. Dropping it reclaims the ~0.22 W a running AP costs
+         * (measured 2026-11-14). Only while it is actually up; apply_ap_mode()
+         * enforces the "station connected" safety rule. If the sender later
+         * cannot find the AP (its channel scan is gone), the receiver's link
+         * fallback brings the AP back. */
+        const runtime_config_t *got_cfg = active_runtime_config();
+        if (got_cfg->ap_auto_off && g_ap_enabled) {
+            char ap_err[96] = {0};
+            if (apply_ap_mode(false, ap_err, sizeof(ap_err))) {
+                ESP_LOGI(TAG, "Auto-off: setup SoftAP switched off after "
+                              "station connect (ap_auto_off on)");
+            } else {
+                ESP_LOGW(TAG, "Auto-off: could not switch the setup SoftAP off: %s",
+                         ap_err);
+            }
+        }
 #endif
     }
 }
@@ -1308,7 +1345,7 @@ static void wifi_event_handler(void *arg,
 static uint8_t scan_receiver_ap_channel(void)
 {
     wifi_scan_config_t scan_config = {
-        .ssid = (uint8_t *)"ESP32-IR-Meter",
+        .ssid = (uint8_t *)AP_SSID,
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
         .show_hidden = false,
     };
@@ -1327,7 +1364,7 @@ static uint8_t scan_receiver_ap_channel(void)
     }
 
     for (uint16_t i = 0; i < count; ++i) {
-        if (strcmp((const char *)records[i].ssid, "ESP32-IR-Meter") == 0) {
+        if (strcmp((const char *)records[i].ssid, AP_SSID) == 0) {
             return records[i].primary;
         }
     }
@@ -1381,6 +1418,25 @@ static bool ota_target_is_safe(const esp_partition_t *target)
     return true;
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Push the SoftAP parameters into the driver. Shared by the boot path and
+ * apply_ap_mode(), so a beacon/txpower re-apply cannot silently drop the AP's
+ * identity. Returns the driver result so the runtime path can back out instead
+ * of aborting the device on a failed re-enable. */
+static esp_err_t configure_ap(void)
+{
+    wifi_config_t ap_config = {0};
+    memcpy(ap_config.ap.ssid, AP_SSID, sizeof(AP_SSID));
+    ap_config.ap.ssid_len = strlen(AP_SSID);
+    ap_config.ap.channel = ESPNOW_CHANNEL;
+    memcpy(ap_config.ap.password, AP_PASSWORD, sizeof(AP_PASSWORD));
+    ap_config.ap.max_connection = 4;
+    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    ap_config.ap.ssid_hidden = 0;
+    return esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+}
+#endif
+
 static void initialize_wifi_and_espnow(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -1429,25 +1485,26 @@ static void initialize_wifi_and_espnow(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                wifi_event_handler, NULL));
     ESP_ERROR_CHECK(load_wifi_credentials());
-#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
-    /* Station-only: no SoftAP. The dashboard is reachable over the home WLAN;
-     * ESP-NOW runs on the station interface. The sender can no longer discover
-     * the channel from the AP, so both roles must share CONFIG_ESPNOW_CHANNEL. */
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_LOGI(TAG, "SoftAP disabled (CONFIG_ESPNOW_RECEIVER_DISABLE_AP); "
-                  "dashboard only reachable over the configured WLAN");
-#else
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-    wifi_config_t ap_config = {0};
-    memcpy(ap_config.ap.ssid, "ESP32-IR-Meter", sizeof("ESP32-IR-Meter"));
-    ap_config.ap.ssid_len = strlen("ESP32-IR-Meter");
-    ap_config.ap.channel = ESPNOW_CHANNEL;
-    memcpy(ap_config.ap.password, "12345678", sizeof("12345678"));
-    ap_config.ap.max_connection = 4;
-    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    ap_config.ap.ssid_hidden = 0;
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
-#endif
+    /* Boot the SoftAP from the persisted ap_enabled knob (default: on for the
+     * AP build, off for the apoff build). ESP-NOW runs on the AP interface
+     * while it is up, so this must be decided before esp_now_init() below;
+     * g_ap_enabled then drives ESPNOW_IF for every peer. */
+    runtime_config_t *boot_cfg = active_runtime_config();
+    g_ap_enabled = boot_cfg->ap_enabled;
+    if (g_ap_enabled) {
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+        ESP_ERROR_CHECK(configure_ap());
+        ESP_LOGI(TAG, "SoftAP enabled: SSID=%s, channel=%u", AP_SSID,
+                 (unsigned)g_espnow_channel);
+    } else {
+        /* Station-only: no SoftAP. The dashboard is reachable over the home
+         * WLAN and ESP-NOW runs on the station interface. The sender can no
+         * longer discover the channel from the AP, so both roles must share
+         * CONFIG_ESPNOW_CHANNEL. */
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_LOGI(TAG, "SoftAP disabled; dashboard only reachable over the "
+                      "configured WLAN (ESP-NOW on the station interface)");
+    }
     wifi_config_t sta_config;
     fill_station_config(&sta_config);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
@@ -1516,11 +1573,11 @@ static void initialize_wifi_and_espnow(void)
 #endif
     wifi_interface_t espnow_interface = WIFI_IF_STA;
 #else
-#if !CONFIG_ESPNOW_RECEIVER_DISABLE_AP
-    ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP,
-                                          WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G |
-                                          WIFI_PROTOCOL_11N));
-#endif
+    if (g_ap_enabled) {
+        ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP,
+                                              WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G |
+                                              WIFI_PROTOCOL_11N));
+    }
     if (g_wifi_configured) {
         ESP_ERROR_CHECK(esp_wifi_connect());
     } else {
@@ -1555,13 +1612,13 @@ static void initialize_wifi_and_espnow(void)
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));
 
 #if !CONFIG_ESPNOW_ROLE_SENDER
-#if CONFIG_ESPNOW_RECEIVER_DISABLE_AP
-    ESP_LOGI(TAG, "Receiver ready on ESP-NOW channel %u (SoftAP disabled)",
-             g_espnow_channel);
-#else
-    ESP_LOGI(TAG, "AP started: SSID=ESP32-IR-Meter, channel=%u, IP=192.168.4.1",
-             g_espnow_channel);
-#endif
+    if (g_ap_enabled) {
+        ESP_LOGI(TAG, "AP started: SSID=%s, channel=%u, IP=192.168.4.1",
+                 AP_SSID, g_espnow_channel);
+    } else {
+        ESP_LOGI(TAG, "Receiver ready on ESP-NOW channel %u (SoftAP disabled)",
+                 g_espnow_channel);
+    }
 #endif
 }
 
@@ -4557,7 +4614,7 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
      * modem sleeps between wakes. Reading the live runtime config here keeps the
      * dashboard able to show the currently effective values alongside the burst
      * lock, without touching the radio. */
-    char radio_json[220] = "";
+    char radio_json[384] = "";
 #if !CONFIG_ESPNOW_ROLE_SENDER
     {
         runtime_config_t *rcfg = active_runtime_config();
@@ -4577,12 +4634,15 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
             ",\"radio_save\":%s,\"wake_interval_ms\":%u,\"wake_window_ms\":%u,"
             "\"wifi_ps_mode\":\"%s\",\"listen_interval\":%u,"
             "\"ps_ladder\":%s,\"ps_ladder_mode\":\"%s\",\"ps_ladder_losses\":%u,"
-            "\"ps_ladder_steps_down\":%u,\"ps_ladder_steps_up\":%u",
+            "\"ps_ladder_steps_down\":%u,\"ps_ladder_steps_up\":%u,"
+            "\"ap_enabled\":%s,\"ap_auto_off\":%s",
             rcfg->radio_save ? "true" : "false",
             (unsigned)rcfg->wake_interval_ms, (unsigned)rcfg->wake_window_ms,
             ps_name, (unsigned)rcfg->listen_interval,
             rcfg->ps_ladder ? "true" : "false", ladder_name, ladder_losses,
-            ladder_down, ladder_up);
+            ladder_down, ladder_up,
+            g_ap_enabled ? "true" : "false",
+            rcfg->ap_auto_off ? "true" : "false");
         if (radio_len < 0 || (size_t)radio_len >= sizeof(radio_json)) {
             return ESP_FAIL;
         }
@@ -6646,10 +6706,10 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
                  "usage: set <cpu|freq|cpu-min|sleep|retries> <value>\n");
 #elif SOC_WIFI_HE_SUPPORT
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #else
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #endif
         return;
     }
@@ -6743,6 +6803,19 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
         strcmp(key, "listen") == 0 || strcmp(key, "listen-interval") == 0) {
         wifi_ps_apply_and_reconnect();
     }
+    /* 'set ap' actually switches the SoftAP (the knob alone does nothing at
+     * runtime). Refuse-and-roll-back on failure so the persisted state always
+     * matches the live radio - e.g. 'set ap off' before the station is connected
+     * is rejected and the knob stays on. 'set ap-auto-off' needs no apply. */
+    if (strcmp(key, "ap") == 0 || strcmp(key, "ap-enabled") == 0) {
+        char ap_err[128] = {0};
+        if (!apply_ap_mode(cfg->ap_enabled, ap_err, sizeof(ap_err))) {
+            cfg->ap_enabled = g_ap_enabled;
+            runtime_config_store(cfg);
+            snprintf(out, out_size, "%s\n", ap_err);
+            return;
+        }
+    }
 #if SOC_WIFI_HE_SUPPORT
     /* TWT only takes effect once associated; a 'set' while connected re-negotiates
      * (and 'set twt off' tears the agreement down). */
@@ -6794,6 +6867,16 @@ static void console_cmd_reset_config(const char *args, char *out, size_t out_siz
      * re-enables burst-lock leaves the worker disabled while ps=min parks the
      * modem with no wake window (the silent ~90% loss case). */
     apply_radio_power_config();
+    /* Bring the SoftAP back in line with the reset defaults (best effort: an
+     * off while the station is not connected is refused, so the device is never
+     * stranded - it just keeps the AP it has). */
+    if (cfg->ap_enabled != g_ap_enabled) {
+        char ap_err[96] = {0};
+        if (!apply_ap_mode(cfg->ap_enabled, ap_err, sizeof(ap_err))) {
+            ESP_LOGW(TAG, "reset-config: setup SoftAP left %s: %s",
+                     g_ap_enabled ? "on" : "off", ap_err);
+        }
+    }
     /* Restore the default modem PS mode + listen interval and reconnect so the
      * default interval reaches the association request. */
     wifi_ps_apply_and_reconnect();
@@ -6841,12 +6924,19 @@ static void console_cmd_config(const char *args, char *out, size_t out_size)
     const char *ps = cfg->wifi_ps_mode <= RUNTIME_CONFIG_PS_MAX
                          ? ps_names[cfg->wifi_ps_mode]
                          : "min";
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    char ap[48];
+    snprintf(ap, sizeof(ap), " ap=%s ap-auto-off=%s",
+             g_ap_enabled ? "on" : "off", cfg->ap_auto_off ? "on" : "off");
+#else
+    const char *ap = "";
+#endif
     int used = snprintf(out, out_size,
-                        "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u\n",
+                        "cpu=%u/%u sleep=%s retries=%u%s%s%s ps=%s listen=%u%s\n",
                         (unsigned)cfg->cpu_mhz, (unsigned)cfg->cpu_min_mhz,
                         cfg->light_sleep ? "on" : "off",
                         (unsigned)cfg->espnow_retries, radio, wake, twt, ps,
-                        (unsigned)cfg->listen_interval);
+                        (unsigned)cfg->listen_interval, ap);
     /* Surface a safe-fallback repair (a knob the driver rejected and that was
      * reset to its default) so the operator sees why a value differs. */
     if (used > 0 && (size_t)used < out_size) {
@@ -6868,11 +6958,11 @@ static void web_console_register_commands(void)
      * restart the bridge. */
 #if SOC_WIFI_HE_SUPPORT
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #else
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #endif
 #else
@@ -8703,10 +8793,32 @@ static bool decode_form_value(const char *source, char *destination, size_t capa
 
 static esp_err_t config_handler(httpd_req_t *req)
 {
-    static const char page[] =
+    /* The setup-AP switch is receiver-only. A <select> (not a checkbox) is used
+     * so the browser always sends an explicit ap=on|off - an unchecked checkbox
+     * would be omitted entirely and could be misread. The current state is
+     * preselected and spelled out below the control. */
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    const bool ap_on = g_ap_enabled;
+    char ap_section[512];
+    snprintf(ap_section, sizeof(ap_section),
+             "<form method=\"post\" action=\"/api/ap\">"
+             "<label>Setup-AP (%s)</label>"
+             "<select name=\"ap\"><option value=\"on\"%s>an</option>"
+             "<option value=\"off\"%s>aus</option></select>"
+             "<p class=\"note\">Aktuell: <b>%s</b>. Der AP darf nur abgeschaltet "
+             "werden, solange die Station mit einem WLAN verbunden ist. Mit "
+             "&bdquo;automatisch&ldquo; schaltet sich der AP nach dem Verbinden "
+             "selbst ab (spart ~0,22 W).</p>"
+             "<button type=\"submit\">Setup-AP übernehmen</button></form>",
+             AP_SSID, ap_on ? " selected" : "", ap_on ? "" : " selected",
+             ap_on ? "an" : "aus");
+#else
+    const char *ap_section = "";
+#endif
+    static const char page_template[] =
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>WLAN</title>"
         "<style>body{font-family:Arial;margin:24px;background:#10151f;color:#e5edf7}"
-        "input{display:block;margin:8px 0 16px;padding:8px;width:280px}"
+        "input,select{display:block;margin:8px 0 16px;padding:8px;width:280px}"
         ".note{color:#9fb4c8;font-size:0.85rem;max-width:420px}</style></head>"
         "<body><h1>FRITZ!Box WLAN</h1><p class=\"note\">SSID und Passwort des "
         "2,4-GHz-WLANs eintragen. Passwort leer lassen, um ein bereits "
@@ -8718,11 +8830,95 @@ static esp_err_t config_handler(httpd_req_t *req)
         "<label>WLAN-Passwort</label><input name=\"password\" type=\"password\" "
         "maxlength=\"64\" autocomplete=\"off\">"
         "<button type=\"submit\">Speichern und verbinden</button></form>"
+        "%s"
         "<p><a href=\"/\">Zurück zum Zähler</a></p></body></html>";
+    char page[2048];
+    int n = snprintf(page, sizeof(page), page_template, ap_section);
+    if (n < 0 || (size_t)n >= sizeof(page)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Config page too long");
+        return ESP_FAIL;
+    }
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req, page);
 }
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* POST /api/ap: apply the setup-AP switch (form field ap=on|off). The AP is
+ * switched and persisted only when apply_ap_mode() accepts it; an off while the
+ * station is not connected is refused with HTTP 400 so the device is never
+ * stranded. A missing field is treated as "off" (the page always sends one). */
+static esp_err_t ap_switch_handler(httpd_req_t *req)
+{
+    char body[64];
+    if (req->content_len == 0 || req->content_len >= sizeof(body)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid form size");
+        return ESP_FAIL;
+    }
+    size_t received = 0;
+    while (received < req->content_len) {
+        int count = httpd_req_recv(req, body + received, req->content_len - received);
+        if (count <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Could not read form");
+            return ESP_FAIL;
+        }
+        received += (size_t)count;
+    }
+    body[received] = '\0';
+
+    bool want_ap = false; /* absent ap field -> off (the <select> always sends one) */
+    char *field = body;
+    while (field != NULL) {
+        char *next = strchr(field, '&');
+        if (next != NULL) {
+            *next++ = '\0';
+        }
+        char *equals = strchr(field, '=');
+        if (equals == NULL) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Malformed form field");
+            return ESP_FAIL;
+        }
+        *equals++ = '\0';
+        if (strcmp(field, "ap") == 0) {
+            if (strcmp(equals, "on") == 0) {
+                want_ap = true;
+            } else if (strcmp(equals, "off") == 0) {
+                want_ap = false;
+            } else {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid ap value");
+                return ESP_FAIL;
+            }
+        }
+        field = next;
+    }
+
+    char err[96] = {0};
+    if (!apply_ap_mode(want_ap, err, sizeof(err))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        char fail[384];
+        snprintf(fail, sizeof(fail),
+                 "<!doctype html><html><body><p>%s</p>"
+                 "<p><a href=\"/config\">Zurück zur WLAN-Seite</a></p></body></html>",
+                 err);
+        return httpd_resp_sendstr(req, fail);
+    }
+
+    runtime_config_t *cfg = active_runtime_config();
+    cfg->ap_enabled = want_ap;
+    runtime_config_store(cfg);
+
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    char ok[256];
+    snprintf(ok, sizeof(ok),
+             "<!doctype html><html><body><p>Setup-AP ist jetzt <b>%s</b>.</p>"
+             "<p><a href=\"/config\">Zurück zur WLAN-Seite</a></p></body></html>",
+             want_ap ? "an" : "aus");
+    return httpd_resp_sendstr(req, ok);
+}
+#endif
 
 static esp_err_t save_wifi_handler(httpd_req_t *req)
 {
@@ -8988,6 +9184,13 @@ static void register_webserver_handlers(httpd_handle_t server)
         .method = HTTP_GET,
         .handler = config_handler,
     };
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    httpd_uri_t ap_uri = {
+        .uri = "/api/ap",
+        .method = HTTP_POST,
+        .handler = ap_switch_handler,
+    };
+#endif
     httpd_uri_t save = {
         .uri = "/save",
         .method = HTTP_POST,
@@ -9047,6 +9250,9 @@ static void register_webserver_handlers(httpd_handle_t server)
 #endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &log_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config_uri));
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &ap_uri));
+#endif
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &save));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &console_page));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &console_api));
@@ -9186,8 +9392,23 @@ static void link_fallback_worker(void *arg)
                       "disabled, CPU stays awake", (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
 #else
         /* Receiver: no sender traffic. A hung receiver is already covered by
-         * web_guard, so only surface it here for the dashboard. */
+         * web_guard, so only surface it here for the dashboard. Self-heal the
+         * auto-off: if the SoftAP is down, the sender may be unable to find our
+         * channel (it scans for the AP and otherwise falls back to the fixed
+         * CONFIG_ESPNOW_CHANNEL). Bring the AP back so the next scan succeeds;
+         * this costs the ~0.22 W again but restores the link, which is the
+         * higher priority. */
         g_link_fallback_stage = 1;
+        if (!g_ap_enabled) {
+            char ap_err[96] = {0};
+            if (apply_ap_mode(true, ap_err, sizeof(ap_err))) {
+                ESP_LOGW(TAG, "Link fallback: sender silent, setup SoftAP "
+                              "brought back so the sender can find the channel");
+            } else {
+                ESP_LOGW(TAG, "Link fallback: could not re-enable the setup "
+                              "SoftAP: %s", ap_err);
+            }
+        }
         ESP_LOGW(TAG, "Link fallback: no sender traffic for %u ms",
                  (unsigned)CONFIG_ESPNOW_LINK_FALLBACK_MS);
 #endif
@@ -9761,6 +9982,106 @@ static void apply_radio_power_config(void)
 #if BURST_LOCK_SUPPORTED
     apply_burst_lock_config();
 #endif
+}
+
+/* Move the receiver's ESP-NOW peers onto `interface`. The peers follow the
+ * SoftAP: they live on WIFI_IF_AP while the AP is up and must move to
+ * WIFI_IF_STA when it is switched off (and back when it returns). Without this,
+ * a plain esp_wifi_set_mode(WIFI_MODE_STA) tears the AP interface down under the
+ * registered peers and every exchange (diag, history backfill, OTA target,
+ * broadcast) silently stops - the failure that made the earlier runtime AP-drop
+ * a no-go (04add16 reverted in 71409c8). esp_now_add_peer() is a no-op for an
+ * existing MAC, so each peer is deleted first. */
+static void espnow_migrate_peers(wifi_interface_t interface)
+{
+    (void)esp_now_del_peer(broadcast_mac);
+    esp_now_peer_info_t peer = {0};
+    memcpy(peer.peer_addr, broadcast_mac, ESP_NOW_ETH_ALEN);
+    peer.channel = 0;
+    peer.ifidx = interface;
+    peer.encrypt = false;
+    (void)esp_now_add_peer(&peer);
+
+    uint8_t sender_mac[ESP_NOW_ETH_ALEN];
+    portENTER_CRITICAL(&g_sender_mac_lock);
+    bool sender_known = g_sender_mac_valid;
+    memcpy(sender_mac, g_sender_mac, ESP_NOW_ETH_ALEN);
+    portEXIT_CRITICAL(&g_sender_mac_lock);
+    if (sender_known) {
+        (void)esp_now_del_peer(sender_mac);
+        (void)add_espnow_peer(sender_mac, interface);
+    }
+    if (esp_now_is_peer_exist(g_espnow_ota_sender_mac)) {
+        (void)esp_now_del_peer(g_espnow_ota_sender_mac);
+        (void)add_espnow_peer(g_espnow_ota_sender_mac, interface);
+    }
+}
+
+/* Turn the setup SoftAP on or off at runtime. The persisted ap_enabled knob, the
+ * /config page / `set ap` console command and the ap_auto_off path all funnel
+ * through here.
+ *
+ * Safety: switching the AP *off* is refused while the station is not connected,
+ * because the AP is then the only way back to the dashboard - the device would
+ * be unreachable. Switching it on is always allowed. Returns false (and leaves
+ * the state unchanged) when refused or when the driver rejects the mode. */
+static bool apply_ap_mode(bool enable, char *err, size_t err_size)
+{
+    if (enable == g_ap_enabled) {
+        return true; /* already in the requested state */
+    }
+    if (!enable && !g_wifi_connected) {
+        if (err != NULL && err_size > 0) {
+            snprintf(err, err_size,
+                     "AP off refused: the station is not connected to a WLAN, so "
+                     "the device would become unreachable");
+        }
+        return false;
+    }
+
+    esp_err_t mode_err;
+    if (enable) {
+        /* The apoff build never created the AP netif (no SoftAP at boot), so a
+         * runtime enable must create it here - otherwise the AP comes up with
+         * no IP/DHCP server and 192.168.4.1 is unreachable. Cheap and only paid
+         * on the first enable. */
+        if (g_ap_netif == NULL) {
+            g_ap_netif = esp_netif_create_default_wifi_ap();
+            if (g_ap_netif == NULL) {
+                if (err != NULL && err_size > 0) {
+                    snprintf(err, err_size, "AP on failed: no AP network interface");
+                }
+                return false;
+            }
+        }
+        mode_err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+        if (mode_err == ESP_OK) {
+            mode_err = configure_ap();
+        }
+    } else {
+        mode_err = esp_wifi_set_mode(WIFI_MODE_STA);
+    }
+    if (mode_err != ESP_OK) {
+        if (err != NULL && err_size > 0) {
+            snprintf(err, err_size, "AP %s failed: %s", enable ? "on" : "off",
+                     esp_err_to_name(mode_err));
+        }
+        return false;
+    }
+
+    g_ap_enabled = enable;
+    /* ESP-NOW rides the AP interface while the AP is up; move the peers to
+     * whichever interface is now active so the link survives the switch. */
+    espnow_migrate_peers(ESPNOW_IF);
+    if (enable) {
+        /* configure_ap() wrote a fresh (default) AP config, which resets the
+         * persisted beacon interval; re-apply the radio knobs so a runtime
+         * enable matches a boot-time enable. */
+        apply_radio_power_config();
+    }
+    ESP_LOGW(TAG, "SoftAP switched %s at runtime (ESP-NOW on %s)",
+             enable ? "on" : "off", enable ? "WIFI_IF_AP" : "WIFI_IF_STA");
+    return true;
 }
 
 /* Push the persisted Wi-Fi modem power-save mode into the driver. Must run

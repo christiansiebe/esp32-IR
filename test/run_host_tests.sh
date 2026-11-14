@@ -622,6 +622,19 @@ python3 "$repo/remote-shell/ha/test_print_health.py"
 
 "$out/test_runtime_config_c6_defaults"
 
+# Same C6 receiver defaults, but built as the apoff variant (station-only): the
+# SoftAP must default off. Same source, CONFIG_ESPNOW_RECEIVER_DISABLE_AP=1.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DCONFIG_IDF_TARGET_ESP32C6=1 \
+    -DCONFIG_ESPNOW_RECEIVER_DISABLE_AP=1 \
+    -I"$repo/main" \
+    "$repo/main/runtime_config.c" \
+    "$here/test_runtime_config_c6_defaults.c" \
+    -o "$out/test_runtime_config_c6_defaults_apoff"
+
+"$out/test_runtime_config_c6_defaults_apoff"
+
 # Parser robustness runs under AddressSanitizer so buffer overruns in the
 # vendored SML parser fail the build instead of corrupting the sender at runtime.
 cxx="${CXX:-g++}"

@@ -323,6 +323,22 @@ int main(void)
           "listen=65535 (the uint16 ceiling) is accepted");
     CHECK(!runtime_config_set(&cfg, "listen", "65536", 240, err, sizeof(err)),
           "listen above 65535 is rejected");
+    /* The setup-AP knobs (receiver). Both parse as booleans; the alias 'ap' is
+     * the short form used by `set ap on|off` and the /config page. */
+    CHECK(runtime_config_set(&cfg, "ap", "off", 240, err, sizeof(err)) &&
+              cfg.ap_enabled == false,
+          "set ap=off");
+    CHECK(runtime_config_set(&cfg, "ap-enabled", "on", 240, err, sizeof(err)) &&
+              cfg.ap_enabled == true,
+          "the ap-enabled alias works");
+    CHECK(!runtime_config_set(&cfg, "ap", "maybe", 240, err, sizeof(err)),
+          "an unknown ap value is rejected");
+    CHECK(runtime_config_set(&cfg, "ap-auto-off", "off", 240, err, sizeof(err)) &&
+              cfg.ap_auto_off == false,
+          "set ap-auto-off=off");
+    CHECK(runtime_config_set(&cfg, "ap-auto", "on", 240, err, sizeof(err)) &&
+              cfg.ap_auto_off == true,
+          "the ap-auto alias works");
     /* clamp() forces a persisted PS mode/listen interval into range. */
     runtime_config_t psr = runtime_config_defaults();
     psr.wifi_ps_mode = 9;
@@ -383,6 +399,8 @@ int main(void)
     rt.listen_interval = 30;
     rt.burst_lock = true;
     rt.ps_ladder = true;
+    rt.ap_enabled = false;
+    rt.ap_auto_off = true;
     uint8_t blob[RUNTIME_CONFIG_BLOB_SIZE];
     runtime_config_encode(&rt, blob, sizeof(blob));
     CHECK(blob[0] == RUNTIME_CONFIG_BLOB_VERSION, "blob carries the current version");
@@ -399,7 +417,9 @@ int main(void)
               back.twt_wake_ms == rt.twt_wake_ms &&
               back.wifi_ps_mode == rt.wifi_ps_mode &&
               back.burst_lock == rt.burst_lock &&
-              back.ps_ladder == rt.ps_ladder,
+              back.ps_ladder == rt.ps_ladder &&
+              back.ap_enabled == rt.ap_enabled &&
+              back.ap_auto_off == rt.ap_auto_off,
           "the blob roundtrip restores every knob");
     /* A wrong version or size is rejected so an old blob is ignored. */
     blob[0] = (uint8_t)(RUNTIME_CONFIG_BLOB_VERSION - 1);

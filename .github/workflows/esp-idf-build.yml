@@ -294,6 +294,22 @@ jobs:
             "build/${{ matrix.role }}/esp32-IR.bin"
           echo "${{ matrix.role }} image registers workers with the task watchdog"
 
+      - name: Verify the runtime SoftAP switch (receiver)
+        if: startsWith(matrix.role, 'receiver')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The receiver ships a runtime SoftAP switch (ap_enabled / ap_auto_off,
+          # `set ap`, POST /api/ap). The strings below live only in the
+          # receiver-only code paths (apply_ap_mode's log line, the /api/ap form
+          # action, the auto-off log line), so grepping the built app proves the
+          # switch is compiled in and not just the config flag.
+          test -s "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'SoftAP switched %s at runtime' "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'action="/api/ap"' "build/${{ matrix.role }}/esp32-IR.bin"
+          grep -a -q 'Auto-off: setup SoftAP switched off after' "build/${{ matrix.role }}/esp32-IR.bin"
+          echo "${{ matrix.role }} image contains the runtime SoftAP switch"
+
       - name: Verify the receiver health watchdog is compiled in
         if: startsWith(matrix.role, 'receiver')
         shell: bash
