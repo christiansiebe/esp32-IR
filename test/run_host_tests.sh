@@ -280,6 +280,18 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_ps_fallback"
 
+# Adaptive modem-sleep ladder: start frugal (ps max), step a rung down when a
+# window loses too many ESP-NOW frames, climb back after a run of clean windows,
+# never below the floor or above the start. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/ps_ladder.c" \
+    "$here/test_ps_ladder.c" \
+    -o "$out/test_ps_ladder"
+
+"$out/test_ps_ladder"
+
 # Sender parser stall recovery: a wedged SML parser (bytes arriving, no telegram
 # finalised) must be reset by a timer armed by the first byte of the capture, not
 # by a telegram - the old rule left a wedge on the first telegram of a boot
