@@ -1877,19 +1877,22 @@ und tunnelt jede Anfrage ueber den bestehenden Diag-Kanal (`sender_diag_exchange
       bleiben. CI prueft `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80` in beiden Rollen.
 
 ### Bedienung / Diagnose (neu)
-- [ ] **Reboot-Taste im Dashboard** (`POST /api/reboot`, Auth-Gate wie `/update`,
+- [x] **Reboot-Taste im Dashboard** (`POST /api/reboot`, Auth-Gate wie `/update`,
       Antwort senden, dann `esp_restart()`). Nuetzlich fuer den Persistenz-Test
       (Reboot ohne Stecker ziehen) und generell zum Neustart aus der Weboberflaeche.
       Muss auf der AP-Seite auch ohne STA-Verbindung funktionieren.
-      **Teilweise erledigt:** die Web-Konsole (`web_console.c`, `/api/console`) hat
-      bereits den Befehl `reboot` (`console_cmd_reboot` -> `esp_restart()`); es fehlt
-      nur noch die prominente Taste im Dashboard.
+      **Erledigt** auf `feat/c6-receiver-improvements` (Cherry-Pick `08e4f25`,
+      `a087e83`): `reboot_handler` + `/api/reboot` + Taste; Handler-Budget 34 -> 35.
+      Die Web-Konsole (`web_console.c`, `/api/console`) hatte den Befehl `reboot`
+      (`console_cmd_reboot` -> `esp_restart()`) bereits.
 - [~] **Debug-Konsole mit Eingabe** — **teilweise erledigt:** Web-Konsole existiert
       (`/api/console`, `web_console.c`) mit Befehlen `help`, `status`, `history`,
       `time`, `wifi`, `power`, `reboot` (Registrierung `web_console_register_commands`).
-      Offen: weitere Befehle (`nvs dump`, `sntp resync`, `espnow diag`) und/oder eine
-      **serielle** Eingabe (UART ist durch SML-Eingang belegt). Beruehrt keine
-      geschuetzten Bereiche.
+      **`sntp resync` ergaenzt** (`389f5c1`, `console_cmd_sntp`): SNTP-Client
+      deinit+init, damit ein haengender Sync ohne Reboot neu versucht wird.
+      Offen: `nvs dump` (marginal, `test nvs` zeigt die Zahlen schon), `espnow diag`
+      und/oder eine **serielle** Eingabe (UART ist durch SML-Eingang belegt).
+      Beruehrt keine geschuetzten Bereiche.
 
 ### Persistenz / Zeit
 - [ ] **Minutenwerte erst nach NTP-Sync** (`wall_clock >= 1704067200`): Vor der
@@ -1947,7 +1950,7 @@ und tunnelt jede Anfrage ueber den bestehenden Diag-Kanal (`sender_diag_exchange
       Maus (`mousemove`) und Touch (`touchstart`/`touchmove`) unterstuetzt, funktioniert also
       auch am Touch-Display. Basis-Chart liegt in einem Offscreen-Canvas, beim Hervorheben
       wird nur geblittet + der Balken betont. JS-Syntax- und Laufzeit-Check in CI.
-- [ ] `current_sample_count`-Label praezisieren (aktuell: 15-min-Ringpuffer, nicht Samples im aktuellen 60-s-Bucket).
+- [x] `current_sample_count`-Label praezisieren (aktuell: 15-min-Ringpuffer, nicht Samples im aktuellen 60-s-Bucket). **Erledigt** (`389f5c1`): Dashboard-Zeile heisst jetzt „Messwerte im Live-Ring (15 min)".
 - [ ] `resize`-Handler startet zusaetzliche 60-s-Schleifen (`updateHistory`) -> Mehrfach-Timer vermeiden.
 
 ### Diagnose-Ausbau (CPU-Takt, Sleep, Speicher, Sync) + Vergleich in allen Ansichten
