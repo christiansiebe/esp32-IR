@@ -327,6 +327,10 @@ static volatile bool g_wifi_assoc_listen_valid;
  * skip count is the one that shows the fix working (it used to always reconnect). */
 static uint32_t g_wifi_reconnects;
 static uint32_t g_wifi_reconnect_skips;
+/* How often the STA association landed on a new channel and the ESP-NOW peers
+ * had to be re-anchored. A non-zero value is the roaming fix at work; it used to
+ * be the silent link loss. */
+static uint32_t g_espnow_reanchors;
 /* One-shot timer that performs a needed reconnect out of the HTTP request path,
  * so the console response is flushed before the link drops. */
 static esp_timer_handle_t g_wifi_reconnect_timer;
@@ -1171,6 +1175,11 @@ static bool apply_ap_mode(bool enable, char *err, size_t err_size);
 /* Push the SoftAP parameters into the driver; shared by the boot path and
  * apply_ap_mode(). */
 static esp_err_t configure_ap(void);
+/* Move the receiver's ESP-NOW peers onto the now-active interface. Called by the
+ * AP switch and, since the roaming fix, by the STA_CONNECTED handler whenever
+ * the association landed on a different channel; defined with the radio knobs
+ * below. */
+static void espnow_migrate_peers(wifi_interface_t interface);
 #endif
 
 #if CONFIG_ESPNOW_PS_FALLBACK
@@ -1242,12 +1251,27 @@ static void wifi_event_handler(void *arg,
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
         const wifi_event_sta_connected_t *event = event_data;
         g_wifi_connected = true;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+        /* An ESP-NOW peer latches the radio channel it was added on; a later
+         * association on a different channel does not move it. A mesh hands the
+         * receiver to a BSSID on another channel (ch 11 <-> ch 1 at -85 dBm),
+         * and the peers then keep the old anchor: the link goes silent even
+         * though the sender never stopped, which looked like a 187 s publish
+         * cadence. Remember the previous channel so a real change re-anchors. */
+        const uint8_t previous_channel = g_espnow_channel;
+#endif
         g_espnow_channel = event->channel;
 #if !CONFIG_ESPNOW_ROLE_SENDER
         /* Snapshot the listen_interval this association was built with, so a
          * later 'set listen' can tell whether a reconnect is actually needed. */
         g_wifi_assoc_listen = active_runtime_config()->listen_interval;
         g_wifi_assoc_listen_valid = true;
+        if (event->channel != previous_channel) {
+            espnow_migrate_peers(ESPNOW_IF);
+            ++g_espnow_reanchors;
+            ESP_LOGW(TAG, "ESP-NOW peers re-anchored after channel change %u -> %u",
+                     (unsigned)previous_channel, (unsigned)event->channel);
+        }
 #endif
         ESP_LOGI(TAG, "Connected to configured Wi-Fi on channel %u", event->channel);
 #if CONFIG_ESPNOW_PS_FALLBACK
@@ -4738,13 +4762,15 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     /* Wi-Fi reconnect accounting (receiver-only): a growing "skipped" count is
      * the fix working - a 'set ps|listen' that changed nothing no longer drops
      * the link. */
-    char wifi_json[128] = "";
+    char wifi_json[160] = "";
 #if !CONFIG_ESPNOW_ROLE_SENDER
     {
         int wifi_len = snprintf(wifi_json, sizeof(wifi_json),
-                                ",\"wifi_reconnects\":%u,\"wifi_reconnect_skips\":%u",
+                                ",\"wifi_reconnects\":%u,\"wifi_reconnect_skips\":%u,"
+                                "\"espnow_reanchors\":%u",
                                 (unsigned)g_wifi_reconnects,
-                                (unsigned)g_wifi_reconnect_skips);
+                                (unsigned)g_wifi_reconnect_skips,
+                                (unsigned)g_espnow_reanchors);
         if (wifi_len < 0 || (size_t)wifi_len >= sizeof(wifi_json)) {
             return ESP_FAIL;
         }
@@ -6038,8 +6064,10 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
 #endif
     extra = snprintf(
         out + written, out_size - (size_t)written,
-        "wifi reconnect: %u done, %u skipped (listen_interval unchanged)\n",
-        (unsigned)g_wifi_reconnects, (unsigned)g_wifi_reconnect_skips);
+        "wifi reconnect: %u done, %u skipped (listen_interval unchanged)\n"
+        "esp-now re-anchors: %u (peer channel moved with the STA)\n",
+        (unsigned)g_wifi_reconnects, (unsigned)g_wifi_reconnect_skips,
+        (unsigned)g_espnow_reanchors);
     if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
         snprintf(out, out_size, "status: output truncated\n");
     }
