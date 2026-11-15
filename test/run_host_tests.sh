@@ -308,6 +308,19 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_ps_ladder"
 
+# Sticky BSSID pin with fail-open: take a pin on the first association, hold it
+# across reconnects (so the mesh cannot drag the channel-bound ESP-NOW peers to
+# another channel), and release it once the pinned BSSID has been gone for the
+# fail-open window so the receiver can never wedge itself offline. Pure C.
+"$cc" -std=c11 -Wall -Wextra -O2 \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -I"$repo/main" \
+    "$repo/main/bssid_pin.c" \
+    "$here/test_bssid_pin.c" \
+    -o "$out/test_bssid_pin"
+
+"$out/test_bssid_pin"
+
 # Sender parser stall recovery: a wedged SML parser (bytes arriving, no telegram
 # finalised) must be reset by a timer armed by the first byte of the capture, not
 # by a telegram - the old rule left a wedge on the first telegram of a boot

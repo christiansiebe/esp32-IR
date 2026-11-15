@@ -388,3 +388,33 @@ config ESPNOW_RWDT_TIMEOUT_MS
         panic 30 s + reboot 30 s = 120 s) so a working software reboot is not
         pre-empted, and below the time a hard hang may last unnoticed.
 
+config ESPNOW_BSSID_PIN
+    bool "Receiver: pin the station to one BSSID (stops channel roaming)"
+    default y
+    depends on ESPNOW_ROLE_RECEIVER
+    help
+        A Wi-Fi mesh publishes one SSID on several BSSIDs on different channels.
+        A station with a weak signal is handed back and forth between them, and
+        every handover moves the radio channel. ESP-NOW is channel-bound (its
+        peers latch the channel they were added on), so the handover silently
+        kills the sender link even though the sender never stopped. This pins
+        the station to the BSSID it first associated with, so the mesh can no
+        longer move the channel.
+
+        Fail-open is the availability guarantee: once the pinned BSSID has been
+        gone for ESPNOW_BSSID_PIN_FAILOPEN_MS the pin is released and the next
+        connect may pick any BSSID. Losing the sender link is acceptable; losing
+        the receiver (its dashboard and MQTT) is not. Turn this off to restore
+        free roaming.
+
+config ESPNOW_BSSID_PIN_FAILOPEN_MS
+    int "Receiver: release the BSSID pin after this long without a connect (ms)"
+    depends on ESPNOW_BSSID_PIN
+    range 0 600000
+    default 60000
+    help
+        How long the pinned BSSID may stay gone before the pin is released. Long
+        enough that a slow re-association does not drop a still-valid pin, short
+        enough that a genuinely removed AP costs only a minute of sender link.
+        0 releases the pin on the first disconnect.
+

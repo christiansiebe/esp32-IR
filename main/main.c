@@ -42,6 +42,7 @@
 #include "nvs.h"
 #include "boot_confirm.h"
 #include "boot_log.h"
+#include "bssid_pin.h"
 #include "recovery_start.h"
 #include "history_backfill.h"
 #include "history_sync.h"
@@ -213,6 +214,21 @@ static const char *TAG = "espnow_meter";
  * instead of the fixed CONFIG_ESPNOW_CHANNEL (which would leave the two sides on
  * different channels until someone re-enables the AP). */
 #define WIFI_ESPNOW_CHANNEL_KEY "espnow_ch"
+/* Receiver: the BSSID the station is pinned to (sticky BSSID pin, fail-open).
+ * A mesh moves a weak station between BSSIDs on different channels, which drags
+ * the channel-bound ESP-NOW peers with it; the pin keeps the channel put. */
+#define WIFI_STA_BSSID_KEY     "sta_bssid"
+/* Auto-take the sticky BSSID pin on the first association (CONFIG
+ * ESPNOW_BSSID_PIN). With it off the station roams freely again and only a
+ * manual 'set bssid <mac>' pins it. The fail-open window is the availability
+ * knob: how long a pinned BSSID may stay gone before the pin is released. */
+#if CONFIG_ESPNOW_BSSID_PIN
+#define BSSID_PIN_AUTOTAKE     true
+#define BSSID_PIN_FAILOPEN_MS  ((uint32_t)CONFIG_ESPNOW_BSSID_PIN_FAILOPEN_MS)
+#else
+#define BSSID_PIN_AUTOTAKE     false
+#define BSSID_PIN_FAILOPEN_MS  ((uint32_t)BSSID_PIN_DEFAULT_FAILOPEN_MS)
+#endif
 #define WIFI_SSID_MAX_LEN      32
 #define WIFI_PASSWORD_MAX_LEN  64
 
@@ -334,6 +350,17 @@ static uint32_t g_espnow_reanchors;
 /* One-shot timer that performs a needed reconnect out of the HTTP request path,
  * so the console response is flushed before the link drops. */
 static esp_timer_handle_t g_wifi_reconnect_timer;
+/* Sticky BSSID pin (fail-open). A mesh moves a weak station between BSSIDs on
+ * different channels; every handover drags the channel-bound ESP-NOW peers with
+ * it, so the receiver pins to the BSSID it first landed on and the channel stops
+ * moving. Fail-open is the availability guarantee: once the pinned BSSID has been
+ * gone for the fail-open window the pin is released and the next connect may
+ * pick any BSSID, so the receiver can never wedge itself offline - losing the
+ * sender link is acceptable, losing the receiver is not. */
+static bssid_pin_t g_bssid_pin;
+/* How often a reconnect was skipped because the BSSID pin still held (the pin
+ * working). Diagnostic only. */
+static uint32_t g_bssid_pin_skips;
 #endif
 /* Wire layout for the crash-journal diagnostic section. Kept here (next to the
  * journal it mirrors) and outside the role guards so the receiver can decode it
@@ -750,6 +777,51 @@ static esp_err_t save_wifi_credentials(const char *ssid, const char *password)
     return err;
 }
 
+#if !CONFIG_ESPNOW_ROLE_SENDER
+/* Persist/load the sticky BSSID pin so it survives a reboot (a reboot must not
+ * undo the anti-roaming decision and let the mesh move the channel again).
+ * Best effort: a missing or unreadable key just leaves the station unpinned. */
+static void save_sta_bssid(const uint8_t *bssid)
+{
+    nvs_handle_t handle;
+    if (nvs_open(WIFI_CONFIG_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    if (nvs_set_blob(handle, WIFI_STA_BSSID_KEY, bssid, BSSID_PIN_MAC_LEN) == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+}
+
+static void clear_sta_bssid(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(WIFI_CONFIG_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    if (nvs_erase_key(handle, WIFI_STA_BSSID_KEY) == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+}
+
+static void load_sta_bssid(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(WIFI_CONFIG_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return;
+    }
+    uint8_t bssid[BSSID_PIN_MAC_LEN];
+    size_t len = sizeof(bssid);
+    if (nvs_get_blob(handle, WIFI_STA_BSSID_KEY, bssid, &len) == ESP_OK &&
+        len == BSSID_PIN_MAC_LEN) {
+        bssid_pin_restore(&g_bssid_pin, bssid,
+                          (uint64_t)(esp_timer_get_time() / 1000));
+    }
+    nvs_close(handle);
+}
+#endif /* !CONFIG_ESPNOW_ROLE_SENDER */
+
 #if CONFIG_ESPNOW_ROLE_SENDER
 /* Remember the receiver-AP channel across reboots. While the receiver's setup AP
  * is auto-off (the power-saving default) the sender cannot re-learn the channel
@@ -796,6 +868,15 @@ static void fill_station_config(wifi_config_t *config)
      * (the console 'set listen' does that). The default (10) keeps the pre-knob
      * behaviour on the non-HE build. */
     config->sta.listen_interval = active_runtime_config()->listen_interval;
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Pin to the BSSID we are locked onto, so the mesh cannot move the station
+     * (and with it the channel-bound ESP-NOW peers) to another channel. With no
+     * pin held, bssid_set stays 0 and the driver picks any BSSID; the first
+     * association then takes the pin. */
+    if (bssid_pin_get(&g_bssid_pin, config->sta.bssid)) {
+        config->sta.bssid_set = true;
+    }
+#endif
 }
 
 /* Last-known-wall-clock persistence; defined below (the SNTP callback needs it
@@ -1272,6 +1353,18 @@ static void wifi_event_handler(void *arg,
             ESP_LOGW(TAG, "ESP-NOW peers re-anchored after channel change %u -> %u",
                      (unsigned)previous_channel, (unsigned)event->channel);
         }
+        /* Sticky BSSID pin: on the first association take a pin on the BSSID we
+         * landed on, so the mesh cannot move us (and the ESP-NOW channel) later.
+         * A pin that just proved itself only re-arms its fail-open clock. */
+        {
+            const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+            if (bssid_pin_note_connected(&g_bssid_pin, event->bssid, BSSID_PIN_AUTOTAKE, now_ms)) {
+                save_sta_bssid(event->bssid);
+                ESP_LOGI(TAG, "BSSID pinned to %02x:%02x:%02x:%02x:%02x:%02x (stops channel roaming)",
+                         event->bssid[0], event->bssid[1], event->bssid[2],
+                         event->bssid[3], event->bssid[4], event->bssid[5]);
+            }
+        }
 #endif
         ESP_LOGI(TAG, "Connected to configured Wi-Fi on channel %u", event->channel);
 #if CONFIG_ESPNOW_PS_FALLBACK
@@ -1337,6 +1430,24 @@ static void wifi_event_handler(void *arg,
         g_twt_active = false;
 #endif
         if (g_wifi_configured) {
+            /* Fail-open: if the pinned BSSID has been gone for the fail-open
+             * window, release the pin and re-apply the config so this reconnect
+             * may pick any BSSID. The receiver must never stay offline to keep a
+             * pin: losing the sender link is acceptable, losing the receiver is
+             * not. */
+            const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+            /* The driver reports NO_AP_FOUND when the pinned BSSID itself is
+             * gone (it was switched off or moved): release at once instead of
+             * holding the receiver offline for the whole fail-open window. */
+            const bool bssid_unreachable = (event->reason == WIFI_REASON_NO_AP_FOUND);
+            if (bssid_pin_note_disconnect(&g_bssid_pin, bssid_unreachable, now_ms)) {
+                clear_sta_bssid();
+                ESP_LOGW(TAG, "BSSID pin released (%s); the receiver reconnects freely",
+                         bssid_unreachable ? "pinned AP gone" : "fail-open window elapsed");
+                wifi_config_t sta_config;
+                fill_station_config(&sta_config);
+                (void)esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+            }
             esp_err_t err = esp_wifi_connect();
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Wi-Fi reconnect failed: %s", esp_err_to_name(err));
@@ -1545,6 +1656,13 @@ static void initialize_wifi_and_espnow(void)
     wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wifi_config));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+
+#if !CONFIG_ESPNOW_ROLE_SENDER
+    /* Sticky BSSID pin: seed from NVS before the first association so a reboot
+     * keeps the anti-roaming decision. */
+    bssid_pin_init(&g_bssid_pin, BSSID_PIN_FAILOPEN_MS);
+    load_sta_bssid();
+#endif
 
 #if CONFIG_ESPNOW_ROLE_SENDER
     if (esp_netif_create_default_wifi_sta() == NULL) {
@@ -4762,15 +4880,27 @@ static esp_err_t sml_dashboard_api_handler(httpd_req_t *req)
     /* Wi-Fi reconnect accounting (receiver-only): a growing "skipped" count is
      * the fix working - a 'set ps|listen' that changed nothing no longer drops
      * the link. */
-    char wifi_json[160] = "";
+    char wifi_json[224] = "";
 #if !CONFIG_ESPNOW_ROLE_SENDER
     {
+        uint8_t pinned[BSSID_PIN_MAC_LEN];
+        char pin_mac[24] = "none";
+        if (bssid_pin_get(&g_bssid_pin, pinned)) {
+            snprintf(pin_mac, sizeof(pin_mac),
+                     "%02x:%02x:%02x:%02x:%02x:%02x",
+                     pinned[0], pinned[1], pinned[2], pinned[3], pinned[4], pinned[5]);
+        }
         int wifi_len = snprintf(wifi_json, sizeof(wifi_json),
                                 ",\"wifi_reconnects\":%u,\"wifi_reconnect_skips\":%u,"
-                                "\"espnow_reanchors\":%u",
+                                "\"espnow_reanchors\":%u,"
+                                "\"bssid_pinned\":\"%s\",\"bssid_pin_releases\":%u,"
+                                "\"bssid_pin_skips\":%u",
                                 (unsigned)g_wifi_reconnects,
                                 (unsigned)g_wifi_reconnect_skips,
-                                (unsigned)g_espnow_reanchors);
+                                (unsigned)g_espnow_reanchors,
+                                pin_mac,
+                                (unsigned)g_bssid_pin.releases,
+                                (unsigned)g_bssid_pin_skips);
         if (wifi_len < 0 || (size_t)wifi_len >= sizeof(wifi_json)) {
             return ESP_FAIL;
         }
@@ -6065,9 +6195,12 @@ static void console_cmd_status(const char *args, char *out, size_t out_size)
     extra = snprintf(
         out + written, out_size - (size_t)written,
         "wifi reconnect: %u done, %u skipped (listen_interval unchanged)\n"
-        "esp-now re-anchors: %u (peer channel moved with the STA)\n",
+        "esp-now re-anchors: %u (peer channel moved with the STA)\n"
+        "bssid pin: %u taken, %u fail-open release(s), %u skip(s)\n",
         (unsigned)g_wifi_reconnects, (unsigned)g_wifi_reconnect_skips,
-        (unsigned)g_espnow_reanchors);
+        (unsigned)g_espnow_reanchors,
+        (unsigned)g_bssid_pin.pins, (unsigned)g_bssid_pin.releases,
+        (unsigned)g_bssid_pin_skips);
     if (extra < 0 || (size_t)extra >= out_size - (size_t)written) {
         snprintf(out, out_size, "status: output truncated\n");
     }
@@ -6187,13 +6320,25 @@ static void console_cmd_wifi(const char *args, char *out, size_t out_size)
                            (unsigned int)g_espnow_channel);
 #endif
 #else
+    uint8_t pinned[BSSID_PIN_MAC_LEN];
+    char pin_line[64] = "";
+    if (bssid_pin_get(&g_bssid_pin, pinned)) {
+        snprintf(pin_line, sizeof(pin_line),
+                 "bssid pin: %02x:%02x:%02x:%02x:%02x:%02x (fail-open %u ms)\n",
+                 pinned[0], pinned[1], pinned[2], pinned[3], pinned[4], pinned[5],
+                 (unsigned)g_bssid_pin.failopen_ms);
+    } else {
+        snprintf(pin_line, sizeof(pin_line), "bssid pin: none\n");
+    }
     int written = snprintf(out, out_size,
                            "configured ssid: %s\n"
                            "fritzbox: %s\n"
-                           "esp-now channel: %u\n",
+                           "esp-now channel: %u\n"
+                           "%s",
                            g_wifi_configured ? g_wifi_ssid : "(none)",
                            g_wifi_connected ? "connected" : "not connected",
-                           (unsigned int)g_espnow_channel);
+                           (unsigned int)g_espnow_channel,
+                           pin_line);
 #endif
     if (written < 0 || (size_t)written >= out_size) {
         snprintf(out, out_size, "wifi: output truncated\n");
@@ -6857,6 +7002,70 @@ static void console_set_wifi_credential(const char *key, const char *value,
     }
     snprintf(out, out_size, "wifi %s saved; reconnecting to \"%s\"\n", key, ssid);
 }
+
+/* Console 'set bssid <mac>' / 'set bssid off'. A manual pin is the operator's
+ * override for the automatic sticky pin; it reconnects so the change takes
+ * effect immediately. */
+static void console_set_bssid_pin(const char *value, char *out, size_t out_size)
+{
+    uint8_t bssid[BSSID_PIN_MAC_LEN];
+    uint8_t current[BSSID_PIN_MAC_LEN];
+    bool clearing = strcmp(value, "off") == 0;
+
+    if (clearing) {
+        if (!bssid_pin_get(&g_bssid_pin, current)) {
+            ++g_bssid_pin_skips;
+            snprintf(out, out_size, "bssid pin already clear; no reconnect\n");
+            return;
+        }
+        bssid_pin_clear(&g_bssid_pin);
+        clear_sta_bssid();
+    } else {
+        unsigned int m[6];
+        if (sscanf(value, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) != 6 &&
+            sscanf(value, "%02x%02x%02x%02x%02x%02x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) != 6) {
+            snprintf(out, out_size, "bssid: expected aa:bb:cc:dd:ee:ff (or 'off')\n");
+            return;
+        }
+        for (int i = 0; i < BSSID_PIN_MAC_LEN; ++i) {
+            if (m[i] > 0xff) {
+                snprintf(out, out_size, "bssid: octet out of range\n");
+                return;
+            }
+            bssid[i] = (uint8_t)m[i];
+        }
+        /* A redundant 'set bssid' must not drop the link for nothing. */
+        if (bssid_pin_get(&g_bssid_pin, current) && memcmp(current, bssid, BSSID_PIN_MAC_LEN) == 0) {
+            ++g_bssid_pin_skips;
+            snprintf(out, out_size, "bssid already pinned; no reconnect\n");
+            return;
+        }
+        bssid_pin_set(&g_bssid_pin, bssid,
+                      (uint64_t)(esp_timer_get_time() / 1000));
+        save_sta_bssid(bssid);
+    }
+
+    ps_fallback_mark_intentional();
+    (void)esp_wifi_disconnect();
+    wifi_config_t sta_config;
+    fill_station_config(&sta_config);
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+    if (err == ESP_OK) {
+        err = esp_wifi_connect();
+    }
+    if (err != ESP_OK) {
+        snprintf(out, out_size, "bssid %s, but reconnect failed (%s)\n",
+                 clearing ? "cleared" : "set", esp_err_to_name(err));
+        return;
+    }
+    if (clearing) {
+        snprintf(out, out_size, "bssid pin cleared; reconnecting to any BSSID\n");
+    } else {
+        snprintf(out, out_size,
+                 "bssid pinned to %02x:%02x:%02x:%02x:%02x:%02x; reconnecting\n",
+                 bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+    }
+}
 #endif /* !CONFIG_ESPNOW_ROLE_SENDER */
 
 static void console_cmd_set(const char *args, char *out, size_t out_size)
@@ -6880,10 +7089,10 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
                  "usage: set <cpu|freq|cpu-min|sleep|retries> <value>\n");
 #elif SOC_WIFI_HE_SUPPORT
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|ap|ap-auto-off|bssid|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #else
         snprintf(out, out_size,
-                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
+                 "usage: set <cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|ap|ap-auto-off|bssid|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass> <value>\n");
 #endif
         return;
     }
@@ -6894,6 +7103,10 @@ static void console_cmd_set(const char *args, char *out, size_t out_size)
      * restart. Handled here before the runtime_config_set() fallthrough. */
     if (strcmp(key, "wifi-ssid") == 0 || strcmp(key, "wifi-pass") == 0) {
         console_set_wifi_credential(key, value, out, out_size);
+        return;
+    }
+    if (strcmp(key, "bssid") == 0) {
+        console_set_bssid_pin(value, out, out_size);
         return;
     }
     if (strncmp(key, "mqtt-", 5) == 0) {
@@ -7132,11 +7345,11 @@ static void web_console_register_commands(void)
      * restart the bridge. */
 #if SOC_WIFI_HE_SUPPORT
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|twt|twt-wake|ps|listen|ap|ap-auto-off|bssid|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #else
     web_console_register("set",
-                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|ap|ap-auto-off|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
+                         "change a runtime knob: cpu|freq|cpu-min|sleep|retries|txpower|beacon|radio-save|wake-interval|wake-window|burst-lock|ps|listen|ap|ap-auto-off|bssid|wifi-ssid|wifi-pass|mqtt-uri|mqtt-prefix|mqtt-user|mqtt-pass",
                          console_cmd_set);
 #endif
 #else
