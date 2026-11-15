@@ -29,8 +29,18 @@
   `main/rwdt_guard.{c,h}` (IDF-Glue), Armierung an den Anfang von `app_main`,
   Feed in `liveness_note_alive()`, Statuszeile `rwdt backstop: …` in `status`,
   Kconfig-Knopf + CI-Guard „Verify the hardware RWDT backstop".
-- **Offen:** GitHub-CI-Build (nie auf dem Odroid), Flash auf `/dev/ttyACM0`,
-  Hardware-Nachweis (Statuszeile + Reset-Grund `ESP_RST_WDT` nach kuenstlichem Stall).
+- **Verifiziert (2026-11-15):** GitHub-CI-Build gruen (Run `43652200216`, SHA
+  `c13ed1f`; alle 5 Matrix-Jobs inkl. `receiver-c6` + Guard „Verify the hardware
+  RWDT backstop"). Auf `/dev/ttyACM0` geflasht (`v0.4.0-70-gc13ed1f`, Hash ok).
+  Bootlog: `rwdt: RWDT backstop armed: stage0 system reset at 180000 ms
+  (24480000 ticks @ 136000 Hz)`; `status` zeigt `rwdt backstop: armed, timeout
+  180000 ms, <N> feed(s)` (Feed waechst ueber >10 min Uptime -> kein
+  Spurious-Reset). Idle-Leistung (FNB-48, kein Sender) **0,068 W** = dokumentierter
+  Bestwert.
+- **Offen:** Hardware-Nachweis des tatsaechlichen RWDT-Resets (Reset-Grund
+  `ESP_RST_WDT` nach kuenstlichem Stall) - es fehlt ein Hang-/Fault-Injection-Haken
+  (`test rwdt-stall`). Ausserdem: Verlustfreiheit/Verbrauch unter echter Senderlast
+  (Pruefstand ohne Sender).
 
 ## NEU (2026-11-14): C6-Receiver-Boot-Hang vor `start_webserver()` — gehaertet
 **Branch `feat/c6-mqtt-cmd`. Details: `docs/c6-receiver-boot-hang.md`.**
