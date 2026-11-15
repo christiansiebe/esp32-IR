@@ -1,5 +1,26 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-15): C6-Empfänger pinnt sich per BSSID (Roaming verhindern, Fail-Open)
+**Branch `feat/c6-rwdt-backstop`, Commit `63c24e3`. Details: `docs/c6-bssid-pin-failopen.md`.**
+- **Ziel:** Nicht mehr jeden Kanalwechsel heilen, sondern den **Kanalwechsel
+  verhindern**. Der Re-Anchor-Fix (`3f21ca3`) heilt das Symptom; jede Mesh-Übergabe
+  kostet aber weiter Frames. Der Empfänger pinnt sich deshalb auf die BSSID, mit
+  der er sich zuerst assoziiert hat (`wifi_config_t.sta.bssid`), so kann das Mesh
+  den Client — und den kanalgebundenen ESP-NOW-Link — nicht mehr bewegen.
+- **Fail-Open (Verfügbarkeitsgarantie):** Priorität ist „**lieber den Sender
+  verlieren als selbst offline gehen**". Ist die gepinnte BSSID weg
+  (`WIFI_REASON_NO_AP_FOUND`), fällt der Pin **sofort**; sonst nach
+  `ESPNOW_BSSID_PIN_FAILOPEN_MS` (Default 60 s) ohne Assoziation. Danach darf der
+  nächste Connect jede BSSID nehmen und pinnt sich neu. Kein Festfahren möglich.
+- **Modul:** `main/bssid_pin.{c,h}` (reines C, hostgetestet
+  `test/test_bssid_pin.c`); Pin in NVS (`sta_bssid`) persistent über Reboot.
+- **Konsole:** `set bssid <mac>` / `set bssid off`; Anzeige in `wifi`/`status` und
+  `/api/dashboard` (`bssid_pinned`, `bssid_pin_releases`, `bssid_pin_skips`).
+- **Kconfig:** `ESPNOW_BSSID_PIN` (Default y), `ESPNOW_BSSID_PIN_FAILOPEN_MS`.
+- **OFFEN:** Feldnachweis der Langzeitstabilität mit aktivem Pin; erzwungener
+  Mesh-Kanalwechsel mit gesetztem Pin als Gegenbeweis; Abwägung, ob der Pin einen
+  kleineren RSSI (festere, schwächere BSSID) in Kauf nimmt.
+
 ## NEU (2026-11-15): C6-Empfänger verliert ESP-NOW still bei Kanalwechsel (Roaming) — behoben
 **Branch `feat/c6-rwdt-backstop`, Commit `3f21ca3` (gepusht). Am Gerät `.105` reproduziert. Details: `docs/c6-espnow-roaming-reanchor.md`.**
 - **Symptom:** Der C6-Empfänger verliert den ESP-NOW-Link **still** — kein
