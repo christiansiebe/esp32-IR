@@ -1,5 +1,44 @@
 # To-do – esp32-IR
 
+## NEU (2026-11-15): C6-Empfänger verliert ESP-NOW still bei Kanalwechsel (Roaming) — behoben
+**Branch `feat/c6-rwdt-backstop`, Commit `3f21ca3` (gepusht). Am Gerät `.105` reproduziert. Details: `docs/c6-espnow-roaming-reanchor.md`.**
+- **Symptom:** Der C6-Empfänger verliert den ESP-NOW-Link **still** — kein
+  Disconnect, kein Log, keine Fehlermeldung. `crc_valid` **friert ~200 s ein**,
+  danach folgt ein **+28-Frame-Schwall**. Das sah wie eine **187-s-Publish-Kadenz**
+  aus (HA-DB-Deltas **187/187/1/187**) und wurde vom `ps_fallback`-Wächter als
+  **Modem-Sleep-Fehler fehlgedeutet** → `ps off` sticky (Sparmodus verloren,
+  obwohl der PS-Modus unschuldig war).
+- **Root Cause (Peer-Kanal-Anker):** Ein **ESP-NOW-Peer hält den Funk-Kanal
+  fest**, auf dem er angelegt wurde; eine spätere STA-Assoziation auf einem
+  **anderen** Kanal verschiebt ihn **nicht**. Im Mesh-Roaming übergibt die
+  FRITZ!Box den Empfänger an eine andere BSSID derselben SSID „Wohnzimmer" auf
+  einem anderen Kanal (**ch 11 <-> ch 1**, RSSI −84…−89 dBm). Der Peer behält
+  den alten Anker → der Empfang geht still verloren, obwohl der Sender
+  ununterbrochen sendet.
+- **A/B-Beweis (am Gerät `.105`):** `set ap on` bzw. `set ap off` ruft
+  `espnow_migrate_peers()` auf und legt Broadcast-/Sender-/OTA-Peer **neu** an.
+  **Allein das** verwandelte einen **187-s-Freeze** in einen **stetigen
+  ~3 Frames/s-Strom**, der **250 s hielt (0 Einfrierungen)** — während die STA
+  auf **Kanal 1** blieb. Damit ist der Peer-Anker (nicht der Kanal der STA und
+  nicht der Modem-Sleep) als Ursache belegt.
+- **Fix (`3f21ca3`):** Im `WIFI_EVENT_STA_CONNECTED`-Handler wird bei einem
+  **echten Kanalwechsel** (`event->channel != previous_channel`) jetzt
+  `espnow_migrate_peers(ESPNOW_IF)` aufgerufen (**nur Empfänger-Pfad**; der
+  Sender-Pfad bleibt unverändert). Der Handler merkt sich den vorherigen Kanal
+  und loggt `ESP-NOW peers re-anchored after channel change %u -> %u`.
+- **Neuer Zähler `espnow_reanchors`:** in `/api/dashboard` und in der
+  `status`-Zeile (`esp-now re-anchors: %u (peer channel moved with the STA)`).
+  Ein steigender Wert = der Fix greift.
+- **OFFEN:** **Hardware-Nachweis unter echter Senderlast** steht aus — am
+  Prüfstand ist **kein Sender** (`crc_valid=0`, `192.168.178.70` down), die
+  Verlustfreiheit nach dem Re-Anchor ist damit **nicht** belegt. Ebenfalls offen:
+  der **Nachweis, dass `espnow_reanchors` bei echtem Roaming steigt** (ein
+  erzwungener Mesh-Kanalwechsel mit laufendem Sender fehlt).
+- **Verwandt:** Der ältere `OFFEN (2026-10-21)`-Abschnitt „ESP-NOW-Link bleibt
+  nach Kanalwechsel des Routers tot" beschreibt den **Sender**, der dem
+  Router-Kanal nicht folgt; dieser Befund hier ist die **Empfänger-Seite**
+  (gelatchter Peer-Kanal) und heilt sie lokal.
+
 ## NEU (2026-11-07): C6-Receiver — Hardware-RWDT-Backstop (Reboot nie unmoeglich)
 **Branch `feat/c6-rwdt-backstop` (Basis = geflashter Commit `4512784`).**
 - **Ziel:** Ein Hang darf **nie** permanent sein. TWDT + `liveness_guard` brauchen
