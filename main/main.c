@@ -9803,6 +9803,22 @@ static void link_fallback_worker(void *arg)
             if (apply_ap_mode(true, ap_err, sizeof(ap_err))) {
                 ESP_LOGW(TAG, "Link fallback: sender silent, setup SoftAP "
                               "brought back so the sender can find the channel");
+                /* The Auto-Off timer is a one-shot armed only on GOT_IP; having
+                 * re-enabled the AP here we must re-arm it (only if the feature
+                 * is on), otherwise the AP stays up for the rest of the session
+                 * and the device sits in the measured ~0.42 W APSTA draw
+                 * instead of dropping back to the low-power state once the
+                 * sender link is healthy again. */
+                const runtime_config_t *cfg = active_runtime_config();
+                if (cfg->ap_auto_off && g_ap_enabled &&
+                    g_ap_auto_off_timer != NULL) {
+                    if (esp_timer_start_once(g_ap_auto_off_timer,
+                                             (uint64_t)AP_AUTO_OFF_DELAY_MS *
+                                                 1000) != ESP_OK) {
+                        ESP_LOGW(TAG, "Auto-off: could not re-arm the setup-AP "
+                                      "drop timer after link fallback");
+                    }
+                }
             } else {
                 ESP_LOGW(TAG, "Link fallback: could not re-enable the setup "
                               "SoftAP: %s", ap_err);
