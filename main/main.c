@@ -9672,9 +9672,16 @@ static void register_webserver_handlers(httpd_handle_t server)
  * On the sender it also re-scans the receiver's SoftAP channel on a timer while
  * the peer stays silent (the AP follows the home AP's channel, so a boot-time
  * scan alone goes stale after every router channel change); once the peer has
- * been silent past the timeout it falls back to the proven mode exactly once
- * (sticky until reboot, so it cannot flap). The two sides watch each other
- * independently - no handshake, so they can never deadlock. */
+ * been silent past the timeout it falls back to the proven mode (radio awake,
+ * channel re-aligned). The fallback is NOT sticky: when the peer answers again
+ * after the recovery window the module re-arms, so a *fresh* silence episode
+ * can fall back again instead of leaving the device un-healed for the session.
+ * If the peer stays silent even in the proven mode, the sender reboots to clear
+ * every driver state that could still hold the old channel (rate-limited, one
+ * decision per silence timeout). The receiver also re-enables its setup SoftAP
+ * on fallback so the sender can find the channel again, and drops it back once
+ * the link healed. The two sides watch each other independently - no handshake,
+ * so they can never deadlock. */
 static void link_fallback_worker(void *arg)
 {
     (void)arg;
@@ -9685,6 +9692,8 @@ static void link_fallback_worker(void *arg)
 #if CONFIG_ESPNOW_ROLE_SENDER
     link_fallback_set_realign_interval(&g_link_fallback,
                                        CONFIG_ESPNOW_LINK_REALIGN_MS);
+    link_fallback_set_reboot_timeout(&g_link_fallback,
+                                     CONFIG_ESPNOW_LINK_REBOOT_MS);
 #endif
     portEXIT_CRITICAL(&g_link_fallback_lock);
 
@@ -9730,8 +9739,78 @@ static void link_fallback_worker(void *arg)
         }
 #endif
 
+#if CONFIG_ESPNOW_ROLE_SENDER
+        /* Reboot backstop: the fallback already re-aligned the channel and kept
+         * the radio awake, but the peer stayed silent. A full reboot is the
+         * hard reset of every driver state that could still hold the old
+         * channel - a stuck ESP-NOW peer table or a half-open scan can survive
+         * the soft re-align, and a firmware bug after the fallback should not be
+         * able to lock the sender out for the rest of the session. Rate-limited
+         * inside the pure module (at most one decision per silence timeout), so
+         * a 5 s poll cannot fire it twice while the reboot is in flight. */
+        bool reboot;
+        portENTER_CRITICAL(&g_link_fallback_lock);
+        reboot = link_fallback_should_reboot(&g_link_fallback, now_ms);
+        portEXIT_CRITICAL(&g_link_fallback_lock);
+        if (reboot) {
+            ESP_LOGE(TAG, "Link fallback: peer silent for %u ms after the "
+                          "fallback, rebooting to clear the stuck channel",
+                     (unsigned)CONFIG_ESPNOW_LINK_REBOOT_MS);
+            diag_log_event(ESPNOW_DIAG_LEVEL_ERROR,
+                           "link fallback: rebooting after %u ms silence",
+                           (unsigned)CONFIG_ESPNOW_LINK_REBOOT_MS);
+            crash_journal_mark_clean_restart();
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_restart();
+        }
+#endif
+
+        /* Heal: the peer answered again after the recovery window (fallback +
+         * 3x the silence timeout). The proven mode is no longer needed; drop
+         * the latch so a FRESH silence episode can fall back again - that is
+         * the repeatable self-heal the old sticky latch (g_link_fallback_active
+         * stayed true until reboot) made impossible: a channel change the
+         * fallback itself could not see left the device un-healed for the whole
+         * session. An answered frame inside the window only re-arms the silence
+         * timer, so a recovered link cannot flap between sleep on/off. */
+        bool healed;
+        portENTER_CRITICAL(&g_link_fallback_lock);
+        healed = link_fallback_should_heal(&g_link_fallback, now_ms);
+        portEXIT_CRITICAL(&g_link_fallback_lock);
+        if (healed) {
+            g_link_fallback_active = false;
+            g_link_fallback_stage = 0;
+            ESP_LOGW(TAG, "Link fallback: peer answered again, link healed");
+            diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "link fallback healed");
+#if !CONFIG_ESPNOW_ROLE_SENDER
+            /* The SoftAP was only brought back so the sender could find the
+             * channel; it answered again, so the channel is anchored now. Drop
+             * the AP back to the low-power state - delayed like the boot-time
+             * auto-off so a just-rebooting sender still finds the AP during its
+             * channel scan. Re-arming the drop HERE, at the heal, is the fix:
+             * the old code armed it in the fallback block itself, so the AP
+             * vanished 60 s after being enabled, before the sender (whose scan
+             * can lag far behind) ever got to see it - the 3.8 h stuck episode.
+             * With no AP to scan, the re-align can still chase the channel
+             * (the sender falls back to CONFIG_ESPNOW_CHANNEL and the receiver
+             * re-enables the AP on the next silence), so this stays safe. */
+            const runtime_config_t *cfg = active_runtime_config();
+            if (cfg->ap_auto_off && g_ap_enabled && g_ap_auto_off_timer != NULL) {
+                if (esp_timer_start_once(g_ap_auto_off_timer,
+                                         (uint64_t)AP_AUTO_OFF_DELAY_MS * 1000) !=
+                    ESP_OK) {
+                    ESP_LOGW(TAG, "Auto-off: could not arm the setup-AP drop "
+                                  "after the link healed");
+                } else {
+                    ESP_LOGW(TAG, "Auto-off: sender link healed, setup SoftAP "
+                                  "will drop back to low power");
+                }
+            }
+#endif
+        }
+
         if (g_link_fallback_active) {
-            continue; /* already fell back */
+            continue; /* proven mode already enforced (the heal above returns) */
         }
         bool fallback;
         portENTER_CRITICAL(&g_link_fallback_lock);
@@ -9799,26 +9878,18 @@ static void link_fallback_worker(void *arg)
         sender_heard = g_sender_mac_valid;
         portEXIT_CRITICAL(&g_sender_mac_lock);
         if (!g_ap_enabled && sender_heard) {
+            /* Bring the SoftAP back so the sender can scan the channel - and
+             * deliberately do NOT arm the auto-off here. The auto-off delay is
+             * meant for the boot-time AP (which has the sender already listening
+             * on CONFIG_ESPNOW_CHANNEL); arming it at the fallback made the AP
+             * vanish 60 s later while the sender was still out of reach. The AP
+             * stays up until the heal path below arms the drop, giving the
+             * sender an arbitrarily long window to re-scan (it only sees the AP
+             * when it next polls the channel list). */
             char ap_err[96] = {0};
             if (apply_ap_mode(true, ap_err, sizeof(ap_err))) {
                 ESP_LOGW(TAG, "Link fallback: sender silent, setup SoftAP "
                               "brought back so the sender can find the channel");
-                /* The Auto-Off timer is a one-shot armed only on GOT_IP; having
-                 * re-enabled the AP here we must re-arm it (only if the feature
-                 * is on), otherwise the AP stays up for the rest of the session
-                 * and the device sits in the measured ~0.42 W APSTA draw
-                 * instead of dropping back to the low-power state once the
-                 * sender link is healthy again. */
-                const runtime_config_t *cfg = active_runtime_config();
-                if (cfg->ap_auto_off && g_ap_enabled &&
-                    g_ap_auto_off_timer != NULL) {
-                    if (esp_timer_start_once(g_ap_auto_off_timer,
-                                             (uint64_t)AP_AUTO_OFF_DELAY_MS *
-                                                 1000) != ESP_OK) {
-                        ESP_LOGW(TAG, "Auto-off: could not re-arm the setup-AP "
-                                      "drop timer after link fallback");
-                    }
-                }
             } else {
                 ESP_LOGW(TAG, "Link fallback: could not re-enable the setup "
                               "SoftAP: %s", ap_err);

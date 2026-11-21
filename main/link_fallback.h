@@ -13,9 +13,15 @@
  *   Receiver: fell silent -> surface it in the diagnostics; a hung *receiver*
  *             is already caught by web_guard, so no reboot is needed here.
  *
- * The decision is sticky on purpose: once the new path is dropped it stays
- * dropped until the next boot. Re-arming it after a single answered poll would
- * flap (sleep off -> peer answers -> sleep on -> silence -> ...).
+ * The decision is NOT sticky: falling back just drops the new path for the
+ * proven one once, and the module then re-arms itself. The caller re-enters the
+ * proven mode on every *fresh* silence (see link_fallback_should_fallback),
+ * while the peer keeps polling the healthy link state so a single answered
+ * frame heals the watchdog. That is how a channel change the fallback could not
+ * see (e.g. a router changing the home AP channel again while the peer's
+ * re-scan was already in progress) gets a second chance instead of leaving the
+ * device un-healed for the whole session. The caller is still responsible for
+ * flapping protection across one recovery window (see link_fallback_should_heal).
  *
  * The sender additionally needs a *repeatable* channel re-align, not a sticky
  * one: the receiver's SoftAP follows the home AP's channel, which the router can
@@ -47,7 +53,11 @@ typedef struct {
     uint64_t last_ok_ms;         /* last acknowledged send to the peer */
     uint32_t realign_interval_ms;/* min gap between channel re-align attempts (0 = off) */
     uint64_t last_realign_ms;    /* last re-align attempt, to rate-limit the scan */
-    bool latched;                /* fell back; sticky until a fresh init */
+    uint64_t fell_back_at_ms;    /* when the current fallback fired (0 = not fallen back) */
+    uint64_t heal_deadline_ms;   /* fallback stays enforced until this clock (0 = none) */
+    uint64_t last_heal_announce_ms; /* last answered frame while fallen back (rate-limit) */
+    uint32_t reboot_timeout_ms;  /* peer silence that forces a full reboot (0 = off) */
+    uint64_t last_reboot_check_ms; /* last reboot-decision poll (rate-limit) */
 } link_fallback_t;
 
 /* Silence before the link is declared down. Long enough that a quiet wiring
@@ -57,11 +67,12 @@ typedef struct {
 #define LINK_FALLBACK_DEFAULT_MIN_UPTIME_MS (30u * 1000u)
 
 /* Initialise at boot; both clocks start at "now" so the grace window covers
- * startup. */
+ * startup (no fallback / reboot armed yet). */
 void link_fallback_init(link_fallback_t *fb, uint32_t silence_timeout_ms,
                         uint32_t min_uptime_ms, uint64_t started_at_ms);
 
-/* A peer frame was received; re-arms the silence timer (no effect once fired). */
+/* A peer frame was received; re-arms the silence timer (and heals a fallen-back
+ * link: see link_fallback_should_heal). */
 void link_fallback_note_rx(link_fallback_t *fb, uint64_t now_ms);
 
 /* Our own send to the peer was acknowledged; also counts as the link being up.
@@ -74,6 +85,12 @@ void link_fallback_note_send_ok(link_fallback_t *fb, uint64_t now_ms);
  * (the receiver, which has no channel to chase, leaves it off). */
 void link_fallback_set_realign_interval(link_fallback_t *fb, uint32_t interval_ms);
 
+/* Enable the reboot backstop: when the peer has been silent for this long
+ * *after* a fallback already fired (the proven mode did not bring the link
+ * back), link_fallback_should_reboot() fires once and stays armed until the
+ * caller actually reboots. 0 disables it (the receiver leaves it off). */
+void link_fallback_set_reboot_timeout(link_fallback_t *fb, uint32_t timeout_ms);
+
 /* True when the peer has been silent long enough (receive direction only, so a
  * broadcast sender whose sends always "succeed" still notices) and the re-align
  * interval has elapsed since the last attempt. Each true advances the timer, so
@@ -83,6 +100,22 @@ bool link_fallback_should_realign(link_fallback_t *fb, uint64_t now_ms,
                                   uint64_t uptime_ms);
 
 /* True when the peer has been silent past the timeout and the uptime grace has
- * passed. Latches on first true (sticky) so the caller cannot flap. */
+ * passed AND the link is not currently fallen back (fell_back_at_ms == 0). Arms
+ * the fallback (records when) so a caller polling faster than the timeout re-
+ * enters the proven mode at most once per silence episode; a single answered
+ * frame re-arms it for the next episode. */
 bool link_fallback_should_fallback(link_fallback_t *fb, uint64_t now_ms,
                                    uint64_t uptime_ms);
+
+/* True when a fallen-back link has been answered again *after* the recovery
+ * window: the proven mode is no longer needed, the caller may drop it. Fires at
+ * most once per silence-timeout, so the caller's transition is rate-limited
+ * while the caller polls at most once per 5 s. A frame arriving before the
+ * window ends only re-arms the silence timer, it does not count as "healed". */
+bool link_fallback_should_heal(link_fallback_t *fb, uint64_t now_ms);
+
+/* True when the peer has been silent for reboot_timeout_ms past the fallback
+ * (the proven mode did not bring it back) and at least one additional silence
+ * timeout has elapsed since the last reboot decision, so a 5 s poll cannot
+ * double-fire. Arms when it fires and only a caller reboot clears it. */
+bool link_fallback_should_reboot(link_fallback_t *fb, uint64_t now_ms);

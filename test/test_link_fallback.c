@@ -1,7 +1,12 @@
 /* Link fallback: each device declares the link down after the peer has been
  * silent past the timeout (and the uptime grace has passed), then returns to its
- * proven mode. The transition must be sticky so it cannot flap between the new
- * and the proven path. Pure logic, no ESP-IDF. */
+ * proven mode. The fallback is NOT sticky: once the peer answers again after the
+ * recovery window, the device drops the proven mode and re-arms, so a *fresh*
+ * silence episode can fall back again (repeatable self-heal). Flapping is
+ * prevented by the recovery window (3x the silence timeout) and by the caller
+ * polling at most every 5 s. The sender additionally has a reboot backstop that
+ * fires when the peer stays silent even in the proven mode. Pure logic, no
+ * ESP-IDF. */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -79,14 +84,33 @@ int main(void)
     }
     CHECK(!tripped, "a frame every 5 s never trips the fallback");
 
-    /* Sticky: once it fires it stays fired even after the peer returns, so the
-     * proven mode is not dropped and re-armed in a loop. */
+    /* NOT sticky - repeatable self-heal: once the fallback fired, a peer answer
+     * inside the recovery window (3x the silence timeout) does NOT heal it (no
+     * flapping), but an answer after the window ends DOES heal it, and a *fresh*
+     * silence episode can then fall back again (the one-shot stuck latch is
+     * gone). */
     link_fallback_t stuck;
     link_fallback_init(&stuck, T_MS, 0, 0);
     CHECK(link_fallback_should_fallback(&stuck, T_MS, T_MS), "fires once");
-    link_fallback_note_rx(&stuck, T_MS + 1); /* peer answers again */
-    CHECK(link_fallback_should_fallback(&stuck, T_MS + 2, T_MS + 2),
-          "still fallen back after the peer returns (sticky)");
+    link_fallback_note_rx(&stuck, T_MS + 1); /* peer answers again, in window */
+    CHECK(!link_fallback_should_heal(&stuck, T_MS + 1),
+          "answer inside the recovery window -> no heal (no flap)");
+    CHECK(!link_fallback_should_fallback(&stuck, T_MS + 2, T_MS + 2),
+          "still enforced inside the window (proven mode kept)");
+    /* Recovery window passes, peer answers again: heal fires and re-arms. */
+    const uint64_t heal_at = T_MS + 3u * T_MS + 1u; /* past fallback + 3x timeout */
+    link_fallback_note_rx(&stuck, heal_at);         /* peer alive after the window */
+    CHECK(link_fallback_should_heal(&stuck, heal_at),
+          "answer after the recovery window -> heal");
+    CHECK(!link_fallback_should_heal(&stuck, heal_at + 1),
+          "heal fires at most once (rate-limited)");
+    /* Re-armed: a fresh episode of silence can fall back again. */
+    const uint64_t rearm_at = heal_at + 1000;
+    link_fallback_note_rx(&stuck, rearm_at);
+    CHECK(!link_fallback_should_fallback(&stuck, rearm_at + T_MS - 1, rearm_at + T_MS - 1),
+          "fresh silence just short of the timeout -> no fallback");
+    CHECK(link_fallback_should_fallback(&stuck, rearm_at + T_MS, rearm_at + T_MS),
+          "fresh silence reaches the timeout -> falls back again (re-armed)");
 
     /* Clock going backwards must not fire a bogus fallback. */
     link_fallback_t back;
@@ -179,6 +203,50 @@ int main(void)
           "now before last_rx -> no re-align");
 
     CHECK(!link_fallback_should_realign(NULL, 1, 1), "NULL re-align -> false");
+
+    /* --- Reboot backstop (sender) ------------------------------------------ */
+
+    /* Disabled by default: the receiver never arms it. */
+    link_fallback_t no_reboot;
+    link_fallback_init(&no_reboot, T_MS, 0, 0);
+    CHECK(link_fallback_should_fallback(&no_reboot, T_MS, T_MS), "falls back");
+    CHECK(!link_fallback_should_reboot(&no_reboot, 10u * T_MS),
+          "reboot not armed -> never fires");
+
+    /* A reboot fires only well after the fallback: silence must last
+     * reboot_timeout_ms past the fallback, plus one silence timeout of margin so
+     * a 5 s poll cannot double-fire. */
+    link_fallback_t rb;
+    link_fallback_init(&rb, T_MS, 0, 0);
+    link_fallback_set_reboot_timeout(&rb, 3u * T_MS);
+    CHECK(link_fallback_should_fallback(&rb, T_MS, T_MS), "falls back");
+    CHECK(!link_fallback_should_reboot(&rb, T_MS + 3u * T_MS - 1),
+          "just short of the post-fallback reboot timeout -> no reboot");
+    CHECK(link_fallback_should_reboot(&rb, T_MS + 3u * T_MS),
+          "peer silent past the post-fallback timeout -> reboot");
+    CHECK(!link_fallback_should_reboot(&rb, T_MS + 3u * T_MS + 1),
+          "reboot decision rate-limited (one per silence timeout)");
+
+    /* A *fresh* contact (inside the silence timeout) cancels the reboot, even
+     * when it comes before the post-fallback timeout elapses. A single answer
+     * followed by renewed silence does NOT - the reboot is a backstop for a peer
+     * that only answers by chance (a stray broadcast) and is gone again. */
+    link_fallback_t rb_healed;
+    link_fallback_init(&rb_healed, T_MS, 0, 0);
+    link_fallback_set_reboot_timeout(&rb_healed, 3u * T_MS);
+    CHECK(link_fallback_should_fallback(&rb_healed, T_MS, T_MS), "falls back");
+    link_fallback_note_rx(&rb_healed, T_MS + 1000); /* one answer after fallback */
+    CHECK(link_fallback_should_reboot(&rb_healed, T_MS + 3u * T_MS),
+          "single answer then renewed silence -> reboot still fires");
+    link_fallback_t rb_fresh;
+    link_fallback_init(&rb_fresh, T_MS, 0, 0);
+    link_fallback_set_reboot_timeout(&rb_fresh, 3u * T_MS);
+    CHECK(link_fallback_should_fallback(&rb_fresh, T_MS, T_MS), "falls back");
+    link_fallback_note_rx(&rb_fresh, T_MS + 3u * T_MS - 1);
+    CHECK(!link_fallback_should_reboot(&rb_fresh, T_MS + 3u * T_MS),
+          "fresh contact inside the silence timeout -> no reboot");
+
+    CHECK(!link_fallback_should_reboot(NULL, 1), "NULL reboot -> false");
 
     printf("link fallback: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

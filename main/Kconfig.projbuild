@@ -201,11 +201,16 @@ config ESPNOW_LINK_FALLBACK
         Each device watches the ESP-NOW link on its own: when no frame from the
         peer arrives for CONFIG_ESPNOW_LINK_FALLBACK_MS (and the uptime grace
         has passed), it returns to its proven mode. The sender turns its
-        adaptive light sleep off for good and keeps the Wi-Fi radio awake; the
-        receiver just records it in the diagnostics (a hung receiver is already
-        handled by web_guard). The decision is sticky until the next boot, so it
-        cannot flap between the new and the proven path. Independent per device:
-        no handshake, so the two sides cannot deadlock.
+        adaptive light sleep off and keeps the Wi-Fi radio awake; the receiver
+        re-enables its setup SoftAP so the sender can find the channel again (a
+        hung receiver is already handled by web_guard). The decision is NOT
+        sticky: once the peer answers again after the recovery window, the
+        device drops the proven mode and re-arms, so a *fresh* silence episode
+        (e.g. the router changing the home AP channel again) falls back again
+        instead of leaving the device un-healed for the whole session. The
+        caller keeps flapping protection across the recovery window
+        (3x the silence timeout). Independent per device: no handshake, so the
+        two sides cannot deadlock.
 
 config ESPNOW_LINK_FALLBACK_MS
     int "Peer silence before the link is declared down (ms)"
@@ -241,6 +246,22 @@ config ESPNOW_LINK_REALIGN_MS
         sender re-scans for the receiver AP at most once per this interval and
         re-aligns. Set 0 to disable the periodic re-align (boot-time scan only).
         The receiver has no channel to chase and ignores this.
+
+config ESPNOW_LINK_REBOOT_MS
+    int "Sender: reboot when the peer stays silent after the fallback (ms, 0 = off)"
+    depends on ESPNOW_LINK_FALLBACK && ESPNOW_ROLE_SENDER
+    range 0 3600000
+    default 300000
+    help
+        The fallback re-aligns the channel and keeps the radio awake, but a
+        stuck ESP-NOW peer table or a half-open scan can survive that soft
+        repair. When no frame has arrived from the receiver for this long after
+        the fallback fired, the sender does a full reboot (a clean boot clears
+        every driver state that could still hold the old channel). Must be
+        clearly longer than CONFIG_ESPNOW_LINK_FALLBACK_MS so a healthy-but-slow
+        link never reboots; each decision is rate-limited to one per silence
+        timeout. Set 0 to disable the reboot (soft re-align only). The receiver
+        leaves it off.
 
 config ESPNOW_PS_FALLBACK
     bool "Both roles: drop Wi-Fi modem sleep when it storms STA disconnects"

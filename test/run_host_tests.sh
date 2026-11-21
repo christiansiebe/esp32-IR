@@ -274,7 +274,9 @@ trap 'rm -rf "$out"' EXIT
 "$out/test_sleep_announce"
 
 # Link fallback: the peer-silence decision that returns a device to its proven
-# mode. Pure C; the transition must be sticky (no flapping) and grace-bounded.
+# mode. Pure C; the transition must be grace-bounded (no flapping across the
+# recovery window), re-arm after the peer answers (repeatable self-heal) and
+# rate-limit the sender reboot backstop.
 "$cc" -std=c11 -Wall -Wextra -O2 \
     -Wno-unused-variable -Wno-unused-const-variable \
     -I"$repo/main" \
