@@ -9781,7 +9781,11 @@ static void link_fallback_worker(void *arg)
             g_link_fallback_active = false;
             g_link_fallback_stage = 0;
             ESP_LOGW(TAG, "Link fallback: peer answered again, link healed");
+#if CONFIG_ESPNOW_ROLE_SENDER
+            /* The diag event ring is built sender-only; on the receiver the ESP_LOGW
+             * above is the heal record (it owns the web_guard/reporting channels). */
             diag_log_event(ESPNOW_DIAG_LEVEL_INFO, "link fallback healed");
+#endif
 #if !CONFIG_ESPNOW_ROLE_SENDER
             /* The SoftAP was only brought back so the sender could find the
              * channel; it answered again, so the channel is anchored now. Drop
