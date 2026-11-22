@@ -6780,6 +6780,41 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  r.energy_1_8_0, r.energy_1_8_1, r.power_15_7_0);
         return;
     }
+    if (strcmp(what, "storage") == 0) {
+        if (strcmp(rest, "format") == 0) {
+            /* Repair an unreadable/damaged ring: reformat the partition and
+             * recreate the file with fresh headers. The sender backfill
+             * re-imports the minute history afterwards (run 'pull'). */
+            snprintf(out, out_size, "formatting persistent storage ...\n");
+            esp_err_t ferr = power_history_format();
+            snprintf(out + strlen(out), out_size - strlen(out),
+                     "format: %s\n", ferr == ESP_OK ? "ok (empty store, run 'pull')"
+                                                    : esp_err_to_name(ferr));
+            return;
+        }
+        power_history_status_t s;
+        power_history_get_status(&s);
+        int64_t oldest = 0;
+        int64_t latest = 0;
+        (void)power_history_time_range(&oldest, &latest);
+        int written = snprintf(out, out_size,
+                 "storage: %s\n"
+                 "  records: %u  sequences: %u..%u\n"
+                 "  range: %lld..%lld UTC\n"
+                 "  queue drops: %u  write errors: %u\n"
+                 "usage: test storage | test storage format\n",
+                 !s.ready ? "not ready"
+                          : (s.persistent ? "ready (SPIFFS)"
+                                          : "RAM fallback (not persistent)"),
+                 (unsigned)s.record_count,
+                 (unsigned)s.oldest_sequence, (unsigned)s.latest_sequence,
+                 (long long)oldest, (long long)latest,
+                 (unsigned)s.queue_drops, (unsigned)s.write_errors);
+        if (written > 0 && (size_t)written < out_size) {
+            nvs_stats_append(out + written, out_size - (size_t)written);
+        }
+        return;
+    }
 #if CONFIG_ESPNOW_ROLE_SENDER
     if (strcmp(what, "sleep") == 0) {
         esp_pm_config_t pm;
@@ -6896,41 +6931,6 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
          * instead of reporting 'unknown test'. */
         snprintf(out, out_size,
                  "sleep: not available on the receiver (sender-only test)\n");
-        return;
-    }
-    if (strcmp(what, "storage") == 0) {
-        if (strcmp(rest, "format") == 0) {
-            /* Repair an unreadable/damaged ring: reformat the partition and
-             * recreate the file with fresh headers. The sender backfill
-             * re-imports the minute history afterwards (run 'pull'). */
-            snprintf(out, out_size, "formatting persistent storage ...\n");
-            esp_err_t ferr = power_history_format();
-            snprintf(out + strlen(out), out_size - strlen(out),
-                     "format: %s\n", ferr == ESP_OK ? "ok (empty store, run 'pull')"
-                                                    : esp_err_to_name(ferr));
-            return;
-        }
-        power_history_status_t s;
-        power_history_get_status(&s);
-        int64_t oldest = 0;
-        int64_t latest = 0;
-        (void)power_history_time_range(&oldest, &latest);
-        int written = snprintf(out, out_size,
-                 "storage: %s\n"
-                 "  records: %u  sequences: %u..%u\n"
-                 "  range: %lld..%lld UTC\n"
-                 "  queue drops: %u  write errors: %u\n"
-                 "usage: test storage | test storage format\n",
-                 !s.ready ? "not ready"
-                          : (s.persistent ? "ready (SPIFFS)"
-                                          : "RAM fallback (not persistent)"),
-                 (unsigned)s.record_count,
-                 (unsigned)s.oldest_sequence, (unsigned)s.latest_sequence,
-                 (long long)oldest, (long long)latest,
-                 (unsigned)s.queue_drops, (unsigned)s.write_errors);
-        if (written > 0 && (size_t)written < out_size) {
-            nvs_stats_append(out + written, out_size - (size_t)written);
-        }
         return;
     }
     if (strcmp(what, "espnow") == 0) {
