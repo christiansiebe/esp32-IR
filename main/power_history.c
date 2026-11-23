@@ -950,13 +950,30 @@ static bool compact_history_file_locked(void)
             return false;
         }
     }
-    /* Truncate the physical file to the compacted size. SPIFFS frees the tail.
-     * ftruncate() is routed through the SPIFFS VFS (SPIFFS_ftruncate). */
+    /* Truncate the physical file to the compacted size. ftruncate() is routed
+     * through the SPIFFS VFS (SPIFFS_ftruncate). The freed tail only becomes
+     * allocatable after a GC pass (SPIFFS returns blocks at deletion/GC time,
+     * not at logical truncate), so run an explicit GC afterwards -- without it
+     * the next splice would hit ENOSPC again a moment later. */
     if (ftruncate(fileno(g_history_file), needed) != 0) {
         ESP_LOGW(TAG, "History compaction: ftruncate failed (%s); ring was "
                       "compacted but the file was not shrunk", strerror(errno));
         return false;
     }
+#ifdef ESP_PLATFORM
+    esp_err_t gc_err = esp_spiffs_gc(POWER_HISTORY_PARTITION, 0);
+    if (gc_err != ESP_OK) {
+        ESP_LOGW(TAG, "History compaction: esp_spiffs_gc failed (%s); the file "
+                      "was shrunk but the freed blocks may not be reusable yet",
+                 esp_err_to_name(gc_err));
+    } else {
+        size_t gc_total = 0, gc_used = 0;
+        if (esp_spiffs_info(POWER_HISTORY_PARTITION, &gc_total, &gc_used) == ESP_OK) {
+            g_storage_total_bytes = (uint32_t)gc_total;
+            g_storage_used_bytes = (uint32_t)gc_used;
+        }
+    }
+#endif
     ESP_LOGW(TAG, "Compacted history file: %ld -> %ld bytes (%lu records live)",
              file_size, needed, (unsigned long)count);
     return true;
@@ -1819,8 +1836,25 @@ static void status_fill_unlocked(power_history_status_t *status)
     status->splice_batches = g_splice_batches;
     status->splice_records = g_splice_records;
     status->splice_skipped = g_splice_skipped;
-    status->storage_used_bytes = g_storage_used_bytes;
-    status->storage_total_bytes = g_storage_total_bytes;
+    /* Report the live SPIFFS fill, not the value captured at boot: a repair
+     * that compacts and ftruncates a bloated ring only becomes visible that
+     * way (the boot-time value would keep showing the pre-repair fill). */
+#ifdef ESP_PLATFORM
+    if (g_history_file != NULL) {
+        size_t live_total = 0, live_used = 0;
+        if (esp_spiffs_info(POWER_HISTORY_PARTITION, &live_total, &live_used) == ESP_OK) {
+            status->storage_total_bytes = (uint32_t)live_total;
+            status->storage_used_bytes = (uint32_t)live_used;
+        } else {
+            status->storage_total_bytes = g_storage_total_bytes;
+            status->storage_used_bytes = g_storage_used_bytes;
+        }
+    } else
+#endif
+    {
+        status->storage_used_bytes = g_storage_used_bytes;
+        status->storage_total_bytes = g_storage_total_bytes;
+    }
     if (g_history_mutex != NULL &&
         xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         strncpy(status->last_persist_stage, g_last_persist_stage,
