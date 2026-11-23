@@ -161,6 +161,16 @@ esp_err_t power_history_init(void);
  * fresh measurements keep being recorded during and after the format.
  * Returns ESP_OK once the fresh headers are on disk. */
 esp_err_t power_history_format(void);
+/* Data-preserving file rebuild: drop quarters.bin (releasing SPIFFS pages)
+ * and rewrite it compactly from an in-RAM copy of the live records. Unlike
+ * format() it never touches the partition table or erases the filesystem and
+ * keeps every stored minute; it exists because SPIFFS_ftruncate on esp-idf
+ * v6.1 only shortens the logical file length without marking the cropped
+ * object-index/data pages as deleted, so 'used' stays at the old full size and
+ * the GC (which only reaps deleted pages) reclaims nothing. Executing this
+ * once re-persists the ring at its true compact size and makes the freed
+ * blocks allocatable again. */
+esp_err_t power_history_rebuild_file(void);
 
 bool power_history_enqueue(const power_history_record_t *record);
 

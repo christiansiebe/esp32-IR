@@ -6884,6 +6884,22 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                                          : esp_err_to_name(rerr));
             return;
         }
+        if (strcmp(rest, "rebuild") == 0) {
+            /* Data-preserving file rebuild: drop quarters.bin and rewrite it
+             * compactly from the live records. Fixes the "file shrinks but
+             * SPIFFS used stays flat" case where SPIFFS_ftruncate only shortens
+             * the logical length without marking the cropped pages deleted, so
+             * the GC can never reclaim them and writes keep hitting ENOSPC.
+             * Unlike format it keeps every stored minute and never erases the
+             * partition/FS. */
+            snprintf(out, out_size, "rebuilding history file in place ...\n");
+            esp_err_t rerr = power_history_rebuild_file();
+            snprintf(out + strlen(out), out_size - strlen(out),
+                     "rebuild: %s\n", rerr == ESP_OK
+                                         ? "ok (file recreated compact, minutes kept)"
+                                         : esp_err_to_name(rerr));
+            return;
+        }
         if (strcmp(rest, "format") == 0) {
             /* Last resort for an unreadable/damaged ring: reformat the
              * partition and recreate the file with fresh headers. The sender
@@ -6908,7 +6924,8 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  "  splices: %u (amp %u)  splice skipped: %u\n"
                  "  spiffs used: %lu/%lu  file: %lld bytes\n"
                  "  last persist failure: %s%s%s\n"
-                 "usage: test storage | test storage repair | test storage format\n",
+                 "usage: test storage | test storage gc [<bytes>] | test storage repair | "
+                 "test storage rebuild | test storage format\n",
                  !s.ready ? "not ready"
                           : (s.persistent ? "ready (SPIFFS)"
                                           : "RAM fallback (not persistent)"),

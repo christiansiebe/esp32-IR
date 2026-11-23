@@ -70,6 +70,23 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_history_compaction"
 
+# History file rebuild: proves power_history_rebuild_file() drops quarters.bin
+# and rewrites it compactly from the live records, keeping every minute. This
+# is the data-preserving fix for SPIFFS_ftruncate-only-shortens-the-length
+# (esp-idf v6.1), i.e. "file shrinks but SPIFFS used stays flat". Same scratch
+# mount as the compaction test.
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_history_rebuild.c" \
+    -lm -o "$out/test_history_rebuild"
+
+"$out/test_history_rebuild"
+
 # Storage recovery: proves the background repair brings a RAM-only store back to
 # a persistent one (formatting as the last resort) when the history file cannot
 # be opened. The obstacle is a directory at the file path (fopen fails on it),
