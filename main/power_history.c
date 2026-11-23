@@ -1643,26 +1643,18 @@ esp_err_t power_history_rebuild_file(void)
      * FS contains zero deleted pages, so that forced GC finds nothing and every
      * subsequent write -- COW rewrite or a normal append -- fails ENOSPC even
      * though esp_spiffs_info reports plenty of free pages. Breaking the cycle
-     * needs a few deleted pages for the GC to reap: create and delete a small
-     * throwaway file below the GC threshold, then run one explicit GC pass. */
+     * needs a few deleted pages for the GC to reap. Creating a new file fails
+     * (EIO, no allocatable object index), so instead delete the existing small
+     * README.txt: the unlink itself marks its pages deleted without needing to
+     * allocate anything, then an explicit GC pass reaps them. */
     {
-        const char *tmp_name = POWER_HISTORY_MOUNT_PATH "/.reclaim.tmp";
-        FILE *tmp = fopen(tmp_name, "wb");
+        const char *tmp_name = POWER_HISTORY_MOUNT_PATH "/README.txt";
         g_rebuild_pre_gc_detail[0] = '\0';
-        if (tmp != NULL) {
-            uint8_t filler[768];
-            memset(filler, 0x5a, sizeof(filler));
-            size_t w = fwrite(filler, 1, sizeof(filler), tmp);
-            int fe = fflush(tmp);
-            int sy = fsync(fileno(tmp));
-            fclose(tmp);
-            int rm = remove(tmp_name);
-            snprintf(g_rebuild_pre_gc_detail, sizeof(g_rebuild_pre_gc_detail),
-                     "reclaim probe: wrote %u B flush=%d fsync=%d rm=%d",
-                     (unsigned)w, fe, sy, rm);
-        } else {
-            snprintf(g_rebuild_pre_gc_detail, sizeof(g_rebuild_pre_gc_detail),
-                     "reclaim probe: fopen failed (errno=%d)", (int)errno);
+        struct stat st_tmp;
+        bool had_readme = (stat(tmp_name, &st_tmp) == 0);
+        int rm = -1;
+        if (had_readme) {
+            rm = remove(tmp_name);
         }
         size_t tot_pre = 0, used_pre = 0;
         esp_err_t gc_err = ESP_ERR_NOT_SUPPORTED;
@@ -1670,9 +1662,11 @@ esp_err_t power_history_rebuild_file(void)
             tot_pre > used_pre) {
             gc_err = esp_spiffs_gc(POWER_HISTORY_PARTITION, tot_pre - used_pre);
         }
-        ESP_LOGW(TAG, "History rebuild pre-GC: %s | gc=%s used=%u/%u",
-                 g_rebuild_pre_gc_detail, esp_err_to_name(gc_err),
+        snprintf(g_rebuild_pre_gc_detail, sizeof(g_rebuild_pre_gc_detail),
+                 "reclaim: README=%s rm=%d gc=%s used=%u/%u",
+                 had_readme ? "yes" : "no", rm, esp_err_to_name(gc_err),
                  (unsigned)used_pre, (unsigned)tot_pre);
+        ESP_LOGW(TAG, "History rebuild pre-GC: %s", g_rebuild_pre_gc_detail);
     }
 #endif
 
