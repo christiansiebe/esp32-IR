@@ -108,6 +108,11 @@ typedef struct {
     uint32_t record_count;
     uint32_t queue_drops;
     uint32_t write_errors;
+    /* The stage ("shift", "splice-write", "append-write", "flush", "header")
+     * and errno of the most recent persist failure; empty stage = write_errors
+     * is only from the boot reset counter, not a live failure. */
+    char last_persist_stage[24];
+    int last_persist_errno;
     /* Write-amplification diagnostic: how many records the ring had to shift
      * (shift_up_renumber) because a merged minute fell before the local tail,
      * and how many persist attempts performed such a splice. A backfill that

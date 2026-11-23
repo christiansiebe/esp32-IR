@@ -95,6 +95,11 @@ static uint32_t g_write_errors;
 static uint32_t g_splice_batches;
 static uint32_t g_splice_records;
 static uint32_t g_splice_skipped;
+/* The most recent persist failure (stage + errno) so a stalled ring can be
+ * diagnosed without digging through a boot log that is usually full of WiFi
+ * noise. Cleared on a successful write. */
+static char g_last_persist_stage[24];
+static int g_last_persist_errno;
 static uint32_t g_storage_used_bytes;
 static uint32_t g_storage_total_bytes;
 static bool g_history_ready;
@@ -453,6 +458,9 @@ static bool minute_is_stored(const power_history_header_t *header, int64_t ts)
 static void log_persist_failure(const char *stage)
 {
     int err = errno;
+    strncpy(g_last_persist_stage, stage, sizeof(g_last_persist_stage) - 1);
+    g_last_persist_stage[sizeof(g_last_persist_stage) - 1] = '\0';
+    g_last_persist_errno = err;
 #ifdef ESP_PLATFORM
     size_t total = 0;
     size_t used = 0;
@@ -464,8 +472,15 @@ static void log_persist_failure(const char *stage)
 #else
     ESP_LOGE(TAG, "History persist failed at %s: errno=%d (%s)", stage, err,
              strerror(err));
-    (void)stage; /* ESP_LOGE is a no-op on the host */
 #endif
+}
+
+/* Called by write_records on full success: a fresh batch wrote cleanly, so the
+ * reported failure is no longer the current state. */
+static void clear_persist_failure(void)
+{
+    g_last_persist_stage[0] = '\0';
+    g_last_persist_errno = 0;
 }
 
 /* Append/insert a batch of validated records into the ring, keeping it sorted by
@@ -588,6 +603,7 @@ static bool write_records(power_history_record_t *records, size_t record_count)
     }
     g_history_header = updated;
     g_active_header_copy = next_copy;
+    clear_persist_failure();
     return true;
 }
 
@@ -1711,6 +1727,17 @@ static void status_fill_unlocked(power_history_status_t *status)
     status->splice_skipped = g_splice_skipped;
     status->storage_used_bytes = g_storage_used_bytes;
     status->storage_total_bytes = g_storage_total_bytes;
+    if (g_history_mutex != NULL &&
+        xSemaphoreTake(g_history_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        strncpy(status->last_persist_stage, g_last_persist_stage,
+                sizeof(status->last_persist_stage) - 1);
+        status->last_persist_stage[sizeof(status->last_persist_stage) - 1] = '\0';
+        status->last_persist_errno = g_last_persist_errno;
+        xSemaphoreGive(g_history_mutex);
+    } else {
+        status->last_persist_stage[0] = '\0';
+        status->last_persist_errno = 0;
+    }
 }
 
 /* Fill the header-derived status fields. The caller must hold g_history_mutex. */

@@ -6781,10 +6781,24 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
         return;
     }
     if (strcmp(what, "storage") == 0) {
+        if (strcmp(rest, "repair") == 0) {
+            /* Data-preserving in-place repair: heal SPIFFS' index, re-sort the
+             * ring and drop duplicate minutes, keeping everything else. This
+             * is the right first step for a ring that stalled (write errors
+             * climb, record count frozen) -- unlike 'format', which throws the
+             * stored minutes away. */
+            snprintf(out, out_size, "repairing persistent storage in place ...\n");
+            esp_err_t rerr = power_history_repair_ring();
+            snprintf(out + strlen(out), out_size - strlen(out),
+                     "repair: %s\n", rerr == ESP_OK
+                                         ? "ok (minutes kept, ring re-sorted)"
+                                         : esp_err_to_name(rerr));
+            return;
+        }
         if (strcmp(rest, "format") == 0) {
-            /* Repair an unreadable/damaged ring: reformat the partition and
-             * recreate the file with fresh headers. The sender backfill
-             * re-imports the minute history afterwards (run 'pull'). */
+            /* Last resort for an unreadable/damaged ring: reformat the
+             * partition and recreate the file with fresh headers. The sender
+             * backfill re-imports the minute history afterwards (run 'pull'). */
             snprintf(out, out_size, "formatting persistent storage ...\n");
             esp_err_t ferr = power_history_format();
             snprintf(out + strlen(out), out_size - strlen(out),
@@ -6802,14 +6816,20 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  "  records: %u  sequences: %u..%u\n"
                  "  range: %lld..%lld UTC\n"
                  "  queue drops: %u  write errors: %u\n"
-                 "usage: test storage | test storage format\n",
+                 "  splices: %u (amp %u)  splice skipped: %u\n"
+                 "  last persist failure: %s%s%s\n"
+                 "usage: test storage | test storage repair | test storage format\n",
                  !s.ready ? "not ready"
                           : (s.persistent ? "ready (SPIFFS)"
                                           : "RAM fallback (not persistent)"),
                  (unsigned)s.record_count,
                  (unsigned)s.oldest_sequence, (unsigned)s.latest_sequence,
                  (long long)oldest, (long long)latest,
-                 (unsigned)s.queue_drops, (unsigned)s.write_errors);
+                 (unsigned)s.queue_drops, (unsigned)s.write_errors,
+                 (unsigned)s.splice_batches, (unsigned)s.splice_skipped,
+                 s.last_persist_stage[0] != '\0' ? s.last_persist_stage : "none",
+                 s.last_persist_stage[0] != '\0' ? " (errno=" : "",
+                 s.last_persist_stage[0] != '\0' ? strerror(s.last_persist_errno) : "");
         if (written > 0 && (size_t)written < out_size) {
             nvs_stats_append(out + written, out_size - (size_t)written);
         }
