@@ -1631,6 +1631,34 @@ esp_err_t power_history_rebuild_file(void)
      * headroom and no large RAM buffer: the records are read and rewritten in
      * POWER_HISTORY_SHIFT_CHUNK-sized chunks through g_compact_buf. A full ring
      * (29000 records) would still only ever touch one chunk at a time. */
+    #ifdef ESP_PLATFORM
+    /* ESP-IDF SPIFFS forces a GC run before it grants a new page when free
+     * space gets tight (spiffs_gc_check). With the ftruncate ghost pages the
+     * FS contains zero deleted pages, so that forced GC finds nothing and every
+     * subsequent write -- COW rewrite or a normal append -- fails ENOSPC even
+     * though esp_spiffs_info reports plenty of free pages. Breaking the cycle
+     * needs a few deleted pages for the GC to reap: create and delete a small
+     * throwaway file below the GC threshold, then run one explicit GC pass. */
+    {
+        const char *tmp_name = POWER_HISTORY_MOUNT_PATH "/.reclaim.tmp";
+        FILE *tmp = fopen(tmp_name, "wb");
+        if (tmp != NULL) {
+            uint8_t filler[768];
+            memset(filler, 0x5a, sizeof(filler));
+            (void)fwrite(filler, 1, sizeof(filler), tmp);
+            (void)fflush(tmp);
+            (void)fsync(fileno(tmp));
+            fclose(tmp);
+            (void)remove(tmp_name);
+        }
+        size_t tot_pre = 0, used_pre = 0;
+        if (esp_spiffs_info(POWER_HISTORY_PARTITION, &tot_pre, &used_pre) == ESP_OK &&
+            tot_pre > used_pre) {
+            (void)esp_spiffs_gc(POWER_HISTORY_PARTITION, tot_pre - used_pre);
+        }
+    }
+#endif
+
     uint32_t oldest_slot = oldest_slot_of(g_history_header.next_slot, count);
     uint32_t done = 0;
     bool ok = true;
