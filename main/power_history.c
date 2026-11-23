@@ -961,7 +961,12 @@ static bool compact_history_file_locked(void)
         return false;
     }
 #ifdef ESP_PLATFORM
-    esp_err_t gc_err = esp_spiffs_gc(POWER_HISTORY_PARTITION, 0);
+    /* size_to_gc is a target amount of *free* space to reclaim: with 0 the
+     * underlying SPIFFS_gc does a minimal pass, which can leave the tail of
+     * the truncated file allocated and the next splice ENOSPC again. Ask for
+     * exactly the bytes the truncate is supposed to have released. */
+    size_t want_free = (file_size > needed) ? (size_t)(file_size - needed) : 0;
+    esp_err_t gc_err = esp_spiffs_gc(POWER_HISTORY_PARTITION, want_free);
     if (gc_err != ESP_OK) {
         ESP_LOGW(TAG, "History compaction: esp_spiffs_gc failed (%s); the file "
                       "was shrunk but the freed blocks may not be reusable yet",
@@ -1848,6 +1853,15 @@ static void status_fill_unlocked(power_history_status_t *status)
         } else {
             status->storage_total_bytes = g_storage_total_bytes;
             status->storage_used_bytes = g_storage_used_bytes;
+        }
+        /* Use stat() on the path, not fseek on the shared handle: the status
+         * reader runs without the history mutex, and moving the FILE position
+         * under the worker's fseek/fread/fwrite would corrupt its I/O. */
+        struct stat sb;
+        if (stat(POWER_HISTORY_FILE, &sb) == 0) {
+            status->storage_file_bytes = sb.st_size;
+        } else {
+            status->storage_file_bytes = -1;
         }
     } else
 #endif

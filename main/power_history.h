@@ -126,10 +126,13 @@ typedef struct {
      * non-zero value next to a stalled cursor names a backfill that is asking
      * for minutes the ring can no longer take in order. */
     uint32_t splice_skipped;
-    /* SPIFFS fill at init, so "is the partition nearly full" is visible in the
-     * status/diag without a separate query. */
+    /* SPIFFS fill, so "is the partition nearly full" is visible in the
+     * status/diag without a separate query. Updated live. */
     uint32_t storage_used_bytes;
     uint32_t storage_total_bytes;
+    /* Physical length of quarters.bin (ftell on the open handle), so a
+     * compaction that ftruncates a bloated ring is verifiable on-device. */
+    int64_t storage_file_bytes;
 } power_history_status_t;
 
 typedef struct __attribute__((packed)) {

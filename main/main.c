@@ -5243,6 +5243,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
                 "\"splice_batches\":%lu,\"splice_records\":%lu,\"splice_skipped\":%lu,"
                 "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
+                "\"storage_file_bytes\":%lld,"
                 "\"aggregated\":true,\"window_hours\":%.2f,\"bucket_seconds\":%lld,"
                 "\"day_start_utc\":%lld,\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
                 "\"capacity\":%u,\"records\":[",
@@ -5261,6 +5262,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
                 (unsigned long)status.splice_skipped,
                 (unsigned long)status.storage_used_bytes,
                 (unsigned long)status.storage_total_bytes,
+                (long long)status.storage_file_bytes,
                 window_hours_out,
                 (long long)bucket_seconds,
                 (long long)window_start_utc,
@@ -5342,6 +5344,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         "\"queue_drops\":%lu,\"write_errors\":%lu,\"overflow\":%s,"
         "\"splice_batches\":%lu,\"splice_records\":%lu,\"splice_skipped\":%lu,"
         "\"storage_used_bytes\":%lu,\"storage_total_bytes\":%lu,"
+        "\"storage_file_bytes\":%lld,"
         "\"energy_day_wh\":%.3f,\"energy_month_wh\":%.3f,"
         "\"capacity\":%u,\"records\":[",
         system_time_is_valid() ? "true" : "false",
@@ -5359,6 +5362,7 @@ static esp_err_t power_history_api_handler(httpd_req_t *req)
         (unsigned long)status.splice_skipped,
         (unsigned long)status.storage_used_bytes,
         (unsigned long)status.storage_total_bytes,
+        (long long)status.storage_file_bytes,
         energy_day_wh,
         energy_month_wh,
         (unsigned int)POWER_HISTORY_CAPACITY);
@@ -6817,6 +6821,7 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  "  range: %lld..%lld UTC\n"
                  "  queue drops: %u  write errors: %u\n"
                  "  splices: %u (amp %u)  splice skipped: %u\n"
+                 "  spiffs used: %lu/%lu  file: %lld bytes\n"
                  "  last persist failure: %s%s%s\n"
                  "usage: test storage | test storage repair | test storage format\n",
                  !s.ready ? "not ready"
@@ -6828,6 +6833,9 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  (unsigned)s.queue_drops, (unsigned)s.write_errors,
                  (unsigned)s.splice_batches, (unsigned)s.splice_records,
                  (unsigned)s.splice_skipped,
+                 (unsigned long)s.storage_used_bytes,
+                 (unsigned long)s.storage_total_bytes,
+                 (long long)s.storage_file_bytes,
                  s.last_persist_stage[0] != '\0' ? s.last_persist_stage : "none",
                  s.last_persist_stage[0] != '\0' ? " (errno=" : "",
                  s.last_persist_stage[0] != '\0' ? strerror(s.last_persist_errno) : "");
