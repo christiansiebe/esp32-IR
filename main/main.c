@@ -6838,18 +6838,28 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
             esp_err_t e0 = esp_spiffs_info(POWER_HISTORY_PARTITION,
                                            &total0, &used0);
             /* SPIFFS gc trap: size_to_gc=0 early-exits in spiffs_gc_check
-             * (len < free_pages*page_size) and reclaims NOTHING, while a huge
-             * value trips the SPIFFS_ERR_FULL guard. Ask for total-used, the
-             * exact (free+deleted)*page_size window, to force a real pass. */
-            esp_err_t gcr = esp_spiffs_gc(
-                POWER_HISTORY_PARTITION,
-                (e0 == ESP_OK && total0 > used0) ? (total0 - used0) : 0);
+             * (len < free_pages*page_size) and reclaims NOTHING, while any
+             * len that needs more pages than free+deleted trips the
+             * ERR_FULL guard. The sweet spot is exactly (free+deleted)
+             * * page_size; total-used overshoots it by one emergency page
+             * (total_data_pages includes a +1). Allow an explicit target
+             * via 'test storage gc <bytes>' to probe the working value. */
+            unsigned long gc_arg = 0;
+            if (rest[0] != '\0') {
+                sscanf(rest, "%lu", &gc_arg);
+            }
+            size_t gc_target = gc_arg ? (size_t)gc_arg
+                                      : (e0 == ESP_OK && total0 > used0)
+                                            ? (total0 - used0)
+                                            : 0;
+            esp_err_t gcr = esp_spiffs_gc(POWER_HISTORY_PARTITION, gc_target);
             size_t total1 = 0, used1 = 0;
             esp_err_t e1 = esp_spiffs_info(POWER_HISTORY_PARTITION,
                                            &total1, &used1);
             snprintf(out, out_size,
-                     "spiffs gc: request=%s info=%s/%s\n"
+                     "spiffs gc: target=%lu request=%s info=%s/%s\n"
                      "  used before: %lu/%lu  after: %lu/%lu\n",
+                     (unsigned long)gc_target,
                      gcr == ESP_OK ? "ok"
                                    : (gcr == ESP_ERR_NOT_FINISHED
                                           ? "partial (flash full of live data)"
