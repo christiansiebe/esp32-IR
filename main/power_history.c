@@ -1597,10 +1597,16 @@ esp_err_t power_history_format(void)
 }
 
 static char g_rebuild_error_detail[96];
+static char g_rebuild_pre_gc_detail[96];
 
 const char *power_history_rebuild_error_detail(void)
 {
     return g_rebuild_error_detail;
+}
+
+const char *power_history_rebuild_pre_gc_detail(void)
+{
+    return g_rebuild_pre_gc_detail;
 }
 
 esp_err_t power_history_rebuild_file(void)
@@ -1642,20 +1648,31 @@ esp_err_t power_history_rebuild_file(void)
     {
         const char *tmp_name = POWER_HISTORY_MOUNT_PATH "/.reclaim.tmp";
         FILE *tmp = fopen(tmp_name, "wb");
+        g_rebuild_pre_gc_detail[0] = '\0';
         if (tmp != NULL) {
             uint8_t filler[768];
             memset(filler, 0x5a, sizeof(filler));
-            (void)fwrite(filler, 1, sizeof(filler), tmp);
-            (void)fflush(tmp);
-            (void)fsync(fileno(tmp));
+            size_t w = fwrite(filler, 1, sizeof(filler), tmp);
+            int fe = fflush(tmp);
+            int sy = fsync(fileno(tmp));
             fclose(tmp);
-            (void)remove(tmp_name);
+            int rm = remove(tmp_name);
+            snprintf(g_rebuild_pre_gc_detail, sizeof(g_rebuild_pre_gc_detail),
+                     "reclaim probe: wrote %u B flush=%d fsync=%d rm=%d",
+                     (unsigned)w, fe, sy, rm);
+        } else {
+            snprintf(g_rebuild_pre_gc_detail, sizeof(g_rebuild_pre_gc_detail),
+                     "reclaim probe: fopen failed (errno=%d)", (int)errno);
         }
         size_t tot_pre = 0, used_pre = 0;
+        esp_err_t gc_err = ESP_ERR_NOT_SUPPORTED;
         if (esp_spiffs_info(POWER_HISTORY_PARTITION, &tot_pre, &used_pre) == ESP_OK &&
             tot_pre > used_pre) {
-            (void)esp_spiffs_gc(POWER_HISTORY_PARTITION, tot_pre - used_pre);
+            gc_err = esp_spiffs_gc(POWER_HISTORY_PARTITION, tot_pre - used_pre);
         }
+        ESP_LOGW(TAG, "History rebuild pre-GC: %s | gc=%s used=%u/%u",
+                 g_rebuild_pre_gc_detail, esp_err_to_name(gc_err),
+                 (unsigned)used_pre, (unsigned)tot_pre);
     }
 #endif
 

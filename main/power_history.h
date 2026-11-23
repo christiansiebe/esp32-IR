@@ -172,6 +172,7 @@ esp_err_t power_history_format(void);
  * blocks allocatable again. */
 esp_err_t power_history_rebuild_file(void);
 const char *power_history_rebuild_error_detail(void);
+const char *power_history_rebuild_pre_gc_detail(void);
 
 bool power_history_enqueue(const power_history_record_t *record);
 

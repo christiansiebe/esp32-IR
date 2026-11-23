@@ -6895,6 +6895,7 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
             snprintf(out, out_size, "rebuilding history file in place ...\n");
             esp_err_t rerr = power_history_rebuild_file();
             const char *detail = power_history_rebuild_error_detail();
+            const char *pre_gc = power_history_rebuild_pre_gc_detail();
             snprintf(out + strlen(out), out_size - strlen(out),
                      "rebuild: %s\n", rerr == ESP_OK
                                          ? "ok (file recreated compact, minutes kept)"
@@ -6902,6 +6903,10 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
             if (rerr != ESP_OK && detail[0] != '\0') {
                 snprintf(out + strlen(out), out_size - strlen(out),
                          "  detail: %s\n", detail);
+            }
+            if (pre_gc[0] != '\0') {
+                snprintf(out + strlen(out), out_size - strlen(out),
+                         "  pre-gc: %s\n", pre_gc);
             }
             return;
         }
