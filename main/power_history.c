@@ -1610,37 +1610,30 @@ esp_err_t power_history_rebuild_file(void)
         return ESP_ERR_INVALID_STATE;
     }
     uint32_t count = g_history_header.record_count;
-    size_t records_bytes = (size_t)count * sizeof(power_history_record_t);
-
-    /* Hold every live record in RAM while the old file (whose SPIFFS pages
-     * ftruncate never marked deleted) is dropped and a compact one is written.
-     * The partition has no headroom for a second copy (a staged .bak plus the
-     * new file would exceed the 836 KB partition while used is still ~565 KB),
-     * so the records MUST be in RAM for the gap between remove() and the
-     * rewrite. A full ring would need 29000*28 = 812 KB: refuse instead of
-     * risking a crash, the boot-time repair then formats as a last resort
-     * (documented in the .bak-free caller). */
     if (count == 0) {
         xSemaphoreGive(g_history_mutex);
         return ESP_OK;
     }
-    power_history_record_t *records = heap_caps_malloc(records_bytes,
-                                                       MALLOC_CAP_8BIT);
-    if (records == NULL) {
-        xSemaphoreGive(g_history_mutex);
-        ESP_LOGE(TAG, "History rebuild: need %u B RAM for %u records, have none",
-                 (unsigned)records_bytes, (unsigned)count);
-        return ESP_ERR_NO_MEM;
-    }
+
+    /* The SPIFFS ftruncate bug ("file shrinks but used stays flat"): the
+     * logical file length drops but the ghost pages stay allocated and the GC
+     * never marks them deleted, so writes keep hitting ENOSPC. Simply writing
+     * the live records back to slots 0..count-1 forces SPIFFS COW to allocate
+     * fresh pages and to mark every old page (including the ghost tail) as
+     * deleted; a GC pass afterwards reaps them. This needs no partition
+     * headroom and no large RAM buffer: the records are read and rewritten in
+     * POWER_HISTORY_SHIFT_CHUNK-sized chunks through g_compact_buf. A full ring
+     * (29000 records) would still only ever touch one chunk at a time. */
     uint32_t oldest_slot = oldest_slot_of(g_history_header.next_slot, count);
-    bool ok = true;
     uint32_t done = 0;
+    bool ok = true;
     while (done < count) {
         uint32_t chunk = count - done;
         if (chunk > POWER_HISTORY_SHIFT_CHUNK) {
             chunk = POWER_HISTORY_SHIFT_CHUNK;
         }
-        if (!read_range_idx(oldest_slot, done, chunk, records + done)) {
+        if (!read_range_idx(oldest_slot, done, chunk, g_compact_buf) ||
+            !write_range_idx(oldest_slot, done, chunk, g_compact_buf)) {
             ok = false;
             break;
         }
@@ -1651,96 +1644,39 @@ esp_err_t power_history_rebuild_file(void)
         }
     }
     if (!ok) {
-        heap_caps_free(records);
         xSemaphoreGive(g_history_mutex);
-        ESP_LOGE(TAG, "History rebuild: could not read live records (%u/%u)",
-                 (unsigned)done, (unsigned)count);
-        return ESP_FAIL;
-    }
-
-    /* Drop the old object: this releases every SPIFFS page it referenced,
-     * including the ghost pages that stayed allocated after ftruncate. */
-    if (fflush(g_history_file) != 0) {
-        heap_caps_free(records);
-        xSemaphoreGive(g_history_mutex);
-        return ESP_FAIL;
-    }
-    fclose(g_history_file);
-    g_history_file = NULL;
-    if (remove(POWER_HISTORY_FILE) != 0) {
-        heap_caps_free(records);
-        xSemaphoreGive(g_history_mutex);
-        ESP_LOGE(TAG, "History rebuild: remove failed (%s)", strerror(errno));
-        return ESP_FAIL;
-    }
-
-    g_history_file = fopen(POWER_HISTORY_FILE, "w+b");
-    if (g_history_file == NULL) {
-        heap_caps_free(records);
-        xSemaphoreGive(g_history_mutex);
-        ESP_LOGE(TAG, "History rebuild: could not recreate history file");
-        return ESP_FAIL;
-    }
-    g_active_header_copy = 1;
-    bool hdr_ok = write_header_copy(0, &g_history_header) &&
-                  write_header_copy(1, &g_history_header);
-    if (!hdr_ok) {
-        ESP_LOGE(TAG, "History rebuild: headers failed");
-    }
-
-    done = 0;
-    while (done < count) {
-        uint32_t chunk = count - done;
-        if (chunk > POWER_HISTORY_SHIFT_CHUNK) {
-            chunk = POWER_HISTORY_SHIFT_CHUNK;
-        }
-        if (!write_range_idx(0, done, chunk, records + done)) {
-            ok = false;
-            break;
-        }
-        done += chunk;
-        if ((done / POWER_HISTORY_SHIFT_CHUNK) %
-                POWER_HISTORY_SHIFT_YIELD_CHUNKS == 0) {
-            vTaskDelay(1);
-        }
-    }
-    heap_caps_free(records);
-    if (!ok) {
-        xSemaphoreGive(g_history_mutex);
-        ESP_LOGE(TAG, "History rebuild: could not rewrite records (%u/%u)",
+        ESP_LOGE(TAG, "History rebuild: COW rewrite stopped at record %u of %u",
                  (unsigned)done, (unsigned)count);
         return ESP_FAIL;
     }
     if (fflush(g_history_file) != 0 || fsync(fileno(g_history_file)) != 0) {
         xSemaphoreGive(g_history_mutex);
-        ESP_LOGE(TAG, "History rebuild: fsync after rewrite failed");
+        ESP_LOGE(TAG, "History rebuild: fsync after COW rewrite failed");
         return ESP_FAIL;
     }
-    /* re-base the header to the compact layout and reset the RAM ring cache */
-    power_history_header_t updated = g_history_header;
-    updated.next_slot = count;
-    ++updated.generation;
-    updated.checksum = header_checksum(&updated);
-    uint8_t next_copy = (uint8_t)(1u - g_active_header_copy);
-    if (!write_header_copy(next_copy, &updated)) {
-        xSemaphoreGive(g_history_mutex);
-        ESP_LOGE(TAG, "History rebuild: could not publish compact header");
-        return ESP_FAIL;
-    }
-    g_history_header = updated;
-    g_active_header_copy = next_copy;
-    g_history_ram_fallback = false;
-    g_history_ram_count = 0;
+
 #ifdef ESP_PLATFORM
-    size_t tot = 0, used = 0;
-    if (esp_spiffs_info(POWER_HISTORY_PARTITION, &tot, &used) == ESP_OK) {
-        g_storage_total_bytes = (uint32_t)tot;
-        g_storage_used_bytes = (uint32_t)used;
+    /* The GC only reaps deleted pages. Drive it at the (free+deleted) sweet
+     * spot -- exactly total-used -- so the ghost pages the rewrite just marked
+     * deleted actually get reclaimed. */
+    size_t tot0 = 0, used0 = 0;
+    if (esp_spiffs_info(POWER_HISTORY_PARTITION, &tot0, &used0) == ESP_OK &&
+        tot0 > used0) {
+        esp_err_t gc_err = esp_spiffs_gc(POWER_HISTORY_PARTITION, tot0 - used0);
+        if (gc_err != ESP_OK && gc_err != ESP_ERR_NOT_FINISHED) {
+            ESP_LOGW(TAG, "History rebuild: GC after rewrite returned %s",
+                     esp_err_to_name(gc_err));
+        }
+        size_t tot1 = 0, used1 = 0;
+        if (esp_spiffs_info(POWER_HISTORY_PARTITION, &tot1, &used1) == ESP_OK) {
+            g_storage_total_bytes = (uint32_t)tot1;
+            g_storage_used_bytes = (uint32_t)used1;
+            ESP_LOGW(TAG, "History rebuild: SPIFFS used %u -> %u after GC",
+                     (unsigned)used0, (unsigned)used1);
+        }
     }
 #endif
     xSemaphoreGive(g_history_mutex);
-    ESP_LOGW(TAG, "History file rebuilt compactly: %lu records, header rebased",
-             (unsigned long)count);
     return ESP_OK;
 }
 

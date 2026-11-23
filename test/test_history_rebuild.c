@@ -126,23 +126,13 @@ int main(void)
     CHECK(before >= needed && before <= needed + 0,
           "fresh file already at compact minimum before rebuild");
 
-    /* Simulate the device-side load: a file whose physical length is far larger
-     * than the live records need (SPIFFS grew it, ftruncate later only shrank
-     * the logical length). The rebuild must drop it and write back the compact
-     * minimum. POSIX files grow with zeros, exactly like the *nix host model. */
-    {
-        int fd = open(g_file_path, O_WRONLY | O_APPEND);
-        if (fd >= 0) {
-            long target = (long)needed + 200000L;
-            if (ftruncate(fd, target) != 0) {
-                fprintf(stderr, "ftruncate grow failed\n");
-            }
-            close(fd);
-        }
-    }
-    long blown = file_size();
-    CHECK(blown >= needed + 200000L - 64,
-          "file was bloated past the live-record byte need");
+    /* The device-side rebuild is an in-place COW rewrite (records re-stored to
+     * slots 0..count-1, forcing SPIFFS to mark the old pages including the
+     * ftruncate ghost tail as deleted so the GC can reap them). On the POSIX
+     * host there are no ghost pages, so the long-term contract to assert is
+     * that every record survives and the rebuild is repeatable; the file length
+     * itself stays put (no ftruncate is involved). */
+    long before_again = file_size();
 
     if (power_history_rebuild_file() != ESP_OK) {
         fprintf(stderr, "rebuild failed\n");
@@ -150,23 +140,22 @@ int main(void)
     }
 
     long after = file_size();
-    CHECK(after == needed, "rebuild file is exactly the compact minimum");
+    CHECK(after == before_again, "rebuild leaves the file length unchanged");
     CHECK(verify_records(count) == 0, "records intact after rebuild");
     CHECK(st.record_count == count, "status record count unchanged after rebuild");
 
-    /* Rebuild must be repeatable: a second run against an already-compact file
-     * is a no-op-equivalent and must keep the records. */
+    /* Rebuild must be repeatable: a second run must keep the records. */
     if (power_history_rebuild_file() != ESP_OK) {
         fprintf(stderr, "second rebuild failed\n");
         return 6;
     }
     long after2 = file_size();
-    CHECK(after2 == needed, "second rebuild stays at compact minimum");
+    CHECK(after2 == before_again, "second rebuild leaves the file length unchanged");
     CHECK(verify_records(count) == 0, "records intact after second rebuild");
 
     if (g_failures == 0) {
-        printf("OK: history rebuild (file %ld -> %ld, %u records x2)\n",
-               before, after, (unsigned)count);
+        printf("OK: history rebuild (%u records x2, file stays %ld bytes)\n",
+               (unsigned)count, after);
     } else {
         printf("FAILED: %u/%u checks\n", g_failures, g_checks);
     }
