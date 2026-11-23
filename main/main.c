@@ -6826,7 +6826,8 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  (unsigned)s.oldest_sequence, (unsigned)s.latest_sequence,
                  (long long)oldest, (long long)latest,
                  (unsigned)s.queue_drops, (unsigned)s.write_errors,
-                 (unsigned)s.splice_batches, (unsigned)s.splice_skipped,
+                 (unsigned)s.splice_batches, (unsigned)s.splice_records,
+                 (unsigned)s.splice_skipped,
                  s.last_persist_stage[0] != '\0' ? s.last_persist_stage : "none",
                  s.last_persist_stage[0] != '\0' ? " (errno=" : "",
                  s.last_persist_stage[0] != '\0' ? strerror(s.last_persist_errno) : "");
