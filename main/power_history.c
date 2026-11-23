@@ -961,12 +961,21 @@ static bool compact_history_file_locked(void)
         return false;
     }
 #ifdef ESP_PLATFORM
-    /* size_to_gc is a target amount of *free* space to reclaim: with 0 the
-     * underlying SPIFFS_gc does a minimal pass, which can leave the tail of
-     * the truncated file allocated and the next splice ENOSPC again. Ask for
-     * exactly the bytes the truncate is supposed to have released. */
-    size_t want_free = (file_size > needed) ? (size_t)(file_size - needed) : 0;
-    esp_err_t gc_err = esp_spiffs_gc(POWER_HISTORY_PARTITION, want_free);
+    /* size_to_gc is how many *free* bytes must be produced, and SPIFFS'
+     * spiffs_gc_check has two traps:
+     *  - len < free_pages*page_size  -> early-exit, GC does NOTHING;
+     *  - len > (free_pages+deleted)*page_size -> immediate SPIFFS_ERR_FULL.
+     * The exact sweet spot is len = total - used (== (free+deleted)*page_size),
+     * reclaiming every non-live page without tripping either guard. A zero or
+     * a max value both silently fail, which was the "file shrinks but SPIFFS
+     * used stays flat" bug. */
+    size_t gc_total = 0, gc_used = 0;
+    esp_err_t gc_info = esp_spiffs_info(POWER_HISTORY_PARTITION, &gc_total,
+                                        &gc_used);
+    size_t gc_target = (gc_info == ESP_OK && gc_total > gc_used)
+                           ? gc_total - gc_used
+                           : 0;
+    esp_err_t gc_err = esp_spiffs_gc(POWER_HISTORY_PARTITION, gc_target);
     if (gc_err != ESP_OK) {
         ESP_LOGW(TAG, "History compaction: esp_spiffs_gc failed (%s); the file "
                       "was shrunk but the freed blocks may not be reusable yet",

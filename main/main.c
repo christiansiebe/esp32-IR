@@ -6837,7 +6837,13 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
             size_t total0 = 0, used0 = 0;
             esp_err_t e0 = esp_spiffs_info(POWER_HISTORY_PARTITION,
                                            &total0, &used0);
-            esp_err_t gcr = esp_spiffs_gc(POWER_HISTORY_PARTITION, 0);
+            /* SPIFFS gc trap: size_to_gc=0 early-exits in spiffs_gc_check
+             * (len < free_pages*page_size) and reclaims NOTHING, while a huge
+             * value trips the SPIFFS_ERR_FULL guard. Ask for total-used, the
+             * exact (free+deleted)*page_size window, to force a real pass. */
+            esp_err_t gcr = esp_spiffs_gc(
+                POWER_HISTORY_PARTITION,
+                (e0 == ESP_OK && total0 > used0) ? (total0 - used0) : 0);
             size_t total1 = 0, used1 = 0;
             esp_err_t e1 = esp_spiffs_info(POWER_HISTORY_PARTITION,
                                            &total1, &used1);
