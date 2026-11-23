@@ -3,7 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/stat.h>
 #include <sys/time.h>
+#include <dirent.h>
 #include <time.h>
 #include <math.h>
 
@@ -18,6 +20,7 @@
 #include "esp_netif_sntp.h"
 #include "esp_now.h"
 #include "esp_ota_ops.h"
+#include "esp_spiffs.h"
 #include "esp_app_desc.h"
 #include "esp_https_ota.h"
 #include "esp_crt_bundle.h"
@@ -6739,6 +6742,46 @@ static bool runtime_config_apply_checked(runtime_config_t *cfg, const char *key)
     return ok;
 }
 
+/* List the files in the power-history mount point. Used by `test storage` to
+ * answer "what is actually consuming the SPIFFS partition": a compacted ring
+ * file that no longer shrinks the partition is usually hiding a second file
+ * (or unreaped deleted blobs), and readdir shows it directly. */
+static void powerlog_list_append(char *out, size_t out_size)
+{
+    size_t used = 0;
+    DIR *dir = opendir(POWER_HISTORY_MOUNT_PATH);
+    if (dir == NULL) {
+        snprintf(out, out_size, "  /powerlog: opendir failed\n");
+        return;
+    }
+    int n = snprintf(out, out_size, "  /powerlog files:\n");
+    if (n > 0) {
+        used = (size_t)n;
+    }
+    struct dirent *ent;
+    while (used < out_size - 32 && (ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] == '.') {
+            continue;
+        }
+        struct stat sb;
+        long long sz = -1;
+        char szbuf[32] = "?";
+        char path[96];
+        snprintf(path, sizeof(path), "%s/%s", POWER_HISTORY_MOUNT_PATH,
+                 ent->d_name);
+        if (stat(path, &sb) == 0) {
+            sz = (long long)sb.st_size;
+            snprintf(szbuf, sizeof(szbuf), "%lld", sz);
+        }
+        int w = snprintf(out + used, out_size - used, "    %-24s %s B\n",
+                         ent->d_name, szbuf);
+        if (w > 0) {
+            used += (size_t)w;
+        }
+    }
+    closedir(dir);
+}
+
 /* Append NVS partition usage to out. Shared by the `test storage` console
  * command and the /diag page so both report the same numbers. NVS is where the
  * Wi-Fi credentials, the crash journal and the history cursor live. */
@@ -6785,6 +6828,32 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
         return;
     }
     if (strcmp(what, "storage") == 0) {
+        if (strcmp(rest, "gc") == 0) {
+            /* Explicit SPIFFS garbage collection. The compaction ftruncates
+             * quarters.bin but SPIFFS keeps the freed blocks until a GC pass
+             * reaps them; this command runs that pass on demand and reports
+             * the partition fill before/after, so the block reclaim is
+             * verifiable on-device instead of assumed. */
+            size_t total0 = 0, used0 = 0;
+            esp_err_t e0 = esp_spiffs_info(POWER_HISTORY_PARTITION,
+                                           &total0, &used0);
+            esp_err_t gcr = esp_spiffs_gc(POWER_HISTORY_PARTITION, 0);
+            size_t total1 = 0, used1 = 0;
+            esp_err_t e1 = esp_spiffs_info(POWER_HISTORY_PARTITION,
+                                           &total1, &used1);
+            snprintf(out, out_size,
+                     "spiffs gc: request=%s info=%s/%s\n"
+                     "  used before: %lu/%lu  after: %lu/%lu\n",
+                     gcr == ESP_OK ? "ok"
+                                   : (gcr == ESP_ERR_NOT_FINISHED
+                                          ? "partial (flash full of live data)"
+                                          : esp_err_to_name(gcr)),
+                     e0 == ESP_OK ? "ok" : esp_err_to_name(e0),
+                     e1 == ESP_OK ? "ok" : esp_err_to_name(e1),
+                     (unsigned long)used0, (unsigned long)total0,
+                     (unsigned long)used1, (unsigned long)total1);
+            return;
+        }
         if (strcmp(rest, "repair") == 0) {
             /* Data-preserving in-place repair: heal SPIFFS' index, re-sort the
              * ring and drop duplicate minutes, keeping everything else. This
@@ -6841,6 +6910,10 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
                  s.last_persist_stage[0] != '\0' ? strerror(s.last_persist_errno) : "");
         if (written > 0 && (size_t)written < out_size) {
             nvs_stats_append(out + written, out_size - (size_t)written);
+        }
+        size_t used_out = strlen(out);
+        if (used_out < out_size) {
+            powerlog_list_append(out + used_out, out_size - used_out);
         }
         return;
     }
