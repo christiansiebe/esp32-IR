@@ -869,6 +869,99 @@ static void heal_spiffs_consistency(void)
  *    SPIFFS store can make a single lseek hang for minutes, which used to wedge
  *    the boot). The sender backfill re-imports the dropped minutes.
  * Returns true when the ring is sorted and duplicate-free afterwards. */
+/* Scratch buffer for compacting the ring. Sized to one copy chunk (see
+ * POWER_HISTORY_SHIFT_CHUNK); cleaning must not need a large RAM buffer on a
+ * no-PSRAM part next to the Wi-Fi stack. */
+static power_history_record_t g_compact_buf[POWER_HISTORY_SHIFT_CHUNK];
+
+/* Physically shrink the history file to what the current records need. A ring
+ * that ran for a long time has its slots spread across almost the whole file
+ * (2 headers + CAPACITY * record bytes), even if only a few thousand records
+ * are live. SPIFFS allocates in blocks and its garbage collection needs free
+ * blocks, so a mostly-full-but-sparse file makes every further shift/insertion
+ * fail with ENOSPC while reads still work (the "write errors climb, ring
+ * stalls" fault). Re-writing the live slots compactly from slot 0 and then
+ * truncating frees that entire dead tail back to the GC pool -- in place,
+ * without formatting. Chunked so no large RAM buffer is needed. */
+static bool compact_history_file_locked(void)
+{
+    uint32_t count = g_history_header.record_count;
+    if (count == 0 || g_history_file == NULL) {
+        return true;
+    }
+    if (fseek(g_history_file, 0, SEEK_END) != 0) {
+        return false;
+    }
+    long file_size = ftell(g_history_file);
+    long needed = (long)(2u * sizeof(power_history_header_t) +
+                         count * sizeof(power_history_record_t));
+    if (file_size <= needed) {
+        return true; /* already compact */
+    }
+    uint32_t oldest_slot =
+        (g_history_header.next_slot + POWER_HISTORY_CAPACITY - count) %
+        POWER_HISTORY_CAPACITY;
+
+    /* If the records already sit at the low end of the file (oldest_slot == 0),
+     * no copy is needed -- the file simply grew past them in earlier runs -- so
+     * only the physical truncation below has to run. Otherwise the ring holds
+     * its live slots scattered in the high half of a big file (SPIFFS never
+     * frees that tail, which is exactly why writes started failing with ENOSPC
+     * while the partition still looked half empty); those slots must be copied
+     * down to Slot 0 first. */
+    if (oldest_slot != 0) {
+        /* Copy source slots [oldest_slot+done ..) into target slots [0+done ..).
+         * The target is always at or below the matching source, so stepping the
+         * target index forward never overwrites a source slot we still have to
+         * read -- as long as the source region starts at least one chunk ahead
+         * of the target cursor (oldest_slot >= CHUNK) and does not wrap past the
+         * ring end (oldest_slot + count <= CAPACITY). If that does not hold the
+         * copy would clobber an unread source, so skip it; the store is left
+         * untouched this pass and a later boot retries. */
+        if (oldest_slot + count > POWER_HISTORY_CAPACITY ||
+            oldest_slot < POWER_HISTORY_SHIFT_CHUNK) {
+            ESP_LOGW(TAG, "History compaction skipped (range old=%u count=%u)",
+                     (unsigned)oldest_slot, (unsigned)count);
+            return true;
+        }
+        uint32_t done = 0;
+        while (done < count) {
+            uint32_t chunk = count - done;
+            if (chunk > POWER_HISTORY_SHIFT_CHUNK) {
+                chunk = POWER_HISTORY_SHIFT_CHUNK;
+            }
+            if (!read_range_idx(oldest_slot, done, chunk, g_compact_buf) ||
+                !write_range_idx(0, done, chunk, g_compact_buf)) {
+                return false;
+            }
+            done += chunk;
+            if ((done / POWER_HISTORY_SHIFT_CHUNK) %
+                    POWER_HISTORY_SHIFT_YIELD_CHUNKS == 0) {
+                vTaskDelay(1); /* keep the IDLE/task watchdog alive */
+            }
+        }
+        if (fflush(g_history_file) != 0) {
+            return false;
+        }
+        /* The data now lives at Slots 0..count-1, so the header must be re-based
+         * to match (next_slot = count, oldest = 0); finish_repair also rewrites
+         * both header copies and fsyncs. */
+        if (!finish_repair(0, count)) {
+            return false;
+        }
+    }
+    /* Truncate the physical file to the compacted size. SPIFFS frees the tail.
+     * ftruncate() is routed through the SPIFFS VFS (SPIFFS_ftruncate). */
+    if (ftruncate(fileno(g_history_file), needed) != 0) {
+        ESP_LOGW(TAG, "History compaction: ftruncate failed (%s); ring was "
+                      "compacted but the file was not shrunk", strerror(errno));
+        return false;
+    }
+    ESP_LOGW(TAG, "Compacted history file: %ld -> %ld bytes (%lu records live)",
+             file_size, needed, (unsigned long)count);
+    return true;
+}
+
 esp_err_t power_history_repair_ring(void)
 {
     if (g_history_mutex == NULL) {
@@ -887,6 +980,7 @@ esp_err_t power_history_repair_ring(void)
         heal_spiffs_consistency();
     }
     bool ok = repair_ring_if_needed();
+    (void)compact_history_file_locked();
     xSemaphoreGive(g_history_mutex);
     (void)ok;
     return ESP_OK;

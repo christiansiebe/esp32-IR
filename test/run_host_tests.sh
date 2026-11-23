@@ -53,6 +53,23 @@ trap 'rm -rf "$out"' EXIT
 
 "$out/test_reboot_persistence"
 
+# History compaction: proves power_history_repair_ring() shrinks an
+# over-large history file back to the minimum the live records need (a file that
+# was written up to the physical ring capacity but holds only a few thousand
+# minutes makes SPIFFS run out of GC room -> ENOSPC on every shift). Same scratch
+# mount as the reboot-persistence test.
+"$cc" -std=c11 -Wall -Wextra -O2 -pthread \
+    -D_GNU_SOURCE -D_DEFAULT_SOURCE \
+    -Wno-unused-variable -Wno-unused-const-variable \
+    -DPOWER_HISTORY_MOUNT_PATH="\"$out/powerlog\"" \
+    -I"$here/host/include" \
+    -I"$repo/main" \
+    "$repo/main/power_history.c" \
+    "$here/test_history_compaction.c" \
+    -lm -o "$out/test_history_compaction"
+
+"$out/test_history_compaction"
+
 # Storage recovery: proves the background repair brings a RAM-only store back to
 # a persistent one (formatting as the last resort) when the history file cannot
 # be opened. The obstacle is a directory at the file path (fopen fails on it),
