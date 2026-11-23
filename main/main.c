@@ -6766,7 +6766,7 @@ static void powerlog_list_append(char *out, size_t out_size)
         struct stat sb;
         long long sz = -1;
         char szbuf[32] = "?";
-        char path[96];
+        char path[64 + 256];
         snprintf(path, sizeof(path), "%s/%s", POWER_HISTORY_MOUNT_PATH,
                  ent->d_name);
         if (stat(path, &sb) == 0) {
