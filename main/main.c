@@ -6894,10 +6894,15 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
              * partition/FS. */
             snprintf(out, out_size, "rebuilding history file in place ...\n");
             esp_err_t rerr = power_history_rebuild_file();
+            const char *detail = power_history_rebuild_error_detail();
             snprintf(out + strlen(out), out_size - strlen(out),
                      "rebuild: %s\n", rerr == ESP_OK
                                          ? "ok (file recreated compact, minutes kept)"
                                          : esp_err_to_name(rerr));
+            if (rerr != ESP_OK && detail[0] != '\0') {
+                snprintf(out + strlen(out), out_size - strlen(out),
+                         "  detail: %s\n", detail);
+            }
             return;
         }
         if (strcmp(rest, "format") == 0) {

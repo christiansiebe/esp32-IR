@@ -1596,6 +1596,13 @@ esp_err_t power_history_format(void)
     return headers_ok ? ESP_OK : ESP_FAIL;
 }
 
+static char g_rebuild_error_detail[96];
+
+const char *power_history_rebuild_error_detail(void)
+{
+    return g_rebuild_error_detail;
+}
+
 esp_err_t power_history_rebuild_file(void)
 {
     if (g_history_mutex == NULL) {
@@ -1632,9 +1639,24 @@ esp_err_t power_history_rebuild_file(void)
         if (chunk > POWER_HISTORY_SHIFT_CHUNK) {
             chunk = POWER_HISTORY_SHIFT_CHUNK;
         }
-        if (!read_range_idx(oldest_slot, done, chunk, g_compact_buf) ||
-            !write_range_idx(oldest_slot, done, chunk, g_compact_buf)) {
+        if (!read_range_idx(oldest_slot, done, chunk, g_compact_buf)) {
             ok = false;
+            g_rebuild_error_detail[0] = '\0';
+            snprintf(g_rebuild_error_detail, sizeof(g_rebuild_error_detail),
+                     "read failed at record %u, slot %u (errno=%d)",
+                     (unsigned)done,
+                     (unsigned)((oldest_slot + done) % POWER_HISTORY_CAPACITY),
+                     (int)errno);
+            break;
+        }
+        if (!write_range_idx(oldest_slot, done, chunk, g_compact_buf)) {
+            ok = false;
+            g_rebuild_error_detail[0] = '\0';
+            snprintf(g_rebuild_error_detail, sizeof(g_rebuild_error_detail),
+                     "write failed at record %u, slot %u (errno=%d)",
+                     (unsigned)done,
+                     (unsigned)((oldest_slot + done) % POWER_HISTORY_CAPACITY),
+                     (int)errno);
             break;
         }
         done += chunk;
@@ -1645,8 +1667,8 @@ esp_err_t power_history_rebuild_file(void)
     }
     if (!ok) {
         xSemaphoreGive(g_history_mutex);
-        ESP_LOGE(TAG, "History rebuild: COW rewrite stopped at record %u of %u",
-                 (unsigned)done, (unsigned)count);
+        ESP_LOGE(TAG, "History rebuild: %s (record %u of %u)",
+                 g_rebuild_error_detail, (unsigned)done, (unsigned)count);
         return ESP_FAIL;
     }
     if (fflush(g_history_file) != 0 || fsync(fileno(g_history_file)) != 0) {

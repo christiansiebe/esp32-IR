@@ -171,6 +171,7 @@ esp_err_t power_history_format(void);
  * once re-persists the ring at its true compact size and makes the freed
  * blocks allocatable again. */
 esp_err_t power_history_rebuild_file(void);
+const char *power_history_rebuild_error_detail(void);
 
 bool power_history_enqueue(const power_history_record_t *record);
 
