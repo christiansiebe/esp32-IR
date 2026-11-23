@@ -6845,8 +6845,8 @@ static void console_cmd_test(const char *args, char *out, size_t out_size)
              * (total_data_pages includes a +1). Allow an explicit target
              * via 'test storage gc <bytes>' to probe the working value. */
             unsigned long gc_arg = 0;
-            if (rest[0] != '\0') {
-                sscanf(rest, "%lu", &gc_arg);
+            if (extra[0] != '\0') {
+                sscanf(extra, "%lu", &gc_arg);
             }
             size_t gc_target = gc_arg ? (size_t)gc_arg
                                       : (e0 == ESP_OK && total0 > used0)
