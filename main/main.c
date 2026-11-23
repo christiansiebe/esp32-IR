@@ -8930,7 +8930,12 @@ static esp_err_t ota_sender_update_handler(httpd_req_t *req)
  * a stack overflow mid-flash. The request only validates and starts the task;
  * the device reboots itself when the image is installed. */
 #define OTA_PULL_MAX_URL 320
-#define OTA_PULL_TIMEOUT_MS 15000
+/* The receiver's 2.4 GHz link can be weak (rssi ~ -90); at ~3 KB/s a full
+ * 1.5 MB OTA image takes ~9 minutes. An esp_http_client recv that gives up
+ * after 15 s aborted the pull at ~48 KB (seen in the nginx access log: three
+ * attempts, every one ending at exactly 48 862 bytes). Give the download a
+ * full 15 minutes so it can complete over a slow-but-alive link. */
+#define OTA_PULL_TIMEOUT_MS (15 * 60 * 1000)
 #define OTA_PULL_TASK_STACK 8192
 
 static char s_ota_pull_url[OTA_PULL_MAX_URL];
@@ -9444,6 +9449,12 @@ static void start_webserver(void)
      * for both at their worst simultaneous depth. */
     config.stack_size = 12288;
     config.lru_purge_enable = true;
+    /* The 2.4 GHz link can be weak (rssi ~ -90) with multi-second stalls. The
+     * httpd default recv_wait_timeout (5 s) made a large POST - the OTA image
+     * upload to /update - fail with a dropped connection (curl RC=56) whenever
+     * the WLAN paused longer than 5 s mid-body. Let a slow-but-alive upload
+     * take its time. */
+    config.recv_wait_timeout = 120;
     /* httpd reserves 3 sockets for itself, so asking for more than
      * CONFIG_LWIP_MAX_SOCKETS - 3 makes httpd_start() return ESP_ERR_INVALID_ARG;
      * the ESP_ERROR_CHECK below would then abort and boot-loop. Derive the value
