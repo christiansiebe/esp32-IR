@@ -176,6 +176,15 @@ const char *power_history_rebuild_pre_gc_detail(void);
 
 bool power_history_enqueue(const power_history_record_t *record);
 
+/* Quiesce the live/backfill producers while a CSV restore is streaming. With
+ * the flag set, power_history_enqueue() (the live minute path and the
+ * sender-backfill merge) refuses new records until the restore finishes, so the
+ * ring is written exclusively by power_history_import_sorted() during the
+ * build-back. Minutes refused here are not lost: the sender still holds them
+ * and the backfill pulls them after the restore, once the flag is cleared. */
+void power_history_set_restore_active(bool active);
+bool power_history_restore_active(void);
+
 /* Observer for records that were just persisted (newly placed, not a duplicate).
  * Called from the history writer while it holds the store lock, once per record
  * a committed batch actually stored. The running energy totals use it to fold

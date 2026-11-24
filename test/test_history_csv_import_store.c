@@ -226,6 +226,50 @@ static void test_status_persistent(void)
     CHECK(st.persistent, "persistent flag set when the file is open");
 }
 
+/* While a CSV restore is streaming, live/backfill producers must be quiesced:
+ * enqueue() refuses new minutes so the restore can be the only writer. The
+ * restore itself (import_sorted) still works, and once the flag is cleared the
+ * live path resumes. */
+static void test_restore_quiesces_live(void)
+{
+    printf("test_restore_quiesces_live\n");
+    const int64_t base = 9600000000LL;
+    power_history_status_t st;
+
+    power_history_get_status(&st);
+    uint32_t before = st.record_count;
+
+    power_history_set_restore_active(true);
+    CHECK(power_history_restore_active(), "restore flag reads back true");
+
+    /* import_sorted is the restore path and must still write. */
+    power_history_record_t imported[2] = {
+        import_record(base, 9000),
+        import_record(base + 60, 9001),
+    };
+    size_t imported_n = 0;
+    size_t skipped = 0;
+    CHECK(power_history_import_sorted(imported, 2, &imported_n, &skipped) == ESP_OK,
+          "import works while restore active");
+    CHECK(imported_n == 2, "two minutes imported during restore");
+    CHECK(power_history_has_minute(base), "imported minute present");
+
+    /* A live/backfill minute offered via enqueue is refused, so it must not
+     * appear in the ring while the flag is set. */
+    power_history_record_t live = make_record(9999, base + 120, 111);
+    CHECK(!power_history_enqueue(&live), "enqueue refused while restore active");
+    usleep(50000);
+    power_history_get_status(&st);
+    CHECK(!power_history_has_minute(base + 120), "refused minute not stored");
+
+    /* Clearing the flag re-enables the live path. */
+    power_history_set_restore_active(false);
+    CHECK(!power_history_restore_active(), "restore flag cleared");
+    CHECK(power_history_enqueue(&live), "enqueue accepted after restore");
+    wait_for_count(before + 3); /* the two imported minutes plus the live one */
+    CHECK(power_history_has_minute(base + 120), "live minute stored after resume");
+}
+
 static void test_import_arg_guards(void)
 {
     printf("test_import_arg_guards\n");
@@ -267,6 +311,7 @@ int main(void)
     test_import_idempotent();
     test_import_rejects_pre_2024();
     test_status_persistent();
+    test_restore_quiesces_live();
     test_import_arg_guards();
 
     printf("history_csv_import_store: %d checks, %d failures\n", g_checks, g_failures);

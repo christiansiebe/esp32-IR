@@ -5712,6 +5712,7 @@ static void power_history_upload_task(void *arg)
     free(u);
     httpd_req_async_handler_complete(req);
     g_history_upload_active = false;
+    power_history_set_restore_active(false);
     vTaskDelete(NULL);
 }
 
@@ -5739,9 +5740,11 @@ static esp_err_t power_history_upload_handler(httpd_req_t *req)
                                       "Could not start the CSV import");
     }
     g_history_upload_active = true;
+    power_history_set_restore_active(true);
     if (xTaskCreate(power_history_upload_task, "csv_upload",
                     HISTORY_UPLOAD_TASK_STACK, copy, 3, NULL) != pdPASS) {
         g_history_upload_active = false;
+        power_history_set_restore_active(false);
         httpd_req_async_handler_complete(copy);
         return send_http_error_status(req, "500 Internal Server Error",
                                       "Could not start the CSV import task");

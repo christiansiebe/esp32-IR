@@ -104,6 +104,9 @@ static uint32_t g_storage_used_bytes;
 static uint32_t g_storage_total_bytes;
 static bool g_history_ready;
 static bool g_history_ram_fallback;
+/* Set while a CSV restore upload is streaming: live/backfill producers are
+ * quiesced (enqueue refuses) so the restore writes the ring exclusively. */
+static bool g_history_restore_active;
 static power_history_record_t g_history_ram_records[POWER_HISTORY_PAGE_SIZE];
 static size_t g_history_ram_count;
 static portMUX_TYPE g_stats_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -1741,6 +1744,22 @@ esp_err_t power_history_rebuild_file(void)
     return ESP_OK;
 }
 
+void power_history_set_restore_active(bool active)
+{
+    portENTER_CRITICAL(&g_stats_lock);
+    g_history_restore_active = active;
+    portEXIT_CRITICAL(&g_stats_lock);
+}
+
+bool power_history_restore_active(void)
+{
+    bool active;
+    portENTER_CRITICAL(&g_stats_lock);
+    active = g_history_restore_active;
+    portEXIT_CRITICAL(&g_stats_lock);
+    return active;
+}
+
 bool power_history_enqueue(const power_history_record_t *record)
 {
     if (!g_history_ready || record == NULL) {
@@ -1749,6 +1768,13 @@ bool power_history_enqueue(const power_history_record_t *record)
         portEXIT_CRITICAL(&g_stats_lock);
         ESP_LOGE(TAG, "History enqueue rejected: %s",
                  record == NULL ? "null record" : "store not ready");
+        return false;
+    }
+    /* A CSV restore is streaming: it takes the store lock itself per batch and
+     * must be the only writer so the ring stays sorted as it is built back.
+     * Refuse live/backfill minutes here; the backfill (blocked on the worker
+     * while the restore is active anyway) will pull them once it resumes. */
+    if (g_history_restore_active) {
         return false;
     }
     if (xQueueSend(g_history_queue, record, 0) != pdTRUE) {
