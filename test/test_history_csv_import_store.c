@@ -262,12 +262,20 @@ static void test_restore_quiesces_live(void)
     power_history_get_status(&st);
     CHECK(!power_history_has_minute(base + 120), "refused minute not stored");
 
-    /* Clearing the flag re-enables the live path. */
+    /* Clearing the flag re-enables the live path. A full batch (the worker
+     * gathers POWER_HISTORY_BATCH_RECORDS before flushing) is needed so the
+     * write happens at once instead of waiting out the batch timeout. */
     power_history_set_restore_active(false);
     CHECK(!power_history_restore_active(), "restore flag cleared");
-    CHECK(power_history_enqueue(&live), "enqueue accepted after restore");
-    wait_for_count(before + 3); /* the two imported minutes plus the live one */
+    power_history_record_t live_batch[5];
+    for (size_t i = 0; i < 5; ++i) {
+        live_batch[i] = make_record((uint32_t)(9999 + i), base + 120 + (int64_t)i * 60,
+                                    111 + (int32_t)i);
+        CHECK(power_history_enqueue(&live_batch[i]), "enqueue accepted after restore");
+    }
+    wait_for_count(before + 2 + 5); /* the two imported plus the live batch */
     CHECK(power_history_has_minute(base + 120), "live minute stored after resume");
+    CHECK(power_history_has_minute(base + 240), "last live minute stored");
 }
 
 static void test_import_arg_guards(void)
