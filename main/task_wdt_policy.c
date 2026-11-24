@@ -23,6 +23,7 @@ const char *task_wdt_worker_name(task_wdt_worker_t worker)
     case TASK_WDT_WORKER_UART_EVENT:    return "uart_events";
     case TASK_WDT_WORKER_UART_CAPTURE:  return "uart_capture";
     case TASK_WDT_WORKER_HEALTH:        return "health";
+    case TASK_WDT_WORKER_BACKFILL:      return "hist_backfill";
     case TASK_WDT_WORKER_COUNT:
     default:                            return "unknown";
     }
@@ -40,8 +41,9 @@ bool task_wdt_worker_in_role(task_wdt_worker_t worker, task_wdt_role_t role)
         /* The UART workers only exist in the sender. */
         return role == TASK_WDT_ROLE_SENDER;
     case TASK_WDT_WORKER_HEALTH:
-        /* The self-heal watchdog only runs on the receiver (it has the
-         * dashboard + SML data path to protect; the sender has no such loop). */
+    case TASK_WDT_WORKER_BACKFILL:
+        /* The self-heal watchdog and the history backfill (CSV restore + ESP-NOW
+         * sync) only run on the receiver. */
         return role == TASK_WDT_ROLE_RECEIVER;
     case TASK_WDT_WORKER_COUNT:
     default:
@@ -69,6 +71,13 @@ uint32_t task_wdt_worker_max_block_ms(task_wdt_worker_t worker)
         /* The health watchdog sleeps HEALTH_POLL_MS (5 s) between evaluations,
          * then feeds the watchdog before sleeping again. */
         return 5000;
+    case TASK_WDT_WORKER_BACKFILL:
+        /* The backfill worker waits for a CSV batch with a short poll, and the
+         * ESP-NOW sync fetches one page at a time (each fetch feeds). Its
+         * longest legitimate block while holding the store lock is the CSV
+         * import of one batch plus its splices; cover it with the same generous
+         * bound as the minute writer's 60 s batch wait. */
+        return 60000;
     case TASK_WDT_WORKER_COUNT:
     default:
         return 0;

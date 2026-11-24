@@ -37,6 +37,23 @@
  * 512 records is ~1000 SPIFFS reads+writes, well under the reader timeout. */
 #define POWER_HISTORY_MAX_SPLICE_RECORDS 512u
 
+/* How long the live history writer may wait for the store lock before it has to
+ * prove it is still alive (TWDT). The CSV import holds the mutex for an entire
+ * batch while it splices minutes into the sorted ring; without this bound the
+ * writer would block in xSemaphoreTake(portMAX_DELAY) for the whole import and
+ * stop feeding the task watchdog -> a healthy restore looked like a stall and
+ * rebooted the device. The bound is far under the TWDT timeout (120 s), so a
+ * truly wedged writer is still caught, but a long import only delays, never
+ * kills, the live writer. Records already taken from the queue are put back so
+ * no live minute is lost. */
+#define POWER_HISTORY_WRITE_LOCK_TIMEOUT_MS 30000u
+
+/* While the CSV import holds the store lock it feeds the task watchdog every
+ * POWER_HISTORY_IMPORT_FEED_EVERY imported records, so a long splice-heavy
+ * restore proves liveness to the (now subscribed) import worker instead of
+ * letting the live writer's watchdog trip. */
+#define POWER_HISTORY_IMPORT_FEED_EVERY 8u
+
 /* SPIFFS mount point and history file. Overridable so the reboot-persistence
  * host test can point the store at a scratch directory instead of the
  * device-only /powerlog mount. */

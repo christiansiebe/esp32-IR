@@ -26,6 +26,7 @@
 #define TASK_WDT_NAME_UART_EVENT    "uart_events"
 #define TASK_WDT_NAME_UART_CAPTURE  "uart_capture"
 #define TASK_WDT_NAME_HEALTH        "health"
+#define TASK_WDT_NAME_BACKFILL      "hist_backfill"
 
 /* Long-running workers that must prove liveness to the TWDT. */
 typedef enum {
@@ -33,6 +34,7 @@ typedef enum {
     TASK_WDT_WORKER_UART_EVENT,        /* UART error/statistics worker (sender) */
     TASK_WDT_WORKER_UART_CAPTURE,      /* UART byte reader / SML decoder (sender) */
     TASK_WDT_WORKER_HEALTH,            /* receiver self-heal watchdog (receiver) */
+    TASK_WDT_WORKER_BACKFILL,          /* CSV-restore import + ESP-NOW backfill (receiver) */
     TASK_WDT_WORKER_COUNT
 } task_wdt_worker_t;
 

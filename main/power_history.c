@@ -412,7 +412,11 @@ static bool shift_up_renumber(uint32_t oldest_slot, uint32_t count, uint32_t at)
         if (++chunks_done % POWER_HISTORY_SHIFT_YIELD_CHUNKS == 0) {
             /* Let the IDLE task (watchdog) and any equal/higher-priority waiter
              * run between file-I/O rounds. The mutex is still held, so a reader
-             * waits at most one chunk round before its bounded take succeeds. */
+             * waits at most one chunk round before its bounded take succeeds.
+             * Also feed the TWDT: a deep splice keeps this worker (the import or
+             * the live writer) inside one long mutex hold, so it must prove it
+             * is still alive while it shifts records. */
+            task_wdt_guard_feed();
             vTaskDelay(1);
         }
     }
@@ -634,11 +638,24 @@ static void power_history_worker(void *arg)
             ++record_count;
         }
         task_wdt_guard_feed();
-        if (xSemaphoreTake(g_history_mutex, portMAX_DELAY) != pdTRUE) {
-            ESP_LOGE(TAG, "Could not lock persistent history");
-            portENTER_CRITICAL(&g_stats_lock);
-            ++g_write_errors;
-            portEXIT_CRITICAL(&g_stats_lock);
+        if (xSemaphoreTake(g_history_mutex,
+                           pdMS_TO_TICKS(POWER_HISTORY_WRITE_LOCK_TIMEOUT_MS)) != pdTRUE) {
+            /* The CSV import holds the store lock across a splice-heavy batch. A
+             * bounded wait (not portMAX_DELAY) lets this writer prove it is still
+             * alive to the TWDT instead of blocking for the whole import; the
+             * records taken off the queue go back to the front, so no live minute
+             * is lost and the store observes them once the import is done. */
+            for (size_t i = record_count; i > 0; --i) {
+                if (xQueueSendToFront(g_history_queue, &records[i - 1], 0) != pdTRUE) {
+                    portENTER_CRITICAL(&g_stats_lock);
+                    ++g_write_errors;
+                    portEXIT_CRITICAL(&g_stats_lock);
+                    ESP_LOGE(TAG, "Could not re-queue live history batch");
+                    break;
+                }
+            }
+            task_wdt_guard_feed();
+            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
         bool persist_ok = true;
@@ -1884,6 +1901,13 @@ esp_err_t power_history_import_sorted(const power_history_record_t *records,
 
     power_history_header_t updated = g_history_header;
     for (size_t i = 0; i < count; ++i) {
+        /* A splice-heavy restore can hold the store lock far past one import
+         * batch. The import worker is TWDT-subscribed, so feed it on progress
+         * instead of letting the live writer's watchdog (or a future read
+         * timeout) mistake a long, healthy import for a stall. */
+        if ((i % POWER_HISTORY_IMPORT_FEED_EVERY == 0) && i != 0) {
+            task_wdt_guard_feed();
+        }
         power_history_record_t record = records[i];
         /* A restore must never push a live minute out of a full ring: drop the
          * imported record instead of the oldest stored one. */

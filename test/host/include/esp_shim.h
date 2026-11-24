@@ -123,6 +123,27 @@ static inline int xQueueSend(QueueHandle_t q, const void *item, uint32_t t)
     pthread_mutex_unlock(&h->m);
     return ok;
 }
+static inline int xQueueSendToFront(QueueHandle_t q, const void *item, uint32_t t)
+{
+    (void)t;
+    if (q == NULL) {
+        return pdFALSE;
+    }
+    host_queue_t *h = (host_queue_t *)q;
+    pthread_mutex_lock(&h->m);
+    int ok = pdFALSE;
+    if (h->count < h->len) {
+        /* The slot immediately before the current head; xQueueSendToFront puts
+         * the item where the next receive will see it first. */
+        h->head = (h->head + h->len - 1u) % h->len;
+        memcpy(h->buf + (size_t)h->head * h->size, item, h->size);
+        ++h->count;
+        ok = pdTRUE;
+        pthread_cond_signal(&h->c);
+    }
+    pthread_mutex_unlock(&h->m);
+    return ok;
+}
 static inline int xQueueReceive(QueueHandle_t q, void *item, uint32_t t)
 {
     if (q == NULL) {

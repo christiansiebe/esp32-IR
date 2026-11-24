@@ -292,6 +292,83 @@ static void test_import_arg_guards(void)
           "zero count rejected");
 }
 
+/* The watchdog-fairness constants must stay well under the TWDT 120 s timeout
+ * (a value at or above it would re-introduce the very stall that rebooted the
+ * device during the restore), and the import-feed stride must be non-zero. */
+static void test_wdt_fairness_constants(void)
+{
+    printf("test_wdt_fairness_constants\n");
+    CHECK(POWER_HISTORY_WRITE_LOCK_TIMEOUT_MS > 0,
+          "write-lock timeout is positive");
+    CHECK(POWER_HISTORY_WRITE_LOCK_TIMEOUT_MS < 120000,
+          "write-lock timeout stays under the TWDT 120 s timeout");
+    CHECK(POWER_HISTORY_IMPORT_FEED_EVERY > 0,
+          "import-feed stride is positive");
+}
+
+/* A restore that inserts minutes deep below the tail of an already-full ring
+ * performs a splice (shift_up_renumber) for every such minute. The import must
+ * stay correct (time-ordered, all minutes present, full ring readable) under
+ * that splice load, so a long restore does not corrupt the store while the
+ * watchdog-fairness changes keep the worker alive. */
+static void test_import_splice_pressure(void)
+{
+    printf("test_import_splice_pressure\n");
+    const int64_t base = 9700000000LL;
+    power_history_status_t st;
+
+    /* Pre-fill a region with minutes base+N*60 so an import of the same base
+     * minutes (older than the tail) forces an in-place splice each time. */
+    power_history_record_t existing[100];
+    for (size_t i = 0; i < 100; ++i) {
+        existing[i] = import_record(base + (int64_t)i * 60, (int32_t)(10000 + i));
+    }
+    size_t imported_n = 0, skipped = 0;
+    CHECK(power_history_import_sorted(existing, 100, &imported_n, &skipped) == ESP_OK,
+          "pre-fill import ok");
+    CHECK(imported_n == 100 && skipped == 0, "all pre-fill minutes imported");
+
+    /* Import the same minutes again but stamped as "older" backups. They are
+     * duplicates (same minute), so they must be skipped, not spliced - and a
+     * second region of brand-new lower minutes (base-M) must splice in. */
+    power_history_record_t splice_in[64];
+    for (size_t i = 0; i < 64; ++i) {
+        splice_in[i] = import_record(base - (int64_t)(64 - i) * 60,
+                                     (int32_t)(20000 + i));
+    }
+    CHECK(power_history_import_sorted(splice_in, 64, &imported_n, &skipped) == ESP_OK,
+          "splice import ok");
+    CHECK(imported_n == 64 && skipped == 0, "all splice minutes imported");
+
+    /* Every minute - the pre-fill and the spliced-in block - must be present,
+     * and the ring must still read in strict time order. */
+    CHECK(power_history_has_minute(base - 60), "first spliced minute present");
+    CHECK(power_history_has_minute(base), "pre-fill start present");
+    CHECK(power_history_has_minute(base + 99 * 60), "pre-fill end present");
+    CHECK(power_history_has_minute(base - 64 * 60), "oldest spliced minute present");
+
+    power_history_record_t page[256];
+    size_t count = 0;
+    bool more = false;
+    CHECK(power_history_read_after(base - 65 * 60, 256, page, 256, &count, &st, &more) ==
+              ESP_OK,
+          "read after splice ok");
+    int64_t last_utc = 0;
+    bool first = true;
+    bool ascending = true;
+    for (size_t i = 0; i < count; ++i) {
+        if (page[i].interval_start_utc == 0) {
+            continue;
+        }
+        if (!first && page[i].interval_start_utc <= last_utc) {
+            ascending = false;
+        }
+        last_utc = page[i].interval_start_utc;
+        first = false;
+    }
+    CHECK(ascending, "ring stays time-ordered after splice pressure");
+}
+
 static void cleanup(void)
 {
     remove(POWER_HISTORY_FILE);
@@ -320,6 +397,8 @@ int main(void)
     test_import_rejects_pre_2024();
     test_status_persistent();
     test_restore_quiesces_live();
+    test_wdt_fairness_constants();
+    test_import_splice_pressure();
     test_import_arg_guards();
 
     printf("history_csv_import_store: %d checks, %d failures\n", g_checks, g_failures);

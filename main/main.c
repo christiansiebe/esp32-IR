@@ -7859,8 +7859,13 @@ static bool history_sync_fetch_espnow(void *ctx, int64_t after_utc, int64_t to_u
     };
     uint8_t response[ESP_NOW_MAX_DATA_LEN];
     size_t response_len = 0;
-    if (sender_diag_exchange_raw(&request, sizeof(request), request_id, response,
-                                 &response_len) != ESP_OK) {
+    esp_err_t fetch_err = sender_diag_exchange_raw(
+        &request, sizeof(request), request_id, response, &response_len);
+    /* Every ESP-NOW round trip (including a retry) is a chunk of honest work for
+     * the now-TWDT-subscribed backfill worker: keep it alive so a long session
+     * (many pages) is not mistaken for a stall. */
+    task_wdt_guard_feed();
+    if (fetch_err != ESP_OK) {
         /* The session counts a page loss once it has exhausted its retries
          * (history_sync_result_t.fetch_failures); a single recovered attempt
          * must not inflate the diagnostic. */
@@ -8000,6 +8005,12 @@ static void history_backfill_request_full(void)
 static void history_backfill_worker(void *arg)
 {
     (void)arg;
+    /* The CSV restore import holds the store lock across a whole batch, so this
+     * is a long-lived, lock-holding worker: subscribe it to the TWDT. The
+     * import path feeds on progress (power_history.c) and each ESP-NOW page
+     * fetch feeds too, so a normal, long restore stays alive while a wedged
+     * SPIFFS call still trips the watchdog. */
+    task_wdt_guard_subscribe(TASK_WDT_NAME_BACKFILL);
     history_sync_cursor_load();
     vTaskDelay(pdMS_TO_TICKS(15000));
     while (1) {
@@ -8011,6 +8022,7 @@ static void history_backfill_worker(void *arg)
                 history_upload_import_batch(batch);
             }
         }
+        task_wdt_guard_feed();
 
         /* A CSV restore is streaming: keep draining its batches and skip the
          * (long) sync session so a batch never waits behind one. The restore

@@ -68,10 +68,16 @@ int main(void)
     CHECK(!task_wdt_worker_in_role(TASK_WDT_WORKER_HEALTH,
                                    TASK_WDT_ROLE_SENDER),
           "health watchdog is receiver-only");
+    CHECK(task_wdt_worker_in_role(TASK_WDT_WORKER_BACKFILL,
+                                  TASK_WDT_ROLE_RECEIVER),
+          "backfill import runs on the receiver");
+    CHECK(!task_wdt_worker_in_role(TASK_WDT_WORKER_BACKFILL,
+                                   TASK_WDT_ROLE_SENDER),
+          "backfill import is receiver-only");
 
-    /* Receiver subscribes 2 workers (history + health), sender 3. */
-    CHECK(task_wdt_subscribed_count(TASK_WDT_ROLE_RECEIVER) == 2,
-          "receiver subscribes the history writer and the health watchdog");
+    /* Receiver subscribes 3 workers (history + health + backfill), sender 3. */
+    CHECK(task_wdt_subscribed_count(TASK_WDT_ROLE_RECEIVER) == 3,
+          "receiver subscribes history writer, health watchdog and backfill");
     CHECK(task_wdt_subscribed_count(TASK_WDT_ROLE_SENDER) == 3,
           "sender subscribes history + both uart workers");
 
@@ -80,6 +86,8 @@ int main(void)
           "history worker name");
     CHECK(task_wdt_worker_name(TASK_WDT_WORKER_UART_CAPTURE)[0] == 'u',
           "uart capture worker name");
+    CHECK(task_wdt_worker_name(TASK_WDT_WORKER_BACKFILL) != NULL,
+          "backfill worker name is a string");
     CHECK(task_wdt_worker_name(TASK_WDT_WORKER_COUNT) != NULL,
           "unknown worker name is still a string");
 
